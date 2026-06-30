@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "name": "Hong Kong business calendar and travel expo events",
+    "coverage": "2024-01-01 to 2026-12-31",
+    "last_verified": "2026-06-10",
+    "notes": [
+      "Public holidays exclude the recurring 'Every Sunday' row because weekend is modeled separately.",
+      "2026 autumn Holiday & Travel Expo is not included because no official TIC or organiser source was confirmed in this step."
+    ]
+  },
+  "public_holidays": [
+    {
+      "year": 2024,
+      "source_name": "GovHK press release: General holidays for 2024 published",
+      "source_url": "https://www.info.gov.hk/gia/general/202305/25/P2023052500208.htm",
+      "events": [
+        { "date": "2024-01-01", "name": "The first day of January" },
+        { "date": "2024-02-10", "name": "Lunar New Year's Day" },
+        { "date": "2024-02-12", "name": "The third day of Lunar New Year" },
+        { "date": "2024-02-13", "name": "The fourth day of Lunar New Year" },
+        { "date": "2024-03-29", "name": "Good Friday" },
+        { "date": "2024-03-30", "name": "The day following Good Friday" },
+        { "date": "2024-04-01", "name": "Easter Monday" },
+        { "date": "2024-04-04", "name": "Ching Ming Festival" },
+        { "date": "2024-05-01", "name": "Labour Day" },
+        { "date": "2024-05-15", "name": "The Birthday of the Buddha" },
+        { "date": "2024-06-10", "name": "Tuen Ng Festival" },
+        { "date": "2024-07-01", "name": "Hong Kong Special Administrative Region Establishment Day" },
+        { "date": "2024-09-18", "name": "The day following the Chinese Mid-Autumn Festival" },
+        { "date": "2024-10-01", "name": "National Day" },
+        { "date": "2024-10-11", "name": "Chung Yeung Festival" },
+        { "date": "2024-12-25", "name": "Christmas Day" },
+        { "date": "2024-12-26", "name": "The first weekday after Christmas Day" }
+      ]
+    },
+    {
+      "year": 2025,
+      "source_name": "GovHK press release: General holidays for 2025 published",
+      "source_url": "https://www.info.gov.hk/gia/general/202405/03/P2024043000417.htm",
+      "events": [
+        { "date": "2025-01-01", "name": "The first day of January" },
+        { "date": "2025-01-29", "name": "Lunar New Year's Day" },
+        { "date": "2025-01-30", "name": "The second day of Lunar New Year" },
+        { "date": "2025-01-31", "name": "The third day of Lunar New Year" },
+        { "date": "2025-04-04", "name": "Ching Ming Festival" },
+        { "date": "2025-04-18", "name": "Good Friday" },
+        { "date": "2025-04-19", "name": "The day following Good Friday" },
+        { "date": "2025-04-21", "name": "Easter Monday" },
+        { "date": "2025-05-01", "name": "Labour Day" },
+        { "date": "2025-05-05", "name": "The Birthday of the Buddha" },
+        { "date": "2025-05-31", "name": "Tuen Ng Festival" },
+        { "date": "2025-07-01", "name": "Hong Kong Special Administrative Region Establishment Day" },
+        { "date": "2025-10-01", "name": "National Day" },
+        { "date": "2025-10-07", "name": "The day following the Chinese Mid-Autumn Festival" },
+        { "date": "2025-10-29", "name": "Chung Yeung Festival" },
+        { "date": "2025-12-25", "name": "Christmas Day" },
+        { "date": "2025-12-26", "name": "The first weekday after Christmas Day" }
+      ]
+    },
+    {
+      "year": 2026,
+      "source_name": "GovHK press release: General holidays for 2026 published",
+      "source_url": "https://www.info.gov.hk/gia/general/202505/16/P2025051300353.htm",
+      "events": [
+        { "date": "2026-01-01", "name": "The first day of January" },
+        { "date": "2026-02-17", "name": "Lunar New Year's Day" },
+        { "date": "2026-02-18", "name": "The second day of Lunar New Year" },
+        { "date": "2026-02-19", "name": "The third day of Lunar New Year" },
+        { "date": "2026-04-03", "name": "Good Friday" },
+        { "date": "2026-04-04", "name": "The day following Good Friday" },
+        { "date": "2026-04-06", "name": "The day following Ching Ming Festival" },
+        { "date": "2026-04-07", "name": "The day following Easter Monday" },
+        { "date": "2026-05-01", "name": "Labour Day" },
+        { "date": "2026-05-25", "name": "The day following the Birthday of the Buddha" },
+        { "date": "2026-06-19", "name": "Tuen Ng Festival" },
+        { "date": "2026-07-01", "name": "Hong Kong Special Administrative Region Establishment Day" },
+        { "date": "2026-09-26", "name": "The day following the Chinese Mid-Autumn Festival" },
+        { "date": "2026-10-01", "name": "National Day" },
+        { "date": "2026-10-19", "name": "The day following Chung Yeung Festival" },
+        { "date": "2026-12-25", "name": "Christmas Day" },
+        { "date": "2026-12-26", "name": "The first weekday after Christmas Day" }
+      ]
+    }
+  ],
+  "travel_expos": [
+    {
+      "name": "Hong Kong Holiday and Travel Expo 2024",
+      "event_type": "holiday_travel_expo",
+      "start_date": "2024-02-22",
+      "end_date": "2024-02-25",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Travel Industry Council of Hong Kong",
+      "source_url": "https://www.tichk.org/en/latest-news/2024-02-19"
+    },
+    {
+      "name": "ITE Hong Kong 2024",
+      "event_type": "ite_hong_kong",
+      "start_date": "2024-06-13",
+      "end_date": "2024-06-16",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Meeting and Exhibitions Hong Kong",
+      "source_url": "https://www.mehongkong.com/eng/home/planning/events/detail/2024-06-13-81375-Hong-Kong-International-Travel-Expo.html"
+    },
+    {
+      "name": "Hong Kong Holiday & Travel Expo 2024 Autumn",
+      "event_type": "holiday_travel_expo_autumn",
+      "start_date": "2024-09-27",
+      "end_date": "2024-09-29",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Travel Industry Council of Hong Kong",
+      "source_url": "https://www.tichk.org/en/latest-news/2024-09-17"
+    },
+    {
+      "name": "Hong Kong Holiday and Travel Expo 2025",
+      "event_type": "holiday_travel_expo",
+      "start_date": "2025-02-20",
+      "end_date": "2025-02-23",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Travel Industry Council of Hong Kong",
+      "source_url": "https://www.tichk.org/en/latest-news/2025-02-10"
+    },
+    {
+      "name": "ITE Hong Kong 2025",
+      "event_type": "ite_hong_kong",
+      "start_date": "2025-06-12",
+      "end_date": "2025-06-15",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Meeting and Exhibitions Hong Kong",
+      "source_url": "https://www.mehongkong.com/eng/home/planning/events/detail/2025-06-12-82514-The-39th-International-Travel-Expo-Hong-Kong.html"
+    },
+    {
+      "name": "Hong Kong Holiday & Travel Expo 2025 Autumn",
+      "event_type": "holiday_travel_expo_autumn",
+      "start_date": "2025-09-25",
+      "end_date": "2025-09-28",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Travel Industry Council of Hong Kong",
+      "source_url": "https://www.tichk.org/en/latest-news/2025-09-16"
+    },
+    {
+      "name": "Hong Kong Holiday & Travel Expo 2026",
+      "event_type": "holiday_travel_expo",
+      "start_date": "2026-01-29",
+      "end_date": "2026-02-01",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Klook event page",
+      "source_url": "https://www.klook.com/en-US/activity/107351-hk-travel-expo-2026/"
+    },
+    {
+      "name": "ITE Hong Kong 2026",
+      "event_type": "ite_hong_kong",
+      "start_date": "2026-06-11",
+      "end_date": "2026-06-14",
+      "venue": "Hong Kong Convention and Exhibition Centre",
+      "source_name": "Meeting and Exhibitions Hong Kong",
+      "source_url": "https://www.mehongkong.com/eng/home/planning/events/detail/2026-06-11-84004-ITE-Hong-Kong-2026---The-40th-International-Travel-Expo-Hong-Kong-.html"
+    }
+  ]
+}
