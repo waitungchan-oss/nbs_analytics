@@ -230,6 +230,10 @@ def _render_upload_audit_notice() -> None:
             if drift_checks:
                 st.caption("預演核心口徑漂移：")
                 st.dataframe(pd.DataFrame(drift_checks), hide_index=True, width="stretch")
+            preflight_timings = preflight_report.get("stageTimings") or []
+            if preflight_timings:
+                st.caption("Preflight 內部耗時")
+                st.dataframe(pd.DataFrame(preflight_timings), hide_index=True, width="stretch")
             drift_diagnosis = preflight_report.get("driftDiagnosis") or {}
             if drift_diagnosis:
                 st.caption("Drift Diagnosis")
@@ -620,6 +624,11 @@ def _render_upload_area(has_db_data: bool) -> None:
                     db_before_max = _combined_max_date(db_before_tour, db_before_others)
                     with st.status("讀取與清洗檔案...", expanded=True) as upload_status:
                         stage_timings: list[dict] = []
+                        upload_started = time.perf_counter()
+
+                        def _record_stage(label: str, started_at: float) -> None:
+                            stage_timings.append({"階段": label, "秒數": round(time.perf_counter() - started_at, 2)})
+
                         stage_started = time.perf_counter()
                         source_files = [
                             item.name
@@ -641,7 +650,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                             main_raw_df,
                             secondary_diag_frames,
                         )
-                        stage_timings.append({"階段": "讀取 Excel 與日期診斷", "秒數": round(time.perf_counter() - stage_started, 2)})
+                        _record_stage("讀取 Excel 與日期診斷", stage_started)
                         if date_diag.get("date_mismatch_warning"):
                             st.session_state["LAST_UPLOAD_AUDIT"] = {
                                 "status": "warning",
@@ -665,7 +674,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                             sales_reps,
                             source_files=source_files,
                         )
-                        stage_timings.append({"階段": "Preflight 臨時 DB 與口徑驗收", "秒數": round(time.perf_counter() - stage_started, 2)})
+                        _record_stage("Preflight 臨時 DB 與口徑驗收", stage_started)
                         batch_summary = preflight_result.get("batchSummary") or []
                         batch_max = preflight_result.get("latestDataDate")
                         contains_target_date = any(row.get("包含 2026-06-15") for row in batch_summary)
@@ -705,17 +714,21 @@ def _render_upload_area(has_db_data: bool) -> None:
                         upload_status.update(label="寫入 SQLite...", state="running")
                         stage_started = time.perf_counter()
                         upsert_summary = upsert_to_db(new_t_df, new_o_df)
-                        stage_timings.append({"階段": "正式 SQLite upsert", "秒數": round(time.perf_counter() - stage_started, 2)})
+                        _record_stage("正式 SQLite upsert", stage_started)
                         upload_status.update(label="重建 dashboard cache（不重跑 AI）...", state="running")
                         stage_started = time.perf_counter()
                         _load_and_compute_cache(include_ai=False)
-                        stage_timings.append({"階段": "Dashboard cache 快速重建", "秒數": round(time.perf_counter() - stage_started, 2)})
+                        _record_stage("Dashboard cache 快速重建", stage_started)
                         st.session_state["PROCESSED_DATA_CACHE"]["anm"] = anm_df
                         upsert_rows = _upsert_summary_rows(upsert_summary)
 
+                        stage_started = time.perf_counter()
                         db_after_tour, db_after_others = load_all_data_from_db()
                         db_after_max = _combined_max_date(db_after_tour, db_after_others)
+                        _record_stage("寫入後 SQLite reload", stage_started)
+                        stage_started = time.perf_counter()
                         stability_gate = build_phase2c_stability_gate()
+                        _record_stage("Stability gate 驗證", stage_started)
                         status = "success"
                         message = (
                             f"上傳批次已寫入並重建 dashboard cache；SQLite 最新收款時間：{_fmt_date(db_after_max)}。"
@@ -733,6 +746,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                                 f"寫入前：{_fmt_date(db_before_max)}，寫入後：{_fmt_date(db_after_max)}。請檢查是否全部為既有來源單據號覆蓋。"
                             )
 
+                        stage_started = time.perf_counter()
                         rollback_result = handle_core_drift_rollback(
                             stability_gate,
                             upsert_summary.get("backup_path") if isinstance(upsert_summary, dict) else None,
@@ -740,6 +754,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                             rebuild_cache=_rebuild_cache_after_database_restore,
                             build_gate=build_phase2c_stability_gate,
                         )
+                        _record_stage("Rollback guard", stage_started)
                         if rollback_result["status"] == "rejected_rolled_back":
                             status = "error"
                             message = (
@@ -760,6 +775,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                         ]
                         history_record_id = None
                         history_error = None
+                        stage_started = time.perf_counter()
                         try:
                             history_record_id = record_stability_history(
                                 stability_gate,
@@ -780,6 +796,8 @@ def _render_upload_area(has_db_data: bool) -> None:
                             )
                         except Exception as history_exc:
                             history_error = f"{type(history_exc).__name__}: {history_exc}"
+                        _record_stage("Stability history 記錄", stage_started)
+                        _record_stage("Upload total", upload_started)
 
                         st.session_state["LAST_UPLOAD_AUDIT"] = {
                             "status": status,
@@ -2006,7 +2024,7 @@ def _render_dashboard_tab() -> None:
     if has_db_data and not st.session_state["DB_LOADED_FLAG"]:
         with st.spinner("載入階段：SQLite loaded → Dashboard facts ready → AI cache hit/rebuild check；Export workbooks 會按需載入。"):
             try:
-                _load_and_compute_cache()
+                _load_and_compute_cache(include_ai=False)
                 st.rerun()
             except Exception:
                 _render_error("從資料庫恢復數據失敗。", traceback.format_exc())

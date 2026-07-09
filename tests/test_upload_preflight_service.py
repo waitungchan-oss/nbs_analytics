@@ -129,3 +129,10 @@ def test_upload_preflight_uses_temp_database_and_preserves_live_db(tmp_path, mon
     assert report["batchSummary"][0]["包含 2026-06-15"] is False
     assert report["batchSummary"][1]["包含 2026-06-15"] is True
     assert report["batchSummary"][1]["最早收款時間"] == "2026-06-15 09:19:16"
+    timing_labels = [item["階段"] for item in report["stageTimings"]]
+    assert "建立 Preflight 臨時 DB" in timing_labels
+    assert "清洗與 Entity Resolution" in timing_labels
+    assert "臨時 SQLite upsert" in timing_labels
+    assert "Preflight stability gate" in timing_labels
+    assert "Drift diagnosis" in timing_labels
+    assert "Preflight total" in timing_labels

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,6 +16,10 @@ from pipeline import process_raw_files
 
 def _money_text(value: float) -> str:
     return f"HKD {float(value):,.0f}"
+
+
+def _record_stage(stage_timings: list[dict], label: str, started_at: float) -> None:
+    stage_timings.append({"階段": label, "秒數": round(time.perf_counter() - started_at, 2)})
 
 
 def _frame_max_date(frame: pd.DataFrame) -> str | None:
@@ -116,6 +121,8 @@ def run_upload_preflight(
     *,
     source_files: list[str] | None = None,
 ) -> dict:
+    stage_timings: list[dict] = []
+    preflight_started = time.perf_counter()
     source_files = source_files or [
         item.name
         for item in [main_file, tour_file, *(other_files or [])]
@@ -124,13 +131,20 @@ def run_upload_preflight(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_db_path = Path(tmpdir) / "preflight.db"
+        stage_started = time.perf_counter()
         _snapshot_live_database(temp_db_path)
+        _record_stage(stage_timings, "建立 Preflight 臨時 DB", stage_started)
+        stage_started = time.perf_counter()
         live_tour_before, live_others_before = database.load_all_data_from_db()
+        _record_stage(stage_timings, "讀取正式 SQLite 快照", stage_started)
+        stage_started = time.perf_counter()
         live_before = {
             "tour_rows": _table_row_count(Path(database.DB_FILE), "tour_data"),
             "others_rows": _table_row_count(Path(database.DB_FILE), "others_data"),
         }
+        _record_stage(stage_timings, "統計正式 DB 行數", stage_started)
         with _temporary_database_path(temp_db_path):
+            stage_started = time.perf_counter()
             new_t_df, new_o_df, anm_df, entity_audit = process_raw_files(
                 main_file,
                 tour_file,
@@ -140,9 +154,17 @@ def run_upload_preflight(
                 sales_reps,
                 return_entity_audit=True,
             )
+            _record_stage(stage_timings, "清洗與 Entity Resolution", stage_started)
+            stage_started = time.perf_counter()
             upsert_summary = database.upsert_to_db(new_t_df, new_o_df)
+            _record_stage(stage_timings, "臨時 SQLite upsert", stage_started)
+            stage_started = time.perf_counter()
             stability_gate = build_phase2c_stability_gate()
+            _record_stage(stage_timings, "Preflight stability gate", stage_started)
+            stage_started = time.perf_counter()
             temp_tour_after, temp_others_after = database.load_all_data_from_db()
+            _record_stage(stage_timings, "讀取臨時 DB 結果", stage_started)
+            stage_started = time.perf_counter()
             drift_diagnosis = build_upload_drift_diagnosis(
                 live_tour_before,
                 live_others_before,
@@ -150,18 +172,26 @@ def run_upload_preflight(
                 temp_others_after,
                 stability_gate=stability_gate,
             )
+            _record_stage(stage_timings, "Drift diagnosis", stage_started)
+            stage_started = time.perf_counter()
             latest_data_date = _combined_max_date(temp_tour_after, temp_others_after)
+            _record_stage(stage_timings, "Preflight 最新日期彙總", stage_started)
+        stage_started = time.perf_counter()
         live_after = {
             "tour_rows": _table_row_count(Path(database.DB_FILE), "tour_data"),
             "others_rows": _table_row_count(Path(database.DB_FILE), "others_data"),
         }
+        _record_stage(stage_timings, "確認正式 DB 未變更", stage_started)
 
+    stage_started = time.perf_counter()
     total_filtered = sum(int(upsert_summary.get(key, {}).get("filtered_excluded_rows", 0)) for key in ("tour_data", "others_data"))
     total_write_rows = sum(int(upsert_summary.get(key, {}).get("write_rows", 0)) for key in ("tour_data", "others_data"))
     batch_summary = [
         _batch_summary_row("旅行團", new_t_df),
         _batch_summary_row("其他業務", new_o_df),
     ]
+    _record_stage(stage_timings, "Preflight batch summary", stage_started)
+    _record_stage(stage_timings, "Preflight total", preflight_started)
     drift_checks = stability_gate.get("driftChecks") or []
     status = str(stability_gate.get("status") or "drift")
     message = (
@@ -181,6 +211,7 @@ def run_upload_preflight(
         "driftChecks": drift_checks,
         "driftDiagnosis": drift_diagnosis,
         "batchSummary": batch_summary,
+        "stageTimings": stage_timings,
         "upsertSummary": upsert_summary,
         "stabilityGate": stability_gate,
         "prepared": {

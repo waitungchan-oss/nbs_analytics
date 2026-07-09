@@ -23,6 +23,21 @@
         "0B": "展覽會場專用2",
         "225": "營銷運營中心-專職銷售組"
     },
+    "BRANCH_REASSIGNMENT_OVERRIDES": [
+        {
+            "month": "2026-06",
+            "from_prefix": "E6",
+            "from_branch": "上環服務點",
+            "to_prefix": "0A",
+            "to_branch": "展覽會場專用",
+            "scope": [
+                "旅行團",
+                "郵輪",
+                "票務"
+            ],
+            "reason": "2026年6月E6上環服務點銷售額歸入0A展覽會場專用"
+        }
+    ],
     "EXCLUDE_PREFIXES": [
         "1950506",
         "1950404",

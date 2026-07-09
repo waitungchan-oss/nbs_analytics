@@ -29,6 +29,7 @@ from rules import (
     KEY_COL_2,
     MONEY_COLS_1,
     MONEY_COLS_2,
+    BRANCH_REASSIGNMENT_OVERRIDES,
     SESSION_RULE_KEYS,
     TARGET_DEPT_FOR_REP,
     _clean_list,
@@ -50,6 +51,7 @@ def init_session_state_config() -> None:
             for k, v in branch_mapping.items()
             if _clean_text(k) and _clean_text(v)
         },
+        "BRANCH_REASSIGNMENT_OVERRIDES": list(rules.get("BRANCH_REASSIGNMENT_OVERRIDES", [])),
         "EXCLUDE_PREFIXES": _clean_list(rules.get("EXCLUDE_PREFIXES", [])),
         "TARGET_BRANCHES_S3": _clean_list(rules.get("TARGET_BRANCHES_S3", [])),
         "SALES_REP_LIST": _clean_list(rules.get("SALES_REP_LIST", [])),

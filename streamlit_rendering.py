@@ -475,6 +475,8 @@ def _render_role_badges(items: list[tuple[str, str, str]]) -> None:
 def _render_export_status_card(cache: dict, export_loaded: bool) -> None:
     status = str(cache.get("export_cache_status", "not_prepared") or "not_prepared")
     path = str(cache.get("export_cache_path", "") or "")
+    export_cache_version = str(cache.get("export_cache_version", "") or "")
+    official_export_schema = str(cache.get("official_export_schema", "") or "")
     if export_loaded:
         label = "Loaded"
         badge_class = "nbs-badge-success"
@@ -491,8 +493,10 @@ def _render_export_status_card(cache: dict, export_loaded: bool) -> None:
         title = "Export workbooks 尚未準備"
         note = "需要下載時才生成三份大型 Excel，完成後會寫入本地 export cache。"
     path_note = f"Cache path：{path}" if path else "Cache path：尚未建立"
+    version_note = f"Cache version：{export_cache_version}" if export_cache_version else "Cache version：未知"
+    schema_note = f"Official schema：{official_export_schema}" if official_export_schema else "Official schema：尚未標記"
     st.markdown(
-        f'<div class="nbs-export-status-card"><div><div class="nbs-export-status-title">{escape(title)}</div><div class="nbs-export-status-meta">{escape(note)}<br>{escape(path_note)}</div></div><div class="nbs-badge {badge_class}">{escape(label)}</div></div>',
+        f'<div class="nbs-export-status-card"><div><div class="nbs-export-status-title">{escape(title)}</div><div class="nbs-export-status-meta">{escape(note)}<br>{escape(path_note)}<br>{escape(version_note)}<br>{escape(schema_note)}</div></div><div class="nbs-badge {badge_class}">{escape(label)}</div></div>',
         unsafe_allow_html=True,
     )
 

@@ -37,6 +37,17 @@ DEFAULT_BRANCH_MAPPING = {
 
 DEFAULT_RULES = {
     "BRANCH_MAPPING": DEFAULT_BRANCH_MAPPING,
+    "BRANCH_REASSIGNMENT_OVERRIDES": [
+        {
+            "month": "2026-06",
+            "from_prefix": "E6",
+            "from_branch": "上環服務點",
+            "to_prefix": "0A",
+            "to_branch": "展覽會場專用",
+            "scope": ["旅行團", "郵輪", "票務"],
+            "reason": "2026年6月E6上環服務點銷售額歸入0A展覽會場專用",
+        }
+    ],
     "EXCLUDE_PREFIXES": ["1950506", "1950404", "1950202"],
     "TARGET_BRANCHES_S3": [
         "銅鑼灣分社",
@@ -66,8 +77,11 @@ DEFAULT_RULES = {
     "CRUISE_DEPTS": ["郵輪事業部-郵輪線業務組", "移走-郵輪事業部"],
 }
 
+BRANCH_REASSIGNMENT_OVERRIDES = DEFAULT_RULES["BRANCH_REASSIGNMENT_OVERRIDES"]
+
 SESSION_RULE_KEYS = (
     "BRANCH_MAPPING",
+    "BRANCH_REASSIGNMENT_OVERRIDES",
     "EXCLUDE_PREFIXES",
     "TARGET_BRANCHES_S3",
     "SALES_REP_LIST",

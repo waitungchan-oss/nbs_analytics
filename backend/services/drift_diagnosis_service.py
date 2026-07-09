@@ -153,6 +153,26 @@ def _select_driver_row(order_rows: pd.DataFrame, order_id: str) -> pd.Series | N
     return work.sort_values("收款原幣金額", ascending=False).iloc[0]
 
 
+def _with_clean_order_id(frame: pd.DataFrame) -> pd.DataFrame:
+    work = frame.copy()
+    if COL_ORDER_ID not in work.columns:
+        work[COL_ORDER_ID] = ""
+    work["_clean_order_id"] = work[COL_ORDER_ID].astype(str).map(_safe_text)
+    return work
+
+
+def _rows_for_order(clean_frame: pd.DataFrame, order_id: str) -> pd.DataFrame:
+    if clean_frame.empty or "_clean_order_id" not in clean_frame.columns:
+        return clean_frame.iloc[0:0].copy()
+    return clean_frame.loc[clean_frame["_clean_order_id"] == order_id].copy()
+
+
+def _candidate_rows(clean_frame: pd.DataFrame, candidate_order_ids: set[str]) -> pd.DataFrame:
+    if clean_frame.empty or not candidate_order_ids or "_clean_order_id" not in clean_frame.columns:
+        return clean_frame.iloc[0:0].copy()
+    return clean_frame.loc[clean_frame["_clean_order_id"].isin(candidate_order_ids)].drop(columns=["_clean_order_id"], errors="ignore").copy()
+
+
 def build_upload_drift_diagnosis(
     live_tour: pd.DataFrame,
     live_others: pd.DataFrame,
@@ -176,9 +196,29 @@ def build_upload_drift_diagnosis(
 
     live_raw = pd.concat([live_tour, live_others], ignore_index=True, sort=False)
     temp_raw = pd.concat([temp_tour, temp_others], ignore_index=True, sort=False)
+    live_raw_clean = _with_clean_order_id(live_raw)
+    temp_raw_clean = _with_clean_order_id(temp_raw)
 
     live_analysis_tour, live_analysis_others, live_audit = build_revenue_scope_frames(live_tour, live_others)
     temp_analysis_tour, temp_analysis_others, temp_audit = build_revenue_scope_frames(temp_tour, temp_others)
+
+    if status == "matched" or abs(delta_amount) < 1.0:
+        return {
+            "status": "no_drift",
+            "baselineMonth": baseline_month,
+            "expectedTotal": expected_total,
+            "actualTotal": actual_total,
+            "deltaAmount": delta_amount,
+            "summaryMessage": "核心口徑未漂移。",
+            "rowLimit": row_limit,
+            "liveAudit": live_audit,
+            "tempAudit": temp_audit,
+            "sourceOrderDiffs": [],
+            "receiptDiffs": [],
+            "excludedReceiptDiffs": [],
+            "topDrivers": [],
+            "detailMode": "skipped_core_matched",
+        }
 
     live_excluded_ids = {
         str(value).strip()
@@ -217,8 +257,8 @@ def build_upload_drift_diagnosis(
     order_ids = sorted(set(live_order_map) | set(temp_order_map) | set(live_excluded_ids) | set(temp_excluded_ids))
     order_diffs: list[dict] = []
     for order_id in order_ids:
-        live_rows = live_raw[live_raw[COL_ORDER_ID].astype(str).map(_safe_text) == order_id].copy()
-        temp_rows = temp_raw[temp_raw[COL_ORDER_ID].astype(str).map(_safe_text) == order_id].copy()
+        live_rows = _rows_for_order(live_raw_clean, order_id)
+        temp_rows = _rows_for_order(temp_raw_clean, order_id)
         live_total = float(live_order_map.get(order_id, 0.0))
         temp_total = float(temp_order_map.get(order_id, 0.0))
         delta = round(temp_total - live_total, 2)
@@ -256,9 +296,11 @@ def build_upload_drift_diagnosis(
         )
 
     order_diffs.sort(key=lambda item: abs(float(item.get("deltaAmount") or 0)), reverse=True)
+    candidate_order_ids = {str(item.get("sourceOrderNo") or "") for item in order_diffs if str(item.get("sourceOrderNo") or "")}
 
-    live_rows = _frame_with_keys(pd.concat([live_tour, live_others], ignore_index=True, sort=False), "live")
-    temp_rows = _frame_with_keys(pd.concat([temp_tour, temp_others], ignore_index=True, sort=False), "temp")
+    live_rows = _frame_with_keys(_candidate_rows(live_raw_clean, candidate_order_ids), "live")
+    temp_rows = _frame_with_keys(_candidate_rows(temp_raw_clean, candidate_order_ids), "temp")
+    candidate_receipt_rows = {"live": int(len(live_rows)), "temp": int(len(temp_rows))}
     merged = live_rows.merge(
         temp_rows,
         on="_row_key",
@@ -327,8 +369,8 @@ def build_upload_drift_diagnosis(
     top_drivers: list[dict] = []
     for order_diff in order_diffs[:row_limit]:
         order_id = str(order_diff.get("sourceOrderNo") or "")
-        temp_order_rows = temp_raw[temp_raw[COL_ORDER_ID].astype(str).map(_safe_text) == order_id].copy()
-        live_order_rows = live_raw[live_raw[COL_ORDER_ID].astype(str).map(_safe_text) == order_id].copy()
+        temp_order_rows = _rows_for_order(temp_raw_clean, order_id).drop(columns=["_clean_order_id"], errors="ignore")
+        live_order_rows = _rows_for_order(live_raw_clean, order_id).drop(columns=["_clean_order_id"], errors="ignore")
         chosen_row = _select_driver_row(temp_order_rows if not temp_order_rows.empty else live_order_rows, order_id)
         if chosen_row is None:
             continue
@@ -374,4 +416,7 @@ def build_upload_drift_diagnosis(
         "receiptDiffs": receipt_diffs[:row_limit],
         "excludedReceiptDiffs": excluded_receipt_diffs[:row_limit],
         "topDrivers": top_drivers[:row_limit],
+        "detailMode": "candidate_order_scope",
+        "candidateOrderCount": len(candidate_order_ids),
+        "candidateReceiptRows": candidate_receipt_rows,
     }

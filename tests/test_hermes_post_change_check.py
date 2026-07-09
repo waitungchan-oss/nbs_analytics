@@ -47,3 +47,43 @@ def test_overall_status_passes_when_all_steps_pass():
     ]
 
     assert post_check.compute_overall_status(results) == "pass"
+
+
+def test_markdown_report_summarizes_baseline_tests_and_commit_advice():
+    report = {
+        "overallStatus": "pass",
+        "projectRoot": "/tmp/nbs",
+        "results": [
+            {
+                "label": "git-status",
+                "required": True,
+                "exitCode": 0,
+                "stdout": "## main\n M pipeline.py\n?? tests/test_official_export_workbook_contract.py\n",
+                "stderr": "",
+            },
+            {
+                "label": "phase2-baseline",
+                "required": True,
+                "exitCode": 0,
+                "stdout": '{"status":"matched","formattedActualTotal":"HKD 12,057,968"}',
+                "stderr": "",
+            },
+            {
+                "label": "targeted-tests",
+                "required": True,
+                "exitCode": 0,
+                "stdout": "39 passed in 9.40s",
+                "stderr": "",
+            },
+        ],
+    }
+
+    markdown = post_check.format_markdown_report(report)
+
+    assert "# Hermes Post-Change Report" in markdown
+    assert "Overall status: PASS" in markdown
+    assert "phase2-baseline: PASS" in markdown
+    assert "HKD 12,057,968" in markdown
+    assert "targeted-tests: PASS" in markdown
+    assert "39 passed" in markdown
+    assert "Commit recommendation: ready after reviewing grouped diff" in markdown

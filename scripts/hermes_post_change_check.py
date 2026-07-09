@@ -136,11 +136,81 @@ def run_checks(*, include_monitor: bool = True, include_tests: bool = True, proj
     }
 
 
+def _result_by_label(report: dict, label: str) -> dict:
+    for result in report.get("results", []):
+        if result.get("label") == label:
+            return result
+    return {}
+
+
+def _status_text(result: dict) -> str:
+    if not result:
+        return "MISSING"
+    return "PASS" if int(result.get("exitCode", 1) or 0) == 0 else "FAIL"
+
+
+def _first_matching_line(text: str, needles: tuple[str, ...]) -> str:
+    for line in str(text or "").splitlines():
+        if any(needle in line for needle in needles):
+            return line.strip()
+    return ""
+
+
+def format_markdown_report(report: dict) -> str:
+    status = str(report.get("overallStatus") or "unknown").upper()
+    baseline = _result_by_label(report, "phase2-baseline")
+    tests = _result_by_label(report, "targeted-tests")
+    git_status = _result_by_label(report, "git-status")
+    baseline_line = _first_matching_line(
+        baseline.get("stdout", ""),
+        ("formattedActualTotal", "HKD 12,057,968", "status"),
+    )
+    tests_line = _first_matching_line(tests.get("stdout", ""), ("passed", "failed", "error"))
+    changed_lines = [
+        line.strip()
+        for line in str(git_status.get("stdout", "") or "").splitlines()
+        if line.startswith(" M ") or line.startswith("?? ") or line.startswith(" A ")
+    ]
+    commit_advice = (
+        "ready after reviewing grouped diff"
+        if status == "PASS"
+        else "not ready; fix failing required checks first"
+    )
+    changed_block = "\n".join(f"- `{line}`" for line in changed_lines[:20]) or "- No changed files reported."
+    return "\n".join(
+        [
+            "# Hermes Post-Change Report",
+            "",
+            f"Overall status: {status}",
+            f"Project root: `{report.get('projectRoot', '')}`",
+            "",
+            "## Required Checks",
+            "",
+            f"- phase2-baseline: {_status_text(baseline)}",
+            f"- targeted-tests: {_status_text(tests)}",
+            "",
+            "## Evidence",
+            "",
+            f"- Baseline: `{baseline_line or 'not found in stdout'}`",
+            f"- Tests: `{tests_line or 'not found in stdout'}`",
+            "",
+            "## Changed Files",
+            "",
+            changed_block,
+            "",
+            "## Recommendation",
+            "",
+            f"Commit recommendation: {commit_advice}",
+        ]
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Hermes post-change monitoring checks for nbs_analytics.")
     parser.add_argument("--skip-monitor", action="store_true", help="Skip system_manager.py monitor write.")
     parser.add_argument("--skip-tests", action="store_true", help="Skip targeted pytest monitoring pack.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
+    parser.add_argument("--markdown", action="store_true", help="Print a concise Markdown report.")
     return parser.parse_args(argv)
 
 
@@ -149,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     report = run_checks(include_monitor=not args.skip_monitor, include_tests=not args.skip_tests)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
+    elif args.markdown:
+        print(format_markdown_report(report))
     else:
         print(f"Overall status: {report['overallStatus'].upper()}")
         print(f"Project root: {report['projectRoot']}")

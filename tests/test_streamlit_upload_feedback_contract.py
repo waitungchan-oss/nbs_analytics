@@ -173,12 +173,57 @@ def test_upload_flow_uses_fast_dashboard_cache_rebuild_without_ai_blocking():
     assert 'ai_cache_status = "deferred"' in cache_source
 
 
+def test_initial_dashboard_load_defers_ai_cache_rebuild():
+    source = _pages_function_source("_render_dashboard_tab")
+
+    assert "_load_and_compute_cache(include_ai=False)" in source
+    assert "_load_and_compute_cache()" not in source
+
+
+def test_upload_flow_profiles_all_post_write_guard_stages():
+    source = _pages_function_source("_render_upload_area")
+
+    for label in [
+        "讀取 Excel 與日期診斷",
+        "Preflight 臨時 DB 與口徑驗收",
+        "正式 SQLite upsert",
+        "Dashboard cache 快速重建",
+        "寫入後 SQLite reload",
+        "Stability gate 驗證",
+        "Rollback guard",
+        "Stability history 記錄",
+        "Upload total",
+    ]:
+        assert label in source
+
+
+def test_upload_preflight_internal_timings_are_rendered():
+    source = _pages_function_source("_render_upload_audit_notice")
+
+    assert 'preflight_report.get("stageTimings")' in source
+    assert "Preflight 內部耗時" in source
+
+
 def test_ai_section_exposes_manual_recompute_button():
     source = _pages_function_source("_render_ai_and_exports")
 
     assert 'st.button("補算 AI"' in source
     assert "_load_and_compute_cache(include_ai=True)" in source
     assert "st.rerun()" in source
+
+
+def test_export_status_card_surfaces_cache_version_and_schema_contract():
+    source = _rendering_function_source("_render_export_status_card")
+    cache_source = _workflows_function_source("_load_and_compute_cache")
+    compute_source = _workflows_function_source("_compute_export_workbooks")
+    ensure_source = _workflows_function_source("_ensure_export_workbooks")
+
+    assert "export_cache_version" in source
+    assert "official_export_schema" in source
+    assert "EXPORT_CACHE_VERSION" in cache_source
+    assert "official_export_schema" in cache_source
+    assert "official_export_schema" in compute_source
+    assert "official_export_schema" in ensure_source
 
 
 def test_error_traceback_is_hidden_behind_technical_details_expander():

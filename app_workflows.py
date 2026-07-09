@@ -105,7 +105,8 @@ REVENUE_SCOPE_CAPTION = '收入口徑：不含收款類型「掛賬核銷」；�
 REVENUE_SCOPE_EXCLUDED_RECEIPT_TYPES = ('掛賬核銷',)
 REVENUE_SCOPE_EXCLUDED_PAYMENT_METHODS = ('TT 退款轉團款',)
 AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
-EXPORT_CACHE_VERSION = 'export-lazy-v1'
+EXPORT_CACHE_VERSION = 'export-lazy-v3'
+OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v1'
 AI_CACHE_DIR = Path(__file__).resolve().parent / '.nbs_runtime_cache'
 AI_CLEANING_RULE_TYPES = ("BRANCH_MAPPING", "EXCLUDE_PREFIXES", "SALES_REP_LIST", "CRUISE_DEPTS")
 AI_CLEANING_BRANCH_PLACEHOLDER = "待填分社名稱"
@@ -991,11 +992,14 @@ def _compute_export_workbooks(db_tour: pd.DataFrame, db_others: pd.DataFrame) ->
         sales_reps,
         ["掛賬核銷"],
         excluded_payment_methods=["TT 退款轉團款"],
+        include_branch_salesperson_sheet=True,
     )
     return {
         "ex": _buffer_to_bytes(excel_buf),
         "ex_no_writeoff": _buffer_to_bytes(excel_no_writeoff_buf),
         "ex_no_writeoff_refund_transfer": _buffer_to_bytes(excel_no_writeoff_refund_transfer_buf),
+        "export_cache_version": EXPORT_CACHE_VERSION,
+        "official_export_schema": OFFICIAL_EXPORT_SCHEMA_CONTRACT,
     }
 
 def _read_gmv_exclusion_file(file_obj) -> pd.DataFrame:
@@ -1171,6 +1175,8 @@ def _load_and_compute_cache(include_ai: bool = True) -> None:
         "export_cache_key": export_cache_key,
         "export_cache_status": export_cache_status,
         "export_cache_path": str(export_cache_path),
+        "export_cache_version": EXPORT_CACHE_VERSION,
+        "official_export_schema": OFFICIAL_EXPORT_SCHEMA_CONTRACT,
         "scope": scope_audit,
     }
     st.session_state["DB_LOADED_FLAG"] = True
@@ -1530,6 +1536,7 @@ def _apply_ai_cleaning_suggestions(selected: pd.DataFrame) -> tuple[list[str], l
         "TARGET_BRANCHES_S3": list(st.session_state.get("TARGET_BRANCHES_S3", [])),
         "SALES_REP_LIST": list(st.session_state.get("SALES_REP_LIST", [])),
         "CRUISE_DEPTS": list(st.session_state.get("CRUISE_DEPTS", [])),
+        "BRANCH_REASSIGNMENT_OVERRIDES": list(st.session_state.get("BRANCH_REASSIGNMENT_OVERRIDES", [])),
     }
 
     for _, row in selected.iterrows():
@@ -2597,6 +2604,8 @@ def _ensure_export_workbooks(cache: dict) -> bool:
     cache["ex_no_writeoff_refund_transfer"] = export_payload.get("ex_no_writeoff_refund_transfer")
     cache["export_cache_status"] = "ready"
     cache["export_cache_path"] = str(_export_cache_path(cache_key))
+    cache["export_cache_version"] = export_payload.get("export_cache_version") or EXPORT_CACHE_VERSION
+    cache["official_export_schema"] = export_payload.get("official_export_schema") or OFFICIAL_EXPORT_SCHEMA_CONTRACT
     st.session_state["PROCESSED_DATA_CACHE"] = cache
     return all(cache.get(k) for k in ("ex", "ex_no_writeoff", "ex_no_writeoff_refund_transfer"))
 

@@ -31,7 +31,8 @@ from config import (
     KEY_COL_2,
     MONEY_COLS_1,
     MONEY_COLS_2,
-TARGET_DEPT_FOR_REP,
+    BRANCH_REASSIGNMENT_OVERRIDES,
+    TARGET_DEPT_FOR_REP,
 )
 
 COL_SUBTABLE_BRANCH = "副表_銷售點"
@@ -258,6 +259,74 @@ def apply_subtable_branch_override(
     return result
 
 
+def _normalize_branch_value(value: Any) -> str:
+    return str(value or "").replace("\u3000", " ").strip()
+
+
+def _reassignment_period_mask(frame: pd.DataFrame, *, month: str = "", year: str = "") -> pd.Series:
+    if not month and not year:
+        return pd.Series(True, index=frame.index)
+    for column in ("統一日期", DATE_COL_R, COL_DATE, DATE_COL_Y):
+        if column in frame.columns:
+            dates = pd.to_datetime(frame[column], errors="coerce")
+            if dates.notna().any():
+                if month:
+                    return dates.dt.strftime("%Y-%m").eq(str(month))
+                return dates.dt.strftime("%Y").eq(str(year))
+    return pd.Series(False, index=frame.index)
+
+
+def apply_branch_reassignment_overrides(
+    df: pd.DataFrame,
+    overrides: list[dict] | None = None,
+    anomaly_log: list[dict] | None = None,
+) -> pd.DataFrame:
+    if df.empty or COL_BRANCH not in df.columns:
+        return df
+
+    result = df.copy()
+    if COL_SUBTABLE_BRANCH not in result.columns:
+        result[COL_SUBTABLE_BRANCH] = ""
+
+    for override in overrides or []:
+        to_branch = _normalize_branch_value(override.get("to_branch"))
+        if not to_branch:
+            continue
+        from_branch = _normalize_branch_value(override.get("from_branch"))
+        from_prefix = _normalize_branch_value(override.get("from_prefix")).upper()
+        month = _normalize_branch_value(override.get("month"))
+        year = _normalize_branch_value(override.get("year"))
+
+        mask = _reassignment_period_mask(result, month=month, year=year)
+        if from_branch:
+            current_branch = result[COL_BRANCH].map(_normalize_branch_value)
+            sub_branch = result[COL_SUBTABLE_BRANCH].map(_normalize_branch_value)
+            mask &= current_branch.eq(from_branch) | sub_branch.eq(from_branch)
+        if from_prefix and COL_ORDER_ID in result.columns:
+            order_ids = result[COL_ORDER_ID].astype(str).str.upper()
+            mask &= order_ids.str.startswith(from_prefix)
+
+        if not bool(mask.any()):
+            continue
+
+        for idx in result.index[mask]:
+            old_branch = _normalize_branch_value(result.at[idx, COL_BRANCH])
+            old_sub_branch = _normalize_branch_value(result.at[idx, COL_SUBTABLE_BRANCH])
+            source_id = _normalize_branch_value(result.at[idx, COL_ORDER_ID]) if COL_ORDER_ID in result.columns else ""
+            result.at[idx, COL_BRANCH] = to_branch
+            result.at[idx, COL_SUBTABLE_BRANCH] = to_branch
+            if anomaly_log is not None:
+                anomaly_log.append(
+                    {
+                        "異常發生欄位": COL_BRANCH,
+                        "原始異常值": f"來源單據號={source_id or '未知'} | 原銷售點={old_branch or '空白'} | 原副表銷售點={old_sub_branch or '空白'}",
+                        "系統修正值": to_branch,
+                        "處理狀態": "✅ 命中月份限定分社歸屬 override，已重派銷售點",
+                    }
+                )
+    return result
+
+
 def map_dest_category(row: pd.Series, cruise_depts: list[str]) -> str:
     dept = str(row.get(COL_DEPT, "")).strip()
     dest = str(row.get(COL_DEST_CATEGORY, "")).strip()
@@ -459,6 +528,7 @@ def process_raw_files(
     exclude_prefixes: list[str],
     sales_rep_list: list[str],
     return_entity_audit: bool = False,
+    branch_reassignment_overrides: list[dict] | None = None,
 ):
     df1, _ = _read_excel_source(main_file)
     secondary_dfs = []
@@ -542,6 +612,9 @@ def process_raw_files(
             )
     df_tour_matched = apply_subtable_branch_override(df_tour_matched, anomaly_log)
     df_others_matched = apply_subtable_branch_override(df_others_matched, anomaly_log)
+    overrides = BRANCH_REASSIGNMENT_OVERRIDES if branch_reassignment_overrides is None else branch_reassignment_overrides
+    df_tour_matched = apply_branch_reassignment_overrides(df_tour_matched, overrides, anomaly_log)
+    df_others_matched = apply_branch_reassignment_overrides(df_others_matched, overrides, anomaly_log)
     df_tour_matched = apply_operator_sales_rep_override(df_tour_matched, sales_rep_list, anomaly_log)
     df_others_matched = apply_operator_sales_rep_override(df_others_matched, sales_rep_list, anomaly_log)
     df_anomaly_log = (
@@ -570,6 +643,7 @@ def build_dashboard_data(
     cruise_depts: list[str],
     sales_rep_list: list[str],
     make_workbook: bool = True,
+    include_branch_salesperson_sheet: bool = False,
 ):
     df_tour_matched = normalize_runtime_columns(df_tour_matched)
     df_others_matched = normalize_runtime_columns(df_others_matched)
@@ -601,12 +675,126 @@ def build_dashboard_data(
             ["文本", col_type, "日期", "月份", "旅行團", "郵輪", "票務"]
         ].fillna(0)
 
+    def build_branch_salesperson_summary(df_t, df_o):
+        columns = ["文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"]
+        branch_text_lookup = {str(text)[2:]: str(text) for text in branch_list}
+        if not branch_text_lookup:
+            return pd.DataFrame(columns=columns)
+
+        def _prepared_branch_frame(df_sub: pd.DataFrame) -> pd.DataFrame:
+            if df_sub.empty:
+                return pd.DataFrame()
+            work = df_sub.copy()
+            if COL_BRANCH not in work.columns:
+                return pd.DataFrame()
+            if COL_SALESPERSON not in work.columns:
+                work[COL_SALESPERSON] = "未指定"
+            work = work[work[COL_BRANCH].isin(branch_text_lookup)]
+            if work.empty:
+                return pd.DataFrame()
+            work[COL_SALESPERSON] = work[COL_SALESPERSON].fillna("").astype(str).str.strip().replace("", "未指定")
+            return work
+
+        def grouped_amounts(df_sub: pd.DataFrame, amount_col: str) -> pd.DataFrame:
+            work = _prepared_branch_frame(df_sub)
+            if work.empty:
+                return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", amount_col])
+            work["_交易金額"] = pd.to_numeric(work[COL_MONEY], errors="coerce").fillna(0)
+            return (
+                work.groupby([COL_BRANCH, COL_SALESPERSON, "統一日期"], dropna=False)["_交易金額"]
+                .sum()
+                .reset_index(name=amount_col)
+            )
+
+        def grouped_tour_people(df_sub: pd.DataFrame) -> pd.DataFrame:
+            work = _prepared_branch_frame(df_sub)
+            if work.empty:
+                return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "旅行團交易人數"])
+            work = (
+                work.sort_values(by=COL_TRANS_TIME, na_position="last").drop_duplicates(subset=[COL_ORDER_ID], keep="first")
+                if COL_ORDER_ID in work.columns
+                else work.copy()
+            )
+            work["統計日期"] = (
+                pd.to_datetime(work[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(work["統一日期"])
+                if COL_TRANS_TIME in work.columns
+                else work["統一日期"]
+            )
+            work["旅行團交易人數"] = pd.to_numeric(work[COL_QTY], errors="coerce").fillna(0)
+            return (
+                work.groupby([COL_BRANCH, COL_SALESPERSON, "統計日期"], dropna=False)["旅行團交易人數"]
+                .sum()
+                .reset_index()
+                .rename(columns={"統計日期": "統一日期"})
+            )
+
+        def grouped_ticket_quantity(df_sub: pd.DataFrame) -> pd.DataFrame:
+            work = _prepared_branch_frame(df_sub)
+            if work.empty:
+                return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "票務交易數量"])
+            work["統計日期"] = (
+                pd.to_datetime(work[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(work["統一日期"])
+                if COL_TRANS_TIME in work.columns
+                else work["統一日期"]
+            )
+            work["票務種類"] = work.apply(map_ticket_category, axis=1)
+            work = work[work["票務種類"].notnull()]
+            if work.empty:
+                return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "票務交易數量"])
+            work["票務交易數量"] = pd.to_numeric(work[COL_QTY], errors="coerce").fillna(0)
+            return (
+                work.groupby([COL_BRANCH, COL_SALESPERSON, "統計日期"], dropna=False)["票務交易數量"]
+                .sum()
+                .reset_index()
+                .rename(columns={"統計日期": "統一日期"})
+            )
+
+        t_not_c = df_t[~df_t[COL_DEPT].isin(cruise_depts)]
+        t_c = df_t[df_t[COL_DEPT].isin(cruise_depts)]
+        s_tour = grouped_amounts(t_not_c, "旅行團")
+        s_cruise = grouped_amounts(t_c, "郵輪")
+        s_tkt = grouped_amounts(df_o, "票務")
+        s_tour_people = grouped_tour_people(df_t)
+        s_ticket_qty = grouped_ticket_quantity(df_o)
+        keys = [COL_BRANCH, COL_SALESPERSON, "統一日期"]
+        res = (
+            s_tour.merge(s_cruise, on=keys, how="outer")
+            .merge(s_tkt, on=keys, how="outer")
+            .merge(s_tour_people, on=keys, how="outer")
+            .merge(s_ticket_qty, on=keys, how="outer")
+        )
+        if res.empty:
+            return pd.DataFrame(columns=columns)
+        res["文本"] = res[COL_BRANCH].map(branch_text_lookup)
+        res["單選"] = res["文本"].apply(get_branch_type)
+        res["銷售員"] = res[COL_SALESPERSON]
+        res["日期"] = res["統一日期"]
+        res["月份"] = pd.to_datetime(res["日期"], errors="coerce").dt.strftime("%Y-%m")
+        for amount_col in ["旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"]:
+            res[amount_col] = pd.to_numeric(res[amount_col], errors="coerce").fillna(0)
+        res = res[
+            (res["旅行團"] != 0)
+            | (res["郵輪"] != 0)
+            | (res["票務"] != 0)
+            | (res["旅行團交易人數"] != 0)
+            | (res["票務交易數量"] != 0)
+        ]
+        return res[columns].sort_values(["文本", "銷售員", "日期"]).reset_index(drop=True)
+
     result_s1 = build_summary(
         df_tour_matched[df_tour_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
         df_others_matched[df_others_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
         branch_list,
         COL_BRANCH,
         True,
+    )
+    result_s1_salesperson = (
+        build_branch_salesperson_summary(
+            df_tour_matched[df_tour_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
+            df_others_matched[df_others_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
+        )
+        if include_branch_salesperson_sheet
+        else pd.DataFrame(columns=["文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"])
     )
     result_s2 = build_summary(
         df_tour_matched[df_tour_matched[COL_BRANCH] == TARGET_DEPT_FOR_REP],
@@ -930,6 +1118,8 @@ def build_dashboard_data(
         (result_s15, "分社線路種類每天統計"),
         (result_s16, "專職線路種類每天統計"),
     ]
+    if include_branch_salesperson_sheet:
+        sheets.insert(1, (result_s1_salesperson, "分社經營統計_含銷售員"))
 
     if not make_workbook:
         return None, result_s1, result_s2
@@ -952,6 +1142,7 @@ def build_dashboard_data_excluding_receipt_types(
     excluded_receipt_types: list[str],
     excluded_payment_methods: list[str] | None = None,
     make_workbook: bool = True,
+    include_branch_salesperson_sheet: bool = False,
 ):
     excluded_types = {str(v).strip() for v in excluded_receipt_types if str(v).strip()}
     excluded_methods = {str(v).strip() for v in (excluded_payment_methods or []) if str(v).strip()}
@@ -964,6 +1155,7 @@ def build_dashboard_data_excluding_receipt_types(
             cruise_depts,
             sales_rep_list,
             make_workbook=make_workbook,
+            include_branch_salesperson_sheet=include_branch_salesperson_sheet,
         )
 
     def collect_excluded_ids(df: pd.DataFrame) -> set[str]:
@@ -992,4 +1184,5 @@ def build_dashboard_data_excluding_receipt_types(
         cruise_depts,
         sales_rep_list,
         make_workbook=make_workbook,
+        include_branch_salesperson_sheet=include_branch_salesperson_sheet,
     )

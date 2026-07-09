@@ -109,7 +109,7 @@ REVENUE_SCOPE_CAPTION = "收入口徑：不含收款類型「掛賬核銷」；�
 REVENUE_SCOPE_EXCLUDED_RECEIPT_TYPES = ("掛賬核銷",)
 REVENUE_SCOPE_EXCLUDED_PAYMENT_METHODS = ("TT 退款轉團款",)
 AI_CACHE_VERSION = "daily-macro-normal-tight-v1"
-EXPORT_CACHE_VERSION = "export-lazy-v1"
+EXPORT_CACHE_VERSION = "export-lazy-v3"
 AI_CACHE_DIR = Path(__file__).resolve().parent / ".nbs_runtime_cache"
 
 from app_styles import apply_global_styles

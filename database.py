@@ -10,7 +10,17 @@ from pathlib import Path
 
 import pandas as pd
 
-from config import COL_BRANCH, COL_DATE, COL_MONEY, COL_ORDER_ID, COL_RECEIPT_OPERATOR, COL_SALESPERSON, DB_FILE, TARGET_DEPT_FOR_REP
+from config import (
+    BRANCH_REASSIGNMENT_OVERRIDES,
+    COL_BRANCH,
+    COL_DATE,
+    COL_MONEY,
+    COL_ORDER_ID,
+    COL_RECEIPT_OPERATOR,
+    COL_SALESPERSON,
+    DB_FILE,
+    TARGET_DEPT_FOR_REP,
+)
 
 COL_SUBTABLE_BRANCH = "副表_銷售點"
 UPLOAD_EXCLUDED_RECEIPT_TYPES = {"掛賬核銷"}
@@ -334,6 +344,44 @@ def repair_operator_sales_rep_assignments(sales_rep_list: list[str]) -> dict:
     return {"updated": len(updates), "backup": backup_path}
 
 
+def _clean_branch_value(value) -> str:
+    return str(value or "").replace("\u3000", " ").strip()
+
+
+def _row_periods(row, table_cols: set[str]) -> tuple[str, str]:
+    for column in ("統一日期", COL_DATE, "收款時間"):
+        if column in table_cols:
+            parsed = pd.to_datetime(row.get(column), errors="coerce")
+            if pd.notna(parsed):
+                return parsed.strftime("%Y-%m"), parsed.strftime("%Y")
+    return "", ""
+
+
+def _branch_reassignment_target(row, table_cols: set[str]) -> str | None:
+    current_branch = _clean_branch_value(row.get(COL_BRANCH))
+    sub_branch = _clean_branch_value(row.get(COL_SUBTABLE_BRANCH))
+    source_id = _clean_branch_value(row.get(COL_ORDER_ID)).upper()
+    month, year = _row_periods(row, table_cols)
+    for override in BRANCH_REASSIGNMENT_OVERRIDES or []:
+        to_branch = _clean_branch_value(override.get("to_branch"))
+        if not to_branch:
+            continue
+        override_month = _clean_branch_value(override.get("month"))
+        if override_month and month != override_month:
+            continue
+        override_year = _clean_branch_value(override.get("year"))
+        if override_year and year != override_year:
+            continue
+        from_branch = _clean_branch_value(override.get("from_branch"))
+        if from_branch and current_branch != from_branch and sub_branch != from_branch:
+            continue
+        from_prefix = _clean_branch_value(override.get("from_prefix")).upper()
+        if from_prefix and not source_id.startswith(from_prefix):
+            continue
+        return to_branch
+    return None
+
+
 def repair_subtable_branch_assignments(sales_rep_list: list[str]) -> dict:
     """依副表銷售點修復既有資料歸屬，並保留收款操作員命中專職的最高優先級。"""
     from pipeline import match_sales_rep_by_operator
@@ -358,7 +406,8 @@ def repair_subtable_branch_assignments(sales_rep_list: list[str]) -> dict:
                 if COL_RECEIPT_OPERATOR in table_cols:
                     matched_rep = match_sales_rep_by_operator(row.get(COL_RECEIPT_OPERATOR), sales_rep_list)
 
-                desired_branch = TARGET_DEPT_FOR_REP if matched_rep else sub_branch
+                reassigned_branch = _branch_reassignment_target(row, table_cols)
+                desired_branch = TARGET_DEPT_FOR_REP if matched_rep else (reassigned_branch or sub_branch)
                 desired_sales = matched_rep if matched_rep and COL_SALESPERSON in table_cols else None
 
                 current_branch = str(row.get(COL_BRANCH, "") or "").replace("\u3000", " ").strip()
