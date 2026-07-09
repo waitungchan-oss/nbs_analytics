@@ -20,7 +20,7 @@ import database as database_module  # noqa: E402
 import pipeline as pipeline_module  # noqa: E402
 import visuals as visuals_module  # noqa: E402
 import forecasting as forecasting_module  # noqa: E402
-from streamlit_rendering import _render_sidebar_control_header, _render_sidebar_navigation  # noqa: E402
+from streamlit_rendering import _render_sidebar_navigation  # noqa: E402
 from backend.services.stability_history_service import record_stability_history  # noqa: E402
 from backend.services.stability_service import build_phase2c_stability_gate  # noqa: E402
 from backend.services.upload_preflight_service import run_upload_preflight  # noqa: E402
@@ -2416,21 +2416,10 @@ def _build_dashboard_kpis(
     year_sel: list[int],
     month_sel: list[str],
     date_rng,
-    branch_sel: str,
-    sales_sel: str,
 ) -> list[dict]:
     s1_f = _apply_filters(s1, "日期", year_sel, month_sel, date_rng)
     t_f = _apply_filters(t_df, "統一日期", year_sel, month_sel, date_rng)
     o_f = _apply_filters(o_df, "統一日期", year_sel, month_sel, date_rng)
-
-    if branch_sel != "全部分社":
-        s1_f = s1_f[s1_f["文本"].astype(str).str.strip() == str(branch_sel).strip()].copy()
-        t_f = t_f[t_f[COL_BRANCH].astype(str).str.strip() == str(branch_sel).strip()].copy()
-        o_f = o_f[o_f[COL_BRANCH].astype(str).str.strip() == str(branch_sel).strip()].copy()
-
-    if sales_sel != "全部銷售組":
-        t_f = t_f[t_f[COL_SALESPERSON].astype(str).str.strip() == str(sales_sel).strip()].copy()
-        o_f = o_f[o_f[COL_SALESPERSON].astype(str).str.strip() == str(sales_sel).strip()].copy()
 
     tour_series = pd.to_numeric(s1_f["旅行團"], errors="coerce").fillna(0) if "旅行團" in s1_f.columns else pd.Series(dtype=float)
     cruise_series = pd.to_numeric(s1_f["郵輪"], errors="coerce").fillna(0) if "郵輪" in s1_f.columns else pd.Series(dtype=float)
@@ -2447,7 +2436,7 @@ def _build_dashboard_kpis(
         {
             "label": "淨營收",
             "value": _money_text(total),
-            "delta": f"目前視角：{branch_sel} / {sales_sel}",
+            "delta": "營運總覽與管理層 KPI 視角",
             "note": f"{REVENUE_SCOPE_LABEL}；含旅行團、郵輪與票務",
             "accent": "#118DFF",
         },
@@ -2475,15 +2464,14 @@ def _build_dashboard_kpis(
         {
             "label": "可見分社 / 專員",
             "value": f"{branch_count} / {sales_count}",
-            "delta": "以目前篩選條件計算",
+            "delta": "以 KPI 篩選條件計算",
             "note": "用來確認當前視角覆蓋範圍",
             "accent": "#197278",
         },
     ]
 
-def _sidebar_control_center(cache: dict) -> tuple[list[int], list[str], tuple[pd.Timestamp, pd.Timestamp] | tuple, str, str]:
+def _render_sidebar_shell() -> None:
     _render_sidebar_navigation()
-    _render_sidebar_control_header()
     st.sidebar.radio(
         "介面主題",
         ["light", "dark"],
@@ -2492,12 +2480,22 @@ def _sidebar_control_center(cache: dict) -> tuple[list[int], list[str], tuple[pd
         horizontal=True,
     )
 
+
+def _filter_option_context(cache: dict) -> dict:
     s1 = cache["s1"].copy()
     t_df = cache["t"].copy()
     o_df = cache["o"].copy()
     if s1.empty and t_df.empty and o_df.empty:
-        st.sidebar.info("目前尚無可篩選資料，請先上傳主副表。")
-        return [], [], (), "全部分社", "全部銷售組"
+        today = pd.Timestamp.today().normalize()
+        return {
+            "ready": False,
+            "year_opts": [],
+            "month_opts": [],
+            "min_dt": today,
+            "max_dt": today,
+            "branch_opts": [],
+            "sales_opts": [],
+        }
 
     date_pool = pd.concat(
         [
@@ -2519,52 +2517,151 @@ def _sidebar_control_center(cache: dict) -> tuple[list[int], list[str], tuple[pd
 
     branch_opts = _safe_option_list(s1.get("文本", pd.Series(dtype=str)))
     sales_opts = _safe_option_list(pd.concat([t_df.get(COL_SALESPERSON, pd.Series(dtype=str)), o_df.get(COL_SALESPERSON, pd.Series(dtype=str))], ignore_index=True))
-    year_default = st.session_state.get("CTRL_YEAR_SEL", year_opts)
-    if not isinstance(year_default, list):
-        year_default = list(year_default) if isinstance(year_default, (tuple, set)) else []
-    year_default = [y for y in year_default if y in year_opts] or year_opts
-    month_default = st.session_state.get("CTRL_MONTH_SEL", month_opts)
-    if not isinstance(month_default, list):
-        month_default = list(month_default) if isinstance(month_default, (tuple, set)) else []
-    month_default = [m for m in month_default if m in month_opts] or month_opts
+    return {
+        "ready": True,
+        "year_opts": year_opts,
+        "month_opts": month_opts,
+        "min_dt": min_dt,
+        "max_dt": max_dt,
+        "branch_opts": branch_opts,
+        "sales_opts": sales_opts,
+    }
 
-    with st.sidebar.form("control_center_form", clear_on_submit=False):
-        year_sel = st.multiselect("年份", year_opts, default=year_default, key="CTRL_YEAR_SEL")
-        month_sel = st.multiselect("月份", month_opts, default=month_default, key="CTRL_MONTH_SEL")
-        date_default = st.session_state.get("CTRL_DATE_RANGE", (min_dt.date(), max_dt.date()))
-        if not isinstance(date_default, tuple) or len(date_default) != 2:
-            date_default = (min_dt.date(), max_dt.date())
+
+def _safe_multiselect_default(key: str, options: list) -> list:
+    current = st.session_state.get(key, options)
+    if not isinstance(current, list):
+        current = list(current) if isinstance(current, (tuple, set)) else []
+    return [value for value in current if value in options] or options
+
+
+def _safe_date_default(key: str, min_dt: pd.Timestamp, max_dt: pd.Timestamp) -> tuple:
+    current = st.session_state.get(key, (min_dt.date(), max_dt.date()))
+    if not isinstance(current, tuple) or len(current) != 2:
+        return (min_dt.date(), max_dt.date())
+    return current
+
+
+def _render_period_filter_form(
+    *,
+    title: str,
+    help_text: str,
+    form_key: str,
+    year_key: str,
+    month_key: str,
+    date_key: str,
+    reset_key: str,
+    context: dict,
+) -> tuple[list[int], list[str], tuple[pd.Timestamp, pd.Timestamp] | tuple]:
+    if not context.get("ready"):
+        st.info("目前尚無可篩選資料，請先上傳主副表。")
+        return [], [], ()
+
+    year_opts = context["year_opts"]
+    month_opts = context["month_opts"]
+    min_dt = context["min_dt"]
+    max_dt = context["max_dt"]
+    st.markdown(f"#### {title}")
+    st.caption(help_text)
+    year_default = _safe_multiselect_default(year_key, year_opts)
+    month_default = _safe_multiselect_default(month_key, month_opts)
+    with st.form(form_key, clear_on_submit=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            year_sel = st.multiselect("年份", year_opts, default=year_default, key=year_key)
+        with c2:
+            month_sel = st.multiselect("月份", month_opts, default=month_default, key=month_key)
+        date_default = _safe_date_default(date_key, min_dt, max_dt)
         date_rng = st.date_input(
             "日期範圍",
             value=date_default,
             min_value=min_dt.date(),
             max_value=max_dt.date(),
-            key="CTRL_DATE_RANGE",
+            key=date_key,
+        )
+        st.form_submit_button("套用篩選", use_container_width=True)
+
+    if st.button("重設為全部", key=reset_key, use_container_width=True):
+        st.session_state[year_key] = year_opts
+        st.session_state[month_key] = month_opts
+        st.session_state[date_key] = (min_dt.date(), max_dt.date())
+        st.rerun()
+
+    return (
+        st.session_state.get(year_key, year_opts),
+        st.session_state.get(month_key, month_opts),
+        st.session_state.get(date_key, (min_dt.date(), max_dt.date())),
+    )
+
+
+def _render_kpi_filter_center(cache: dict) -> tuple[list[int], list[str], tuple[pd.Timestamp, pd.Timestamp] | tuple]:
+    context = _filter_option_context(cache)
+    return _render_period_filter_form(
+        title="營運總覽與管理層 KPI 篩選",
+        help_text="只影響上方 KPI 總覽，不影響門店排行榜、產品下鑽、AI Forecast 或 Export。",
+        form_key="kpi_filter_form",
+        year_key="KPI_YEAR_SEL",
+        month_key="KPI_MONTH_SEL",
+        date_key="KPI_DATE_RANGE",
+        reset_key="KPI_FILTER_RESET",
+        context=context,
+    )
+
+
+def _render_rank_filter_center(cache: dict) -> tuple[list[int], list[str], tuple[pd.Timestamp, pd.Timestamp] | tuple, str, str]:
+    context = _filter_option_context(cache)
+    if not context.get("ready"):
+        st.info("目前尚無可篩選資料，請先上傳主副表。")
+        return [], [], (), "全部分社", "全部銷售組"
+
+    year_opts = context["year_opts"]
+    month_opts = context["month_opts"]
+    min_dt = context["min_dt"]
+    max_dt = context["max_dt"]
+    branch_opts = context["branch_opts"]
+    sales_opts = context["sales_opts"]
+    st.markdown("#### 門店與產品分析篩選")
+    st.caption("只影響門店業績排行榜與產品佔比下鑽分析，不改變營運 KPI、年度總覽、AI Forecast 或 Export。")
+    year_default = _safe_multiselect_default("RANK_YEAR_SEL", year_opts)
+    month_default = _safe_multiselect_default("RANK_MONTH_SEL", month_opts)
+    with st.form("rank_filter_form", clear_on_submit=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            year_sel = st.multiselect("年份", year_opts, default=year_default, key="RANK_YEAR_SEL")
+        with c2:
+            month_sel = st.multiselect("月份", month_opts, default=month_default, key="RANK_MONTH_SEL")
+        date_default = _safe_date_default("RANK_DATE_RANGE", min_dt, max_dt)
+        date_rng = st.date_input(
+            "日期範圍",
+            value=date_default,
+            min_value=min_dt.date(),
+            max_value=max_dt.date(),
+            key="RANK_DATE_RANGE",
         )
 
-        branch_current = st.session_state.get("CTRL_BRANCH_SEL", "全部分社")
+        branch_current = st.session_state.get("RANK_BRANCH_SEL", "全部分社")
         branch_index = branch_opts.index(branch_current) + 1 if branch_current in branch_opts else 0
-        branch_sel = st.selectbox("分社視角", ["全部分社"] + branch_opts, index=branch_index, key="CTRL_BRANCH_SEL")
+        branch_sel = st.selectbox("分社視角", ["全部分社"] + branch_opts, index=branch_index, key="RANK_BRANCH_SEL")
 
-        sales_current = st.session_state.get("CTRL_SALES_SEL", "全部銷售組")
+        sales_current = st.session_state.get("RANK_SALES_SEL", "全部銷售組")
         sales_index = sales_opts.index(sales_current) + 1 if sales_current in sales_opts else 0
-        sales_sel = st.selectbox("專職視角", ["全部銷售組"] + sales_opts, index=sales_index, key="CTRL_SALES_SEL")
+        sales_sel = st.selectbox("專職視角", ["全部銷售組"] + sales_opts, index=sales_index, key="RANK_SALES_SEL")
 
         st.form_submit_button("套用篩選", use_container_width=True)
 
-    if st.sidebar.button("重設為全部", use_container_width=True):
-        st.session_state["CTRL_YEAR_SEL"] = year_opts
-        st.session_state["CTRL_MONTH_SEL"] = month_opts
-        st.session_state["CTRL_DATE_RANGE"] = (min_dt.date(), max_dt.date())
-        st.session_state["CTRL_BRANCH_SEL"] = "全部分社"
-        st.session_state["CTRL_SALES_SEL"] = "全部銷售組"
+    if st.button("重設為全部", key="RANK_FILTER_RESET", use_container_width=True):
+        st.session_state["RANK_YEAR_SEL"] = year_opts
+        st.session_state["RANK_MONTH_SEL"] = month_opts
+        st.session_state["RANK_DATE_RANGE"] = (min_dt.date(), max_dt.date())
+        st.session_state["RANK_BRANCH_SEL"] = "全部分社"
+        st.session_state["RANK_SALES_SEL"] = "全部銷售組"
         st.rerun()
 
-    year_sel = st.session_state.get("CTRL_YEAR_SEL", year_opts)
-    month_sel = st.session_state.get("CTRL_MONTH_SEL", month_opts)
-    date_rng = st.session_state.get("CTRL_DATE_RANGE", (min_dt.date(), max_dt.date()))
-    branch_sel = st.session_state.get("CTRL_BRANCH_SEL", "全部分社")
-    sales_sel = st.session_state.get("CTRL_SALES_SEL", "全部銷售組")
+    year_sel = st.session_state.get("RANK_YEAR_SEL", year_opts)
+    month_sel = st.session_state.get("RANK_MONTH_SEL", month_opts)
+    date_rng = st.session_state.get("RANK_DATE_RANGE", (min_dt.date(), max_dt.date()))
+    branch_sel = st.session_state.get("RANK_BRANCH_SEL", "全部分社")
+    sales_sel = st.session_state.get("RANK_SALES_SEL", "全部銷售組")
     return year_sel, month_sel, date_rng, branch_sel, sales_sel
 
 def _governance_summary_value(summary_df: pd.DataFrame, view: str) -> tuple[str, str]:

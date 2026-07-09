@@ -66,7 +66,9 @@ from app_workflows import (
     _refresh_cache_and_rerun,
     _repair_operator_assignments_before_load,
     _repair_subtable_branch_assignments_before_load,
-    _sidebar_control_center,
+    _render_kpi_filter_center,
+    _render_rank_filter_center,
+    _render_sidebar_shell,
     _upload_date_source_diagnostics_from_frames,
     _uploaded_excel_frame,
     _upsert_summary_rows,
@@ -2035,9 +2037,8 @@ def _render_dashboard_tab() -> None:
         return
 
     s1, s2, t_df, o_df = cache["s1"].copy(), cache["s2"].copy(), cache["t"].copy(), cache["o"].copy()
-    year_sel, month_sel, date_rng, branch_sel, sales_sel = _sidebar_control_center(cache)
+    _render_sidebar_shell()
     _render_executive_summary_band(REVENUE_SCOPE_LABEL)
-    _render_applied_filter_chips(year_sel, month_sel, date_rng, branch_sel, sales_sel)
     _render_anchor("section-current-context")
     _render_section("目前分析脈絡", None, "📌")
     scope = cache.get("scope", {})
@@ -2047,15 +2048,18 @@ def _render_dashboard_tab() -> None:
     )
     _render_info_panel(
         "當前營運視角",
-        f"左側控制中心採提交式篩選，分社與專員拆開處理，避免一個條件把整張圖清空。{scope_note}",
+        f"上方正式口徑保持完整；KPI 與門店/產品分析各自使用局部篩選，避免一個條件影響整張大盤。{scope_note}",
     )
     _render_anchor("section-kpi-overview")
-    _render_kpi_strip(_build_dashboard_kpis(s1, t_df, o_df, year_sel, month_sel, date_rng, branch_sel, sales_sel))
+    kpi_year_sel, kpi_month_sel, kpi_date_rng = _render_kpi_filter_center(cache)
+    _render_applied_filter_chips(kpi_year_sel, kpi_month_sel, kpi_date_rng, "全部分社", "全部銷售組")
+    _render_kpi_strip(_build_dashboard_kpis(s1, t_df, o_df, kpi_year_sel, kpi_month_sel, kpi_date_rng))
     _render_data_quality_scorecard(cache)
     _render_entity_resolution_audit(cache)
     _render_ai_cleaning_suggestions(cache)
-    _render_year_summary(s1, s2, year_sel, month_sel, date_rng)
-    _render_rank_and_drilldown(s1, t_df, o_df, branch_sel, sales_sel, year_sel, month_sel, date_rng)
+    _render_year_summary(s1, s2, [], [], ())
+    rank_year_sel, rank_month_sel, rank_date_rng, rank_branch_sel, rank_sales_sel = _render_rank_filter_center(cache)
+    _render_rank_and_drilldown(s1, t_df, o_df, rank_branch_sel, rank_sales_sel, rank_year_sel, rank_month_sel, rank_date_rng)
     _render_ai_and_exports(cache)
 
 def _render_gmv_exclusion_tab() -> None:

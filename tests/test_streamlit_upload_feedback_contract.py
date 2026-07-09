@@ -180,6 +180,49 @@ def test_initial_dashboard_load_defers_ai_cache_rebuild():
     assert "_load_and_compute_cache()" not in source
 
 
+def test_sidebar_keeps_theme_but_no_global_control_filters():
+    sidebar_source = _workflows_function_source("_render_sidebar_shell")
+    workflows_source = WORKFLOWS_PATH.read_text(encoding="utf-8")
+
+    assert "_render_sidebar_navigation()" in sidebar_source
+    assert "NBS_UI_THEME" in sidebar_source
+    assert "_render_sidebar_control_header" not in sidebar_source
+    assert "control_center_form" not in workflows_source
+    assert "CTRL_YEAR_SEL" not in workflows_source
+    assert "CTRL_MONTH_SEL" not in workflows_source
+    assert "CTRL_DATE_RANGE" not in workflows_source
+    assert "CTRL_BRANCH_SEL" not in workflows_source
+    assert "CTRL_SALES_SEL" not in workflows_source
+
+
+def test_kpi_and_rank_filters_have_independent_scope_keys():
+    kpi_source = _workflows_function_source("_render_kpi_filter_center")
+    rank_source = _workflows_function_source("_render_rank_filter_center")
+
+    for key in ["KPI_YEAR_SEL", "KPI_MONTH_SEL", "KPI_DATE_RANGE"]:
+        assert key in kpi_source
+        assert key not in rank_source
+
+    for key in ["RANK_YEAR_SEL", "RANK_MONTH_SEL", "RANK_DATE_RANGE", "RANK_BRANCH_SEL", "RANK_SALES_SEL"]:
+        assert key in rank_source
+        assert key not in kpi_source
+
+    assert "營運總覽與管理層 KPI 篩選" in kpi_source
+    assert "門店與產品分析篩選" in rank_source
+
+
+def test_dashboard_uses_separate_filter_scopes_for_kpi_and_rank_sections():
+    source = _pages_function_source("_render_dashboard_tab")
+
+    assert "_render_sidebar_shell()" in source
+    assert "_sidebar_control_center" not in source
+    assert "kpi_year_sel, kpi_month_sel, kpi_date_rng = _render_kpi_filter_center(cache)" in source
+    assert "rank_year_sel, rank_month_sel, rank_date_rng, rank_branch_sel, rank_sales_sel = _render_rank_filter_center(cache)" in source
+    assert "_build_dashboard_kpis(s1, t_df, o_df, kpi_year_sel, kpi_month_sel, kpi_date_rng)" in source
+    assert "_render_rank_and_drilldown(s1, t_df, o_df, rank_branch_sel, rank_sales_sel, rank_year_sel, rank_month_sel, rank_date_rng)" in source
+    assert "左側控制中心" not in source
+
+
 def test_upload_flow_profiles_all_post_write_guard_stages():
     source = _pages_function_source("_render_upload_area")
 

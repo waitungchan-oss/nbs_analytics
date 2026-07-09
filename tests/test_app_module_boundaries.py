@@ -60,7 +60,9 @@ def test_pages_module_runtime_namespace_has_private_helpers():
         "_render_anchor",
         "_render_error",
         "_load_and_compute_cache",
-        "_sidebar_control_center",
+        "_render_sidebar_shell",
+        "_render_kpi_filter_center",
+        "_render_rank_filter_center",
         "_build_dashboard_kpis",
     ]:
         assert hasattr(app_pages, helper_name), f"{helper_name} should be available to app_pages at runtime"
