@@ -54,6 +54,7 @@ from app_workflows import (
     _current_entity_resolution_audit,
     _current_rules,
     _ensure_export_workbooks,
+    _evaluate_monthly_baselines_for_runtime,
     _filter_gmv_exclusion_frames,
     _fmt_date,
     _format_quality_display_value,
@@ -76,6 +77,7 @@ from app_workflows import (
     _weight_schedule_from_backtest,
     build_dashboard_data,
     build_macro_forecast_summary,
+    build_monthly_baseline_governance,
     build_phase2c_stability_gate,
     clear_database,
     draw_forecast_chart,
@@ -86,6 +88,8 @@ from app_workflows import (
     load_all_data_from_db,
     map_dest_category,
     map_ticket_category,
+    list_monthly_baseline_promotions,
+    promote_monthly_baselines,
     record_stability_history,
     restore_database_from_backup,
     run_upload_preflight,
@@ -557,7 +561,120 @@ def _style_causal_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
         styled = styled.background_gradient(subset=["Delta"], cmap="RdYlGn")
     return styled.hide(axis="index")
 
+
+def _render_monthly_baseline_governance() -> None:
+    st.markdown("### Monthly Baseline Governance")
+    try:
+        evaluation = _evaluate_monthly_baselines_for_runtime()
+        governance = build_monthly_baseline_governance(evaluation=evaluation)
+        promotions = list_monthly_baseline_promotions(limit=1)
+    except Exception as exc:
+        st.error(f"月度基準治理狀態載入失敗：{type(exc).__name__}: {exc}")
+        return
+
+    status_labels = {
+        "monitoring": "Monitoring",
+        "promotion_ready": "Ready",
+        "blocking": "Blocking",
+        "drift": "Drift",
+    }
+    status = str(governance.get("status") or "monitoring")
+    status_label = status_labels.get(status, status.title())
+    stable_cycles = int(governance.get("stableUploadCycles") or 0)
+    required_cycles = int(governance.get("requiredStableUploadCycles") or 1)
+    checks = governance.get("checks") or []
+
+    with st.container(border=True):
+        st.markdown(f"**狀態：{status_label}**")
+        st.caption(
+            f"正式口徑：{governance.get('scope')}｜"
+            f"母體：{governance.get('population')}｜"
+            f"穩定上傳週期：{stable_cycles} / {required_cycles}"
+        )
+        rows = pd.DataFrame(
+            [
+                {
+                    "月份": row.get("month"),
+                    "治理模式": str(row.get("mode") or "").title(),
+                    "顯示基準": row.get("formattedExpectedTotal"),
+                    "目前金額": row.get("formattedActualTotal"),
+                    "精確差額": float(row.get("deltaAmount") or 0),
+                    "狀態": str(row.get("status") or "").title(),
+                }
+                for row in checks
+            ]
+        )
+        st.dataframe(
+            rows,
+            hide_index=True,
+            width="stretch",
+            column_config={"精確差額": st.column_config.NumberColumn("精確差額", format="HKD %.2f")},
+        )
+
+        if status == "drift":
+            st.warning("監測月份出現 drift；穩定週期已重設為 0 / 1。目前只警告，不阻擋 upload、不執行 rollback。")
+        elif status == "promotion_ready":
+            st.success("6 / 6 月份匹配，已完成 1 個穩定上傳週期，可進行人工升級。")
+        elif status == "blocking":
+            latest = promotions[0] if promotions else {}
+            st.success(
+                "2026-01 至 2026-06 已是 Blocking baseline。"
+                + (f" Promotion Record #{latest.get('id')}。" if latest else "")
+            )
+        else:
+            st.info("月度基準正在監測；需完成一次功能部署後的正式 accepted upload 才可升級。")
+
+        promotion_ready = bool(governance.get("promotionReady"))
+        if st.button(
+            "升級為阻擋式基準",
+            disabled=not promotion_ready,
+            key="MONTHLY_BASELINE_PROMOTION_OPEN",
+            width="stretch",
+        ):
+            st.session_state["MONTHLY_BASELINE_PROMOTION_CONFIRM_OPEN"] = True
+            st.rerun()
+
+        if st.session_state.get("MONTHLY_BASELINE_PROMOTION_CONFIRM_OPEN") and promotion_ready:
+            st.warning(
+                "本次會新增 2026-01、02、03、04、06 為 Blocking；2026-05 已是 Blocking。"
+                "生效後 drift 會拒絕 upload 並觸發 rollback。"
+            )
+            confirmed = st.checkbox(
+                "我理解升級後的上傳阻擋與 rollback 影響",
+                key="MONTHLY_BASELINE_PROMOTION_CONFIRMED",
+            )
+            cancel_col, confirm_col = st.columns(2)
+            with cancel_col:
+                if st.button("取消", key="MONTHLY_BASELINE_PROMOTION_CANCEL", width="stretch"):
+                    st.session_state["MONTHLY_BASELINE_PROMOTION_CONFIRM_OPEN"] = False
+                    st.session_state["MONTHLY_BASELINE_PROMOTION_CONFIRMED"] = False
+                    st.rerun()
+            with confirm_col:
+                if st.button(
+                    "確認升級",
+                    type="primary",
+                    disabled=not confirmed,
+                    key="MONTHLY_BASELINE_PROMOTION_CONFIRM",
+                    width="stretch",
+                ):
+                    try:
+                        result = promote_monthly_baselines(
+                            confirmed=True,
+                            expected_record_id=int(governance["eligibleRecordId"]),
+                        )
+                    except Exception as exc:
+                        st.error(f"月度基準升級失敗：{type(exc).__name__}: {exc}")
+                    else:
+                        st.session_state["MONTHLY_BASELINE_PROMOTION_CONFIRM_OPEN"] = False
+                        st.session_state["MONTHLY_BASELINE_PROMOTION_CONFIRMED"] = False
+                        st.success(
+                            f"月度基準已升級；Promotion Event #{result.get('promotionEventId')}。"
+                        )
+                        st.rerun()
+
+
 def _render_config_tab() -> None:
+    _render_monthly_baseline_governance()
     c1, c2 = st.columns(2)
     with c1:
         st.write("**1. 銷售點代碼與分社名稱對應表**")
@@ -788,8 +905,9 @@ def _render_upload_area(has_db_data: bool) -> None:
                                 "latest_data_date": _fmt_date(db_after_max),
                                 "batch_summary": batch_summary,
                                 "upsert_summary": upsert_rows,
-                                "drift_diagnosis": preflight_result.get("driftDiagnosis") or {},
-                                "rollback_status": rollback_result.get("rollbackStatus"),
+                                    "drift_diagnosis": preflight_result.get("driftDiagnosis") or {},
+                                    "monthly_baseline": stability_gate.get("monthlyBaseline") or {},
+                                    "rollback_status": rollback_result.get("rollbackStatus"),
                                 "backup_path": rollback_result.get("backupPath"),
                                 "quarantine_path": rollback_result.get("quarantinePath"),
                                     "post_rollback_gate": rollback_result.get("postRollbackGate"),
@@ -809,6 +927,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                             "upsert_summary": upsert_rows,
                             "entity_audit": entity_audit,
                             "stability_gate": stability_gate,
+                            "monthly_baseline": stability_gate.get("monthlyBaseline") or {},
                             "backup_path": upsert_summary.get("backup_path") if isinstance(upsert_summary, dict) else None,
                             "source_files": source_files,
                             "history_record_id": history_record_id,

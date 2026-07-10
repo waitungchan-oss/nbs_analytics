@@ -21,6 +21,8 @@ TARGETED_TESTS = [
     "tests/test_upload_preflight_service.py",
     "tests/test_upload_rollback_service.py",
     "tests/test_upload_api.py",
+    "tests/test_monthly_baseline_service.py",
+    "tests/test_monthly_baseline_check_cli.py",
 ]
 
 
@@ -61,6 +63,12 @@ def build_check_plan(
     if include_monitor:
         plan.append(CheckStep("system-monitor", [py, "scripts/system_manager.py", "monitor"]))
     plan.append(CheckStep("phase2-baseline", [py, "-c", baseline_code]))
+    plan.append(
+        CheckStep(
+            "monthly-baseline-governance",
+            [py, "scripts/monthly_baseline_check.py"],
+        )
+    )
     if include_tests:
         plan.append(
             CheckStep(
@@ -159,6 +167,7 @@ def _first_matching_line(text: str, needles: tuple[str, ...]) -> str:
 def format_markdown_report(report: dict) -> str:
     status = str(report.get("overallStatus") or "unknown").upper()
     baseline = _result_by_label(report, "phase2-baseline")
+    monthly = _result_by_label(report, "monthly-baseline-governance")
     tests = _result_by_label(report, "targeted-tests")
     git_status = _result_by_label(report, "git-status")
     baseline_line = _first_matching_line(
@@ -166,6 +175,10 @@ def format_markdown_report(report: dict) -> str:
         ("formattedActualTotal", "HKD 12,057,968", "status"),
     )
     tests_line = _first_matching_line(tests.get("stdout", ""), ("passed", "failed", "error"))
+    monthly_line = _first_matching_line(
+        monthly.get("stdout", ""),
+        ("promotionReady", "blockingStatus", "status"),
+    )
     changed_lines = [
         line.strip()
         for line in str(git_status.get("stdout", "") or "").splitlines()
@@ -187,11 +200,13 @@ def format_markdown_report(report: dict) -> str:
             "## Required Checks",
             "",
             f"- phase2-baseline: {_status_text(baseline)}",
+            f"- monthly-baseline-governance: {_status_text(monthly)}",
             f"- targeted-tests: {_status_text(tests)}",
             "",
             "## Evidence",
             "",
             f"- Baseline: `{baseline_line or 'not found in stdout'}`",
+            f"- Monthly governance: `{monthly_line or 'not found in stdout'}`",
             f"- Tests: `{tests_line or 'not found in stdout'}`",
             "",
             "## Changed Files",

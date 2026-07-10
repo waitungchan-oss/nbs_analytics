@@ -1,0 +1,46 @@
+{
+  "version": "monthly-revenue-v1",
+  "scope": "不含掛賬核銷與TT退款轉團款",
+  "population": "全部正式分社＋正式四人專職銷售組",
+  "amountTolerance": 1.0,
+  "requiredStableUploadCycles": 1,
+  "baselines": [
+    {
+      "month": "2026-01",
+      "expectedTotal": 10711053.50,
+      "displayTotal": 10711054,
+      "mode": "monitoring"
+    },
+    {
+      "month": "2026-02",
+      "expectedTotal": 9765694.54,
+      "displayTotal": 9765695,
+      "mode": "monitoring"
+    },
+    {
+      "month": "2026-03",
+      "expectedTotal": 14628841.00,
+      "displayTotal": 14628841,
+      "mode": "monitoring"
+    },
+    {
+      "month": "2026-04",
+      "expectedTotal": 10506207.78,
+      "displayTotal": 10506208,
+      "mode": "monitoring"
+    },
+    {
+      "month": "2026-05",
+      "expectedTotal": 12057967.92,
+      "displayTotal": 12057968,
+      "mode": "blocking",
+      "legacyCore": true
+    },
+    {
+      "month": "2026-06",
+      "expectedTotal": 9083241.29,
+      "displayTotal": 9083241,
+      "mode": "monitoring"
+    }
+  ]
+}

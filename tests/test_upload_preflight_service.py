@@ -1,8 +1,19 @@
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 
 import database
+
+
+def test_upload_preflight_uses_governed_monthly_baseline_gate():
+    source = (Path(__file__).resolve().parents[1] / "backend" / "services" / "upload_preflight_service.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "from backend.services.monthly_baseline_service import build_governed_stability_gate" in source
+    assert "build_phase2c_stability_gate = build_governed_stability_gate" in source
+    assert "stability_gate = build_phase2c_stability_gate()" in source
 
 
 def test_upload_preflight_uses_temp_database_and_preserves_live_db(tmp_path, monkeypatch):

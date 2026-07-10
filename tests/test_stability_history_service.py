@@ -47,6 +47,11 @@ def test_record_and_list_stability_history_uses_dedicated_audit_table(tmp_path, 
             "quarantine_path": "quarantine.db",
             "post_rollback_gate": {"status": "matched"},
             "rollback_error": None,
+            "monthly_baseline": {
+                "registryVersion": "monthly-revenue-v1",
+                "allMatched": True,
+                "checks": [{"month": "2026-01", "status": "matched"}],
+            },
         },
     )
     rows = history_service.list_stability_history(limit=10)
@@ -67,6 +72,11 @@ def test_record_and_list_stability_history_uses_dedicated_audit_table(tmp_path, 
     assert rows[0]["quarantinePath"] == "quarantine.db"
     assert rows[0]["postRollbackGate"] == {"status": "matched"}
     assert rows[0]["rollbackError"] is None
+    assert rows[0]["monthlyBaseline"] == {
+        "registryVersion": "monthly-revenue-v1",
+        "allMatched": True,
+        "checks": [{"month": "2026-01", "status": "matched"}],
+    }
 
 
 def test_stability_history_limit_is_bounded(tmp_path, monkeypatch):

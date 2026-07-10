@@ -25,6 +25,19 @@ def test_pages_module_hosts_page_orchestration():
     assert "def _render_upload_area" in pages_source
 
 
+def test_config_tab_starts_with_monthly_baseline_governance_panel():
+    import ast
+
+    pages_source = PAGES_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(pages_source)
+    config_node = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_render_config_tab"
+    )
+    config_source = ast.get_source_segment(pages_source, config_node) or ""
+
+    assert config_source.index("_render_monthly_baseline_governance()") < config_source.index("st.columns(2)")
+
+
 def test_pages_module_uses_explicit_workflow_imports():
     pages_source = PAGES_PATH.read_text(encoding="utf-8")
 
@@ -41,6 +54,17 @@ def test_workflows_module_hosts_non_ui_helpers():
 
     assert "def _load_and_compute_cache" in workflows_source
     assert "def _build_dashboard_kpis" in workflows_source
+
+
+def test_monthly_baseline_runtime_reuses_existing_dashboard_facts():
+    workflows_source = WORKFLOWS_PATH.read_text(encoding="utf-8")
+    pages_source = PAGES_PATH.read_text(encoding="utf-8")
+
+    assert "def _evaluate_monthly_baselines_for_runtime" in workflows_source
+    assert 'st.session_state.get("PROCESSED_DATA_CACHE")' in workflows_source
+    assert "build_analytics_from_facts(" in workflows_source
+    assert "evaluate_monthly_baselines(analytics_builder=builder)" in workflows_source
+    assert "_evaluate_monthly_baselines_for_runtime()" in pages_source
 
 
 def test_app_py_no_longer_holds_top_level_css():

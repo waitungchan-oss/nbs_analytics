@@ -46,7 +46,8 @@ def _ensure_table(conn) -> None:
             batch_summary_json TEXT NOT NULL,
             upsert_summary_json TEXT NOT NULL,
             drift_diagnosis_json TEXT NOT NULL,
-            gate_json TEXT NOT NULL
+            gate_json TEXT NOT NULL,
+            monthly_baseline_json TEXT
         )
         """
     )
@@ -62,6 +63,7 @@ def _ensure_table(conn) -> None:
         "post_rollback_gate_json": "TEXT",
         "rollback_error": "TEXT",
         "drift_diagnosis_json": "TEXT",
+        "monthly_baseline_json": "TEXT",
     }
     for column, sqlite_type in migrations.items():
         if column not in existing_columns:
@@ -83,8 +85,8 @@ def record_stability_history(gate: dict, context: dict | None = None) -> int:
                 total_checks, drift_check_count, freshness_status,
                 freshness_update_count, latest_data_date, batch_summary_json,
                 upsert_summary_json, drift_diagnosis_json, gate_json, rollback_status,
-                backup_path, quarantine_path, post_rollback_gate_json, rollback_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                monthly_baseline_json, backup_path, quarantine_path, post_rollback_gate_json, rollback_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 created_at,
@@ -107,6 +109,7 @@ def record_stability_history(gate: dict, context: dict | None = None) -> int:
                 _json_dump(context.get("drift_diagnosis") or {}),
                 _json_dump(gate),
                 context.get("rollback_status"),
+                _json_dump(context.get("monthly_baseline") or gate.get("monthlyBaseline") or {}),
                 context.get("backup_path"),
                 context.get("quarantine_path"),
                 _json_dump(context.get("post_rollback_gate") or {}),
@@ -155,6 +158,7 @@ def list_stability_history(limit: int = 20) -> list[dict]:
             "upsertSummary": _json_load(row["upsert_summary_json"], []),
             "driftDiagnosis": _json_load(row["drift_diagnosis_json"], {}),
             "gate": _json_load(row["gate_json"], {}),
+            "monthlyBaseline": _json_load(row["monthly_baseline_json"], {}),
             "rollbackStatus": row["rollback_status"],
             "backupPath": row["backup_path"],
             "quarantinePath": row["quarantine_path"],

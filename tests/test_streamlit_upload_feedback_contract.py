@@ -128,9 +128,32 @@ def test_upload_success_persists_phase2g_stability_history():
 
     assert "record_stability_history(" in source
     assert '"source_files"' in source
+
+
+def test_upload_flow_persists_monthly_baseline_monitoring_payload():
+    source = _pages_function_source("_render_upload_area")
+    workflows = WORKFLOWS_PATH.read_text(encoding="utf-8")
+
+    assert "build_governed_stability_gate as build_phase2c_stability_gate" in workflows
+    assert source.count('"monthly_baseline": stability_gate.get("monthlyBaseline") or {}') >= 2
     assert '"latest_data_date"' in source
     assert '"history_record_id"' in source
     assert '"history_error"' in source
+
+
+def test_monthly_baseline_governance_panel_requires_ready_and_confirmation():
+    source = _pages_function_source("_render_monthly_baseline_governance")
+
+    assert "Monthly Baseline Governance" in source
+    assert '"monitoring": "Monitoring"' in source
+    assert '"promotion_ready": "Ready"' in source
+    assert '"blocking": "Blocking"' in source
+    assert 'governance.get("promotionReady")' in source
+    assert "升級為阻擋式基準" in source
+    assert "我理解升級後的上傳阻擋與 rollback 影響" in source
+    assert "promote_monthly_baselines(" in source
+    assert 'expected_record_id=int(governance["eligibleRecordId"])' in source
+    assert "st.rerun()" in source
 
 
 def test_phase2h_upload_uses_lock_and_persists_history_after_rollback():

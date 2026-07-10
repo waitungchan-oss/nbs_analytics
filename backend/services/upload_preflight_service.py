@@ -10,8 +10,11 @@ import pandas as pd
 
 import database
 from backend.services.drift_diagnosis_service import build_upload_drift_diagnosis
-from backend.services.stability_service import build_phase2c_stability_gate
+from backend.services.monthly_baseline_service import build_governed_stability_gate
 from pipeline import process_raw_files
+
+# Backward-compatible dependency hook used by profiling and tests.
+build_phase2c_stability_gate = build_governed_stability_gate
 
 
 def _money_text(value: float) -> str:

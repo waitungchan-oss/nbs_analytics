@@ -10,7 +10,11 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
     assert "system-acceptance" in labels
     assert "system-monitor" in labels
     assert "phase2-baseline" in labels
+    assert "monthly-baseline-governance" in labels
     assert "targeted-tests" in labels
+    targeted = next(step for step in plan if step.label == "targeted-tests")
+    assert "tests/test_monthly_baseline_service.py" in targeted.command
+    assert "tests/test_monthly_baseline_check_cli.py" in targeted.command
 
 
 def test_plan_can_skip_monitor_and_tests_for_fast_dry_run():
@@ -20,6 +24,7 @@ def test_plan_can_skip_monitor_and_tests_for_fast_dry_run():
     assert "system-monitor" not in labels
     assert "targeted-tests" not in labels
     assert "phase2-baseline" in labels
+    assert "monthly-baseline-governance" in labels
 
 
 def test_overall_status_fails_on_failed_required_step():
@@ -75,6 +80,13 @@ def test_markdown_report_summarizes_baseline_tests_and_commit_advice():
                 "stdout": "39 passed in 9.40s",
                 "stderr": "",
             },
+            {
+                "label": "monthly-baseline-governance",
+                "required": True,
+                "exitCode": 0,
+                "stdout": '{"status":"monitoring","blockingStatus":"matched","promotionReady":false}',
+                "stderr": "",
+            },
         ],
     }
 
@@ -85,5 +97,7 @@ def test_markdown_report_summarizes_baseline_tests_and_commit_advice():
     assert "phase2-baseline: PASS" in markdown
     assert "HKD 12,057,968" in markdown
     assert "targeted-tests: PASS" in markdown
+    assert "monthly-baseline-governance: PASS" in markdown
+    assert "promotionReady" in markdown
     assert "39 passed" in markdown
     assert "Commit recommendation: ready after reviewing grouped diff" in markdown

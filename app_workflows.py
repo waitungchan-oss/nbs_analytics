@@ -21,8 +21,15 @@ import pipeline as pipeline_module  # noqa: E402
 import visuals as visuals_module  # noqa: E402
 import forecasting as forecasting_module  # noqa: E402
 from streamlit_rendering import _render_sidebar_navigation  # noqa: E402
+from backend.services.monthly_baseline_service import (  # noqa: E402
+    build_monthly_baseline_governance,
+    build_governed_stability_gate as build_phase2c_stability_gate,
+    evaluate_monthly_baselines,
+    list_monthly_baseline_promotions,
+    promote_monthly_baselines,
+)
+from backend.services.dashboard_analytics_service import build_analytics_from_facts  # noqa: E402
 from backend.services.stability_history_service import record_stability_history  # noqa: E402
-from backend.services.stability_service import build_phase2c_stability_gate  # noqa: E402
 from backend.services.upload_preflight_service import run_upload_preflight  # noqa: E402
 from backend.services.upload_rollback_service import handle_core_drift_rollback  # noqa: E402
 
@@ -108,6 +115,19 @@ AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
 EXPORT_CACHE_VERSION = 'export-lazy-v3'
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v1'
 AI_CACHE_DIR = Path(__file__).resolve().parent / '.nbs_runtime_cache'
+
+
+def _evaluate_monthly_baselines_for_runtime() -> dict:
+    cache = st.session_state.get("PROCESSED_DATA_CACHE")
+    if cache and isinstance(cache.get("s1"), pd.DataFrame) and isinstance(cache.get("s2"), pd.DataFrame):
+        def builder(filters: dict) -> dict:
+            return {
+                "revenueScope": REVENUE_SCOPE_LABEL,
+                **build_analytics_from_facts(cache["s1"], cache["s2"], filters),
+            }
+
+        return evaluate_monthly_baselines(analytics_builder=builder)
+    return evaluate_monthly_baselines()
 AI_CLEANING_RULE_TYPES = ("BRANCH_MAPPING", "EXCLUDE_PREFIXES", "SALES_REP_LIST", "CRUISE_DEPTS")
 AI_CLEANING_BRANCH_PLACEHOLDER = "待填分社名稱"
 
