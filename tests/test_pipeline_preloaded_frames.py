@@ -57,6 +57,52 @@ def test_branch_reassignment_override_moves_2026_06_e6_to_0a_only():
     assert result.loc[1, "副表_銷售點"] == "上環服務點"
 
 
+def test_branch_reassignment_override_matches_one_exact_source_order_only():
+    import pipeline
+
+    source = pd.DataFrame(
+        [
+            {
+                "來源單據號": "E9MF16613172500",
+                "統一日期": "2026-06-13",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+            },
+            {
+                "來源單據號": "E9OTHER202606",
+                "統一日期": "2026-06-13",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+            },
+            {
+                "來源單據號": "E9MF16613172500",
+                "統一日期": "2026-07-13",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+            },
+            {
+                "來源單據號": "E9MF16613172500",
+                "統一日期": "2026-06-13",
+                "銷售點": "元朗服務點",
+                "副表_銷售點": "元朗服務點",
+            },
+        ]
+    )
+    override = {
+        "month": "2026-06",
+        "source_order_id": "E9MF16613172500",
+        "from_branch": "上環服務點",
+        "to_branch": "展覽會場專用",
+        "to_prefix": "0A",
+    }
+
+    result = pipeline.apply_branch_reassignment_overrides(source, [override])
+
+    assert result.loc[0, "銷售點"] == "展覽會場專用"
+    assert result.loc[0, "副表_銷售點"] == "展覽會場專用"
+    assert result.loc[1:, "銷售點"].tolist() == ["上環服務點", "上環服務點", "元朗服務點"]
+
+
 def test_export_workbook_adds_branch_summary_with_salesperson_and_matches_branch_total():
     import pipeline
 

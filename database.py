@@ -378,6 +378,9 @@ def _branch_reassignment_target(row, table_cols: set[str]) -> str | None:
         from_prefix = _clean_branch_value(override.get("from_prefix")).upper()
         if from_prefix and not source_id.startswith(from_prefix):
             continue
+        override_source_order_id = _clean_branch_value(override.get("source_order_id")).upper()
+        if override_source_order_id and source_id != override_source_order_id:
+            continue
         return to_branch
     return None
 

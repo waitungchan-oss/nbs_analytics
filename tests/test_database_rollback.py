@@ -238,3 +238,84 @@ def test_repair_subtable_branch_assignments_keeps_2026_06_e6_reassigned_to_0a_on
     by_order = rows.set_index("來源單據號")["銷售點"].to_dict()
     assert by_order["E6TEST2026001"] == "展覽會場專用"
     assert by_order["E6TEST2026071"] == "上環服務點"
+
+
+def test_repair_subtable_branch_assignments_matches_one_exact_source_order_only(tmp_path, monkeypatch):
+    live_path = tmp_path / "live.db"
+    monkeypatch.setattr(database, "DB_FILE", str(live_path))
+    monkeypatch.setattr(
+        database,
+        "BRANCH_REASSIGNMENT_OVERRIDES",
+        [
+            {
+                "month": "2026-06",
+                "source_order_id": "E9MF16613172500",
+                "from_branch": "上環服務點",
+                "to_branch": "展覽會場專用",
+                "to_prefix": "0A",
+            }
+        ],
+        raising=False,
+    )
+    existing = pd.DataFrame(
+        [
+            {
+                "來源單據號": "E9MF16613172500",
+                "收款單號": "SK2606000001",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+                "收款時間": "2026-06-13",
+                "統一日期": "2026-06-13",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+            {
+                "來源單據號": "E9OTHER202606",
+                "收款單號": "SK2606000002",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+                "收款時間": "2026-06-13",
+                "統一日期": "2026-06-13",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+            {
+                "來源單據號": "E9MF16613172500",
+                "收款單號": "SK2607000001",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+                "收款時間": "2026-07-13",
+                "統一日期": "2026-07-13",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+            {
+                "來源單據號": "E9MF16613172500",
+                "收款單號": "SK2606000003",
+                "銷售點": "元朗服務點",
+                "副表_銷售點": "元朗服務點",
+                "收款時間": "2026-06-13",
+                "統一日期": "2026-06-13",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+        ]
+    )
+    conn = sqlite3.connect(live_path)
+    try:
+        existing.to_sql("others_data", conn, if_exists="replace", index=False)
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = database.repair_subtable_branch_assignments([])
+    _, rows = database.load_all_data_from_db()
+
+    assert result["updated"] == 1
+    by_receipt = rows.set_index("收款單號")["銷售點"].to_dict()
+    assert by_receipt == {
+        "SK2606000001": "展覽會場專用",
+        "SK2606000002": "上環服務點",
+        "SK2607000001": "上環服務點",
+        "SK2606000003": "元朗服務點",
+    }

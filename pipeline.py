@@ -294,6 +294,7 @@ def apply_branch_reassignment_overrides(
             continue
         from_branch = _normalize_branch_value(override.get("from_branch"))
         from_prefix = _normalize_branch_value(override.get("from_prefix")).upper()
+        source_order_id = _normalize_branch_value(override.get("source_order_id")).upper()
         month = _normalize_branch_value(override.get("month"))
         year = _normalize_branch_value(override.get("year"))
 
@@ -302,9 +303,12 @@ def apply_branch_reassignment_overrides(
             current_branch = result[COL_BRANCH].map(_normalize_branch_value)
             sub_branch = result[COL_SUBTABLE_BRANCH].map(_normalize_branch_value)
             mask &= current_branch.eq(from_branch) | sub_branch.eq(from_branch)
-        if from_prefix and COL_ORDER_ID in result.columns:
-            order_ids = result[COL_ORDER_ID].astype(str).str.upper()
-            mask &= order_ids.str.startswith(from_prefix)
+        if (from_prefix or source_order_id) and COL_ORDER_ID in result.columns:
+            order_ids = result[COL_ORDER_ID].map(_normalize_branch_value).str.upper()
+            if from_prefix:
+                mask &= order_ids.str.startswith(from_prefix)
+            if source_order_id:
+                mask &= order_ids.eq(source_order_id)
 
         if not bool(mask.any()):
             continue
