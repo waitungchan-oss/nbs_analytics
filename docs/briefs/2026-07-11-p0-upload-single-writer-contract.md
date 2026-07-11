@@ -1,7 +1,7 @@
 ---
 type: codex-brief
 project: nbs_analytics
-status: awaiting-review
+status: plan-ready
 priority: P0
 created: 2026-07-11
 tags: [nbs_analytics, codex, upload, single-writer, baseline, hermes]
@@ -38,6 +38,12 @@ tags: [nbs_analytics, codex, upload, single-writer, baseline, hermes]
 Repo design spec：
 
 `docs/superpowers/specs/2026-07-11-p0-upload-single-writer-contract-design.md`
+
+Implementation plan：
+
+`docs/superpowers/plans/2026-07-11-p0-upload-single-writer-contract.md`
+
+目前狀態：Brief、Design Spec 與 TDD implementation plan 已完成；正式程式碼尚未修改。下一步必須由使用者選擇執行模式後，依 plan 逐 Task 實作與驗證。
 
 ## Observed State
 
