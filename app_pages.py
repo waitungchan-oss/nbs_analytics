@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import database as database_module
+
 from app_workflows import (
     COL_BRANCH,
     COL_DATE,
@@ -25,7 +27,6 @@ from app_workflows import (
     REVENUE_SCOPE_LABEL,
     SESSION_RULE_KEYS,
     TARGET_DEPT_FOR_REP,
-    UPLOAD_OPERATION_LOCK,
     _add_health_column,
     _apply_ai_cleaning_suggestions,
     _apply_filters,
@@ -61,6 +62,7 @@ from app_workflows import (
     _gmv_summary_rows,
     _governance_summary_value,
     _load_and_compute_cache,
+    _invalidate_session_cache_if_generation_changed,
     _model_health_label,
     _parse_gmv_exclusion_ids,
     _rebuild_cache_after_database_restore,
@@ -97,6 +99,8 @@ from app_workflows import (
     save_business_rules,
     upsert_to_db,
 )
+from backend.services.upload_lock_service import UploadBusyError, acquire_upload_lease
+from backend.services.upload_orchestrator_service import execute_upload_operation
 from streamlit_rendering import *
 
 
@@ -717,7 +721,96 @@ def _render_config_tab() -> None:
         st.success("資料庫已完全清空，請重新上傳基礎數據。")
         st.rerun()
 
+def _streamlit_named_bytes(upload) -> io.BytesIO:
+    payload = io.BytesIO(upload.getvalue())
+    payload.name = getattr(upload, "name", "upload.xlsx")
+    return payload
+
+
 def _render_upload_area(has_db_data: bool) -> None:
+    _render_upload_audit_notice()
+    with st.expander("📥 追加上傳新月份數據 (Upsert New Data)", expanded=not has_db_data):
+        left, right = st.columns(2)
+        with left:
+            main_up = st.file_uploader("營收主表 (必填)", type=["xlsx", "xls"])
+            tour_up = st.file_uploader("旅行團副表 (選填)", type=["xlsx", "xls"])
+            oth_up = st.file_uploader("其他業務副表 (多選)", type=["xlsx", "xls"], accept_multiple_files=True)
+        with right:
+            if HAS_AI_LIBS:
+                _ = st.success("✅ AI 預測環境就緒")
+            else:
+                _ = st.warning("⚠️ 缺 matplotlib/statsmodels，AI 預測會降級或跳過")
+            if not st.button("🔥 上傳並合併至資料庫", type="primary", width="stretch"):
+                return
+        if not main_up:
+            st.error("需上傳主表。")
+            return
+
+        source_files = [item.name for item in [main_up, tour_up, *(oth_up or [])] if item is not None]
+        try:
+            with acquire_upload_lease(entry_point="streamlit", source_files=source_files) as lease:
+                with st.status("讀取與清洗檔案...", expanded=True) as upload_status:
+                    main_frame = _uploaded_excel_frame(_streamlit_named_bytes(main_up))
+                    tour_frame = _uploaded_excel_frame(_streamlit_named_bytes(tour_up)) if tour_up else None
+                    other_frames = [
+                        (item.name, _uploaded_excel_frame(_streamlit_named_bytes(item)))
+                        for item in (oth_up or [])
+                    ]
+                    secondary = []
+                    if tour_frame is not None:
+                        secondary.append(("旅行團副表", tour_up.name, tour_frame))
+                    secondary.extend(("其他業務副表", name, frame) for name, frame in other_frames)
+                    date_diag = _upload_date_source_diagnostics_from_frames(main_up.name, main_frame, secondary)
+                    if date_diag.get("date_mismatch_warning"):
+                        st.session_state["LAST_UPLOAD_AUDIT"] = {
+                            "status": "warning", "message": date_diag["date_mismatch_warning"],
+                            "date_diagnostics": date_diag.get("rows", []), "batch_summary": [],
+                        }
+                        upload_status.update(label="主表未包含目標收款日期，已停止寫入 SQLite", state="error")
+                        st.rerun()
+
+                    upload_status.update(label="上傳預演、寫入與口徑驗收...", state="running")
+                    execution = execute_upload_operation(
+                        lease.operation,
+                        main_file=_streamlit_named_bytes(main_up),
+                        tour_file=_streamlit_named_bytes(tour_up) if tour_up else None,
+                        other_files=[_streamlit_named_bytes(item) for item in (oth_up or [])],
+                        live_db_path=database_module.DB_FILE,
+                        accepted_cache_rebuilder=lambda: _load_and_compute_cache(include_ai=False),
+                    )
+                    if st.session_state.get("PROCESSED_DATA_CACHE") is not None:
+                        st.session_state["PROCESSED_DATA_CACHE"]["anm"] = execution.anomaly_frame
+                    response = execution.response
+                    preflight = response.get("preflightReport") or {}
+                    st.session_state["LAST_UPLOAD_AUDIT"] = {
+                        "status": response.get("status"), "message": response.get("message"),
+                        "batch_summary": preflight.get("batchSummary") or [],
+                        "date_diagnostics": date_diag.get("rows", []),
+                        "upsert_summary": _upsert_summary_rows(response.get("upsertSummary") or {}),
+                        "entity_audit": execution.entity_audit,
+                        "stability_gate": response.get("stabilityGate"),
+                        "monthly_baseline": response.get("monthlyBaseline") or {},
+                        "source_files": response.get("sourceFiles") or source_files,
+                        "history_record_id": response.get("historyRecordId"),
+                        "history_error": response.get("historyError"),
+                        "rollback_status": (response.get("rollbackResult") or {}).get("rollbackStatus"),
+                        "quarantine_path": (response.get("rollbackResult") or {}).get("quarantinePath"),
+                        "post_rollback_gate": (response.get("rollbackResult") or {}).get("postRollbackGate"),
+                        "rollback_error": (response.get("rollbackResult") or {}).get("rollbackError"),
+                        "drift_diagnosis": preflight.get("driftDiagnosis") or {},
+                        "preflight_report": preflight,
+                        "stage_timings": response.get("stageTimings") or [],
+                    }
+                    upload_status.update(label=response.get("message") or "上傳完成", state="complete")
+                st.rerun()
+        except UploadBusyError as exc:
+            owner = exc.owner or {}
+            st.warning(f"另一個上傳正在執行：{owner.get('entry_point', 'unknown')}（{owner.get('started_at', 'unknown')}）。")
+        except Exception:
+            _render_error("程式在清洗關聯或寫入資料庫階段出錯。", traceback.format_exc())
+
+
+def _render_upload_area_legacy(has_db_data: bool) -> None:
     _render_upload_audit_notice()
     with st.expander("📥 追加上傳新月份數據 (Upsert New Data)", expanded=not has_db_data):
         cu1, cu2 = st.columns(2)
@@ -2128,6 +2221,8 @@ def _render_ai_and_exports(cache: dict) -> None:
 def _render_dashboard_tab() -> None:
     _repair_subtable_branch_assignments_before_load()
     _repair_operator_assignments_before_load()
+    if _invalidate_session_cache_if_generation_changed():
+        st.rerun()
     subtable_notice = st.session_state.pop("SUBTABLE_BRANCH_REPAIR_NOTICE", None)
     notice = st.session_state.pop("OPERATOR_REPAIR_NOTICE", None)
     if subtable_notice:

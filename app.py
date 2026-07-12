@@ -7,7 +7,6 @@ import importlib
 import hashlib
 import json
 import pickle
-import threading
 import time
 from html import escape
 from pathlib import Path
@@ -56,8 +55,6 @@ repair_operator_sales_rep_assignments = database_module.repair_operator_sales_re
 repair_subtable_branch_assignments = database_module.repair_subtable_branch_assignments
 restore_database_from_backup = database_module.restore_database_from_backup
 upsert_to_db = database_module.upsert_to_db
-
-UPLOAD_OPERATION_LOCK = threading.Lock()
 
 HAS_AI_LIBS = forecasting_module.HAS_AI_LIBS
 build_macro_forecast_summary = forecasting_module.build_macro_forecast_summary

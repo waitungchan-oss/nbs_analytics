@@ -95,17 +95,16 @@ def test_phase2f_upload_gate_uses_card_drift_table_and_download_report():
 def test_upload_success_audit_stores_phase2c_stability_gate():
     source = _pages_function_source("_render_upload_area")
 
-    assert "build_phase2c_stability_gate()" in source
-    assert '"stability_gate": stability_gate' in source
+    assert "execute_upload_operation(" in source
+    assert '"stability_gate": response.get("stabilityGate")' in source
 
 
 def test_upload_flow_runs_preflight_before_writing_sqlite():
     source = _pages_function_source("_render_upload_area")
     helper_source = _pages_function_source("_render_upload_audit_notice")
 
-    assert "run_upload_preflight(" in source
+    assert "execute_upload_operation(" in source
     assert "preflight_report" in source
-    assert "if preflight_status != \"matched\":" in source
     assert "查看上傳預演結果" in helper_source
     assert "preflight_report" in helper_source
     assert "driftDiagnosis" in helper_source
@@ -113,7 +112,7 @@ def test_upload_flow_runs_preflight_before_writing_sqlite():
     assert "drift_diagnosis.json" in helper_source
     assert "drift_diagnosis.xlsx" in helper_source
     assert "_build_drift_diagnosis_workbook(drift_diagnosis)" in helper_source
-    assert '"drift_diagnosis": preflight_result.get("driftDiagnosis") or {}' in source
+    assert '"drift_diagnosis": preflight.get("driftDiagnosis") or {}' in source
 
 
 def test_upsert_feedback_surfaces_filtered_excluded_rows():
@@ -126,7 +125,7 @@ def test_upsert_feedback_surfaces_filtered_excluded_rows():
 def test_upload_success_persists_phase2g_stability_history():
     source = _pages_function_source("_render_upload_area")
 
-    assert "record_stability_history(" in source
+    assert "execute_upload_operation(" in source
     assert '"source_files"' in source
 
 
@@ -135,8 +134,7 @@ def test_upload_flow_persists_monthly_baseline_monitoring_payload():
     workflows = WORKFLOWS_PATH.read_text(encoding="utf-8")
 
     assert "build_governed_stability_gate as build_phase2c_stability_gate" in workflows
-    assert source.count('"monthly_baseline": stability_gate.get("monthlyBaseline") or {}') >= 2
-    assert '"latest_data_date"' in source
+    assert '"monthly_baseline": response.get("monthlyBaseline") or {}' in source
     assert '"history_record_id"' in source
     assert '"history_error"' in source
 
@@ -161,13 +159,13 @@ def test_phase2h_upload_uses_lock_and_persists_history_after_rollback():
     source = _pages_function_source("_render_upload_area")
     rebuild_source = _workflows_function_source("_rebuild_cache_after_database_restore")
 
-    assert "UPLOAD_OPERATION_LOCK" in app_source
-    assert "handle_core_drift_rollback(" in source
-    assert "_rebuild_cache_after_database_restore" in source
+    assert "UPLOAD_OPERATION_LOCK" not in app_source
+    assert "acquire_upload_lease(" in source
+    assert "execute_upload_operation(" in source
     assert 'st.session_state["PROCESSED_DATA_CACHE"] = None' in rebuild_source
     assert '"rollback_status"' in source
     assert '"quarantine_path"' in source
-    assert source.index("handle_core_drift_rollback(") < source.index("record_stability_history(")
+    assert source.index("acquire_upload_lease(") < source.index("_uploaded_excel_frame(_streamlit_named_bytes(main_up))")
 
 
 def test_upload_status_alert_does_not_render_streamlit_deltagenerator_magic():
@@ -191,7 +189,7 @@ def test_upload_flow_uses_fast_dashboard_cache_rebuild_without_ai_blocking():
     cache_source = _workflows_function_source("_load_and_compute_cache")
 
     assert "_load_and_compute_cache(include_ai=False)" in source
-    assert "重建 dashboard cache（不重跑 AI）" in source
+    assert "accepted_cache_rebuilder=lambda: _load_and_compute_cache(include_ai=False)" in source
     assert "include_ai: bool = True" in cache_source
     assert 'ai_cache_status = "deferred"' in cache_source
 
@@ -249,18 +247,7 @@ def test_dashboard_uses_separate_filter_scopes_for_kpi_and_rank_sections():
 def test_upload_flow_profiles_all_post_write_guard_stages():
     source = _pages_function_source("_render_upload_area")
 
-    for label in [
-        "讀取 Excel 與日期診斷",
-        "Preflight 臨時 DB 與口徑驗收",
-        "正式 SQLite upsert",
-        "Dashboard cache 快速重建",
-        "寫入後 SQLite reload",
-        "Stability gate 驗證",
-        "Rollback guard",
-        "Stability history 記錄",
-        "Upload total",
-    ]:
-        assert label in source
+    assert '"stage_timings": response.get("stageTimings") or []' in source
 
 
 def test_upload_preflight_internal_timings_are_rendered():

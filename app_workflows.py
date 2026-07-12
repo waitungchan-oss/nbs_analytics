@@ -5,7 +5,6 @@ import importlib
 import io
 import json
 import pickle
-import threading
 import time
 import traceback
 from html import escape
@@ -32,6 +31,7 @@ from backend.services.dashboard_analytics_service import build_analytics_from_fa
 from backend.services.stability_history_service import record_stability_history  # noqa: E402
 from backend.services.upload_preflight_service import run_upload_preflight  # noqa: E402
 from backend.services.upload_rollback_service import handle_core_drift_rollback  # noqa: E402
+from backend.services.cache_generation_service import load_cache_generation  # noqa: E402
 
 config_module = importlib.reload(config_module)
 database_module = importlib.reload(database_module)
@@ -59,8 +59,6 @@ repair_operator_sales_rep_assignments = database_module.repair_operator_sales_re
 repair_subtable_branch_assignments = database_module.repair_subtable_branch_assignments
 restore_database_from_backup = database_module.restore_database_from_backup
 upsert_to_db = database_module.upsert_to_db
-
-UPLOAD_OPERATION_LOCK = threading.Lock()
 
 HAS_AI_LIBS = forecasting_module.HAS_AI_LIBS
 build_macro_forecast_summary = forecasting_module.build_macro_forecast_summary
@@ -1200,6 +1198,27 @@ def _load_and_compute_cache(include_ai: bool = True) -> None:
         "scope": scope_audit,
     }
     st.session_state["DB_LOADED_FLAG"] = True
+    generation = load_cache_generation(db_path=database_module.DB_FILE)
+    st.session_state["DATA_GENERATION"] = int(generation.get("generation", 0))
+    st.session_state["DATA_GENERATION_TOKEN"] = str(generation.get("cacheToken") or "0:missing")
+
+
+def _invalidate_session_cache_if_generation_changed() -> bool:
+    current = load_cache_generation(db_path=database_module.DB_FILE)
+    generation = int(current.get("generation", 0))
+    token = str(current.get("cacheToken") or f"{generation}:missing")
+    loaded_token = st.session_state.get("DATA_GENERATION_TOKEN")
+    if loaded_token is None:
+        st.session_state["DATA_GENERATION"] = generation
+        st.session_state["DATA_GENERATION_TOKEN"] = token
+        return False
+    if str(loaded_token) == token:
+        return False
+    st.session_state["PROCESSED_DATA_CACHE"] = None
+    st.session_state["DB_LOADED_FLAG"] = False
+    st.session_state["DATA_GENERATION"] = generation
+    st.session_state["DATA_GENERATION_TOKEN"] = token
+    return True
 
 def _rebuild_cache_after_database_restore() -> None:
     st.session_state["PROCESSED_DATA_CACHE"] = None
