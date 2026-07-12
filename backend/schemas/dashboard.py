@@ -223,6 +223,8 @@ class StabilityHistoryResponse(BaseModel):
 class UploadActionResponse(BaseModel):
     status: str
     message: str
+    operationId: str
+    entryPoint: str
     sourceFiles: list[str]
     preflightReport: dict
     upsertSummary: dict | None = None
@@ -231,6 +233,11 @@ class UploadActionResponse(BaseModel):
     historyRecordId: int | None = None
     historyError: str | None = None
     writeCommitted: bool
+    monthlyBaseline: dict = Field(default_factory=dict)
+    cacheState: str
+    cacheError: str | None = None
+    dataGeneration: dict = Field(default_factory=dict)
+    stageTimings: list[dict] = Field(default_factory=list)
     latestHealth: dict
     entityAudit: dict | None = None
     anmRowCount: int | None = None

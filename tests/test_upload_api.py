@@ -11,7 +11,9 @@ def test_upload_api_accepts_files_and_returns_audit(monkeypatch):
         assert [item.filename for item in other_files or []] == ["other-a.xlsx", "other-b.xlsx"]
         return {
             "status": "success",
-            "message": "上傳批次已寫入並重建 dashboard cache；SQLite 最新收款時間：2026-06-24。",
+            "message": "上傳批次已寫入；SQLite 最新收款日期：2026-06-24。",
+            "operationId": "op-api",
+            "entryPoint": "fastapi",
             "sourceFiles": ["main.xlsx", "tour.xlsx", "other-a.xlsx", "other-b.xlsx"],
             "preflightReport": {
                 "status": "matched",
@@ -29,6 +31,11 @@ def test_upload_api_accepts_files_and_returns_audit(monkeypatch):
             "historyRecordId": 9,
             "historyError": None,
             "writeCommitted": True,
+            "monthlyBaseline": {"allMatched": True},
+            "cacheState": "invalidated",
+            "cacheError": None,
+            "dataGeneration": {},
+            "stageTimings": [],
             "latestHealth": {"status": "ok"},
             "entityAudit": {},
             "anmRowCount": 0,
@@ -54,6 +61,11 @@ def test_upload_api_accepts_files_and_returns_audit(monkeypatch):
     assert payload["writeCommitted"] is True
     assert payload["historyRecordId"] == 9
     assert payload["preflightReport"]["status"] == "matched"
+    assert payload["operationId"] == "op-api"
+    assert payload["entryPoint"] == "fastapi"
+    assert payload["cacheState"] == "invalidated"
+    assert payload["monthlyBaseline"]["allMatched"] is True
+    assert "已重建 dashboard cache" not in payload["message"]
 
 
 def test_upload_api_openapi_contract_is_named():

@@ -4,6 +4,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend.schemas.dashboard import UploadActionResponse
 from backend.services.upload_action_service import run_vue_upload_action
+from backend.services.upload_lock_service import UploadBusyError
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -22,6 +23,8 @@ async def upload_monthly_data(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UploadBusyError as exc:
+        raise HTTPException(status_code=409, detail={"status": "busy", "owner": exc.owner}) from exc
     except HTTPException:
         raise
     except Exception as exc:
