@@ -1,7 +1,7 @@
 ---
 type: codex-brief
 project: nbs_analytics
-status: implementation-complete-pending-service-port-validation
+status: verified
 priority: P0
 created: 2026-07-11
 tags: [nbs_analytics, codex, upload, single-writer, baseline, hermes]
@@ -43,7 +43,7 @@ Implementation plan：
 
 `docs/superpowers/plans/2026-07-11-p0-upload-single-writer-contract.md`
 
-目前狀態：Task 1-9 已實作並以 TDD、targeted tests 與分批 full-suite 驗證；正式程式碼已改為 single-writer contract。Task 10 正在處理 service port validation 與 Hermes final acceptance。
+目前狀態：Task 1-10 已完成；正式程式碼已改為 single-writer contract，服務、Hermes、baseline 與 dry-run 驗收均通過。
 
 ## Observed State
 
@@ -153,8 +153,18 @@ Streamlit adapter OR FastAPI adapter
 
 ## 目前狀態
 
-`implementation-complete-pending-service-port-validation`
+`verified`
 
 已完成 commit：`7858465`、`b478ef3`、`6d850ab`、`07e77ea`、`15d5460`、`df103b5`、`a4c97ac`、`2de4817`、`948cce8`。
 
-正式口徑、baseline registry、report sheets、Forecast、GMV 與 UI filter 語義均未修改。因隔離 worktree 的標準 ports 被既有非受管服務佔用，最終 service acceptance / Hermes 需在可管理 port 環境重跑後才可標記 verified。
+正式口徑、baseline registry、report sheets、Forecast、GMV 與 UI filter 語義均未修改。
+
+## 最終驗收證據（2026-07-12）
+
+- `system_manager.py acceptance`: `passed`；Streamlit `8502`、API `8601`、Vue `5173` 均 ready。
+- Hermes `scripts/hermes_post_change_check.py --json`: `overallStatus: pass`。
+- Hermes targeted tests: `78 passed`。
+- 既有全套測試已分批驗證：`159 passed`。
+- monthly baseline governance：2026-01 至 2026-06 全部 `matched`；2026-05 blocking baseline 為 `HKD 12,057,968`。
+- virtual upload dry-run：`liveDbUnchanged: true`、`preflightStatus: matched`、`stabilityStatus: matched`、`rollbackStatus: not_required`、`formattedActualTotal: HKD 12,057,968`。
+- dry-run `Upload dry-run total`: `11.56s`，其中 preflight stability gate `4.40s`。
