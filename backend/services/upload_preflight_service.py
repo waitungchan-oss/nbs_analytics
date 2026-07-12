@@ -114,6 +114,8 @@ def run_upload_preflight(
     ]
 
     live_path = database.resolve_db_path(live_db_path)
+    if live_db_path is not None and not live_path.exists():
+        raise FileNotFoundError(f"explicit live database not found: {live_path}")
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_db_path = Path(tmpdir) / "preflight.db"
         stage_started = time.perf_counter()

@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 import database
 
@@ -11,6 +12,7 @@ def test_upload_preflight_never_changes_module_global_db_target(tmp_path, monkey
 
     live_path = tmp_path / "live.db"
     default_path = tmp_path / "default.db"
+    live_path.touch()
     monkeypatch.setattr(database, "DB_FILE", str(default_path))
     observed = {}
 
@@ -77,6 +79,41 @@ def test_upload_preflight_never_changes_module_global_db_target(tmp_path, monkey
     assert observed["gate_db_path"] != live_path
     assert observed["load_paths"] == [live_path, observed["gate_db_path"]]
     assert database.DB_FILE == str(default_path)
+
+
+def test_upload_preflight_rejects_missing_explicit_live_db_without_creating_it(tmp_path, monkeypatch):
+    from backend.services import upload_preflight_service
+
+    missing_live_path = tmp_path / "missing-live.db"
+    monkeypatch.setattr(
+        upload_preflight_service,
+        "process_raw_files",
+        lambda *args, **kwargs: (pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"summary": pd.DataFrame()}),
+    )
+    monkeypatch.setattr(
+        upload_preflight_service,
+        "build_phase2c_stability_gate",
+        lambda *, db_path=None: {"status": "matched", "driftChecks": []},
+    )
+    monkeypatch.setattr(
+        upload_preflight_service,
+        "build_upload_drift_diagnosis",
+        lambda *args, **kwargs: {"status": "no_drift"},
+    )
+
+    with pytest.raises(FileNotFoundError, match="explicit live database not found"):
+        upload_preflight_service.run_upload_preflight(
+            BytesIO(b"dummy"),
+            None,
+            [],
+            {},
+            [],
+            [],
+            source_files=["main.xlsx"],
+            live_db_path=missing_live_path,
+        )
+
+    assert not missing_live_path.exists()
 
 
 def test_upload_preflight_uses_temp_database_and_preserves_live_db(tmp_path, monkeypatch):
