@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import shutil
 import tempfile
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -96,24 +94,6 @@ def _table_exists(conn, table_name: str) -> bool:
     )
 
 
-@contextmanager
-def _temporary_database_path(temp_db_path: Path):
-    original = database.DB_FILE
-    database.DB_FILE = str(temp_db_path)
-    try:
-        yield
-    finally:
-        database.DB_FILE = original
-
-
-def _snapshot_live_database(temp_db_path: Path) -> None:
-    live_path = Path(database.DB_FILE)
-    if live_path.exists():
-        shutil.copy2(live_path, temp_db_path)
-    else:
-        temp_db_path.touch()
-
-
 def run_upload_preflight(
     main_file,
     tour_file,
@@ -123,6 +103,7 @@ def run_upload_preflight(
     sales_reps: list[str],
     *,
     source_files: list[str] | None = None,
+    live_db_path: str | Path | None = None,
 ) -> dict:
     stage_timings: list[dict] = []
     preflight_started = time.perf_counter()
@@ -132,57 +113,57 @@ def run_upload_preflight(
         if item is not None and getattr(item, "name", None)
     ]
 
+    live_path = database.resolve_db_path(live_db_path)
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_db_path = Path(tmpdir) / "preflight.db"
         stage_started = time.perf_counter()
-        _snapshot_live_database(temp_db_path)
+        database.snapshot_sqlite_database(live_path, temp_db_path)
         _record_stage(stage_timings, "建立 Preflight 臨時 DB", stage_started)
         stage_started = time.perf_counter()
-        live_tour_before, live_others_before = database.load_all_data_from_db()
+        live_tour_before, live_others_before = database.load_all_data_from_db(db_path=live_path)
         _record_stage(stage_timings, "讀取正式 SQLite 快照", stage_started)
         stage_started = time.perf_counter()
         live_before = {
-            "tour_rows": _table_row_count(Path(database.DB_FILE), "tour_data"),
-            "others_rows": _table_row_count(Path(database.DB_FILE), "others_data"),
+            "tour_rows": _table_row_count(live_path, "tour_data"),
+            "others_rows": _table_row_count(live_path, "others_data"),
         }
         _record_stage(stage_timings, "統計正式 DB 行數", stage_started)
-        with _temporary_database_path(temp_db_path):
-            stage_started = time.perf_counter()
-            new_t_df, new_o_df, anm_df, entity_audit = process_raw_files(
-                main_file,
-                tour_file,
-                other_files or [],
-                branch_mapping,
-                exclude_prefixes,
-                sales_reps,
-                return_entity_audit=True,
-            )
-            _record_stage(stage_timings, "清洗與 Entity Resolution", stage_started)
-            stage_started = time.perf_counter()
-            upsert_summary = database.upsert_to_db(new_t_df, new_o_df)
-            _record_stage(stage_timings, "臨時 SQLite upsert", stage_started)
-            stage_started = time.perf_counter()
-            stability_gate = build_phase2c_stability_gate()
-            _record_stage(stage_timings, "Preflight stability gate", stage_started)
-            stage_started = time.perf_counter()
-            temp_tour_after, temp_others_after = database.load_all_data_from_db()
-            _record_stage(stage_timings, "讀取臨時 DB 結果", stage_started)
-            stage_started = time.perf_counter()
-            drift_diagnosis = build_upload_drift_diagnosis(
-                live_tour_before,
-                live_others_before,
-                temp_tour_after,
-                temp_others_after,
-                stability_gate=stability_gate,
-            )
-            _record_stage(stage_timings, "Drift diagnosis", stage_started)
-            stage_started = time.perf_counter()
-            latest_data_date = _combined_max_date(temp_tour_after, temp_others_after)
-            _record_stage(stage_timings, "Preflight 最新日期彙總", stage_started)
+        stage_started = time.perf_counter()
+        new_t_df, new_o_df, anm_df, entity_audit = process_raw_files(
+            main_file,
+            tour_file,
+            other_files or [],
+            branch_mapping,
+            exclude_prefixes,
+            sales_reps,
+            return_entity_audit=True,
+        )
+        _record_stage(stage_timings, "清洗與 Entity Resolution", stage_started)
+        stage_started = time.perf_counter()
+        upsert_summary = database.upsert_to_db(new_t_df, new_o_df, db_path=temp_db_path)
+        _record_stage(stage_timings, "臨時 SQLite upsert", stage_started)
+        stage_started = time.perf_counter()
+        stability_gate = build_phase2c_stability_gate(db_path=temp_db_path)
+        _record_stage(stage_timings, "Preflight stability gate", stage_started)
+        stage_started = time.perf_counter()
+        temp_tour_after, temp_others_after = database.load_all_data_from_db(db_path=temp_db_path)
+        _record_stage(stage_timings, "讀取臨時 DB 結果", stage_started)
+        stage_started = time.perf_counter()
+        drift_diagnosis = build_upload_drift_diagnosis(
+            live_tour_before,
+            live_others_before,
+            temp_tour_after,
+            temp_others_after,
+            stability_gate=stability_gate,
+        )
+        _record_stage(stage_timings, "Drift diagnosis", stage_started)
+        stage_started = time.perf_counter()
+        latest_data_date = _combined_max_date(temp_tour_after, temp_others_after)
+        _record_stage(stage_timings, "Preflight 最新日期彙總", stage_started)
         stage_started = time.perf_counter()
         live_after = {
-            "tour_rows": _table_row_count(Path(database.DB_FILE), "tour_data"),
-            "others_rows": _table_row_count(Path(database.DB_FILE), "others_data"),
+            "tour_rows": _table_row_count(live_path, "tour_data"),
+            "others_rows": _table_row_count(live_path, "others_data"),
         }
         _record_stage(stage_timings, "確認正式 DB 未變更", stage_started)
 

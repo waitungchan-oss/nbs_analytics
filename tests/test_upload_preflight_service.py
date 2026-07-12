@@ -6,14 +6,77 @@ import pandas as pd
 import database
 
 
-def test_upload_preflight_uses_governed_monthly_baseline_gate():
-    source = (Path(__file__).resolve().parents[1] / "backend" / "services" / "upload_preflight_service.py").read_text(
-        encoding="utf-8"
+def test_upload_preflight_never_changes_module_global_db_target(tmp_path, monkeypatch):
+    from backend.services import upload_preflight_service
+
+    live_path = tmp_path / "live.db"
+    default_path = tmp_path / "default.db"
+    monkeypatch.setattr(database, "DB_FILE", str(default_path))
+    observed = {}
+
+    def fake_process_raw_files(*args, **kwargs):
+        observed["db_file_during_processing"] = database.DB_FILE
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"summary": pd.DataFrame()}
+
+    def fake_gate(*, db_path=None):
+        observed["gate_db_path"] = Path(db_path)
+        return {
+            "status": "matched",
+            "formattedActualTotal": "HKD 12,057,968",
+            "deltaAmount": 0.0,
+            "driftChecks": [],
+            "monthlyBaseline": {"allMatched": True},
+        }
+
+    monkeypatch.setattr(upload_preflight_service, "process_raw_files", fake_process_raw_files)
+    monkeypatch.setattr(upload_preflight_service, "build_phase2c_stability_gate", fake_gate)
+    monkeypatch.setattr(
+        upload_preflight_service,
+        "build_upload_drift_diagnosis",
+        lambda *args, **kwargs: {"status": "no_drift"},
+    )
+    monkeypatch.setattr(
+        database,
+        "snapshot_sqlite_database",
+        lambda source, destination: observed.update(
+            snapshot_source=Path(source),
+            snapshot_target=Path(destination),
+        ),
+    )
+    monkeypatch.setattr(
+        database,
+        "load_all_data_from_db",
+        lambda *, db_path=None: observed.setdefault("load_paths", []).append(Path(db_path))
+        or (pd.DataFrame(), pd.DataFrame()),
+    )
+    monkeypatch.setattr(
+        database,
+        "upsert_to_db",
+        lambda *args, db_path=None, **kwargs: observed.update(upsert_path=Path(db_path))
+        or {
+            "tour_data": {"filtered_excluded_rows": 0, "write_rows": 0},
+            "others_data": {"filtered_excluded_rows": 0, "write_rows": 0},
+        },
+    )
+    monkeypatch.setattr(upload_preflight_service, "_table_row_count", lambda *args, **kwargs: 0)
+
+    upload_preflight_service.run_upload_preflight(
+        BytesIO(b"dummy"),
+        None,
+        [],
+        {},
+        [],
+        [],
+        source_files=["main.xlsx"],
+        live_db_path=live_path,
     )
 
-    assert "from backend.services.monthly_baseline_service import build_governed_stability_gate" in source
-    assert "build_phase2c_stability_gate = build_governed_stability_gate" in source
-    assert "stability_gate = build_phase2c_stability_gate()" in source
+    assert observed["db_file_during_processing"] == str(default_path)
+    assert observed["snapshot_source"] == live_path
+    assert observed["upsert_path"] == observed["gate_db_path"]
+    assert observed["gate_db_path"] != live_path
+    assert observed["load_paths"] == [live_path, observed["gate_db_path"]]
+    assert database.DB_FILE == str(default_path)
 
 
 def test_upload_preflight_uses_temp_database_and_preserves_live_db(tmp_path, monkeypatch):
@@ -100,7 +163,7 @@ def test_upload_preflight_uses_temp_database_and_preserves_live_db(tmp_path, mon
     monkeypatch.setattr(
         upload_preflight_service,
         "build_phase2c_stability_gate",
-        lambda: {
+        lambda *, db_path=None: {
             "status": "matched",
             "formattedExpectedTotal": "HKD 12,057,968",
             "formattedActualTotal": "HKD 12,057,968",
@@ -127,6 +190,7 @@ def test_upload_preflight_uses_temp_database_and_preserves_live_db(tmp_path, mon
         exclude_prefixes=[],
         sales_reps=[],
         source_files=["財務收款總數-0101-0625.xlsx"],
+        live_db_path=live_path,
     )
 
     assert report["status"] == "matched"

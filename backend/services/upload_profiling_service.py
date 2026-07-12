@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 import time
 from contextlib import contextmanager
@@ -42,16 +41,6 @@ def _db_counts(db_path: Path) -> dict:
         "tour_rows": _table_row_count(db_path, "tour_data"),
         "others_rows": _table_row_count(db_path, "others_data"),
     }
-
-
-@contextmanager
-def _temporary_database_path(temp_db_path: Path):
-    original = database.DB_FILE
-    database.DB_FILE = str(temp_db_path)
-    try:
-        yield
-    finally:
-        database.DB_FILE = original
 
 
 @contextmanager
@@ -129,76 +118,73 @@ def run_virtual_upload_profiling_dry_run(
 
     stage_timings: list[dict] = []
     total_started = time.perf_counter()
-    live_path = Path(live_db_path or database.DB_FILE)
+    live_path = database.resolve_db_path(live_db_path)
     live_before = _db_counts(live_path)
 
     tempdir = tempfile.mkdtemp(prefix="nbs_upload_profile_")
     temp_db_path = Path(tempdir) / "dry_run.db"
-    if live_path.exists():
-        shutil.copy2(live_path, temp_db_path)
-    else:
-        temp_db_path.touch()
+    database.snapshot_sqlite_database(live_path, temp_db_path)
 
     started = time.perf_counter()
     main_df, tour_df = _virtual_upload_frames(row_count)
     source_files = ["virtual_main_upload.xlsx", "virtual_tour_upload.xlsx"]
     _record_stage(stage_timings, "建立虛擬上傳資料", started)
 
-    with _temporary_database_path(temp_db_path):
+    started = time.perf_counter()
+    with _optional_lightweight_drift_diagnosis(skip_drift_diagnosis):
+        preflight_result = upload_preflight_service.run_upload_preflight(
+            main_df,
+            ("virtual_tour_upload.xlsx", tour_df),
+            [],
+            rules.DEFAULT_BRANCH_MAPPING,
+            rules.DEFAULT_RULES["EXCLUDE_PREFIXES"],
+            rules.DEFAULT_RULES["SALES_REP_LIST"],
+            source_files=source_files,
+            live_db_path=temp_db_path,
+        )
+    _record_stage(stage_timings, "Preflight 臨時 DB 與口徑驗收", started)
+
+    new_t_df = preflight_result.get("prepared", {}).get("tour", pd.DataFrame())
+    new_o_df = preflight_result.get("prepared", {}).get("others", pd.DataFrame())
+    upsert_summary = {}
+    if str(preflight_result.get("status") or "drift") == "matched":
         started = time.perf_counter()
-        with _optional_lightweight_drift_diagnosis(skip_drift_diagnosis):
-            preflight_result = upload_preflight_service.run_upload_preflight(
-                main_df,
-                ("virtual_tour_upload.xlsx", tour_df),
-                [],
-                rules.DEFAULT_BRANCH_MAPPING,
-                rules.DEFAULT_RULES["EXCLUDE_PREFIXES"],
-                rules.DEFAULT_RULES["SALES_REP_LIST"],
-                source_files=source_files,
-            )
-        _record_stage(stage_timings, "Preflight 臨時 DB 與口徑驗收", started)
+        upsert_summary = database.upsert_to_db(new_t_df, new_o_df, db_path=temp_db_path)
+        _record_stage(stage_timings, "正式 SQLite upsert（dry-run temp DB）", started)
 
-        new_t_df = preflight_result.get("prepared", {}).get("tour", pd.DataFrame())
-        new_o_df = preflight_result.get("prepared", {}).get("others", pd.DataFrame())
-        upsert_summary = {}
-        if str(preflight_result.get("status") or "drift") == "matched":
-            started = time.perf_counter()
-            upsert_summary = database.upsert_to_db(new_t_df, new_o_df)
-            _record_stage(stage_timings, "正式 SQLite upsert（dry-run temp DB）", started)
+        started = time.perf_counter()
+        dashboard_summary = build_dashboard_summary(dict(PHASE2B_BASELINE_FILTERS), db_path=temp_db_path)
+        _record_stage(stage_timings, "Dashboard summary rebuild（dry-run temp DB）", started)
 
-            started = time.perf_counter()
-            dashboard_summary = build_dashboard_summary(dict(PHASE2B_BASELINE_FILTERS))
-            _record_stage(stage_timings, "Dashboard summary rebuild（dry-run temp DB）", started)
+        started = time.perf_counter()
+        db_after_tour, db_after_others = database.load_all_data_from_db(db_path=temp_db_path)
+        _record_stage(stage_timings, "寫入後 SQLite reload（dry-run temp DB）", started)
 
-            started = time.perf_counter()
-            db_after_tour, db_after_others = database.load_all_data_from_db()
-            _record_stage(stage_timings, "寫入後 SQLite reload（dry-run temp DB）", started)
+        started = time.perf_counter()
+        stability_gate = build_phase2c_stability_gate(db_path=temp_db_path)
+        _record_stage(stage_timings, "Stability gate 驗證（dry-run temp DB）", started)
 
-            started = time.perf_counter()
-            stability_gate = build_phase2c_stability_gate()
-            _record_stage(stage_timings, "Stability gate 驗證（dry-run temp DB）", started)
-
-            started = time.perf_counter()
-            rollback_result = handle_core_drift_rollback(
-                stability_gate,
-                upsert_summary.get("backup_path") if isinstance(upsert_summary, dict) else None,
-                restore_database=lambda backup_path: {"quarantine_path": None, "backup_path": backup_path},
-                rebuild_cache=lambda: None,
-                build_gate=build_phase2c_stability_gate,
-            )
-            _record_stage(stage_timings, "Rollback guard（dry-run temp DB）", started)
-        else:
-            dashboard_summary = {}
-            db_after_tour, db_after_others = pd.DataFrame(), pd.DataFrame()
-            stability_gate = preflight_result.get("stabilityGate") or {}
-            rollback_result = {
-                "status": "not_run",
-                "rollbackStatus": "not_run",
-                "backupPath": None,
-                "quarantinePath": None,
-                "postRollbackGate": None,
-                "rollbackError": None,
-            }
+        started = time.perf_counter()
+        rollback_result = handle_core_drift_rollback(
+            stability_gate,
+            upsert_summary.get("backup_path") if isinstance(upsert_summary, dict) else None,
+            restore_database=lambda backup_path: {"quarantine_path": None, "backup_path": backup_path},
+            rebuild_cache=lambda: None,
+            build_gate=lambda: build_phase2c_stability_gate(db_path=temp_db_path),
+        )
+        _record_stage(stage_timings, "Rollback guard（dry-run temp DB）", started)
+    else:
+        dashboard_summary = {}
+        db_after_tour, db_after_others = pd.DataFrame(), pd.DataFrame()
+        stability_gate = preflight_result.get("stabilityGate") or {}
+        rollback_result = {
+            "status": "not_run",
+            "rollbackStatus": "not_run",
+            "backupPath": None,
+            "quarantinePath": None,
+            "postRollbackGate": None,
+            "rollbackError": None,
+        }
 
     _record_stage(stage_timings, "Upload dry-run total", total_started)
     live_after = _db_counts(live_path)
