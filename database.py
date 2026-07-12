@@ -27,8 +27,12 @@ UPLOAD_EXCLUDED_RECEIPT_TYPES = {"掛賬核銷"}
 UPLOAD_EXCLUDED_PAYMENT_METHODS = {"TT 退款轉團款"}
 
 
-def get_db_connection() -> sqlite3.Connection:
-    return sqlite3.connect(DB_FILE)
+def resolve_db_path(db_path: str | Path | None = None) -> Path:
+    return Path(db_path if db_path is not None else DB_FILE)
+
+
+def get_db_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
+    return sqlite3.connect(resolve_db_path(db_path))
 
 
 def _sqlite_backup_copy(source_path: Path, destination_path: Path) -> None:
@@ -41,13 +45,26 @@ def _sqlite_backup_copy(source_path: Path, destination_path: Path) -> None:
         source_conn.close()
 
 
-def hot_backup_database() -> str | None:
-    db_path = Path(DB_FILE)
-    if not db_path.exists() or db_path.stat().st_size == 0:
+def snapshot_sqlite_database(
+    source_path: str | Path,
+    destination_path: str | Path,
+) -> None:
+    source = resolve_db_path(source_path)
+    destination = Path(destination_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _sqlite_backup_copy(source, destination)
+    check = validate_sqlite_database(destination)
+    if not check["ok"]:
+        raise RuntimeError(f"snapshot integrity check failed: {check['integrity']}")
+
+
+def hot_backup_database(db_path: str | Path | None = None) -> str | None:
+    source = resolve_db_path(db_path)
+    if not source.exists() or source.stat().st_size == 0:
         return None
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    backup_path = db_path.with_name(f"{db_path.name}.backup_{stamp}")
-    _sqlite_backup_copy(db_path, backup_path)
+    backup_path = source.with_name(f"{source.name}.backup_{stamp}")
+    snapshot_sqlite_database(source, backup_path)
     return str(backup_path)
 
 
@@ -66,8 +83,12 @@ def validate_sqlite_database(path: str | Path) -> dict:
     return {"ok": integrity.lower() == "ok", "path": str(db_path), "integrity": integrity}
 
 
-def restore_database_from_backup(backup_path: str | Path) -> dict:
-    live_path = Path(DB_FILE)
+def restore_database_from_backup(
+    backup_path: str | Path,
+    *,
+    live_db_path: str | Path | None = None,
+) -> dict:
+    live_path = resolve_db_path(live_db_path)
     source_path = Path(backup_path)
     source_check = validate_sqlite_database(source_path)
     if not source_check["ok"]:
@@ -245,10 +266,16 @@ def _filter_upload_revenue_scope_rows(df: pd.DataFrame, existing_receipt_numbers
     }
 
 
-def upsert_to_db(df_tour: pd.DataFrame, df_others: pd.DataFrame) -> dict:
+def upsert_to_db(
+    df_tour: pd.DataFrame,
+    df_others: pd.DataFrame,
+    *,
+    db_path: str | Path | None = None,
+) -> dict:
     """將清洗後的新數據安全追加至資料庫，依據來源單據號防重覆。"""
-    backup_path = hot_backup_database()
-    conn = get_db_connection()
+    target = resolve_db_path(db_path)
+    backup_path = hot_backup_database(target)
+    conn = get_db_connection(target)
     try:
         df_tour, tour_filter = _filter_upload_revenue_scope_rows(df_tour, _existing_receipt_numbers(conn, "tour_data"))
         df_others, others_filter = _filter_upload_revenue_scope_rows(df_others, _existing_receipt_numbers(conn, "others_data"))
@@ -286,8 +313,11 @@ def upsert_to_db(df_tour: pd.DataFrame, df_others: pd.DataFrame) -> dict:
         conn.close()
 
 
-def load_all_data_from_db() -> tuple[pd.DataFrame, pd.DataFrame]:
-    conn = get_db_connection()
+def load_all_data_from_db(
+    *,
+    db_path: str | Path | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    conn = get_db_connection(db_path)
     try:
         df_tour, df_others = pd.DataFrame(), pd.DataFrame()
         if _table_exists(conn, "tour_data"):
