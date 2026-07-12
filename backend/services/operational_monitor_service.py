@@ -45,6 +45,9 @@ def compact_health_payload(health: dict) -> dict:
         "quarantineBytes": int(quarantines.get("totalBytes", 0)),
         "cacheFileCount": int(cache.get("fileCount", 0)),
         "cacheBytes": int(cache.get("totalBytes", 0)),
+        "uploadCoordination": health.get("uploadCoordination") or {},
+        "dataGeneration": health.get("dataGeneration") or {},
+        "uploadEvidence": health.get("uploadEvidence") or {},
         "issues": [str(item) for item in health.get("issues", [])],
     }
 

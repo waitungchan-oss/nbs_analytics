@@ -15,7 +15,7 @@ def test_system_health_reports_operational_summary(monkeypatch, tmp_path):
     monkeypatch.setattr(
         system_health_service,
         "list_stability_history",
-        lambda limit=1: [
+        lambda limit=1, **kwargs: [
             {
                 "id": 9,
                 "createdAt": "2026-06-24T10:00:00+08:00",
@@ -42,6 +42,9 @@ def test_system_health_reports_operational_summary(monkeypatch, tmp_path):
     assert payload["storage"]["backups"]["count"] == 1
     assert payload["storage"]["quarantines"]["count"] == 1
     assert payload["runtimeCache"]["fileCount"] == 1
+    assert payload["uploadCoordination"]["locked"] is False
+    assert payload["dataGeneration"]["generation"] >= 0
+    assert payload["uploadEvidence"]["matched"] in {True, None}
 
 
 def test_system_health_is_critical_when_sqlite_integrity_fails(monkeypatch, tmp_path):
@@ -52,7 +55,7 @@ def test_system_health_is_critical_when_sqlite_integrity_fails(monkeypatch, tmp_
         "validate_sqlite_database",
         lambda path: {"ok": False, "integrity": "database disk image is malformed"},
     )
-    monkeypatch.setattr(system_health_service, "list_stability_history", lambda limit=1: [])
+    monkeypatch.setattr(system_health_service, "list_stability_history", lambda limit=1, **kwargs: [])
 
     payload = system_health_service.build_system_health(
         db_path=db_path,

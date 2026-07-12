@@ -23,6 +23,12 @@ TARGETED_TESTS = [
     "tests/test_upload_api.py",
     "tests/test_monthly_baseline_service.py",
     "tests/test_monthly_baseline_check_cli.py",
+    "tests/test_database_explicit_path.py",
+    "tests/test_upload_lock_service.py",
+    "tests/test_cache_generation_service.py",
+    "tests/test_upload_orchestrator_service.py",
+    "tests/test_upload_action_service.py",
+    "tests/test_upload_single_writer_integration.py",
 ]
 
 

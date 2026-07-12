@@ -15,6 +15,15 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
     targeted = next(step for step in plan if step.label == "targeted-tests")
     assert "tests/test_monthly_baseline_service.py" in targeted.command
     assert "tests/test_monthly_baseline_check_cli.py" in targeted.command
+    for test_name in [
+        "tests/test_database_explicit_path.py",
+        "tests/test_upload_lock_service.py",
+        "tests/test_cache_generation_service.py",
+        "tests/test_upload_orchestrator_service.py",
+        "tests/test_upload_action_service.py",
+        "tests/test_upload_single_writer_integration.py",
+    ]:
+        assert test_name in targeted.command
 
 
 def test_plan_can_skip_monitor_and_tests_for_fast_dry_run():
