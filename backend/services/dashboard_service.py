@@ -76,8 +76,8 @@ def _current_rules() -> tuple[dict, list[str], list[str], list[str]]:
     )
 
 
-def build_dashboard_context() -> dict:
-    db_tour, db_others = load_all_data_from_db()
+def build_dashboard_context(*, db_path=None) -> dict:
+    db_tour, db_others = load_all_data_from_db(db_path=db_path)
     analysis_tour, analysis_others, _ = build_revenue_scope_frames(db_tour, db_others)
     branch_mapping, target_branches, cruise_depts, sales_reps = _current_rules()
     _, s1, _ = build_dashboard_data(
@@ -276,8 +276,8 @@ def _data_freshness(analysis_tour: pd.DataFrame, analysis_others: pd.DataFrame, 
     }
 
 
-def build_dashboard_summary(filters: dict) -> dict:
-    db_tour, db_others = load_all_data_from_db()
+def build_dashboard_summary(filters: dict, *, db_path=None) -> dict:
+    db_tour, db_others = load_all_data_from_db(db_path=db_path)
     analysis_tour, analysis_others, scope_audit = build_revenue_scope_frames(db_tour, db_others)
     branch_mapping, target_branches, cruise_depts, sales_reps = _current_rules()
     _, s1, s2 = build_dashboard_data(

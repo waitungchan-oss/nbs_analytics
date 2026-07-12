@@ -57,6 +57,29 @@ def _base_gate():
     }
 
 
+def test_governed_gate_binds_legacy_and_monthly_checks_to_same_db(monkeypatch, tmp_path):
+    from backend.services import monthly_baseline_service
+
+    seen = {"gate": [], "analytics": []}
+    target = tmp_path / "target.db"
+
+    monkeypatch.setattr(
+        "backend.services.stability_service.build_phase2c_stability_gate",
+        lambda *, db_path=None: seen["gate"].append(db_path) or {"status": "matched"},
+    )
+    monkeypatch.setattr(
+        "backend.services.dashboard_analytics_service.build_dashboard_analytics",
+        lambda filters, *, db_path=None: seen["analytics"].append(db_path) or {
+            "revenueScope": "不含掛賬核銷與TT退款轉團款",
+            "monthlyTrend": [],
+        },
+    )
+
+    monthly_baseline_service.build_governed_stability_gate(db_path=target)
+
+    assert seen == {"gate": [target], "analytics": [target]}
+
+
 def test_registry_preserves_exact_monthly_values_and_six_month_total():
     from backend.services.monthly_baseline_service import load_monthly_baseline_registry
 

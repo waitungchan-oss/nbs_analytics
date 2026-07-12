@@ -136,11 +136,15 @@ def build_stability_baseline(revenue_totals: dict, data_freshness: dict) -> dict
     }
 
 
-def build_phase2c_stability_gate(summary_builder: Callable[[dict], dict] | None = None) -> dict:
+def build_phase2c_stability_gate(
+    summary_builder: Callable[[dict], dict] | None = None,
+    *,
+    db_path=None,
+) -> dict:
     if summary_builder is None:
         from backend.services.dashboard_service import build_dashboard_summary
 
-        summary_builder = build_dashboard_summary
+        summary_builder = lambda filters: build_dashboard_summary(filters, db_path=db_path)
 
     summary = summary_builder(dict(PHASE2B_BASELINE_FILTERS))
     stability = summary["stabilityBaseline"]

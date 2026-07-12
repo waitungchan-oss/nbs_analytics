@@ -71,6 +71,42 @@ def _sample_frames():
     return tour, others
 
 
+def test_phase2c_gate_binds_summary_to_explicit_database(monkeypatch, tmp_path):
+    from backend.services import stability_service
+
+    seen = []
+
+    def fake_summary(filters, *, db_path=None):
+        seen.append(db_path)
+        return {
+            "stabilityBaseline": {
+                "status": "matched",
+                "baselineMonth": "2026-05",
+                "formattedExpectedTotal": "HKD 12,057,968",
+                "formattedActualTotal": "HKD 12,057,968",
+                "deltaAmount": 0.0,
+                "deltaPct": 0.0,
+                "coreValidation": {
+                    "status": "matched",
+                    "summary": {"totalChecks": 2, "matchedChecks": 2, "driftChecks": 0},
+                    "checks": [],
+                },
+                "freshnessUpdate": {
+                    "status": "stable",
+                    "summary": {"totalChecks": 0, "stableChecks": 0, "updatedChecks": 0},
+                    "checks": [],
+                },
+            }
+        }
+
+    monkeypatch.setattr(dashboard_service, "build_dashboard_summary", fake_summary)
+    target = tmp_path / "target.db"
+    gate = stability_service.build_phase2c_stability_gate(db_path=target)
+
+    assert gate["status"] == "matched"
+    assert seen == [target]
+
+
 def test_revenue_scope_excludes_writeoff_order():
     tour, others = _sample_frames()
 
@@ -85,7 +121,7 @@ def test_revenue_scope_excludes_writeoff_order():
 
 def test_dashboard_context_uses_read_only_loaded_frames(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
 
     context = dashboard_service.build_dashboard_context()
 
@@ -98,7 +134,7 @@ def test_dashboard_context_uses_read_only_loaded_frames(monkeypatch):
 
 def test_dashboard_summary_returns_kpis_without_export_generation(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
 
     summary = dashboard_service.build_dashboard_summary(
         {
@@ -127,7 +163,7 @@ def test_dashboard_summary_returns_kpis_without_export_generation(monkeypatch):
 
 def test_dashboard_summary_accepts_month_number_filter(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
 
     summary = dashboard_service.build_dashboard_summary(
         {
@@ -148,7 +184,11 @@ def test_dashboard_summary_returns_combined_branch_and_specialist_totals(monkeyp
     specialist["銷售點"] = "營銷運營中心-專職銷售組"
     specialist["銷售員"] = "YTLAU 刘元太"
     specialist["收款原幣金額"] = 200
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda: (pd.concat([tour, specialist]), others))
+    monkeypatch.setattr(
+        dashboard_service,
+        "load_all_data_from_db",
+        lambda *, db_path=None: (pd.concat([tour, specialist]), others),
+    )
     monkeypatch.setattr(
         dashboard_service,
         "load_business_rules",
@@ -182,7 +222,7 @@ def test_dashboard_summary_returns_combined_branch_and_specialist_totals(monkeyp
 
 def test_dashboard_summary_returns_phase2b_stability_baseline_for_official_month(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
     monkeypatch.setattr(
         dashboard_service,
         "build_dashboard_data",
@@ -261,7 +301,7 @@ def test_phase2c_stability_gate_wraps_matched_baseline(monkeypatch):
     monkeypatch.setattr(
         dashboard_service,
         "build_dashboard_summary",
-        lambda filters: {
+        lambda filters, *, db_path=None: {
             "stabilityBaseline": {
                 "status": "matched",
                 "baselineMonth": "2026-05",
@@ -300,7 +340,7 @@ def test_phase2c_stability_gate_surfaces_drift_message(monkeypatch):
     monkeypatch.setattr(
         dashboard_service,
         "build_dashboard_summary",
-        lambda filters: {
+        lambda filters, *, db_path=None: {
             "stabilityBaseline": {
                 "status": "drift",
                 "baselineMonth": "2026-05",
@@ -351,7 +391,7 @@ def test_dashboard_summary_filters_rankings_and_returns_freshness(monkeypatch):
     monkeypatch.setattr(
         dashboard_service,
         "load_all_data_from_db",
-        lambda: (pd.concat([tour, specialist]), pd.concat([others, july])),
+        lambda *, db_path=None: (pd.concat([tour, specialist]), pd.concat([others, july])),
     )
     monkeypatch.setattr(
         dashboard_service,
@@ -413,7 +453,7 @@ def test_dashboard_context_uses_persisted_business_rules(monkeypatch):
         captured["sales_reps"] = sales_reps
         return None, pd.DataFrame({"文本": ["測試分社"]}), pd.DataFrame()
 
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
     monkeypatch.setattr(
         dashboard_service,
         "load_business_rules",

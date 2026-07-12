@@ -94,7 +94,11 @@ def test_dashboard_summary_contract_has_fixed_kpi_and_ranking_fields(monkeypatch
 
     from backend.services import dashboard_service
 
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda: (pd.DataFrame(), pd.DataFrame()))
+    monkeypatch.setattr(
+        dashboard_service,
+        "load_all_data_from_db",
+        lambda *, db_path=None: (pd.DataFrame(), pd.DataFrame()),
+    )
     monkeypatch.setattr(
         dashboard_service,
         "build_dashboard_data",

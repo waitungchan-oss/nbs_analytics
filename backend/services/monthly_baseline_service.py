@@ -37,12 +37,14 @@ def load_monthly_baseline_registry(path: Path | None = None) -> dict:
 def evaluate_monthly_baselines(
     registry: dict | None = None,
     analytics_builder: Callable[[dict], dict] | None = None,
+    *,
+    db_path=None,
 ) -> dict:
     registry = deepcopy(registry or load_monthly_baseline_registry())
     if analytics_builder is None:
         from backend.services.dashboard_analytics_service import build_dashboard_analytics
 
-        analytics_builder = build_dashboard_analytics
+        analytics_builder = lambda filters: build_dashboard_analytics(filters, db_path=db_path)
 
     months = [str(row["month"]) for row in registry["baselines"]]
     analytics = analytics_builder(
@@ -155,13 +157,17 @@ def build_governed_stability_gate(
     *,
     gate_builder: Callable[[], dict] | None = None,
     analytics_builder: Callable[[dict], dict] | None = None,
+    db_path=None,
 ) -> dict:
     if gate_builder is None:
         from backend.services.stability_service import build_phase2c_stability_gate
 
-        gate_builder = build_phase2c_stability_gate
+        gate_builder = lambda: build_phase2c_stability_gate(db_path=db_path)
     gate = gate_builder()
-    evaluation = evaluate_monthly_baselines(analytics_builder=analytics_builder)
+    evaluation = evaluate_monthly_baselines(
+        analytics_builder=analytics_builder,
+        db_path=db_path,
+    )
     return apply_monthly_blocking_checks(gate, evaluation)
 
 

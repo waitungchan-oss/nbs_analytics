@@ -178,8 +178,8 @@ def build_analytics_from_facts(branch_facts: pd.DataFrame, specialist_facts: pd.
     }
 
 
-def build_dashboard_analytics(filters: dict) -> dict:
-    db_tour, db_others = load_all_data_from_db()
+def build_dashboard_analytics(filters: dict, *, db_path=None) -> dict:
+    db_tour, db_others = load_all_data_from_db(db_path=db_path)
     analysis_tour, analysis_others, _ = build_revenue_scope_frames(db_tour, db_others)
     branch_mapping, target_branches, cruise_depts, sales_reps = _current_rules()
     _, branch_facts, specialist_facts = build_dashboard_data(
@@ -196,4 +196,3 @@ def build_dashboard_analytics(filters: dict) -> dict:
         "revenueScope": REVENUE_SCOPE_LABEL,
         **build_analytics_from_facts(branch_facts, specialist_facts, filters),
     }
-
