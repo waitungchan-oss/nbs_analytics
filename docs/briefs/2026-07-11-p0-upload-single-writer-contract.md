@@ -1,7 +1,7 @@
 ---
 type: codex-brief
 project: nbs_analytics
-status: plan-ready
+status: implementation-complete-pending-service-port-validation
 priority: P0
 created: 2026-07-11
 tags: [nbs_analytics, codex, upload, single-writer, baseline, hermes]
@@ -43,7 +43,7 @@ Implementation plan：
 
 `docs/superpowers/plans/2026-07-11-p0-upload-single-writer-contract.md`
 
-目前狀態：Brief、Design Spec 與 TDD implementation plan 已完成；正式程式碼尚未修改。下一步必須由使用者選擇執行模式後，依 plan 逐 Task 實作與驗證。
+目前狀態：Task 1-9 已實作並以 TDD、targeted tests 與分批 full-suite 驗證；正式程式碼已改為 single-writer contract。Task 10 正在處理 service port validation 與 Hermes final acceptance。
 
 ## Observed State
 
@@ -153,6 +153,8 @@ Streamlit adapter OR FastAPI adapter
 
 ## 目前狀態
 
-`awaiting-review`
+`implementation-complete-pending-service-port-validation`
 
-本 Brief 尚未授權 production code 修改。下一步是使用者審閱書面 spec；批准後才撰寫 implementation plan。
+已完成 commit：`7858465`、`b478ef3`、`6d850ab`、`07e77ea`、`15d5460`、`df103b5`、`a4c97ac`、`2de4817`、`948cce8`。
+
+正式口徑、baseline registry、report sheets、Forecast、GMV 與 UI filter 語義均未修改。因隔離 worktree 的標準 ports 被既有非受管服務佔用，最終 service acceptance / Hermes 需在可管理 port 環境重跑後才可標記 verified。

@@ -79,6 +79,9 @@ Hermes 可以讀取以下來源：
 - `app_workflows.py`
 - `backend/services/upload_preflight_service.py`
 - `backend/services/upload_rollback_service.py`
+- `backend/services/upload_lock_service.py`
+- `backend/services/upload_orchestrator_service.py`
+- `backend/services/cache_generation_service.py`
 - `backend/services/revenue_scope_service.py`
 
 ### Operations
@@ -104,6 +107,18 @@ Hermes 可以讀取以下來源：
 - `tests/test_upload_preflight_service.py`
 - `tests/test_upload_rollback_service.py`
 - `tests/test_upload_api.py`
+- `tests/test_upload_lock_service.py`
+- `tests/test_upload_orchestrator_service.py`
+- `tests/test_upload_single_writer_integration.py`
+
+### Single-Writer Evidence
+
+Hermes 必須讀取 `system_health` 的 `uploadCoordination`、`dataGeneration` 與 `uploadEvidence`：
+
+- lease busy 是資訊狀態，不代表 DB integrity failure；
+- generation 有 operation ID 但找不到同 operation ID history，必須報 degraded；
+- history 有 `cacheError` 或 generation signature 與目前 DB 不符，必須報 degraded；
+- Hermes 不得取得或顯示 lease owner 的來源檔案名稱。
 
 ---
 
