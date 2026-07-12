@@ -64,15 +64,30 @@ def _ensure_table(conn) -> None:
         "rollback_error": "TEXT",
         "drift_diagnosis_json": "TEXT",
         "monthly_baseline_json": "TEXT",
+        "operation_id": "TEXT",
+        "entry_point": "TEXT",
+        "stage_timings_json": "TEXT",
+        "cache_state": "TEXT",
+        "cache_error": "TEXT",
+        "data_generation_json": "TEXT",
     }
     for column, sqlite_type in migrations.items():
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {column} {sqlite_type}")
+    conn.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_NAME}_operation_id "
+        f"ON {TABLE_NAME}(operation_id) WHERE operation_id IS NOT NULL"
+    )
 
 
-def record_stability_history(gate: dict, context: dict | None = None) -> int:
+def record_stability_history(
+    gate: dict,
+    context: dict | None = None,
+    *,
+    db_path: str | None = None,
+) -> int:
     context = context or {}
-    conn = database.get_db_connection()
+    conn = database.get_db_connection(db_path=db_path)
     try:
         _ensure_table(conn)
         created_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -85,8 +100,9 @@ def record_stability_history(gate: dict, context: dict | None = None) -> int:
                 total_checks, drift_check_count, freshness_status,
                 freshness_update_count, latest_data_date, batch_summary_json,
                 upsert_summary_json, drift_diagnosis_json, gate_json, rollback_status,
-                monthly_baseline_json, backup_path, quarantine_path, post_rollback_gate_json, rollback_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                monthly_baseline_json, backup_path, quarantine_path, post_rollback_gate_json, rollback_error,
+                operation_id, entry_point, stage_timings_json, cache_state, cache_error, data_generation_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 created_at,
@@ -114,6 +130,12 @@ def record_stability_history(gate: dict, context: dict | None = None) -> int:
                 context.get("quarantine_path"),
                 _json_dump(context.get("post_rollback_gate") or {}),
                 context.get("rollback_error"),
+                context.get("operation_id"),
+                context.get("entry_point"),
+                _json_dump(context.get("stage_timings") or []),
+                context.get("cache_state"),
+                context.get("cache_error"),
+                _json_dump(context.get("data_generation") or {}),
             ),
         )
         conn.commit()
@@ -122,9 +144,13 @@ def record_stability_history(gate: dict, context: dict | None = None) -> int:
         conn.close()
 
 
-def list_stability_history(limit: int = 20) -> list[dict]:
+def list_stability_history(
+    limit: int = 20,
+    *,
+    db_path: str | None = None,
+) -> list[dict]:
     bounded_limit = max(1, min(int(limit), 100))
-    conn = database.get_db_connection()
+    conn = database.get_db_connection(db_path=db_path)
     try:
         _ensure_table(conn)
         conn.commit()
@@ -164,6 +190,12 @@ def list_stability_history(limit: int = 20) -> list[dict]:
             "quarantinePath": row["quarantine_path"],
             "postRollbackGate": _json_load(row["post_rollback_gate_json"], {}),
             "rollbackError": row["rollback_error"],
+            "operationId": row["operation_id"],
+            "entryPoint": row["entry_point"],
+            "stageTimings": _json_load(row["stage_timings_json"], []),
+            "cacheState": row["cache_state"],
+            "cacheError": row["cache_error"],
+            "dataGeneration": _json_load(row["data_generation_json"], {}),
         }
         for row in rows
     ]

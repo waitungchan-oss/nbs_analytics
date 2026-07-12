@@ -206,6 +206,13 @@ class StabilityHistoryItem(BaseModel):
     quarantinePath: str | None = None
     postRollbackGate: dict = Field(default_factory=dict)
     rollbackError: str | None = None
+    operationId: str | None = None
+    entryPoint: str | None = None
+    stageTimings: list[dict] = Field(default_factory=list)
+    cacheState: str | None = None
+    cacheError: str | None = None
+    dataGeneration: dict = Field(default_factory=dict)
+    monthlyBaseline: dict = Field(default_factory=dict)
 
 
 class StabilityHistoryResponse(BaseModel):

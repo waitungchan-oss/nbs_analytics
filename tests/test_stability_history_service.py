@@ -1,4 +1,5 @@
 import importlib
+import sqlite3
 
 import database
 
@@ -52,6 +53,12 @@ def test_record_and_list_stability_history_uses_dedicated_audit_table(tmp_path, 
                 "allMatched": True,
                 "checks": [{"month": "2026-01", "status": "matched"}],
             },
+            "operation_id": "op-1",
+            "entry_point": "streamlit",
+            "stage_timings": [{"階段": "正式 SQLite upsert", "秒數": 0.2}],
+            "cache_state": "streamlit_rebuilt",
+            "cache_error": None,
+            "data_generation": {"generation": 4, "operationId": "op-1"},
         },
     )
     rows = history_service.list_stability_history(limit=10)
@@ -77,6 +84,96 @@ def test_record_and_list_stability_history_uses_dedicated_audit_table(tmp_path, 
         "allMatched": True,
         "checks": [{"month": "2026-01", "status": "matched"}],
     }
+    assert rows[0]["operationId"] == "op-1"
+    assert rows[0]["entryPoint"] == "streamlit"
+    assert rows[0]["stageTimings"] == [{"階段": "正式 SQLite upsert", "秒數": 0.2}]
+    assert rows[0]["cacheState"] == "streamlit_rebuilt"
+    assert rows[0]["cacheError"] is None
+    assert rows[0]["dataGeneration"]["generation"] == 4
+
+
+def test_stability_history_uses_explicit_database_path_without_touching_default(tmp_path, monkeypatch):
+    default_path = tmp_path / "default.db"
+    history_path = tmp_path / "history.db"
+    monkeypatch.setattr(database, "DB_FILE", str(default_path))
+    history_service = importlib.import_module("backend.services.stability_history_service")
+
+    history_service.record_stability_history(
+        _sample_gate(),
+        {"upload_status": "success", "upload_message": "explicit", "source_files": []},
+        db_path=history_path,
+    )
+
+    rows = history_service.list_stability_history(limit=10, db_path=history_path)
+
+    assert len(rows) == 1
+    assert rows[0]["uploadMessage"] == "explicit"
+    assert not default_path.exists()
+
+
+def test_legacy_history_rows_deserialize_new_evidence_fields_with_defaults(tmp_path):
+    history_path = tmp_path / "legacy-history.db"
+    connection = sqlite3.connect(history_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE stability_gate_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                upload_status TEXT NOT NULL,
+                upload_message TEXT NOT NULL,
+                source_files_json TEXT NOT NULL,
+                core_status TEXT NOT NULL,
+                baseline_month TEXT,
+                formatted_expected_total TEXT,
+                formatted_actual_total TEXT,
+                delta_amount REAL NOT NULL DEFAULT 0,
+                matched_checks INTEGER NOT NULL DEFAULT 0,
+                total_checks INTEGER NOT NULL DEFAULT 0,
+                drift_check_count INTEGER NOT NULL DEFAULT 0,
+                freshness_status TEXT NOT NULL,
+                freshness_update_count INTEGER NOT NULL DEFAULT 0,
+                latest_data_date TEXT,
+                batch_summary_json TEXT NOT NULL,
+                upsert_summary_json TEXT NOT NULL,
+                drift_diagnosis_json TEXT NOT NULL,
+                gate_json TEXT NOT NULL,
+                monthly_baseline_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO stability_gate_history (
+                created_at, upload_status, upload_message, source_files_json,
+                core_status, freshness_status, batch_summary_json,
+                upsert_summary_json, drift_diagnosis_json, gate_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-07-12T12:00:00+08:00",
+                "accepted",
+                "legacy",
+                "[]",
+                "matched",
+                "stable",
+                "[]",
+                "[]",
+                "{}",
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    history_service = importlib.import_module("backend.services.stability_history_service")
+    row = history_service.list_stability_history(limit=1, db_path=history_path)[0]
+
+    assert row["uploadMessage"] == "legacy"
+    assert row["operationId"] is None
+    assert row["stageTimings"] == []
+    assert row["dataGeneration"] == {}
 
 
 def test_stability_history_limit_is_bounded(tmp_path, monkeypatch):
