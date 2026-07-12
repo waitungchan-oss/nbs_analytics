@@ -78,13 +78,20 @@ class UploadLease:
         if not self._active:
             return
         try:
-            self._connection.rollback()
+            try:
+                owner = _read_owner(self._owner_path)
+                if owner.get("operation_id") == self.operation.operation_id:
+                    self._owner_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         finally:
-            self._connection.close()
-            owner = _read_owner(self._owner_path)
-            if owner.get("operation_id") == self.operation.operation_id:
-                self._owner_path.unlink(missing_ok=True)
-            self._active = False
+            try:
+                self._connection.rollback()
+            finally:
+                try:
+                    self._connection.close()
+                finally:
+                    self._active = False
 
     def __enter__(self):
         return self
