@@ -89,3 +89,25 @@ def advance_cache_generation(
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, target)
     return load_cache_generation(target, db_path=db)
+
+
+def refresh_cache_generation_signature(
+    *,
+    db_path: str | Path,
+    path: str | Path | None = None,
+) -> dict:
+    target = Path(path or DEFAULT_GENERATION_PATH)
+    db = Path(db_path)
+    previous = load_cache_generation(target, db_path=db)
+    value = {
+        "generation": int(previous.get("generation", 0)),
+        "operationId": previous.get("operationId"),
+        "status": str(previous.get("status") or "uninitialized"),
+        "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "dbSignature": _db_signature(db),
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, target)
+    return load_cache_generation(target, db_path=db)

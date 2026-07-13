@@ -48,3 +48,40 @@ def test_generation_advances_atomically_with_database_signature(tmp_path):
     stale = load_cache_generation(generation_path, db_path=db_path)
     assert stale["signatureMatched"] is False
     assert stale["cacheToken"] != loaded["cacheToken"]
+
+
+def test_generation_signature_refresh_preserves_generation_and_operation(tmp_path):
+    from backend.services.cache_generation_service import (
+        advance_cache_generation,
+        load_cache_generation,
+        refresh_cache_generation_signature,
+    )
+
+    db_path = tmp_path / "live.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("CREATE TABLE sample (value TEXT)")
+        connection.commit()
+    finally:
+        connection.close()
+    generation_path = tmp_path / "data_generation.json"
+    before = advance_cache_generation(
+        db_path=db_path,
+        operation_id="upload-op",
+        status="accepted",
+        path=generation_path,
+    )
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("INSERT INTO sample VALUES ('governance metadata')")
+        connection.commit()
+    finally:
+        connection.close()
+    assert load_cache_generation(generation_path, db_path=db_path)["signatureMatched"] is False
+
+    refreshed = refresh_cache_generation_signature(db_path=db_path, path=generation_path)
+
+    assert refreshed["generation"] == before["generation"]
+    assert refreshed["operationId"] == before["operationId"]
+    assert refreshed["status"] == before["status"]
+    assert refreshed["signatureMatched"] is True

@@ -9,25 +9,25 @@
       "month": "2026-01",
       "expectedTotal": 10711053.50,
       "displayTotal": 10711054,
-      "mode": "monitoring"
+      "mode": "blocking"
     },
     {
       "month": "2026-02",
       "expectedTotal": 9765694.54,
       "displayTotal": 9765695,
-      "mode": "monitoring"
+      "mode": "blocking"
     },
     {
       "month": "2026-03",
       "expectedTotal": 14628841.00,
       "displayTotal": 14628841,
-      "mode": "monitoring"
+      "mode": "blocking"
     },
     {
       "month": "2026-04",
       "expectedTotal": 10506207.78,
       "displayTotal": 10506208,
-      "mode": "monitoring"
+      "mode": "blocking"
     },
     {
       "month": "2026-05",
@@ -40,7 +40,7 @@
       "month": "2026-06",
       "expectedTotal": 9083241.29,
       "displayTotal": 9083241,
-      "mode": "monitoring"
+      "mode": "blocking"
     }
   ]
 }

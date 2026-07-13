@@ -10,6 +10,7 @@ from typing import Callable
 
 import database
 
+from backend.services.cache_generation_service import refresh_cache_generation_signature
 from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -242,8 +243,9 @@ def _record_promotion_event(
     new_modes: dict,
     snapshot: dict,
     backup_path: str,
+    db_path=None,
 ) -> int:
-    conn = database.get_db_connection()
+    conn = database.get_db_connection(db_path)
     try:
         _ensure_promotion_table(conn)
         cursor = conn.execute(
@@ -306,11 +308,14 @@ def promote_monthly_baselines(
     confirmed: bool,
     expected_record_id: int,
     registry_path: Path | None = None,
+    db_path=None,
+    generation_path: Path | None = None,
 ) -> dict:
     if not confirmed:
         raise ValueError("promotion confirmation is required")
 
     path = Path(registry_path or REGISTRY_FILE)
+    live_db_path = database.resolve_db_path(db_path)
     registry = load_monthly_baseline_registry(path)
     evaluation = evaluate_monthly_baselines(registry)
     governance = build_monthly_baseline_governance(evaluation=evaluation)
@@ -341,10 +346,15 @@ def promote_monthly_baselines(
             new_modes=new_modes,
             snapshot=evaluation,
             backup_path=str(backup_path),
+            db_path=live_db_path,
         )
         verified = load_monthly_baseline_registry(path)
         if any(row.get("mode") != "blocking" for row in verified["baselines"]):
             raise RuntimeError("monthly baseline promotion verification failed")
+        generation = refresh_cache_generation_signature(
+            db_path=live_db_path,
+            path=generation_path,
+        )
     except Exception:
         shutil.copy2(backup_path, path)
         if temp_path.exists():
@@ -358,4 +368,5 @@ def promote_monthly_baselines(
         "uploadRecordId": int(expected_record_id),
         "promotionEventId": event_id,
         "backupPath": str(backup_path),
+        "dataGeneration": generation,
     }
