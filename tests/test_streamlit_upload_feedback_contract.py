@@ -201,6 +201,14 @@ def test_initial_dashboard_load_defers_ai_cache_rebuild():
     assert "_load_and_compute_cache()" not in source
 
 
+def test_initial_dashboard_cache_load_does_not_trigger_second_full_rerun():
+    source = _pages_function_source("_render_dashboard_tab")
+    cache_load_start = source.index("_load_and_compute_cache(include_ai=False)")
+    cache_assignment = source.index('cache = st.session_state["PROCESSED_DATA_CACHE"]')
+
+    assert "st.rerun()" not in source[cache_load_start:cache_assignment]
+
+
 def test_sidebar_keeps_theme_but_no_global_control_filters():
     sidebar_source = _workflows_function_source("_render_sidebar_shell")
     workflows_source = WORKFLOWS_PATH.read_text(encoding="utf-8")
@@ -242,6 +250,36 @@ def test_dashboard_uses_separate_filter_scopes_for_kpi_and_rank_sections():
     assert "_build_dashboard_kpis(s1, t_df, o_df, kpi_year_sel, kpi_month_sel, kpi_date_rng)" in source
     assert "_render_rank_and_drilldown(s1, t_df, o_df, rank_branch_sel, rank_sales_sel, rank_year_sel, rank_month_sel, rank_date_rng)" in source
     assert "左側控制中心" not in source
+
+
+def test_dashboard_persistent_repairs_are_gated_by_generation_and_rule_versions():
+    from app_workflows import _persistent_repair_token, _should_run_persistent_repairs
+
+    token = _persistent_repair_token("1:db-sha", operator_rule_version=1, subtable_rule_version=1)
+    assert _should_run_persistent_repairs(token, None) is True
+    assert _should_run_persistent_repairs(token, token) is False
+    next_token = _persistent_repair_token("2:new-db-sha", operator_rule_version=1, subtable_rule_version=1)
+    assert _should_run_persistent_repairs(next_token, token) is True
+
+
+def test_dashboard_repairs_refresh_generation_after_updates():
+    source = _pages_function_source("_render_dashboard_tab")
+    workflows = WORKFLOWS_PATH.read_text(encoding="utf-8")
+
+    assert "_run_persistent_repairs_before_load()" in source
+    assert "_persistent_repair_token(" in workflows
+    assert "refresh_cache_generation_signature(" in workflows
+
+
+def test_persistent_repair_gate_survives_streamlit_session_restart(tmp_path):
+    from app_workflows import _load_persistent_repair_token, _save_persistent_repair_token
+
+    state_path = tmp_path / "persistent_repair_state.json"
+    assert _load_persistent_repair_token(state_path) is None
+
+    _save_persistent_repair_token("1:db-sha|operator:1|subtable:1", state_path)
+
+    assert _load_persistent_repair_token(state_path) == "1:db-sha|operator:1|subtable:1"
 
 
 def test_upload_flow_profiles_all_post_write_guard_stages():

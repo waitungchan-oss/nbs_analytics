@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import io
 import json
+import os
 import pickle
 import time
 import traceback
@@ -31,7 +32,10 @@ from backend.services.dashboard_analytics_service import build_analytics_from_fa
 from backend.services.stability_history_service import record_stability_history  # noqa: E402
 from backend.services.upload_preflight_service import run_upload_preflight  # noqa: E402
 from backend.services.upload_rollback_service import handle_core_drift_rollback  # noqa: E402
-from backend.services.cache_generation_service import load_cache_generation  # noqa: E402
+from backend.services.cache_generation_service import (  # noqa: E402
+    load_cache_generation,
+    refresh_cache_generation_signature,
+)
 
 config_module = importlib.reload(config_module)
 database_module = importlib.reload(database_module)
@@ -113,6 +117,7 @@ AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
 EXPORT_CACHE_VERSION = 'export-lazy-v3'
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v1'
 AI_CACHE_DIR = Path(__file__).resolve().parent / '.nbs_runtime_cache'
+PERSISTENT_REPAIR_STATE_PATH = Path(__file__).resolve().parent / '.nbs_runtime' / 'persistent_repair_state.json'
 
 
 def _evaluate_monthly_baselines_for_runtime() -> dict:
@@ -1254,6 +1259,77 @@ def _repair_subtable_branch_assignments_before_load() -> None:
     st.session_state["PROCESSED_DATA_CACHE"] = None
     st.session_state["DB_LOADED_FLAG"] = False
     st.session_state["SUBTABLE_BRANCH_REPAIR_NOTICE"] = f"已依副表銷售點修正 {updated} 筆歸屬。"
+
+
+def _persistent_repair_token(
+    generation_token: str,
+    *,
+    operator_rule_version: int | None,
+    subtable_rule_version: int | None,
+) -> str:
+    return (
+        f"{generation_token}|operator:{operator_rule_version or 0}"
+        f"|subtable:{subtable_rule_version or 0}"
+    )
+
+
+def _should_run_persistent_repairs(current_token: str, checked_token: str | None) -> bool:
+    return bool(current_token) and current_token != checked_token
+
+
+def _load_persistent_repair_token(path: str | Path | None = None) -> str | None:
+    target = Path(path or PERSISTENT_REPAIR_STATE_PATH)
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    token = payload.get("checkToken") if isinstance(payload, dict) else None
+    return str(token) if token else None
+
+
+def _save_persistent_repair_token(token: str, path: str | Path | None = None) -> None:
+    target = Path(path or PERSISTENT_REPAIR_STATE_PATH)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"checkToken": str(token)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+
+
+def _run_persistent_repairs_before_load() -> None:
+    generation = load_cache_generation(db_path=database_module.DB_FILE)
+    current_token = _persistent_repair_token(
+        str(generation.get("cacheToken") or "0:missing"),
+        operator_rule_version=st.session_state.get("OPERATOR_REPAIR_RULE_VERSION"),
+        subtable_rule_version=st.session_state.get("SUBTABLE_BRANCH_REPAIR_RULE_VERSION"),
+    )
+    checked_token = st.session_state.get("PERSISTENT_REPAIR_CHECK_TOKEN") or _load_persistent_repair_token()
+    if not _should_run_persistent_repairs(current_token, checked_token):
+        st.session_state["PERSISTENT_REPAIR_CHECK_TOKEN"] = current_token
+        return
+
+    _repair_subtable_branch_assignments_before_load()
+    _repair_operator_assignments_before_load()
+    if not st.session_state.get("SUBTABLE_BRANCH_REPAIR_NOTICE") and not st.session_state.get("OPERATOR_REPAIR_NOTICE"):
+        st.session_state["PERSISTENT_REPAIR_CHECK_TOKEN"] = current_token
+        _save_persistent_repair_token(current_token)
+        return
+
+    try:
+        refreshed = refresh_cache_generation_signature(db_path=database_module.DB_FILE)
+    except Exception as exc:
+        st.warning(f"資料修復後更新 cache generation 失敗：{type(exc).__name__}: {exc}")
+        return
+
+    st.session_state["DB_LOADED_FLAG"] = False
+    st.session_state["PERSISTENT_REPAIR_CHECK_TOKEN"] = _persistent_repair_token(
+        str(refreshed.get("cacheToken") or "0:missing"),
+        operator_rule_version=st.session_state.get("OPERATOR_REPAIR_RULE_VERSION"),
+        subtable_rule_version=st.session_state.get("SUBTABLE_BRANCH_REPAIR_RULE_VERSION"),
+    )
+    _save_persistent_repair_token(st.session_state["PERSISTENT_REPAIR_CHECK_TOKEN"])
 
 def _refresh_cache_and_rerun() -> None:
     st.session_state["DB_LOADED_FLAG"] = False

@@ -72,6 +72,7 @@ from app_workflows import (
     _render_kpi_filter_center,
     _render_rank_filter_center,
     _render_sidebar_shell,
+    _run_persistent_repairs_before_load,
     _upload_date_source_diagnostics_from_frames,
     _uploaded_excel_frame,
     _upsert_summary_rows,
@@ -2219,8 +2220,7 @@ def _render_ai_and_exports(cache: dict) -> None:
                 st.info("目前沒有清洗異常日誌可下載。")
 
 def _render_dashboard_tab() -> None:
-    _repair_subtable_branch_assignments_before_load()
-    _repair_operator_assignments_before_load()
+    _run_persistent_repairs_before_load()
     if _invalidate_session_cache_if_generation_changed():
         st.rerun()
     subtable_notice = st.session_state.pop("SUBTABLE_BRANCH_REPAIR_NOTICE", None)
@@ -2241,7 +2241,6 @@ def _render_dashboard_tab() -> None:
         with st.spinner("載入階段：SQLite loaded → Dashboard facts ready → AI cache hit/rebuild check；Export workbooks 會按需載入。"):
             try:
                 _load_and_compute_cache(include_ai=False)
-                st.rerun()
             except Exception:
                 _render_error("從資料庫恢復數據失敗。", traceback.format_exc())
 
