@@ -24,11 +24,11 @@
 - Create: `backend/schemas/decisions.py`
 - Create: `tests/test_decision_service.py`
 
-- [ ] Write failing unit tests for target matching, missing targets, forecast gap, quality/health/baseline alerts.
-- [ ] Implement target config loading with explicit `not_configured` fallback.
-- [ ] Implement monthly target evaluation and deterministic alert severity.
-- [ ] Implement decision cards with evidence references and no write actions.
-- [ ] Run focused tests and commit.
+- [x] Write failing unit tests for target matching, missing targets, forecast gap, quality/health/baseline alerts.
+- [x] Implement target config loading with explicit `not_configured` fallback.
+- [x] Implement monthly target evaluation and deterministic alert severity.
+- [x] Implement decision cards with evidence references and no write actions.
+- [x] Run focused tests and commit.
 
 ### Task 2: FastAPI decision overview endpoint
 
@@ -37,10 +37,10 @@
 - Modify: `backend/main.py`
 - Create: `tests/test_decision_api.py`
 
-- [ ] Add `GET /api/decisions/overview` with typed response model.
-- [ ] Reuse existing service outputs and expose provenance/generation/cache status.
-- [ ] Add API contract and OpenAPI tests.
-- [ ] Run focused API tests and commit.
+- [x] Add `GET /api/decisions/overview` with typed response model.
+- [x] Reuse existing service outputs and expose provenance/generation/cache status.
+- [x] Add API contract and OpenAPI tests.
+- [x] Run focused API tests and commit.
 
 ### Task 3: Vue management decision panel
 
@@ -49,17 +49,17 @@
 - Modify: `frontend/src/App.vue`
 - Modify: `frontend/scripts/verify-cockpit-contract.mjs`
 
-- [ ] Add `getDecisionOverview()` and non-blocking load handling.
-- [ ] Add Management Decisions navigation and panel for target status, alerts and decision cards.
-- [ ] Bind values directly to API response; do not calculate in Vue.
-- [ ] Run `npm run verify` and `npm run build`; commit.
+- [x] Add `getDecisionOverview()` and non-blocking load handling.
+- [x] Add Management Decisions navigation and panel for target status, alerts and decision cards.
+- [x] Bind values directly to API response; do not calculate in Vue.
+- [x] Run `npm run verify` and `npm run build`; commit.
 
 ### Task 4: Full verification and Hermes
 
 **Files:**
 - Modify: none unless verification exposes a P2-5 regression.
 
-- [ ] Run decision targeted tests, full pytest, Vue checks and system acceptance.
-- [ ] Smoke test `/api/decisions/overview` and confirm scope/baseline provenance.
-- [ ] Run Hermes read-only inspection; require pass, SQLite integrity ok, baseline matched, generation matched, and issues empty.
-- [ ] Confirm clean worktree and report commit before merge options.
+- [x] Run decision targeted tests, full pytest, Vue checks and system acceptance.
+- [x] Smoke test `/api/decisions/overview` and confirm scope/baseline provenance.
+- [x] Run Hermes read-only inspection; require pass, SQLite integrity ok, baseline matched, generation matched, and issues empty.
+- [x] Confirm clean worktree and report commit before merge options.
