@@ -66,6 +66,10 @@ export function getDashboardFacts() {
   return requestJson('/api/dashboard/facts')
 }
 
+export function getDecisionOverview() {
+  return requestJson('/api/decisions/overview')
+}
+
 export function getDashboardSummary(filters) {
   return requestJson('/api/dashboard/summary', {
     method: 'POST',

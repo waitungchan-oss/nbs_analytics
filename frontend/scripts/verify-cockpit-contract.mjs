@@ -56,6 +56,13 @@ const requiredAppContracts = [
   '2026-06-22',
   'applyFilters',
   'scrollToSection'
+  ,'getDecisionOverview'
+  ,'Management Decisions'
+  ,'decisionOverview?.targetConfig'
+  ,'decisionOverview?.alerts'
+  ,'decisionOverview?.decisions'
+  ,'decisionOverview?.provenance?.generationToken'
+  ,'decisionError'
   ,'getDashboardAnalytics'
   ,'Annual Channel Summary'
   ,'Monthly Revenue Trend'
@@ -109,6 +116,10 @@ if (!api.includes('/api/dashboard/context') || !api.includes('/api/dashboard/sum
 
 if (!api.includes('/api/dashboard/facts') || !api.includes('getDashboardFacts')) {
   throw new Error('Vue must consume the Dashboard Facts API.')
+}
+
+if (!api.includes('/api/decisions/overview') || !api.includes('getDecisionOverview')) {
+  throw new Error('Vue must consume the Management Decisions API.')
 }
 
 for (const token of ['readApiError', 'uploadMonthlyData', 'statusCode', 'owner']) {

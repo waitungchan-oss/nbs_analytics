@@ -9,6 +9,7 @@ import {
   getDashboardFacts,
   getDashboardSummary,
   getDataQuality,
+  getDecisionOverview,
   getForecastInsights,
   getHealth,
   getStabilityHistory,
@@ -25,6 +26,8 @@ const health = ref(null)
 const context = ref(null)
 const facts = ref(null)
 const factsError = ref('')
+const decisionOverview = ref(null)
+const decisionError = ref('')
 const summary = ref(null)
 const analytics = ref(null)
 const dataQuality = ref(null)
@@ -65,6 +68,7 @@ const periodText = computed(() => {
 
 const navItems = computed(() => [
   { id: 'overview', label: 'Overview' },
+  { id: 'decisions', label: 'Management Decisions' },
   { id: 'diagnosis', label: 'Drift Diagnosis' },
   { id: 'analytics', label: 'Year / Month Analysis' },
   { id: 'ranking', label: 'Branch / Specialist Ranking' },
@@ -501,13 +505,16 @@ async function loadAll(initial = false) {
     if (initial) loading.value = true
     else refreshing.value = true
     errorMessage.value = ''
-    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload, factsResult] = await Promise.all([
+    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload, factsResult, decisionResult] = await Promise.all([
       getHealth(),
       getDashboardContext(),
       getStabilityHistory(20),
       getDataQuality(),
       getForecastInsights(),
       getDashboardFacts()
+        .then(payload => ({ payload }))
+        .catch(error => ({ error })),
+      getDecisionOverview()
         .then(payload => ({ payload }))
         .catch(error => ({ error }))
     ])
@@ -522,6 +529,13 @@ async function loadAll(initial = false) {
     } else {
       facts.value = factsResult.payload
       factsError.value = ''
+    }
+    if (decisionResult.error) {
+      decisionOverview.value = null
+      decisionError.value = decisionResult.error instanceof Error ? decisionResult.error.message : String(decisionResult.error)
+    } else {
+      decisionOverview.value = decisionResult.payload
+      decisionError.value = ''
     }
     if (initial) setDefaultFilters(contextPayload)
     ;[summary.value, analytics.value] = await Promise.all([
@@ -826,6 +840,84 @@ onMounted(() => {
             <div class="kpi-delta">{{ card.delta }}</div>
             <div class="kpi-note">{{ card.note }}</div>
           </article>
+        </div>
+      </section>
+
+      <section id="decisions" class="section">
+        <div class="section-head">
+          <div>
+            <div class="section-kicker">P2-5 Management Decisions</div>
+            <h2>目標、預警與管理層決策</h2>
+          </div>
+          <span class="history-status" :class="decisionOverview?.status === 'ready' ? 'ok' : 'degraded'">
+            {{ decisionOverview?.status || 'loading' }}
+          </span>
+        </div>
+
+        <div v-if="decisionError" class="health-issues">
+          <strong>Decision source unavailable</strong>
+          <div>{{ decisionError }}</div>
+        </div>
+
+        <div v-if="decisionOverview" class="panel decision-overview-panel">
+          <div class="panel-table-title">Decision Source</div>
+          <div class="panel-note">
+            Target config {{ decisionOverview?.targetConfig?.status || 'pending' }} ·
+            Facts generation {{ decisionOverview?.provenance?.generationToken || '—' }} ·
+            {{ decisionOverview?.provenance?.revenueScope || '正式口徑待確認' }}
+          </div>
+          <div v-if="decisionOverview?.targetConfig?.status === 'not_configured'" class="health-issues">
+            尚未設定管理目標；目前只顯示資料品質、系統健康與 Forecast 預警，不會捏造達成率。
+          </div>
+        </div>
+
+        <div v-if="decisionOverview?.targets?.length" class="panel table-panel">
+          <div class="panel-table-title">Actual vs Target</div>
+          <div class="table-scroll">
+            <table class="data-table compact">
+              <thead>
+                <tr><th>目標</th><th>月份</th><th>實際</th><th>目標</th><th>達成率</th><th>差距</th><th>Forecast</th><th>狀態</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="target in decisionOverview.targets" :key="target.id">
+                  <td>{{ target.label }}</td>
+                  <td>{{ target.month }}</td>
+                  <td>{{ moneyText(target.actualRevenue) }}</td>
+                  <td>{{ moneyText(target.targetRevenue) }}</td>
+                  <td>{{ target.attainmentPct == null ? '—' : `${target.attainmentPct}%` }}</td>
+                  <td>{{ moneyText(target.gapAmount) }}</td>
+                  <td>{{ moneyText(target.forecastedRevenue) }}</td>
+                  <td><span class="history-status" :class="target.status">{{ target.status }}</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div v-if="decisionOverview?.alerts?.length" class="decision-card-grid">
+          <article v-for="alert in decisionOverview.alerts" :key="alert.id" class="panel stat-panel decision-card" :class="`decision-${alert.severity}`">
+            <div class="panel-title">{{ alert.severity }} · {{ alert.code }}</div>
+            <div class="panel-value">{{ alert.title }}</div>
+            <div class="panel-note">{{ alert.summary }}</div>
+            <div class="decision-recommendation">建議：{{ alert.recommendation }}</div>
+          </article>
+        </div>
+
+        <div v-if="decisionOverview?.decisions?.length" class="panel table-panel">
+          <div class="panel-table-title">Decision Queue</div>
+          <div class="table-scroll">
+            <table class="data-table compact">
+              <thead><tr><th>優先級</th><th>決策事項</th><th>建議</th><th>狀態</th></tr></thead>
+              <tbody>
+                <tr v-for="decision in decisionOverview.decisions" :key="decision.id">
+                  <td><span class="history-status" :class="decision.priority">{{ decision.priority }}</span></td>
+                  <td><strong>{{ decision.title }}</strong><div class="history-subtext">{{ decision.summary }}</div></td>
+                  <td>{{ decision.recommendation }}</td>
+                  <td>{{ decision.status }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 
