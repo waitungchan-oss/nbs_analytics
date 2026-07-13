@@ -35,6 +35,7 @@ const uploadTourFile = ref(null)
 const uploadOtherFiles = ref([])
 const uploadBusy = ref(false)
 const uploadError = ref('')
+const uploadRefreshError = ref('')
 const uploadResult = ref(null)
 const uploadFormKey = ref(0)
 const reportBusy = ref('')
@@ -97,6 +98,22 @@ const uploadStatusTone = computed(() => {
   if (status === 'blocked') return 'critical'
   if (status === 'error') return 'critical'
   return 'degraded'
+})
+const uploadAcceptanceLabel = computed(() => {
+  const result = uploadResult.value
+  if (!result) return 'Pending'
+  if (result.status === 'success' && result.writeCommitted) return '已接受並寫入'
+  if (result.status === 'degraded') return '已寫入但需注意'
+  if (result.status === 'blocked') return '已阻擋，未寫入'
+  if (result.rollbackResult?.rollbackStatus === 'verification_failed') return '回滾驗證失敗'
+  if (result.status === 'error' && result.rollbackResult?.rollbackStatus === 'verified') return '已拒絕並回滾'
+  return result.status || '未知狀態'
+})
+const uploadGateLabel = computed(() => {
+  const result = uploadResult.value
+  return result?.monthlyBaseline?.allMatched === true
+    ? 'Monthly baseline matched'
+    : result?.stabilityGate?.status || result?.preflightReport?.status || 'Pending'
 })
 const acceptanceStatusCards = computed(() => [
   {
@@ -393,6 +410,7 @@ function resetUploadForm() {
   uploadTourFile.value = null
   uploadOtherFiles.value = []
   uploadError.value = ''
+  uploadRefreshError.value = ''
   uploadResult.value = null
   uploadFormKey.value += 1
 }
@@ -443,6 +461,7 @@ async function submitVueUpload() {
   try {
     uploadBusy.value = true
     uploadError.value = ''
+    uploadRefreshError.value = ''
     uploadResult.value = null
     const formData = new FormData()
     formData.append('main_file', uploadMainFile.value)
@@ -451,7 +470,10 @@ async function submitVueUpload() {
       formData.append('other_files', file)
     }
     uploadResult.value = await uploadMonthlyData(formData)
+    errorMessage.value = ''
     await loadAll(false)
+    uploadRefreshError.value = errorMessage.value
+    if (uploadRefreshError.value) errorMessage.value = ''
   } catch (error) {
     uploadError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -1275,8 +1297,17 @@ onMounted(() => {
             <strong>Upload Error</strong>
             <div>{{ uploadError }}</div>
           </div>
+          <div v-if="uploadRefreshError" class="health-issues">
+            <strong>Upload Refresh Error</strong>
+            <div>本次上傳回應已保留，但 dashboard / Facts 重新載入失敗：{{ uploadRefreshError }}</div>
+          </div>
 
           <div v-if="uploadResult" class="acceptance-status-grid upload-summary-grid">
+            <article class="panel stat-panel acceptance-stat-panel">
+              <div class="panel-title">Acceptance</div>
+              <div class="panel-value">{{ uploadAcceptanceLabel }}</div>
+              <div class="panel-note">{{ uploadResult?.writeCommitted ? '正式寫入已提交' : '正式 SQLite 未提交寫入' }}</div>
+            </article>
             <article class="panel stat-panel acceptance-stat-panel">
               <div class="panel-title">Message</div>
               <div class="panel-value">{{ uploadResult.message }}</div>
@@ -1288,6 +1319,11 @@ onMounted(() => {
               <div class="panel-note">{{ uploadResult.preflightReport?.message || '—' }}</div>
             </article>
             <article class="panel stat-panel acceptance-stat-panel">
+              <div class="panel-title">Stability Gate</div>
+              <div class="panel-value">{{ uploadGateLabel }}</div>
+              <div class="panel-note">{{ uploadResult.monthlyBaseline?.baselineMonth || '—' }}</div>
+            </article>
+            <article class="panel stat-panel acceptance-stat-panel">
               <div class="panel-title">Rollback</div>
               <div class="panel-value">{{ uploadResult.rollbackResult?.rollbackStatus || 'not_required' }}</div>
               <div class="panel-note">{{ uploadResult.rollbackResult?.rollbackError || '—' }}</div>
@@ -1297,6 +1333,11 @@ onMounted(() => {
               <div class="panel-value">{{ uploadResult.historyRecordId ? `#${uploadResult.historyRecordId}` : '—' }}</div>
               <div class="panel-note">{{ uploadResult.writeCommitted ? '寫入已完成' : '未寫入' }}</div>
             </article>
+          </div>
+
+          <div v-if="uploadResult" class="panel-note upload-observability-meta">
+            Operation {{ uploadResult?.operationId || '—' }} · Entry {{ uploadResult?.entryPoint || '—' }} ·
+            Cache {{ uploadResult?.cacheState || '—' }} · Generation {{ uploadResult?.dataGeneration?.cacheToken || '—' }}
           </div>
 
           <div v-if="uploadResult?.preflightReport" class="table-scroll acceptance-history-scroll">

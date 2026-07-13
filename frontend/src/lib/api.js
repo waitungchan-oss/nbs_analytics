@@ -1,5 +1,24 @@
 const API_BASE = ''
 
+export async function readApiError(response) {
+  const text = await response.text()
+  let detail = text
+  try {
+    const payload = text ? JSON.parse(text) : null
+    detail = payload?.detail ?? payload ?? text
+  } catch {
+    detail = text
+  }
+
+  const statusCode = response.status
+  if (detail && typeof detail === 'object' && detail.status === 'busy') {
+    const owner = detail.owner?.entry_point || detail.owner?.entryPoint || 'unknown'
+    return `${statusCode} ${response.statusText}: 目前已有另一個上傳交易進行中（執行入口：${owner}）`
+  }
+  const message = typeof detail === 'string' ? detail : JSON.stringify(detail)
+  return `${statusCode} ${response.statusText}${message ? `: ${message}` : ''}`
+}
+
 async function requestJson(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
@@ -10,8 +29,7 @@ async function requestJson(path, options = {}) {
   })
 
   if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`${response.status} ${response.statusText}${text ? `: ${text}` : ''}`)
+    throw new Error(await readApiError(response))
   }
 
   return response.json()
