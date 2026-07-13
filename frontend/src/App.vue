@@ -6,6 +6,7 @@ import {
   downloadQualityReport,
   getDashboardAnalytics,
   getDashboardContext,
+  getDashboardFacts,
   getDashboardSummary,
   getDataQuality,
   getForecastInsights,
@@ -22,6 +23,8 @@ const refreshing = ref(false)
 const errorMessage = ref('')
 const health = ref(null)
 const context = ref(null)
+const facts = ref(null)
+const factsError = ref('')
 const summary = ref(null)
 const analytics = ref(null)
 const dataQuality = ref(null)
@@ -73,6 +76,7 @@ const navItems = computed(() => [
 ])
 
 const revenueTotals = computed(() => summary.value?.revenueTotals || null)
+const factsSourceStatus = computed(() => facts.value?.status || (factsError.value ? 'unavailable' : 'pending'))
 const dataFreshness = computed(() => summary.value?.dataFreshness || null)
 const stabilityBaseline = computed(() => summary.value?.stabilityBaseline || null)
 const latestAcceptance = computed(() => stabilityHistory.value[0] || null)
@@ -475,18 +479,28 @@ async function loadAll(initial = false) {
     if (initial) loading.value = true
     else refreshing.value = true
     errorMessage.value = ''
-    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload] = await Promise.all([
+    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload, factsResult] = await Promise.all([
       getHealth(),
       getDashboardContext(),
       getStabilityHistory(20),
       getDataQuality(),
-      getForecastInsights()
+      getForecastInsights(),
+      getDashboardFacts()
+        .then(payload => ({ payload }))
+        .catch(error => ({ error }))
     ])
     health.value = healthPayload
     context.value = contextPayload
     stabilityHistory.value = historyPayload.items || []
     dataQuality.value = qualityPayload
     forecastInsights.value = forecastPayload
+    if (factsResult.error) {
+      facts.value = null
+      factsError.value = factsResult.error instanceof Error ? factsResult.error.message : String(factsResult.error)
+    } else {
+      facts.value = factsResult.payload
+      factsError.value = ''
+    }
     if (initial) setDefaultFilters(contextPayload)
     ;[summary.value, analytics.value] = await Promise.all([
       getDashboardSummary(filters.value),
@@ -1492,6 +1506,20 @@ onMounted(() => {
             <div class="panel-title">Audit</div>
             <div class="panel-value">{{ summary?.scopeAudit?.excluded_order_count ?? '—' }}</div>
             <div class="panel-note">Excluded order IDs</div>
+          </article>
+          <article class="panel stat-panel">
+            <div class="panel-title">Facts Source</div>
+            <div class="panel-value">{{ factsSourceStatus }}</div>
+            <div class="panel-note">
+              {{ facts.value?.serviceVersion || '—' }} ·
+              Cache {{ facts.value?.factsCacheStatus || '—' }} ·
+              Reconciliation {{ facts.value?.reconciliation?.status || '—' }}
+            </div>
+            <div class="panel-note">
+              Generation {{ facts.value?.generationToken || '—' }} ·
+              全域合計 {{ facts ? moneyText(facts.value?.kpiTotals?.combinedRevenue) : '—' }}
+            </div>
+            <div v-if="factsError" class="health-issues">Facts source unavailable：{{ factsError }}</div>
           </article>
         </div>
 
