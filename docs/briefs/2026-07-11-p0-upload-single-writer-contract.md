@@ -168,3 +168,13 @@ Streamlit adapter OR FastAPI adapter
 - monthly baseline governance：2026-01 至 2026-06 全部 `matched`；2026-05 blocking baseline 為 `HKD 12,057,968`。
 - virtual upload dry-run：`liveDbUnchanged: true`、`preflightStatus: matched`、`stabilityStatus: matched`、`rollbackStatus: not_required`、`formattedActualTotal: HKD 12,057,968`。
 - dry-run `Upload dry-run total`: `11.56s`，其中 preflight stability gate `4.40s`。
+
+## Main 遷移與正式封存（2026-07-13）
+
+- P0 與 P0.1 已 fast-forward 合併至 `main`，版本節點為 `95b693a`。
+- worktree 的正式 Record 14 SQLite 已透過 SQLite snapshot 遷移至 main。
+- 遷移前 main DB 備份：`nbs_marketing_data.db.backup_20260713_101635_845718`，integrity `ok`。
+- main DB 遷移後：旅行團 `6,676` 行、其他業務 `22,571` 行、最新日期 `2026-07-12`、latest acceptance Record `14`。
+- 2026-01 至 2026-06 已全部升級為 blocking，六個月 checks 均 `matched`。
+- P0.1 修正 baseline promotion audit 後 generation signature 不同步問題；generation 保持 `1`，operation ID 與 Record 14 history matched。
+- main service acceptance：`passed`；Hermes：`overallStatus: pass`；完整測試：`161 passed`；Hermes targeted tests：`80 passed`。
