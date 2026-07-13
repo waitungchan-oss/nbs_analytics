@@ -180,7 +180,6 @@ def build_dashboard_facts_read_model(
         "generationToken": facts["generationToken"],
         "cacheKey": facts["cacheKey"],
         "factsCacheStatus": facts["factsCacheStatus"],
-        "factsCachePath": facts["factsCachePath"],
         "revenueScope": facts["scopeAudit"]["scope_label"],
         "scopeAudit": facts["scopeAudit"],
         "kpiTotals": {

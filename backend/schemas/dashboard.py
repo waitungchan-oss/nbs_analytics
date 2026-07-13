@@ -175,7 +175,6 @@ class DashboardFactsResponse(BaseModel):
     generationToken: str
     cacheKey: str
     factsCacheStatus: str
-    factsCachePath: str
     revenueScope: str
     scopeAudit: dict
     kpiTotals: dict[str, float]
