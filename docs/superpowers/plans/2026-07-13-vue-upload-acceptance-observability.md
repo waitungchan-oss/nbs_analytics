@@ -23,11 +23,11 @@
 - Modify: `frontend/src/lib/api.js`
 - Test: `frontend/scripts/verify-cockpit-contract.mjs`
 
-- [ ] Add static assertions requiring JSON detail parsing and busy owner handling.
-- [ ] Run `npm run verify` and confirm the new contract fails.
-- [ ] Add a shared `readApiError(response)` helper and use it in `uploadMonthlyData`.
-- [ ] Preserve status code, HTTP status text, JSON `detail`, and busy owner entry point in the thrown message.
-- [ ] Run `npm run verify` and commit `feat: clarify vue upload api errors`.
+- [x] Add static assertions requiring JSON detail parsing and busy owner handling.
+- [x] Run `npm run verify` and confirm the new contract fails.
+- [x] Add a shared `readApiError(response)` helper and use it in `uploadMonthlyData`.
+- [x] Preserve status code, HTTP status text, JSON `detail`, and busy owner entry point in the thrown message.
+- [x] Run `npm run verify` and commit the upload observability implementation.
 
 ### Task 2: Upload acceptance display model
 
@@ -35,19 +35,19 @@
 - Modify: `frontend/src/App.vue`
 - Test: `frontend/scripts/verify-cockpit-contract.mjs`
 
-- [ ] Add computed display values for public status, preflight, stability gate, rollback, cache, history, operation and generation.
-- [ ] Add a result summary panel that binds directly to `uploadResult` fields and shows `writeCommitted` explicitly.
-- [ ] Keep existing preflight table and upload form behavior unchanged.
-- [ ] Show refresh failure separately without clearing a successful upload result.
-- [ ] Run `npm run verify` and `npm run build`; commit `feat: expose vue upload acceptance state`.
+- [x] Add computed display values for public status, preflight, stability gate, rollback, cache, history, operation and generation.
+- [x] Add a result summary panel that binds directly to `uploadResult` fields and shows `writeCommitted` explicitly.
+- [x] Keep existing preflight table and upload form behavior unchanged.
+- [x] Show refresh failure separately without clearing a successful upload result.
+- [x] Run `npm run verify` and `npm run build`; commit `feat: expose vue upload acceptance state`.
 
 ### Task 3: Cross-layer verification and Hermes
 
 **Files:**
 - Modify: none unless verification exposes a P2-4 regression.
 
-- [ ] Run upload API, orchestrator, rollback, and history targeted tests.
-- [ ] Run full pytest and system acceptance.
-- [ ] Verify Vue contract/build and `GET /api/dashboard/facts` remains healthy.
-- [ ] Run Hermes read-only inspection and require pass, SQLite integrity ok, baseline matched, generation matched, and no issues.
-- [ ] Confirm clean worktree and report commit before offering merge back to `main`.
+- [x] Run upload API, orchestrator, rollback, and history targeted tests.
+- [x] Run full pytest and system acceptance.
+- [x] Verify Vue contract/build and `GET /api/dashboard/facts` remains healthy.
+- [x] Run Hermes read-only inspection and require pass, SQLite integrity ok, baseline matched, generation matched, and no issues.
+- [x] Confirm clean worktree and report commit before offering merge back to `main`.
