@@ -44,6 +44,10 @@ export function getDashboardContext() {
   return requestJson('/api/dashboard/context')
 }
 
+export function getDashboardFacts() {
+  return requestJson('/api/dashboard/facts')
+}
+
 export function getDashboardSummary(filters) {
   return requestJson('/api/dashboard/summary', {
     method: 'POST',

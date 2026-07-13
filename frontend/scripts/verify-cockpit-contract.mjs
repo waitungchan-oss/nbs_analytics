@@ -107,6 +107,14 @@ if (!api.includes('/api/dashboard/context') || !api.includes('/api/dashboard/sum
   throw new Error('API client must use dashboard context and summary endpoints.')
 }
 
+if (!api.includes('/api/dashboard/facts') || !api.includes('getDashboardFacts')) {
+  throw new Error('Vue must consume the Dashboard Facts API.')
+}
+
+for (const token of ['getDashboardFacts', 'facts.value?.generationToken', 'facts.value?.factsCacheStatus', 'Facts Source']) {
+  if (!app.includes(token)) throw new Error(`App.vue is missing Facts consumer token: ${token}`)
+}
+
 if (app.includes('v-model="filters.years" multiple') || app.includes('v-model="filters.months" multiple')) {
   throw new Error('Phase 2D cockpit must not use cramped native multi-select controls for years/months.')
 }
