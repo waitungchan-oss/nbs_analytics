@@ -1,8 +1,11 @@
 # NBS Analytics 系統全景地圖導航
 
-更新日期：2026-06-30  
+更新日期：2026-07-13
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`  
 正式收入口徑：`不含掛賬核銷與TT退款轉團款`
+
+目前正式版本節點：`main@5046973`
+最新正式資料：Acceptance Record `14`；最新日期 `2026-07-12`
 
 ---
 
@@ -28,6 +31,10 @@ NBS Analytics 是一套本地企業營運駕駛艙：以 Streamlit 作為基準 
 - 上傳後的快速重建預設先跳過 AI / backtest 快取；需要補算時，使用者可在 AI Forecast 區手動按下「補算 AI」再做完整重建。
 - Phase 2R 後，Streamlit 已拆成 thin entrypoint + page orchestration + workflow helpers；`app.py` 不再承擔大段 rendering 與業務 workflow。
 - Phase 2I 啟動器統一管理 Streamlit / FastAPI / Vue；同專案既有服務佔用預設 port 時可被採納，不會誤判為未知程序。
+- Streamlit 與 FastAPI 兩個正式上傳入口共用 `UploadOrchestrator`，並由 SQLite cross-process lease 保證同一時間只有一個 writer。
+- 所有 preflight、正式 upsert、governed gate、rollback、history 與 cache generation 都綁定明確 `db_path`，不再暫時改寫 `database.DB_FILE`。
+- 2026-01 至 2026-06 月度基準已全部升級為 blocking；目前六個月 checks 均 matched，2026-05 frozen baseline 維持 `HKD 12,057,968`。
+- Acceptance history、upload operation ID 與 data generation signature 互相對應；Hermes 會把缺失或 signature mismatch 視為 degraded/fail。
 
 ---
 
@@ -35,12 +42,20 @@ NBS Analytics 是一套本地企業營運駕駛艙：以 Streamlit 作為基準 
 
 ```mermaid
 flowchart TD
-    A["Excel 原始資料\n營收主表 / 旅行團副表 / 其它業務副表"] --> B["上傳 preflight\n日期來源診斷 + batchSummary"]
+    A["Excel 原始資料\n營收主表 / 旅行團副表 / 其它業務副表"] --> A1["Streamlit / FastAPI adapter"]
+    A1 --> A2["SQLite cross-process lease\n同一時間只有一個 writer"]
+    A2 --> B["UploadOrchestrator\npreflight + 日期診斷 + batchSummary"]
     B --> C{"主表收款時間\n是否覆蓋目標日期?"}
     C -- "否：副表有交易但主表無收款" --> W["UI warning\n提示正式收入日期缺口"]
     C -- "是 / 一般批次" --> D["pipeline.process_raw_files\n單號清洗、分社映射、副表匹配、銷售員修正"]
-    D --> E["database.upsert_to_db\n熱備份 + 依來源單據號刪舊寫新"]
-    E --> F["nbs_marketing_data.db\nSQLite: tour_data / others_data"]
+    D --> E["明確 live db_path\n熱備份 + 正式 SQLite upsert"]
+    E --> E1["Governed stability gate\n月度 blocking baseline"]
+    E1 --> E2{"Blocking checks\n是否 matched?"}
+    E2 -- "drift" --> E3["Rollback + 二次 gate 驗證"]
+    E2 -- "matched" --> F["nbs_marketing_data.db\nSQLite: tour_data / others_data"]
+    E3 --> F
+    F --> F1["一筆 Stability History\noperation ID + timings + rollback evidence"]
+    F1 --> F2["Data Generation\nDB signature + cache token"]
     F --> G["app_workflows._build_revenue_scope_frames\n正式淨收入口徑"]
     G --> H["pipeline.build_dashboard_data\n分社/專職/產品/線路/票務統計"]
     G --> I["forecasting.run_ai_prediction_tracks\nDaily / 7-Day / Month-End"]
@@ -73,8 +88,8 @@ Phase 2R 後，Streamlit 不再由單一大型 `app.py` 承擔所有 rendering �
 | 模組 | 職責 |
 |---|---|
 | `app.py` | Streamlit thin defensive entrypoint；保留 `st.set_page_config`、安全匯入、`main()` 調用與白屏防護。 |
-| `app_pages.py` | 三個 tab、上傳區、經營大盤各 section、GMV 排除看板與業務規則配置的頁面編排。 |
-| `app_workflows.py` | 上傳診斷、batch summary、SQLite upsert audit、stability gate、cache、Data Quality、Entity Audit、Forecast Governance、Feature Store、Causal、Export 等 workflow helpers。 |
+| `app_pages.py` | 三個 tab、上傳區、經營大盤各 section、局部篩選、GMV 排除看板與業務規則配置的頁面編排。 |
+| `app_workflows.py` | Streamlit upload adapter、日期診斷、cache、Data Quality、Entity Audit、Forecast Governance、Feature Store、Causal、Export 等 workflow helpers。正式 upload transaction 交由 backend orchestrator。 |
 | `app_styles.py` | Streamlit CSS、深淺色 token、sidebar 與控制中心視覺樣式。 |
 | `streamlit_rendering.py` | Sidebar navigation、section anchor、cards/table/chart shared renderer。 |
 
@@ -82,7 +97,9 @@ Phase 2R 後，Streamlit 不再由單一大型 `app.py` 承擔所有 rendering �
 
 重要入口：
 
-- `app_pages._render_upload_area()`：上傳主副表，先做日期來源診斷與 upload preflight，再進清洗與 upsert。
+- `app_pages._render_upload_area()`：收集主副表並交給 Streamlit upload adapter；busy path 在讀 Excel 前即被 shared lease 阻擋。
+- `backend.services.upload_orchestrator_service.execute_upload_operation()`：兩個入口共用的正式 transaction；依序執行 preflight、upsert、governed gate、rollback、history 與 generation。
+- `backend.services.upload_lock_service`：使用 `.nbs_runtime/upload_coordination.db` 的 SQLite exclusive lease 做跨 process single-writer coordination。
 - `app_workflows._upload_date_source_diagnostics()`：比較主表 `收款時間` 與副表 `交易時間`，避免副表交易日期被誤認為正式收入日期。
 - `backend.services.upload_preflight_service`：提供 upload preflight response contract；`batchSummary` 包含最早/最晚收款時間、金額合計與是否包含指定日期。
 - `app_workflows._build_revenue_scope_frames()`：排除 `掛賬核銷` 與 `TT 退款轉團款` 的來源單據號，生成正式 analysis frames。
@@ -96,7 +113,7 @@ Phase 2R 後，Streamlit 不再由單一大型 `app.py` 承擔所有 rendering �
 - `_compute_causal_driver_analytics()`：按期間比較拆解營收變動 driver；是解釋型分析，不是嚴格因果。
 - `SIDEBAR_NAV_GROUPS`：定義左側 submenu 分組、anchor、狀態 badge 與語義類型。
 - `_render_sidebar_navigation()`：渲染頁內導覽；目前使用純 hash anchor，例如 `#section-ai-forecast`，避免用 `?nav=` 造成 Streamlit 重新整理。
-- `_render_sidebar_control_header()` / `_sidebar_control_center()`：渲染控制中心與提交式篩選；控制中心不再承擔導航功能。
+- Sidebar 現在只保留 Navigation 與介面主題；資料篩選已移入主畫面並拆成 KPI 與門店/產品兩組局部 filter state。
 - `app_pages._render_gmv_exclusion_tab()`：第 3 個 tab，讀交易號碼清單，扣除匹配 `來源單據號`，生成 GMV 派生視角。
 - `_compute_export_workbooks()`：生成正式三份 workbook；GMV 排除版也沿用此 builder，只是輸入資料先被扣除訂單。
 
@@ -122,6 +139,7 @@ GMV 排除訂單看板
 - `EXCLUDE_PREFIXES`：入庫前排除的來源單據號前綴。
 - `SALES_REP_LIST`：專職銷售代表名單。
 - `CRUISE_DEPTS`：歸類為郵輪的團負責人部門。
+- `BRANCH_REASSIGNMENT_OVERRIDES`：受限月份或指定訂單的分社歸屬 override；目前包含 2026-06 上環服務點至 `0A展覽會場專用` 的治理規則。
 
 ### 3.3 `pipeline.py`：Excel 清洗、匹配與報表生成層
 
@@ -140,6 +158,8 @@ GMV 排除訂單看板
 - `tour_data` 條件：主副表匹配成功且副表資料來源為 `旅行團`。
 - `others_data`：票務、其它業務、未匹配或非旅行團資料。
 - `build_dashboard_data()` 產出完整 workbook 結構；GMV 排除報表沿用同一套 sheets。
+- `分社經營統計_含銷售員` 按分社、銷售員與日期輸出旅行團/郵輪/票務金額、旅行團交易人數及票務交易數量；其金額與人數/數量需與對應正式 sheets 守恆。
+- 分社 override 先按規則限制月份、來源分社與指定訂單，再同步套用到正式寫入與報表生成；不得用 dashboard 或 export formatting 補數。
 
 ### 3.4 `database.py`：SQLite 持久化與 Upsert 層
 
@@ -163,13 +183,28 @@ nbs_marketing_data.db
 - `others_data`：票務、其它業務、未匹配或非旅行團資料。
 - `temp_ids`：upsert 刪舊時的技術輔助表。
 
-目前實例狀態（2026-06-30 本機狀態）：
+目前正式實例狀態（2026-07-13 驗收）：
 
-- `tour_data` 存在，最大 `收款時間` 到 `2026-06-29 19:08:12`。
-- `others_data` 存在，最大 `收款時間` 到 `2026-06-29 18:02:39`。
-- 2026-06-15 已入庫；先前 upload UI 顯示「未解析到 2026-06-15」屬 preflight batch summary contract false warning，已修正。
+- `tour_data`：`6,676` 行。
+- `others_data`：`22,571` 行。
+- 最新正式資料日期：`2026-07-12`。
+- 最新 acceptance：Record `14`，upload status `accepted`，rollback `not_required`。
+- SQLite integrity：`ok`；data generation `1`，operation ID 與 Record 14 history matched，DB signature matched。
 
-### 3.5 `forecasting.py`：AI 預測、回測與診斷層
+### 3.5 Upload Single-Writer 與治理服務
+
+| 模組 | 職責 |
+|---|---|
+| `upload_action_service.py` | FastAPI adapter；取得 shared lease 後把 request 轉交 orchestrator。 |
+| `upload_lock_service.py` | 建立 `UploadOperation` 與跨 process SQLite lease；busy 時不讀檔、不做 backup/preflight/history。 |
+| `upload_orchestrator_service.py` | 唯一正式 upload transaction contract。 |
+| `upload_preflight_service.py` | 在明確 temp DB 執行清洗、口徑及 stability 預演，不改全域 DB target。 |
+| `monthly_baseline_service.py` | 評估六個月 blocking baseline、組合 governed gate、保存 promotion audit。 |
+| `stability_history_service.py` | 每次 operation 保存一筆完整 acceptance、rollback、timings、monthly 與 generation evidence。 |
+| `cache_generation_service.py` | 保存 generation、operation ID 與 DB SHA-256；promotion metadata write 後刷新 signature，但不額外增加 generation。 |
+| `system_health_service.py` | 對照 lease、SQLite integrity、history、generation 與 DB signature，供 API/Hermes 監測。 |
+
+### 3.6 `forecasting.py`：AI 預測、回測與診斷層
 
 正式 tracks：
 
@@ -201,7 +236,7 @@ nbs_marketing_data.db
 - Forecast Governance、Feature Store / Lead Signal 都從現有 backtest/cache 派生，不重訓、不改權重。
 - 當 AI cache 被延後時，首頁仍會先顯示營運 dashboard；補算是使用者顯式操作，不會因為刷新頁面自動觸發。
 
-### 3.6 `business_calendar.py`：香港日曆與旅遊展特徵層
+### 3.7 `business_calendar.py`：香港日曆與旅遊展特徵層
 
 職責：
 
@@ -215,7 +250,7 @@ nbs_marketing_data.db
 .venv/bin/python scripts/validate_business_calendar.py
 ```
 
-### 3.7 `visuals.py`：圖表視覺層
+### 3.8 `visuals.py`：圖表視覺層
 
 職責：
 
@@ -231,20 +266,22 @@ nbs_marketing_data.db
 
 ```text
 Excel 上傳
-→ 日期來源診斷
-→ process_raw_files()
-→ df_tour_matched / df_others_matched
-→ upsert_to_db()
-→ hot backup
-→ delete existing source ids
-→ append compatible columns
-→ SQLite tables
+→ Streamlit / FastAPI adapter
+→ shared cross-process lease
+→ preflight temp DB + 日期來源診斷
+→ governed blocking gate
+→ live DB hot backup + upsert
+→ post-write governed gate
+→ matched：寫一筆 history + 推進 generation
+→ drift：rollback + 二次 gate + history/generation evidence
+→ release lease
 ```
 
 讀取生命週期：
 
 ```text
 Streamlit 啟動或刷新
+→ 比對 data generation cache token
 → load_all_data_from_db()
 → normalize_runtime_columns()
 → _build_revenue_scope_frames()
@@ -274,9 +311,9 @@ GMV 排除後資料
 
 ## 5. 三個 Dashboard Tab
 
-### 5.0 左側 Side Menu 與控制中心
+### 5.0 左側 Navigation 與主畫面局部篩選
 
-左側欄目前分成兩個互不混淆的區域：
+左側欄目前只處理導航與介面主題：
 
 1. `Navigation`
    - 用於頁內快速跳轉，不負責篩選。
@@ -285,10 +322,14 @@ GMV 排除後資料
    - Active 狀態由 CSS `:target` / `:has()` 判斷目前 hash section，不依賴 Streamlit rerun。
    - 狀態 badge 用於標示語義：`正式`、`只讀`、`稽核`、`人工確認`、`宏觀`、`回測`、`治理`、`診斷`、`解釋型`、`匯出`。
 
-2. `Control Center`
-   - 用於 `介面主題`、年份、月份、日期、分社、專職視角、套用篩選與重設。
-   - 採提交式篩選，避免點擊 navigation 時改變資料視角。
-   - 深色 / 淺色主題切換只影響 UI token，不改 SQLite、AI Forecast、WAPE 或 Export。
+2. `介面主題`
+   - 深色 / 淺色切換只影響 UI token，不改 SQLite、AI Forecast、WAPE 或 Export。
+
+資料篩選已移到主畫面並拆成兩組互不污染的局部控制：
+
+- `營運總覽與管理層 KPI 篩選`：只影響 KPI/營運總覽相關區塊。
+- `門店與產品分析篩選`：只影響門店業績排行榜與產品佔比下鑽。
+- 正式口徑、AI Forecast、治理、Export 與其它區塊不會被這兩組局部篩選偷偷重算。
 
 Side menu 收合按鈕仍使用 Streamlit 原生 sidebar control，但 CSS 已調整到品牌區附近，與 `NBS Analytics` identity 保持水平對齊。這是 UI 層行為，不改任何資料流。
 
@@ -297,8 +338,9 @@ Side menu 收合按鈕仍使用 Streamlit 原生 sidebar control，但 CSS 已�
 內容：
 
 - 資料庫狀態與上傳入口。
-- 左側 Navigation submenu 與 Control Center。
-- 控制中心：年份、月份、日期、分社、專職、深淺色主題。
+- 左側 Navigation submenu 與介面主題。
+- 營運總覽與管理層 KPI 局部篩選。
+- 門店與產品分析局部篩選。
 - Executive KPI。
 - 年度總覽。
 - 門店排行榜。
@@ -355,6 +397,7 @@ GMV排除訂單_匹配稽核.xlsx
 | Sheet 名稱 | 用途 |
 |---|---|
 | 分社經營統計 | 分社每日旅行團/郵輪/票務收入 |
+| 分社經營統計_含銷售員 | 分社、銷售員、日期層級的旅行團/郵輪/票務收入、旅行團交易人數與票務交易數量；總額與正式分社統計對齊 |
 | 專職經營統計 | 專職每日旅行團/郵輪/票務收入 |
 | 分社旅行團統計 | 分社旅行團交易人數 |
 | 專職旅行團統計 | 專職旅行團交易人數 |
@@ -398,6 +441,13 @@ AI cache：
 - 可用 `scripts/prewarm_ai_cache.py --status` 檢查。
 - 若上傳後先走快速重建，cache 可能暫時顯示 deferred；需要完整重算時，請回到 Streamlit AI Forecast 區手動按「補算 AI」。
 
+Data generation：
+
+- 位置：`.nbs_runtime/data_generation.json`。
+- accepted upload 或 verified rollback 推進 generation；保存 operation ID 與正式 DB signature。
+- Streamlit 以 `generation:sha256` cache token 判斷 session cache 是否失效。
+- 月度 baseline promotion 會寫 governance audit，因此完成後刷新 signature，但不把同一批 upload 誤算成新 generation。
+
 Export cache：
 
 - 正式三份大型 workbook 採 Lazy Export。
@@ -427,6 +477,9 @@ GMV 排除報表：
 .venv/bin/python scripts/inspect_sqlite_latest.py
 .venv/bin/python scripts/prewarm_ai_cache.py --status
 .venv/bin/python scripts/system_manager.py acceptance
+.venv/bin/python scripts/monthly_baseline_check.py
+.venv/bin/python scripts/hermes_post_change_check.py --json
+.venv/bin/python -m pytest -q
 ```
 
 上傳日期排查：
@@ -444,6 +497,14 @@ nbs_marketing_data.db.backup_YYYYMMDD_HHMMSS
 
 任何 upsert 或修復前會熱備份。
 
+Baseline drift 排查順序：
+
+1. upload operation ID / shared lease owner；
+2. 明確 live DB path、upsert summary 與 hot backup；
+3. governed monthly blocking gate、rollback 與 post-rollback gate；
+4. stability history、data generation signature 與 quarantine；
+5. 最後才檢查 dashboard / export rendering，禁止用顯示層掩蓋 drift。
+
 ---
 
 ## 9. 目前限制與後續方向
@@ -454,9 +515,13 @@ nbs_marketing_data.db.backup_YYYYMMDD_HHMMSS
 - Normal-Day Tight Guardrail 與 Two-Lane Selector 仍是診斷/實驗，不覆蓋正式 forecast。
 - GMV 排除清單目前不持久化，重開 session 需重新上傳。
 - SQLite 仍是本地單機資料庫，未做多人權限與 schema migration 管理。
+- Streamlit rerun / page-load hot path 仍有約 12–15 秒固定等待需要以 profiling 重新定位；這是 P1 效能範圍，不得改動 P0 single-writer 或 baseline contract。
 
-建議下一步：
+P1 下一步：
 
+- 執行 `Streamlit Rerun Hot Path` Brief：量測 no-op repair、hidden tab reload、cache hit/rebuild check，移除可證明不必要的固定等待。
+- 以 cache hit、session rerun、hidden tab 與服務重啟四種情境驗證，並保持正式 DB page-load read-only。
+- P1 完成後仍需跑完整 tests、service acceptance、monthly blocking baseline 與 Hermes。
 - 驗收 GMV 排除訂單看板的真實業務清單與報表 sheets。
 - 持續優化 Daily WAPE，但保持正式 forecast 與診斷模型分離。
 - 以 Feature Store / Lead Signal 的 `NoFutureLeak` 與 readiness matrix 作為下一輪 Daily WAPE 實驗入口。
@@ -471,14 +536,16 @@ nbs_marketing_data.db.backup_YYYYMMDD_HHMMSS
 目前 NBS Analytics 的資料鏈路是：
 
 ```text
-Excel → 日期診斷 → 清洗匹配 → SQLite → 正式淨口徑 → 經營統計 / AI Forecast / 回測診斷 / GMV 派生視角 → Dashboard + Excel 匯出
+Excel → shared lease → preflight temp DB → 清洗匹配 → live SQLite upsert → governed gate / rollback → history + generation → 正式淨口徑 → Dashboard / Forecast / Export / GMV 派生視角
 ```
 
-任何後續修改都應先確認四個邊界：
+任何後續修改都應先確認六個邊界：
 
 1. 是否改 SQLite 明細。
 2. 是否改正式收入口徑。
 3. 是否影響 AI Forecast / WAPE。
 4. 是否只是 session-only 派生視角。
+5. 是否繞過 single-writer、明確 DB path、rollback 或 history/generation contract。
+6. 是否仍保持 2026-01 至 2026-06 blocking checks matched，尤其 2026-05 `HKD 12,057,968`。
 
-只要這四個邊界清楚，系統就能繼續保持穩定、可驗證、可擴展。
+只要這六個邊界清楚，系統就能繼續保持穩定、可驗證、可擴展。
