@@ -271,6 +271,21 @@ def test_dashboard_repairs_refresh_generation_after_updates():
     assert "refresh_cache_generation_signature(" in workflows
 
 
+def test_streamlit_cache_load_uses_dashboard_facts_service():
+    source = _workflows_function_source("_load_and_compute_cache")
+
+    assert "build_dashboard_facts(" in source
+    assert '"facts_cache_status"' in source
+    assert '"facts_cache_key"' in source
+
+
+def test_streamlit_facts_service_uses_current_generation_token():
+    source = _workflows_function_source("_load_and_compute_cache")
+
+    assert "load_cache_generation(db_path=database_module.DB_FILE)" in source
+    assert "generation_token" in source
+
+
 def test_persistent_repair_gate_survives_streamlit_session_restart(tmp_path):
     from app_workflows import _load_persistent_repair_token, _save_persistent_repair_token
 

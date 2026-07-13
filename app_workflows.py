@@ -29,6 +29,7 @@ from backend.services.monthly_baseline_service import (  # noqa: E402
     promote_monthly_baselines,
 )
 from backend.services.dashboard_analytics_service import build_analytics_from_facts  # noqa: E402
+from backend.services.dashboard_facts_service import build_dashboard_facts  # noqa: E402
 from backend.services.stability_history_service import record_stability_history  # noqa: E402
 from backend.services.upload_preflight_service import run_upload_preflight  # noqa: E402
 from backend.services.upload_rollback_service import handle_core_drift_rollback  # noqa: E402
@@ -1141,24 +1142,38 @@ def _empty_ai_runtime_payload(message: str = "") -> dict:
     }
 
 def _load_and_compute_cache(include_ai: bool = True) -> None:
-    db_tour, db_others = load_all_data_from_db()
+    generation = load_cache_generation(db_path=database_module.DB_FILE)
+    generation_token = str(generation.get("cacheToken") or "0:missing")
+    branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
+    try:
+        facts = build_dashboard_facts(
+            db_path=database_module.DB_FILE,
+            generation_token=generation_token,
+            branch_mapping=branch_mapping,
+            target_branches_s3=target_branches,
+            cruise_depts=cruise_depts,
+            sales_rep_list=sales_reps,
+            cache_dir=AI_CACHE_DIR,
+        )
+    except Exception as exc:
+        st.session_state["PROCESSED_DATA_CACHE"] = None
+        st.session_state["DB_LOADED_FLAG"] = False
+        raise RuntimeError(
+            f"Dashboard Facts 建立失敗：db_path={database_module.DB_FILE}; "
+            f"generation_token={generation_token}; {type(exc).__name__}: {exc}"
+        ) from exc
+
+    db_tour = facts["rawTour"]
+    db_others = facts["rawOthers"]
     if db_tour.empty and db_others.empty:
         st.session_state["PROCESSED_DATA_CACHE"] = None
         st.session_state["DB_LOADED_FLAG"] = True
         return
-    branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
-    analysis_tour, analysis_others, scope_audit = _build_revenue_scope_frames(db_tour, db_others)
-    _, s1, s2 = build_dashboard_data_excluding_receipt_types(
-        db_tour,
-        db_others,
-        branch_mapping,
-        target_branches,
-        cruise_depts,
-        sales_reps,
-        ["掛賬核銷"],
-        excluded_payment_methods=["TT 退款轉團款"],
-        make_workbook=False,
-    )
+    analysis_tour = facts["analysisTour"]
+    analysis_others = facts["analysisOthers"]
+    scope_audit = facts["scopeAudit"]
+    s1 = facts["branchFacts"]
+    s2 = facts["specialistFacts"]
     ai_cache_key = _ai_cache_key(scope_audit, analysis_tour, analysis_others)
     legacy_ai_cache_key = _legacy_ai_cache_key(scope_audit)
     ai_payload, ai_cache_status, ai_cache_source_key = _load_ai_runtime_cache(ai_cache_key, fallback_key=legacy_ai_cache_key)
@@ -1201,11 +1216,13 @@ def _load_and_compute_cache(include_ai: bool = True) -> None:
         "export_cache_version": EXPORT_CACHE_VERSION,
         "official_export_schema": OFFICIAL_EXPORT_SCHEMA_CONTRACT,
         "scope": scope_audit,
+        "facts_service_version": facts["serviceVersion"],
+        "facts_cache_key": facts["cacheKey"],
+        "facts_cache_status": facts["factsCacheStatus"],
     }
     st.session_state["DB_LOADED_FLAG"] = True
-    generation = load_cache_generation(db_path=database_module.DB_FILE)
     st.session_state["DATA_GENERATION"] = int(generation.get("generation", 0))
-    st.session_state["DATA_GENERATION_TOKEN"] = str(generation.get("cacheToken") or "0:missing")
+    st.session_state["DATA_GENERATION_TOKEN"] = generation_token
 
 
 def _invalidate_session_cache_if_generation_changed() -> bool:
