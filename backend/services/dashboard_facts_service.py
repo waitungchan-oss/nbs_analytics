@@ -8,6 +8,7 @@ from pathlib import Path
 
 from database import load_all_data_from_db
 from pipeline import build_dashboard_data_excluding_receipt_types
+from backend.services.dashboard_analytics_service import build_analytics_from_facts
 from backend.services.revenue_scope_service import build_revenue_scope_frames
 
 
@@ -132,3 +133,67 @@ def build_dashboard_facts(
     _validate_payload(payload)
     _save_cached_payload(cache_path, payload)
     return payload
+
+
+def build_dashboard_facts_read_model(
+    *,
+    db_path: str | Path,
+    generation_token: str,
+    branch_mapping: dict,
+    target_branches_s3: list[str],
+    cruise_depts: list[str],
+    sales_rep_list: list[str],
+    cache_dir: str | Path | None = None,
+) -> dict:
+    facts = build_dashboard_facts(
+        db_path=db_path,
+        generation_token=generation_token,
+        branch_mapping=branch_mapping,
+        target_branches_s3=target_branches_s3,
+        cruise_depts=cruise_depts,
+        sales_rep_list=sales_rep_list,
+        cache_dir=cache_dir,
+    )
+    analytics = build_analytics_from_facts(
+        facts["branchFacts"],
+        facts["specialistFacts"],
+        {"years": [], "months": [], "dateRange": [], "branch": "全部分社", "salesGroup": "全部銷售組"},
+    )
+    branch_revenue = sum(row["totalRevenue"] for row in analytics["branchRanking"])
+    specialist_revenue = sum(row["totalRevenue"] for row in analytics["specialistRanking"])
+    product_rows = []
+    for product in ("旅行團", "郵輪", "票務"):
+        revenue = sum(
+            row["revenue"]
+            for rows in analytics["productDrilldown"].values()
+            for row in rows
+            if row["product"] == product
+        )
+        product_rows.append({"product": product, "revenue": float(revenue)})
+    total_revenue = sum(row["revenue"] for row in product_rows)
+    for row in product_rows:
+        row["sharePct"] = round(row["revenue"] / total_revenue * 100, 2) if total_revenue else 0.0
+
+    return {
+        "status": "ready",
+        "serviceVersion": facts["serviceVersion"],
+        "generationToken": facts["generationToken"],
+        "cacheKey": facts["cacheKey"],
+        "factsCacheStatus": facts["factsCacheStatus"],
+        "factsCachePath": facts["factsCachePath"],
+        "revenueScope": facts["scopeAudit"]["scope_label"],
+        "scopeAudit": facts["scopeAudit"],
+        "kpiTotals": {
+            "branchRevenue": float(branch_revenue),
+            "specialistRevenue": float(specialist_revenue),
+            "combinedRevenue": float(branch_revenue + specialist_revenue),
+            "tourRevenue": product_rows[0]["revenue"],
+            "cruiseRevenue": product_rows[1]["revenue"],
+            "ticketRevenue": product_rows[2]["revenue"],
+        },
+        "monthlyTotals": analytics["monthlyTrend"],
+        "branchRanking": analytics["branchRanking"],
+        "specialistRanking": analytics["specialistRanking"],
+        "productTotals": product_rows,
+        "reconciliation": analytics["reconciliation"],
+    }

@@ -169,6 +169,23 @@ class Reconciliation(BaseModel):
     checks: list[ReconciliationCheck]
 
 
+class DashboardFactsResponse(BaseModel):
+    status: str
+    serviceVersion: str
+    generationToken: str
+    cacheKey: str
+    factsCacheStatus: str
+    factsCachePath: str
+    revenueScope: str
+    scopeAudit: dict
+    kpiTotals: dict[str, float]
+    monthlyTotals: list[MonthlyTrendRow]
+    branchRanking: list[BranchRankingRow]
+    specialistRanking: list[SpecialistRankingRow]
+    productTotals: list[ProductDrilldownRow]
+    reconciliation: Reconciliation
+
+
 class DashboardAnalyticsResponse(BaseModel):
     appliedFilters: DashboardFilters
     revenueScope: str
