@@ -63,6 +63,11 @@ class ValidationRunner:
                 duration_ms=self._duration_ms(started),
                 timed_out=True,
             )
+        except OSError as exc:
+            raise CommandRejected(
+                f"approved validation executable could not be started: {exc}. "
+                "Check the approved repo virtualenv; PATH lookup and installation are disabled."
+            ) from exc
 
         return ValidationResult(
             command_id=command_id,
@@ -87,6 +92,9 @@ class ValidationRunner:
         prefix = config.get("prefix")
         if not isinstance(prefix, list) or not all(isinstance(item, str) for item in prefix):
             raise CommandRejected(f"command {command_id!r} has invalid argv")
+        if command_id in {"pytest_targeted", "py_compile"}:
+            prefix = list(prefix)
+            prefix[0] = str(self._resolve_interpreter(prefix[0]))
         if command_id == "pytest_targeted":
             self._validate_pytest_arguments(arguments)
         elif command_id == "py_compile":
@@ -94,6 +102,43 @@ class ValidationRunner:
         else:
             raise CommandRejected(f"command {command_id!r} is not supported")
         return [*prefix, *arguments]
+
+    def _resolve_interpreter(self, configured: str) -> Path:
+        configured_path = Path(configured)
+        if configured_path.is_absolute() or ".." in configured_path.parts:
+            raise CommandRejected("Python interpreter must be a repo-relative approved virtualenv")
+        if configured_path != Path(".venv/bin/python"):
+            raise CommandRejected(
+                f"Python interpreter is not an approved virtualenv: {configured}"
+            )
+
+        approved_root = self._approved_repository_root()
+        candidates = [self.project_root / configured_path]
+        if approved_root != self.project_root:
+            candidates.append(approved_root / configured_path)
+
+        for candidate in candidates:
+            virtualenv_root = candidate.parent.parent
+            if not self._is_under(virtualenv_root, approved_root):
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved.is_file() and resolved.stat().st_mode & 0o111:
+                return resolved
+
+        raise CommandRejected(
+            "no executable approved virtualenv interpreter found; expected "
+            f"{self.project_root / configured_path} or "
+            f"{approved_root / configured_path}. Create the approved repo virtualenv "
+            "before running validation; PATH lookup and dependency installation are disabled."
+        )
+
+    def _approved_repository_root(self) -> Path:
+        if self.project_root.parent.name == ".worktrees":
+            return self.project_root.parent.parent.resolve()
+        return self.project_root
 
     def _validate_pytest_arguments(self, arguments: tuple[str, ...]) -> None:
         targets = []

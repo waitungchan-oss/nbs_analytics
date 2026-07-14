@@ -40,6 +40,36 @@ def test_runner_uses_shell_false(monkeypatch):
     assert result.exit_code == 0
 
 
+def test_runner_resolves_project_local_interpreter_first(tmp_path):
+    interpreter = tmp_path / ".venv/bin/python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"python")
+    interpreter.chmod(0o755)
+
+    runner = object.__new__(ValidationRunner)
+    runner.project_root = tmp_path.resolve()
+
+    assert runner._resolve_interpreter(".venv/bin/python") == interpreter.resolve()
+
+
+def test_runner_rejects_missing_allowlisted_interpreter(tmp_path):
+    runner = object.__new__(ValidationRunner)
+    runner.project_root = tmp_path.resolve()
+
+    with pytest.raises(CommandRejected, match="approved virtualenv"):
+        runner._resolve_interpreter(".venv/bin/python")
+
+
+def test_runner_real_allowlisted_python_invocation_returns_result():
+    result = ValidationRunner(PROJECT_ROOT).run(
+        "py_compile", ("backend/agents/validation_runner.py",)
+    )
+
+    assert isinstance(result, ValidationResult)
+    assert result.exit_code == 0
+    assert result.timed_out is False
+
+
 def test_runner_reports_timeout_without_retry(monkeypatch):
     calls = []
 
@@ -67,7 +97,10 @@ def test_runner_caps_each_output_stream_and_returns_stable_result(monkeypatch):
     assert len(result.stdout) == 32000
     assert len(result.stderr) == 32000
     assert result.command_id == "py_compile"
-    assert result.argv == (".venv/bin/python", "-m", "py_compile", "app.py")
+    assert result.argv == (
+        str((PROJECT_ROOT.parent.parent / ".venv/bin/python").resolve()),
+        "-m", "py_compile", "app.py"
+    )
     assert result.exit_code == 3
     assert result.duration_ms >= 0
 
@@ -84,7 +117,8 @@ def test_runner_accepts_pytest_targets_and_integer_maxfail(monkeypatch):
     )
 
     assert calls[0][0][0] == [
-        ".venv/bin/python", "-m", "pytest", "tests/test_implementation_models.py", "-q", "--maxfail=2"
+        str((PROJECT_ROOT.parent.parent / ".venv/bin/python").resolve()),
+        "-m", "pytest", "tests/test_implementation_models.py", "-q", "--maxfail=2"
     ]
 
 

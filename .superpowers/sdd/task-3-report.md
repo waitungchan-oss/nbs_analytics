@@ -45,3 +45,22 @@ ModuleNotFoundError: No module named 'backend.agents.validation_runner'
 - Timeout results use exit code `124`, preserve capped partial output when available, and never retry automatically.
 - Output is capped independently at 32,000 characters per stream.
 - No Hermes post-change check or Task 4+ integration was run because this task is limited to the runner and its tests; the runner remains an isolated backend utility.
+
+## Review Finding Fix
+
+The Important finding was fixed by resolving the configured `.venv/bin/python` before execution. The resolver checks the project-local virtualenv first, then the approved repository root virtualenv for an implementation worktree, requires the allowlisted virtualenv directory to remain inside the approved repository root after realpath resolution, and rejects missing or non-executable interpreters with an actionable `CommandRejected`. It never performs PATH lookup, network access, or dependency installation. Process launch `OSError` is also converted to `CommandRejected` so executable failures do not escape as unstable raw exceptions.
+
+## Review-Fix RED
+
+After adding the resolver and real-invocation tests but before implementing the fix:
+
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_validation_runner.py -q`: FAIL, `5 failed, 13 passed`.
+- The real invocation reproduced the review finding with `FileNotFoundError: [Errno 2] No such file or directory: '.venv/bin/python'`.
+
+## Review-Fix GREEN And Real Invocation
+
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_validation_runner.py tests/test_implementation_models.py tests/test_implementation_guard.py -q`: PASS, `37 passed in 1.43s`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/validation_runner.py`: PASS, exit 0.
+- Independent non-mocked invocation from the implementation worktree:
+  `ValidationRunner(Path.cwd()).run("py_compile", ("backend/agents/validation_runner.py",))`: PASS, returned `ValidationResult` with `exitCode=0`, `timedOut=false`, and resolved interpreter `/Users/chanwaitung2025/.local/share/uv/python/cpython-3.10-macos-aarch64-none/bin/python3.10`.
+- `git diff --check`: PASS, no output.
