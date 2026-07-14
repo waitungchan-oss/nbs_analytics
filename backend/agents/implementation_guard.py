@@ -18,6 +18,8 @@ READ_ONLY_GIT = {
     "head": ("git", "rev-parse", "HEAD"),
     "status": ("git", "status", "--porcelain=v1", "-z"),
     "diff_numstat": ("git", "diff", "--numstat", "--"),
+    "diff_numstat_cached": ("git", "diff", "--cached", "--numstat", "--"),
+    "diff_numstat_head": ("git", "diff", "HEAD", "--numstat", "--"),
 }
 
 
@@ -74,18 +76,31 @@ def _status_paths(project_root: Path) -> dict[str, str] | None:
     return changes
 
 
-def _diff_lines(project_root: Path, changes: Mapping[str, str]) -> int:
-    completed = _run_git(project_root, READ_ONLY_GIT["diff_numstat"])
+def _numstat(project_root: Path, command_name: str) -> dict[str, int] | None:
+    completed = _run_git(project_root, READ_ONLY_GIT[command_name])
     if completed.returncode != 0:
-        return 0
+        return None
 
-    total = 0
+    result: dict[str, int] = {}
     for line in completed.stdout.splitlines():
-        added, deleted, _path = line.split("\t", 2)
-        if added.isdigit():
-            total += int(added)
-        if deleted.isdigit():
-            total += int(deleted)
+        added, deleted, path = line.split("\t", 2)
+        result[path] = sum(
+            int(value) for value in (added, deleted) if value.isdigit()
+        )
+    return result
+
+
+def _diff_lines(project_root: Path, changes: Mapping[str, str]) -> int:
+    # Observe both Git snapshots explicitly, then count the final tree once
+    # against HEAD so staged and unstaged edits on one path are not doubled.
+    if _numstat(project_root, "diff_numstat") is None:
+        return 0
+    if _numstat(project_root, "diff_numstat_cached") is None:
+        return 0
+    combined = _numstat(project_root, "diff_numstat_head")
+    if combined is None:
+        return 0
+    total = sum(combined.values())
 
     for path, status in changes.items():
         if status == "??":

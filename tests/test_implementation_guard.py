@@ -130,3 +130,30 @@ def test_guard_rejects_diff_limits(tmp_git_repo):
     before = capture_worktree_state(tmp_git_repo)
     write_three_line_change(tmp_git_repo / "src/allowed.py")
     assert validate_changes(tmp_git_repo, contract, before).status == "blocked_diff_limit"
+
+
+def test_guard_rejects_staged_diff_limits_without_modifying_index(tmp_git_repo):
+    contract = contract_for(tmp_git_repo, maxChangedFiles=1, maxDiffLines=2)
+    before = capture_worktree_state(tmp_git_repo)
+    write_three_line_change(tmp_git_repo / "src/allowed.py")
+    subprocess.run(["git", "add", "src/allowed.py"], cwd=tmp_git_repo, check=True)
+    staged_before = subprocess.run(
+        ["git", "diff", "--cached", "--binary", "--"],
+        cwd=tmp_git_repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+
+    decision = validate_changes(tmp_git_repo, contract, before)
+
+    staged_after = subprocess.run(
+        ["git", "diff", "--cached", "--binary", "--"],
+        cwd=tmp_git_repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert decision.status == "blocked_diff_limit"
+    assert decision.diff_lines == 4
+    assert staged_after == staged_before
