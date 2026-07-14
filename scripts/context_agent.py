@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                 runner = SubprocessAgentRunner(command, allowed_executables=policy.agent_executables)
         instructions = (PROJECT_ROOT / "docs/agents/CONTEXT_AGENT_CONTRACT.md").read_text(encoding="utf-8")
         report = build_context_report(
-            bundle, runner=runner, runtime_root=PROJECT_ROOT / ".nbs_agent_runtime",
+            bundle, runner=runner, project_root=PROJECT_ROOT, runtime_root=PROJECT_ROOT / ".nbs_agent_runtime",
             instructions=instructions, collect_only=args.collect_only,
         )
         rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n" if args.format == "json" else format_context_markdown(report)

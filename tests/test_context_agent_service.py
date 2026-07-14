@@ -42,7 +42,7 @@ def make_bundle(content="short"):
 def test_context_report_accepts_valid_runner_output(tmp_path):
     runner = FakeRunner()
     report = build_context_report(
-        make_bundle(), runner=runner, runtime_root=tmp_path / ".nbs_agent_runtime",
+        make_bundle(), runner=runner, project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime",
         instructions="context-contract-v1",
     )
     assert report["status"] == "ready"
@@ -55,7 +55,7 @@ def test_context_report_accepts_valid_runner_output(tmp_path):
 
 def test_context_report_returns_overflow_before_runner(tmp_path):
     report = build_context_report(
-        make_bundle("x" * 60000), runner=FakeRunner(), runtime_root=tmp_path / ".nbs_agent_runtime",
+        make_bundle("x" * 60000), runner=FakeRunner(), project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime",
         instructions="context-contract-v1", input_token_limit=10,
     )
     assert report["status"] == "context_overflow"
@@ -63,7 +63,7 @@ def test_context_report_returns_overflow_before_runner(tmp_path):
 
 def test_collect_only_returns_bundle_without_runner(tmp_path):
     report = build_context_report(
-        make_bundle(), runner=None, runtime_root=tmp_path / ".nbs_agent_runtime",
+        make_bundle(), runner=None, project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime",
         instructions="context-contract-v1", collect_only=True,
     )
     assert report["schemaVersion"] == "context-evidence-v1"
@@ -72,7 +72,37 @@ def test_collect_only_returns_bundle_without_runner(tmp_path):
 
 def test_runtime_root_must_be_named_agent_runtime(tmp_path):
     with pytest.raises(PermissionError, match="runtime root"):
-        build_context_report(make_bundle(), runner=FakeRunner(), runtime_root=tmp_path, instructions="contract")
+        build_context_report(make_bundle(), runner=FakeRunner(), project_root=tmp_path, runtime_root=tmp_path, instructions="contract")
+
+
+def test_runtime_root_must_bind_to_project_and_reject_same_basename_escape(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    valid_runtime = project_root / ".nbs_agent_runtime"
+    build_context_report(
+        make_bundle(), runner=FakeRunner(), project_root=project_root,
+        runtime_root=valid_runtime, instructions="contract",
+    )
+    external_runtime = tmp_path / ".nbs_agent_runtime"
+    with pytest.raises(PermissionError, match="symlink|project"):
+        build_context_report(
+            make_bundle(), runner=FakeRunner(), project_root=project_root,
+            runtime_root=external_runtime, instructions="contract",
+        )
+
+
+def test_runtime_symlink_cannot_bypass_project_binding(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    external_runtime = tmp_path / "external-runtime"
+    external_runtime.mkdir()
+    symlink_runtime = project_root / ".nbs_agent_runtime"
+    symlink_runtime.symlink_to(external_runtime, target_is_directory=True)
+    with pytest.raises(PermissionError, match="symlink|project"):
+        build_context_report(
+            make_bundle(), runner=FakeRunner(), project_root=project_root,
+            runtime_root=symlink_runtime, instructions="contract",
+        )
 
 
 def test_context_payload_roundtrip_preserves_semantic_evidence_without_duplicates():
@@ -107,7 +137,7 @@ def test_context_report_rejects_output_over_budget(tmp_path):
 
     with pytest.raises(ValueError, match="output token budget"):
         build_context_report(
-            make_bundle(), runner=VerboseRunner(), runtime_root=tmp_path / ".nbs_agent_runtime",
+            make_bundle(), runner=VerboseRunner(), project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime",
             instructions="context-contract-v1", output_token_limit=10,
         )
 
@@ -120,7 +150,7 @@ def test_context_report_rejects_fingerprint_mismatch(tmp_path):
             return report
 
     with pytest.raises(ValueError, match="fingerprint"):
-        build_context_report(make_bundle(), runner=BadRunner(), runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")
+        build_context_report(make_bundle(), runner=BadRunner(), project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")
 
 
 def test_context_report_rejects_unknown_schema(tmp_path):
@@ -131,7 +161,7 @@ def test_context_report_rejects_unknown_schema(tmp_path):
             return report
 
     with pytest.raises(ValueError, match="schema|field"):
-        build_context_report(make_bundle(), runner=BadRunner(), runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")
+        build_context_report(make_bundle(), runner=BadRunner(), project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")
 
 
 @pytest.mark.parametrize("mutate", [
@@ -161,7 +191,7 @@ def test_runtime_overflow_is_public_context_report_shape(tmp_path, monkeypatch):
 
     monkeypatch.setattr("backend.agents.context_agent_service.AgentRuntime", OverflowRuntime)
     report = build_context_report(
-        make_bundle(), runner=FakeRunner(), runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract",
+        make_bundle(), runner=FakeRunner(), project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract",
     )
     assert report["status"] == "context_overflow"
     assert report["contextFingerprint"]
@@ -188,7 +218,7 @@ def test_context_report_rejects_non_string_list_items(tmp_path, field, bad_value
             return report
 
     with pytest.raises(ValueError, match="schema|field"):
-        build_context_report(make_bundle(), runner=BadRunner(), runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")
+        build_context_report(make_bundle(), runner=BadRunner(), project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")
 
 
 def test_context_report_rejects_non_string_relevant_file_symbols(tmp_path):
@@ -199,4 +229,4 @@ def test_context_report_rejects_non_string_relevant_file_symbols(tmp_path):
             return report
 
     with pytest.raises(ValueError, match="schema"):
-        build_context_report(make_bundle(), runner=BadRunner(), runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")
+        build_context_report(make_bundle(), runner=BadRunner(), project_root=tmp_path, runtime_root=tmp_path / ".nbs_agent_runtime", instructions="contract")

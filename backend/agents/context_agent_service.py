@@ -137,10 +137,16 @@ def _validate_context_payload_shape(payload: dict) -> None:
             raise ValueError("Context evidence recent change item is invalid")
 
 
-def _runtime_path(runtime_root: Path) -> Path:
-    resolved = Path(runtime_root).resolve()
-    if resolved.name != ".nbs_agent_runtime":
-        raise PermissionError(f"Agent runtime root must be named .nbs_agent_runtime: {resolved}")
+def _runtime_path(project_root: Path, runtime_root: Path) -> Path:
+    raw_runtime = Path(runtime_root)
+    if raw_runtime.is_symlink():
+        raise PermissionError("Agent runtime root cannot be a symlink")
+    expected = (Path(project_root).resolve() / ".nbs_agent_runtime").resolve()
+    resolved = raw_runtime.resolve()
+    if resolved != expected:
+        raise PermissionError(
+            f"Agent runtime root must resolve to the project runtime {expected}: {resolved}"
+        )
     return resolved
 
 
@@ -170,13 +176,14 @@ def build_context_report(
     bundle: EvidenceBundle,
     *,
     runner: AgentRunner | None,
+    project_root: Path,
     runtime_root: Path,
     instructions: str,
     collect_only: bool = False,
     input_token_limit: int = 12000,
     output_token_limit: int = 1500,
 ) -> dict:
-    runtime_path = _runtime_path(runtime_root)
+    runtime_path = _runtime_path(project_root, runtime_root)
     payload = build_context_evidence_payload(bundle)
     if collect_only:
         return payload
