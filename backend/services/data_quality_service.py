@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+from pathlib import Path
+
 import pandas as pd
 
 from config import COL_BRANCH, COL_DATE, COL_MONEY, COL_ORDER_ID, COL_SALESPERSON, COL_TRANS_TIME
 from database import load_all_data_from_db
 from pipeline import clean_invoice_number, normalize_runtime_columns
 from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL, build_revenue_scope_frames
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_QUALITY_CACHE_DIR = PROJECT_ROOT / ".nbs_runtime_cache"
+DATA_QUALITY_SERVICE_VERSION = "data-quality-v1"
+DATA_QUALITY_CACHE_PREFIX = "data_quality_"
 
 
 def _rate(numerator, denominator) -> float:
@@ -102,3 +113,84 @@ def build_data_quality() -> dict:
     analysis_tour, analysis_others, audit = build_revenue_scope_frames(raw_tour, raw_others)
     return build_data_quality_from_frames(raw_tour, raw_others, analysis_tour, analysis_others, audit)
 
+
+def _data_quality_cache_key(generation_token: str) -> str:
+    contract = {
+        "serviceVersion": DATA_QUALITY_SERVICE_VERSION,
+        "generationToken": str(generation_token),
+    }
+    encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _data_quality_cache_path(cache_dir: str | Path | None, cache_key: str) -> Path:
+    directory = Path(cache_dir) if cache_dir is not None else DEFAULT_DATA_QUALITY_CACHE_DIR
+    return directory / f"{DATA_QUALITY_CACHE_PREFIX}{cache_key}.json"
+
+
+def _load_data_quality_cache(path: Path, cache_key: str, generation_token: str) -> dict | None:
+    try:
+        wrapper = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(wrapper, dict):
+        return None
+    if (
+        wrapper.get("serviceVersion") != DATA_QUALITY_SERVICE_VERSION
+        or wrapper.get("cacheKey") != cache_key
+        or wrapper.get("generationToken") != str(generation_token)
+        or not isinstance(wrapper.get("payload"), dict)
+    ):
+        return None
+    return {
+        **wrapper["payload"],
+        "cacheStatus": "hit",
+        "generationToken": str(generation_token),
+    }
+
+
+def _save_data_quality_cache(
+    path: Path,
+    cache_key: str,
+    generation_token: str,
+    payload: dict,
+) -> None:
+    wrapper = {
+        "serviceVersion": DATA_QUALITY_SERVICE_VERSION,
+        "cacheKey": cache_key,
+        "generationToken": str(generation_token),
+        "payload": payload,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(wrapper, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def build_data_quality_cached(
+    *,
+    db_path: str | Path,
+    generation_token: str,
+    cache_dir: str | Path | None = None,
+) -> dict:
+    cache_key = _data_quality_cache_key(generation_token)
+    cache_path = _data_quality_cache_path(cache_dir, cache_key)
+    cached = _load_data_quality_cache(cache_path, cache_key, generation_token)
+    if cached is not None:
+        return cached
+
+    raw_tour, raw_others = load_all_data_from_db(db_path=Path(db_path))
+    analysis_tour, analysis_others, audit = build_revenue_scope_frames(raw_tour, raw_others)
+    payload = build_data_quality_from_frames(
+        raw_tour,
+        raw_others,
+        analysis_tour,
+        analysis_others,
+        audit,
+    )
+    _save_data_quality_cache(cache_path, cache_key, generation_token, payload)
+    return {
+        **payload,
+        "cacheStatus": "rebuilt",
+        "generationToken": str(generation_token),
+    }
