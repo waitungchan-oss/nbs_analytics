@@ -9,7 +9,7 @@ from config import (
 )
 from database import load_all_data_from_db
 from pipeline import build_dashboard_data
-from rules import load_business_rules
+from backend.services.business_rules_service import load_business_rules_snapshot
 from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL, build_revenue_scope_frames
 from backend.services.stability_service import build_phase2c_stability_gate, build_stability_baseline
 
@@ -67,12 +67,12 @@ def _apply_filters(df: pd.DataFrame, date_col: str, years: list[int], months: li
 
 
 def _current_rules() -> tuple[dict, list[str], list[str], list[str]]:
-    rules = load_business_rules()
+    rules = load_business_rules_snapshot().facts_kwargs()
     return (
-        rules.get("BRANCH_MAPPING", {}),
-        rules.get("TARGET_BRANCHES_S3", []),
-        rules.get("CRUISE_DEPTS", []),
-        rules.get("SALES_REP_LIST", []),
+        rules["branch_mapping"],
+        rules["target_branches_s3"],
+        rules["cruise_depts"],
+        rules["sales_rep_list"],
     )
 
 

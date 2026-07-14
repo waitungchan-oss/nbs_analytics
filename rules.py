@@ -159,12 +159,12 @@ def _clean_list(values: Any) -> list[str]:
     return result
 
 
-def load_business_rules() -> dict:
-    path = Path(CONFIG_FILE)
-    if not path.exists():
+def load_business_rules(path: str | Path | None = None) -> dict:
+    target = Path(path or CONFIG_FILE)
+    if not target.exists():
         return DEFAULT_RULES.copy()
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with target.open("r", encoding="utf-8") as f:
             loaded = json.load(f)
         return {**DEFAULT_RULES, **loaded}
     except Exception:

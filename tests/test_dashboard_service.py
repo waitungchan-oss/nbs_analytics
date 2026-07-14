@@ -1,6 +1,17 @@
 import pandas as pd
 
 from backend.services import dashboard_service
+from backend.services.business_rules_service import BusinessRulesSnapshot
+
+
+def _rules_snapshot(rules):
+    return BusinessRulesSnapshot(
+        branch_mapping_items=tuple(sorted(rules["BRANCH_MAPPING"].items())),
+        target_branches=tuple(rules["TARGET_BRANCHES_S3"]),
+        cruise_departments=tuple(rules["CRUISE_DEPTS"]),
+        sales_reps=tuple(rules["SALES_REP_LIST"]),
+        fingerprint="test-rules",
+    )
 
 
 def _sample_frames():
@@ -191,14 +202,13 @@ def test_dashboard_summary_returns_combined_branch_and_specialist_totals(monkeyp
     )
     monkeypatch.setattr(
         dashboard_service,
-        "load_business_rules",
-        lambda: {
+        "load_business_rules_snapshot",
+        lambda: _rules_snapshot({
             "BRANCH_MAPPING": {"01": "銅鑼灣分社", "47": "太古分社", "225": "營銷運營中心-專職銷售組"},
             "TARGET_BRANCHES_S3": ["銅鑼灣分社", "太古分社"],
             "CRUISE_DEPTS": [],
             "SALES_REP_LIST": ["YTLAU 刘元太"],
-        },
-        raising=False,
+        }),
     )
 
     summary = dashboard_service.build_dashboard_summary(
@@ -395,14 +405,13 @@ def test_dashboard_summary_filters_rankings_and_returns_freshness(monkeypatch):
     )
     monkeypatch.setattr(
         dashboard_service,
-        "load_business_rules",
-        lambda: {
+        "load_business_rules_snapshot",
+        lambda: _rules_snapshot({
             "BRANCH_MAPPING": {"01": "銅鑼灣分社", "47": "太古分社", "225": "營銷運營中心-專職銷售組"},
             "TARGET_BRANCHES_S3": ["銅鑼灣分社", "太古分社"],
             "CRUISE_DEPTS": [],
             "SALES_REP_LIST": ["YTLAU 刘元太"],
-        },
-        raising=False,
+        }),
     )
 
     summary = dashboard_service.build_dashboard_summary(
@@ -456,14 +465,13 @@ def test_dashboard_context_uses_persisted_business_rules(monkeypatch):
     monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
     monkeypatch.setattr(
         dashboard_service,
-        "load_business_rules",
-        lambda: {
+        "load_business_rules_snapshot",
+        lambda: _rules_snapshot({
             "BRANCH_MAPPING": {"ZZ": "測試分社"},
             "TARGET_BRANCHES_S3": ["測試分社"],
             "CRUISE_DEPTS": ["測試郵輪部門"],
             "SALES_REP_LIST": ["TEST REP"],
-        },
-        raising=False,
+        }),
     )
     monkeypatch.setattr(dashboard_service, "build_dashboard_data", fake_build_dashboard_data)
 
