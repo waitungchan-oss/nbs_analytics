@@ -1,4 +1,5 @@
 import ast
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,27 @@ def test_snapshot_raises_typed_conflict_after_second_change(tmp_path):
         ("1:first", "2:second"),
         ("2:second", "3:third"),
     )
+
+
+def test_snapshot_propagates_builder_exceptions_without_stale_fallback(tmp_path):
+    seen = {}
+    dependencies = _dependencies(["1:stable", "1:stable"], seen)
+    failure = RuntimeError("facts failed")
+
+    def fail_facts(**kwargs):
+        raise failure
+
+    service = ApplicationSnapshotService(
+        _paths(tmp_path),
+        dependencies=replace(dependencies, facts_builder=fail_facts),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        service.build()
+
+    assert raised.value is failure
+    assert "quality" not in seen
+    assert "forecast" not in seen
 
 
 def test_snapshot_module_keeps_framework_and_data_details_outside_boundary():
