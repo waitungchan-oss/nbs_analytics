@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import fnmatch
+import os
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
+
+from backend.agents.implementation_models import (
+    ImplementationTaskContract,
+    load_implementation_policy,
+)
+
+
+READ_ONLY_GIT = {
+    "branch": ("git", "branch", "--show-current"),
+    "head": ("git", "rev-parse", "HEAD"),
+    "status": ("git", "status", "--porcelain=v1", "-z"),
+    "diff_numstat": ("git", "diff", "--numstat", "--"),
+}
+
+
+@dataclass(frozen=True)
+class GuardDecision:
+    status: str
+    changed_files: tuple[str, ...] = ()
+    diff_lines: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class WorktreeState:
+    head: str
+    changes: Mapping[str, str]
+    diff_lines: int
+
+
+def _run_git(project_root: Path, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=project_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        shell=False,
+    )
+
+
+def _git_output(project_root: Path, name: str) -> str | None:
+    completed = _run_git(project_root, READ_ONLY_GIT[name])
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _status_paths(project_root: Path) -> dict[str, str] | None:
+    completed = _run_git(project_root, (*READ_ONLY_GIT["status"], "--untracked-files=all"))
+    if completed.returncode != 0:
+        return None
+
+    entries = completed.stdout.split("\0")
+    changes: dict[str, str] = {}
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
+            continue
+        status, path = entry[:2], entry[3:]
+        changes[path] = status
+        if "R" in status or "C" in status:
+            if index < len(entries) and entries[index]:
+                changes[entries[index]] = status
+            index += 1
+    return changes
+
+
+def _diff_lines(project_root: Path, changes: Mapping[str, str]) -> int:
+    completed = _run_git(project_root, READ_ONLY_GIT["diff_numstat"])
+    if completed.returncode != 0:
+        return 0
+
+    total = 0
+    for line in completed.stdout.splitlines():
+        added, deleted, _path = line.split("\t", 2)
+        if added.isdigit():
+            total += int(added)
+        if deleted.isdigit():
+            total += int(deleted)
+
+    for path, status in changes.items():
+        if status == "??":
+            candidate = project_root / path
+            if candidate.is_file():
+                total += len(candidate.read_text(encoding="utf-8", errors="replace").splitlines())
+    return total
+
+
+def capture_worktree_state(project_root: Path) -> WorktreeState:
+    root = Path(project_root).resolve()
+    head = _git_output(root, "head")
+    changes = _status_paths(root)
+    if head is None or changes is None:
+        raise ValueError("project_root must be a readable Git worktree")
+    return WorktreeState(head=head, changes=changes, diff_lines=_diff_lines(root, changes))
+
+
+def _resolve_guard_path(project_root: Path, raw_path: str, denied_patterns: tuple[str, ...]) -> str:
+    root = project_root.resolve()
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        raise PermissionError("Allowed write path must be relative to project root")
+
+    lexical = Path(os.path.abspath(os.fspath(root / candidate)))
+    current = root
+    for part in candidate.parts:
+        current = current / part
+        if current.is_symlink():
+            raise PermissionError(f"Write path cannot contain symlinks: {current}")
+
+    resolved = lexical.resolve(strict=False)
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise PermissionError("Write path must stay under project root") from exc
+    relative_text = relative.as_posix()
+    if any(
+        fnmatch.fnmatch(relative_text, pattern) or fnmatch.fnmatch(resolved.name, pattern)
+        for pattern in denied_patterns
+    ):
+        raise PermissionError(f"Write path is denied by policy: {relative_text}")
+    return relative_text
+
+
+def _scope_paths(project_root: Path, contract: ImplementationTaskContract) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    policy = load_implementation_policy(project_root)
+    patterns = tuple(policy["deniedWritePatterns"])
+    allowed = tuple(_resolve_guard_path(project_root, path, patterns) for path in contract.allowed_write_paths)
+    return allowed, patterns
+
+
+def validate_preconditions(project_root: Path, contract: ImplementationTaskContract) -> GuardDecision:
+    root = Path(project_root).resolve()
+    approved_worktree = Path(contract.approved_worktree).resolve(strict=False)
+    if root != approved_worktree:
+        return GuardDecision("blocked_wrong_worktree", reason="approved worktree does not match project root")
+
+    branch = _git_output(root, "branch")
+    head = _git_output(root, "head")
+    changes = _status_paths(root)
+    if branch is None or head is None or changes is None:
+        return GuardDecision("blocked_project", reason="project root is not a readable Git worktree")
+
+    policy = load_implementation_policy(root)
+    if not branch.startswith(policy["requiredBranchPrefix"]):
+        return GuardDecision("blocked_wrong_branch", reason="branch does not match implementation policy")
+    if head != contract.approved_base_sha:
+        return GuardDecision("blocked_head_mismatch", reason="HEAD differs from approved base SHA")
+    try:
+        _scope_paths(root, contract)
+    except (PermissionError, KeyError, TypeError):
+        return GuardDecision("blocked_scope", reason="allowed write paths violate implementation policy")
+    if changes:
+        return GuardDecision("blocked_dirty_worktree", changed_files=tuple(sorted(changes)))
+    return GuardDecision("allowed")
+
+
+def validate_changes(
+    project_root: Path,
+    contract: ImplementationTaskContract,
+    before: WorktreeState,
+) -> GuardDecision:
+    root = Path(project_root).resolve()
+    try:
+        after = capture_worktree_state(root)
+        allowed, denied_patterns = _scope_paths(root, contract)
+    except (ValueError, PermissionError, KeyError, TypeError):
+        return GuardDecision("blocked_scope", reason="worktree or policy scope is invalid")
+
+    changed = tuple(sorted(
+        path for path in set(before.changes) | set(after.changes)
+        if before.changes.get(path) != after.changes.get(path)
+    ))
+    for path in changed:
+        try:
+            normalized = _resolve_guard_path(root, path, denied_patterns)
+        except PermissionError:
+            return GuardDecision("blocked_scope", changed_files=changed, reason="changed path violates policy")
+        if normalized not in allowed:
+            return GuardDecision("blocked_scope", changed_files=changed, reason="changed path is outside approved scope")
+
+    policy_limits = load_implementation_policy(root)["limits"]
+    max_changed_files = min(contract.max_changed_files, policy_limits["maxChangedFiles"])
+    max_diff_lines = min(contract.max_diff_lines, policy_limits["maxDiffLines"])
+    if len(changed) > max_changed_files or after.diff_lines > max_diff_lines:
+        return GuardDecision(
+            "blocked_diff_limit", changed_files=changed, diff_lines=after.diff_lines,
+            reason="change count or diff lines exceed policy limit",
+        )
+    return GuardDecision("allowed", changed_files=changed, diff_lines=after.diff_lines)
