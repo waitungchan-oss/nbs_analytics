@@ -1,7 +1,10 @@
 import ast
+import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from backend.services.application_snapshot_service import (
@@ -206,3 +209,67 @@ def test_snapshot_module_keeps_framework_and_data_details_outside_boundary():
             imported_roots.add(node.module.split(".")[0])
 
     assert imported_roots.isdisjoint({"fastapi", "streamlit", "pandas", "pipeline", "database"})
+
+
+def test_default_dependencies_build_snapshot_from_isolated_persistent_sources(tmp_path):
+    paths = _paths(tmp_path)
+    tour = pd.DataFrame(
+        [
+            {
+                "來源單據號": "A001",
+                "收款時間": "2026-06-01",
+                "統一日期": "2026-06-01",
+                "收款原幣金額": 1000,
+                "收款類型": "正常收款",
+                "收款方式": "現金",
+                "銷售點": "Branch A",
+                "銷售員": "Amy",
+                "目的地大類": "旅行團",
+                "團負責人部門": "",
+                "行程天數": 3,
+                "數量": 1,
+            }
+        ]
+    )
+    others = pd.DataFrame(
+        [
+            {
+                "來源單據號": "B001",
+                "收款時間": "2026-06-02",
+                "統一日期": "2026-06-02",
+                "收款原幣金額": 300,
+                "收款類型": "正常收款",
+                "收款方式": "信用卡",
+                "銷售點": "Branch A",
+                "銷售員": "Amy",
+                "目的地大類": "票務",
+                "團負責人部門": "",
+                "行程天數": 0,
+                "數量": 1,
+            }
+        ]
+    )
+    with sqlite3.connect(paths.db_path) as connection:
+        tour.to_sql("tour_data", connection, if_exists="replace", index=False)
+        others.to_sql("others_data", connection, if_exists="replace", index=False)
+    paths.rules_config_path.write_text(
+        json.dumps(
+            {
+                "BRANCH_MAPPING": {"A": "Branch A"},
+                "TARGET_BRANCHES_S3": ["Branch A"],
+                "CRUISE_DEPTS": [],
+                "SALES_REP_LIST": ["Amy"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = ApplicationSnapshotService(paths).build()
+
+    assert snapshot.generation_token.startswith("0:")
+    assert snapshot.facts["status"] == "ready"
+    assert snapshot.quality["status"] == "ready"
+    assert snapshot.forecast["status"] == "not_ready"
+    assert snapshot.targets["status"] == "not_configured"
+    assert snapshot.provenance["coreGenerationConsistent"] is True
+    assert snapshot.provenance["dbPath"] == str(paths.db_path)

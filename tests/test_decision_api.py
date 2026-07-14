@@ -100,3 +100,13 @@ def test_decision_router_keeps_generation_orchestration_outside_transport_layer(
     assert "build_dashboard_facts_read_model" not in source
     assert "build_data_quality_cached" not in source
     assert "for _ in range(2)" not in source
+
+
+def test_decision_router_wires_snapshot_to_project_persistent_paths():
+    paths = decisions_router.SNAPSHOT_PATHS
+
+    assert paths.db_path == decisions_router.PROJECT_ROOT / "nbs_marketing_data.db"
+    assert paths.cache_dir == decisions_router.PROJECT_ROOT / ".nbs_runtime_cache"
+    assert paths.runtime_dir == decisions_router.PROJECT_ROOT / ".nbs_runtime"
+    assert paths.rules_config_path == decisions_router.PROJECT_ROOT / "rules_config.json"
+    assert paths.target_config_path == decisions_router.PROJECT_ROOT / "decision_targets.json"

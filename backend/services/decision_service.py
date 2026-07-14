@@ -12,6 +12,11 @@ from backend.services.target_governance_service import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TARGET_CONFIG_PATH = DEFAULT_CONFIG_PATH
+PUBLIC_SNAPSHOT_PROVENANCE_KEYS = (
+    "rulesFingerprint",
+    "snapshotAttemptCount",
+    "coreGenerationConsistent",
+)
 
 
 def load_decision_targets(path: str | Path | None = None) -> dict[str, Any]:
@@ -56,6 +61,11 @@ def build_decision_overview(
     snapshot_provenance: dict | None = None,
 ) -> dict:
     config = target_config or load_decision_targets()
+    public_snapshot_provenance = {
+        key: snapshot_provenance[key]
+        for key in PUBLIC_SNAPSHOT_PROVENANCE_KEYS
+        if snapshot_provenance and key in snapshot_provenance
+    }
     thresholds = {**DEFAULT_THRESHOLDS, **(config.get("thresholds") or {})}
     config_status = config.get("status") or ("configured" if config.get("targets") else "not_configured")
     active_targets = config.get("targets") if config.get("approvalStatus") == "approved" else []
@@ -168,7 +178,7 @@ def build_decision_overview(
         "alerts": alerts,
         "decisions": decisions,
         "provenance": {
-            **(snapshot_provenance or {}),
+            **public_snapshot_provenance,
             "factsStatus": facts.get("status"),
             "generationToken": facts.get("generationToken"),
             "revenueScope": facts.get("revenueScope"),

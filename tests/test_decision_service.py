@@ -79,6 +79,8 @@ def test_decision_overview_merges_snapshot_provenance_without_losing_existing_ke
             "generationToken": "snapshot-must-not-override-facts",
             "forecastStatus": "snapshot-must-not-override-forecast",
             "systemHealthStatus": "snapshot-must-not-override-health",
+            "dbPath": "/private/internal/path.db",
+            "futureInternalKey": "must-not-be-public",
         },
     )
 
@@ -88,3 +90,18 @@ def test_decision_overview_merges_snapshot_provenance_without_losing_existing_ke
     assert result["provenance"]["generationToken"] == "2:abc"
     assert result["provenance"]["forecastStatus"] == "ready"
     assert result["provenance"]["systemHealthStatus"] == "ok"
+    assert set(result["provenance"]) == {
+        "rulesFingerprint",
+        "snapshotAttemptCount",
+        "coreGenerationConsistent",
+        "factsStatus",
+        "generationToken",
+        "revenueScope",
+        "factsCacheStatus",
+        "readModelCacheStatus",
+        "forecastStatus",
+        "forecastCache",
+        "dataQualityStatus",
+        "dataQualityCacheStatus",
+        "systemHealthStatus",
+    }

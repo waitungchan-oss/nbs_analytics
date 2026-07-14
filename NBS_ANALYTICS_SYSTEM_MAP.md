@@ -192,7 +192,7 @@ nbs_marketing_data.db
 - `others_data`：`22,571` 行。
 - 最新正式資料日期：`2026-07-13`。
 - 最新 acceptance：Record `15`，upload status `accepted`，rollback `not_required`。
-- SQLite integrity：`ok`；data generation `1`，operation ID 與 Record 14 history matched，DB signature matched。
+- SQLite integrity：`ok`；data generation `2`，operation ID 與 Record 15 history matched，DB signature matched。
 
 ### 3.5 Upload Single-Writer 與治理服務
 
