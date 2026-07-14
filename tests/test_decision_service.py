@@ -29,6 +29,7 @@ def test_decision_overview_evaluates_monthly_target_and_forecast_gap():
         target_config={
             "version": "1",
             "source": "test",
+            "approvalStatus": "approved",
             "thresholds": {"forecastGapPct": 0.05},
             "targets": [{"id": "jul", "label": "2026-07 月度目標", "month": "2026-07", "targetRevenue": 1000}],
         },

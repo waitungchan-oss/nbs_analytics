@@ -1,49 +1,21 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+from backend.services.target_governance_service import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_THRESHOLDS,
+    load_target_config,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_TARGET_CONFIG_PATH = PROJECT_ROOT / "decision_targets.json"
-DEFAULT_THRESHOLDS = {
-    "forecastGapPct": 0.05,
-    "qualityWarningScore": 75.0,
-    "qualityCriticalScore": 60.0,
-}
+DEFAULT_TARGET_CONFIG_PATH = DEFAULT_CONFIG_PATH
 
 
 def load_decision_targets(path: str | Path | None = None) -> dict[str, Any]:
-    target_path = Path(path) if path is not None else DEFAULT_TARGET_CONFIG_PATH
-    if not target_path.exists():
-        return {
-            "status": "not_configured",
-            "version": None,
-            "source": str(target_path),
-            "thresholds": dict(DEFAULT_THRESHOLDS),
-            "targets": [],
-        }
-    try:
-        payload = json.loads(target_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return {
-            "status": "invalid",
-            "version": None,
-            "source": str(target_path),
-            "thresholds": dict(DEFAULT_THRESHOLDS),
-            "targets": [],
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    thresholds = {**DEFAULT_THRESHOLDS, **(payload.get("thresholds") or {})}
-    targets = payload.get("targets") if isinstance(payload.get("targets"), list) else []
-    return {
-        "status": "configured" if targets else "not_configured",
-        "version": payload.get("version"),
-        "source": str(target_path),
-        "thresholds": thresholds,
-        "targets": targets,
-    }
+    return load_target_config(path or DEFAULT_TARGET_CONFIG_PATH)
 
 
 def _severity_from_gap(gap_pct: float, threshold: float) -> str:
@@ -85,12 +57,13 @@ def build_decision_overview(
     config = target_config or load_decision_targets()
     thresholds = {**DEFAULT_THRESHOLDS, **(config.get("thresholds") or {})}
     config_status = config.get("status") or ("configured" if config.get("targets") else "not_configured")
+    active_targets = config.get("targets") if config.get("approvalStatus") == "approved" else []
     monthly_totals = facts.get("monthlyTotals") or []
     month_end = forecast.get("monthEnd") or {}
     targets: list[dict] = []
     alerts: list[dict] = []
 
-    for raw_target in config.get("targets") or []:
+    for raw_target in active_targets or []:
         month = str(raw_target.get("month") or "")
         target_revenue = float(raw_target.get("targetRevenue") or 0)
         actual = _target_actual(monthly_totals, month)
@@ -126,12 +99,12 @@ def build_decision_overview(
             "status": status,
         })
 
-    if not config.get("targets"):
+    if not active_targets:
         alerts.append(_alert(
             "target_not_configured", "info", "尚未設定管理目標",
-            "目前沒有可用的月份目標，因此不顯示假造的達成率。",
-            "由管理層提供目標設定後，再啟用 Actual vs Target 預警。",
-            {"targetConfigSource": config.get("source")},
+            "目前沒有已 approved 的月份目標，因此不顯示假造的達成率。",
+            "完成目標設定並 approved 後，再啟用 Actual vs Target 預警。",
+            {"targetConfigSource": config.get("source"), "approvalStatus": config.get("approvalStatus")},
         ))
 
     quality_score = float(quality.get("overallScore") or 0)

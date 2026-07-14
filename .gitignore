@@ -33,7 +33,12 @@ yarn-error.log*
 .nbs_runtime/health_history.jsonl
 .nbs_runtime/data_generation.json
 .nbs_runtime/persistent_repair_state.json
+.nbs_runtime/decision_targets_history.jsonl
 .nbs_runtime_cache/
+
+# Formal management target configuration is local governed state; commit only the schema/docs, not live targets.
+decision_targets.json
+decision_targets.json.tmp
 
 # SQLite formal/runtime data - never commit production data
 *.db
