@@ -16,6 +16,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FACTS_CACHE_DIR = PROJECT_ROOT / ".nbs_runtime_cache"
 FACTS_SERVICE_VERSION = "dashboard-facts-v1"
 FACTS_CACHE_PREFIX = "dashboard_facts_"
+DASHBOARD_READ_MODEL_VERSION = "dashboard-read-model-v1"
+DASHBOARD_READ_MODEL_CACHE_PREFIX = "dashboard_read_model_"
 REQUIRED_PAYLOAD_KEYS = {
     "serviceVersion",
     "cacheKey",
@@ -76,6 +78,50 @@ def _save_cached_payload(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f"{path.suffix}.tmp")
     temporary.write_bytes(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
+    os.replace(temporary, path)
+
+
+def _read_model_cache_key(facts_cache_key: str) -> str:
+    contract = {
+        "serviceVersion": DASHBOARD_READ_MODEL_VERSION,
+        "factsCacheKey": str(facts_cache_key),
+    }
+    encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_model_cache_path(cache_dir: str | Path | None, cache_key: str) -> Path:
+    directory = Path(cache_dir) if cache_dir is not None else DEFAULT_FACTS_CACHE_DIR
+    return directory / f"{DASHBOARD_READ_MODEL_CACHE_PREFIX}{cache_key}.json"
+
+
+def _load_read_model_cache(path: Path, cache_key: str, facts_cache_key: str) -> dict | None:
+    try:
+        wrapper = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(wrapper, dict):
+        return None
+    if (
+        wrapper.get("serviceVersion") != DASHBOARD_READ_MODEL_VERSION
+        or wrapper.get("cacheKey") != cache_key
+        or wrapper.get("factsCacheKey") != facts_cache_key
+        or not isinstance(wrapper.get("payload"), dict)
+    ):
+        return None
+    return wrapper["payload"]
+
+
+def _save_read_model_cache(path: Path, cache_key: str, facts_cache_key: str, payload: dict) -> None:
+    wrapper = {
+        "serviceVersion": DASHBOARD_READ_MODEL_VERSION,
+        "cacheKey": cache_key,
+        "factsCacheKey": facts_cache_key,
+        "payload": payload,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(wrapper, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, path)
 
 
@@ -154,6 +200,16 @@ def build_dashboard_facts_read_model(
         sales_rep_list=sales_rep_list,
         cache_dir=cache_dir,
     )
+    read_model_key = _read_model_cache_key(facts["cacheKey"])
+    read_model_path = _read_model_cache_path(cache_dir, read_model_key)
+    cached = _load_read_model_cache(read_model_path, read_model_key, facts["cacheKey"])
+    if cached is not None:
+        return {
+            **cached,
+            "factsCacheStatus": facts["factsCacheStatus"],
+            "readModelCacheStatus": "hit",
+        }
+
     analytics = build_analytics_from_facts(
         facts["branchFacts"],
         facts["specialistFacts"],
@@ -174,7 +230,7 @@ def build_dashboard_facts_read_model(
     for row in product_rows:
         row["sharePct"] = round(row["revenue"] / total_revenue * 100, 2) if total_revenue else 0.0
 
-    return {
+    payload = {
         "status": "ready",
         "serviceVersion": facts["serviceVersion"],
         "generationToken": facts["generationToken"],
@@ -196,3 +252,5 @@ def build_dashboard_facts_read_model(
         "productTotals": product_rows,
         "reconciliation": analytics["reconciliation"],
     }
+    _save_read_model_cache(read_model_path, read_model_key, facts["cacheKey"], payload)
+    return {**payload, "readModelCacheStatus": "rebuilt"}
