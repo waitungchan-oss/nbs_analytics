@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -138,11 +139,16 @@ def _validate_context_payload_shape(payload: dict) -> None:
 
 
 def _runtime_path(project_root: Path, runtime_root: Path) -> Path:
-    raw_runtime = Path(runtime_root)
-    if raw_runtime.is_symlink():
+    expected_lexical = Path(os.path.abspath(os.fspath(project_root))) / ".nbs_agent_runtime"
+    raw_lexical = Path(os.path.abspath(os.fspath(runtime_root)))
+    if raw_lexical != expected_lexical:
+        raise PermissionError(
+            f"Agent runtime root must be the project runtime {expected_lexical}: {raw_lexical}"
+        )
+    if expected_lexical.is_symlink():
         raise PermissionError("Agent runtime root cannot be a symlink")
-    expected = (Path(project_root).resolve() / ".nbs_agent_runtime").resolve()
-    resolved = raw_runtime.resolve()
+    expected = expected_lexical.resolve()
+    resolved = raw_lexical.resolve()
     if resolved != expected:
         raise PermissionError(
             f"Agent runtime root must resolve to the project runtime {expected}: {resolved}"

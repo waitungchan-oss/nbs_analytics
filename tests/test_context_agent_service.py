@@ -103,6 +103,11 @@ def test_runtime_symlink_cannot_bypass_project_binding(tmp_path):
             make_bundle(), runner=FakeRunner(), project_root=project_root,
             runtime_root=symlink_runtime, instructions="contract",
         )
+    with pytest.raises(PermissionError, match="project"):
+        build_context_report(
+            make_bundle(), runner=FakeRunner(), project_root=project_root,
+            runtime_root=external_runtime, instructions="contract",
+        )
 
 
 def test_context_payload_roundtrip_preserves_semantic_evidence_without_duplicates():
