@@ -56,3 +56,30 @@ No Task 5 TDD gate, Task 6 CLI, or Task 7 documentation/governance implementatio
 - `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/implementation_agent_service.py backend/agents/implementation_guard.py`: PASS, exit 0.
 - `git diff --check`: PASS, no output.
 - Hermes was intentionally not run per task instruction.
+
+## Task 4 Transient Index Write Fix Evidence
+
+### RED
+
+- Added `test_service_blocks_transient_git_index_write_and_restores_index_state`.
+- Before the fix, a fake runner could run `git add` followed by `git reset`, and the service incorrectly returned `completed` (`1 failed, 10 passed`).
+
+### Fix
+
+- During each approved runner invocation, the service preserves Git index mode and timestamps, removes index write bits, and reserves the related `index.lock` path with a temporary directory.
+- The protection is restored in `finally`; no permanent chmod, Git mutation, or formal database write was added.
+- A failed index write is surfaced through the existing `runtime_error` path, while ordinary source edits continue through the normal completion path.
+
+### GREEN
+
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_implementation_agent_service.py -q`: `11 passed`.
+- The regression confirms the service is not `completed`, index mode is restored, `index.lock` is removed, and the guard index fingerprint is unchanged after the runner exception.
+
+## Final Closeout Evidence
+
+- Transient `git add` followed by `git reset` is covered by `test_service_blocks_transient_git_index_write_and_restores_index_state`; the runner cannot leave a hidden index transition behind.
+- During every runner invocation, the Git index is read-only and the index lock path is reserved; original mode, timestamps, and lock state are restored in `finally`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_implementation_agent_service.py tests/test_implementation_guard.py -q`: `22 passed in 5.85s`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/implementation_agent_service.py`: PASS, exit 0.
+- `git diff --check`: PASS, no output.
+- Hermes was not run, per task instruction.
