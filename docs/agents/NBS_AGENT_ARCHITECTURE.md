@@ -1,6 +1,6 @@
 # NBS Agent Architecture
 
-狀態：Design Approved，等待使用者審閱後進入 implementation plan
+狀態：implementation_in_progress
 版本：v1 Evidence Bundle Pipeline
 日期：2026-07-14
 
@@ -387,3 +387,8 @@ Brief
 ```
 
 本文是 architecture truth source。兩份 Agent contract 可以更精簡，但不得放寬本文的權限、資料保護、Token 或 Hermes 邊界。如 implementation plan 需要越出本文件範圍，必須停止並重新取得使用者批准。
+
+Task 6 治理入口：
+
+- [Codex Auto-Dispatch Contract](CODEX_AGENT_DISPATCH.md)
+- [Repo-level Agent Instructions](../../AGENTS.md)
