@@ -1,6 +1,6 @@
 # NBS Agent Architecture
 
-狀態：implementation_in_progress
+狀態：verified
 版本：v1 Evidence Bundle Pipeline
 日期：2026-07-14
 
@@ -387,6 +387,21 @@ Brief
 ```
 
 本文是 architecture truth source。兩份 Agent contract 可以更精簡，但不得放寬本文的權限、資料保護、Token 或 Hermes 邊界。如 implementation plan 需要越出本文件範圍，必須停止並重新取得使用者批准。
+
+## 21. Implementation Evidence
+
+Task 5 至 Task 7 的實作與治理證據已完成核對：
+
+- Implementation commits：`2b7243b`、`5c07e60`、`9e2670a`、`9b3f300`。
+- Agent pack：`108 passed`；full pytest：`321 passed`。
+- Context `--collect-only`：`8,566` estimated tokens，無 overflow。
+- Review `--collect-only`：`28` 個 diff files；denied path content `0`。此數字只計資料內容，文件中描述 deny patterns 的文字不計入資料內容。
+- Read-only integration：passed；tracked worktree、正式 SQLite DB 與 runtime generation 未被修改。
+- Vue verify/build：passed；system acceptance：passed。
+- Hermes：`overallStatus=pass`，並完成 monthly governance、SQLite integrity 與服務驗收。
+- 2026-05 baseline matched：`HKD 12,057,968`。
+
+以上證據只證明 Agent Evidence Pipeline 已通過本階段驗收。Context/Review Agent 仍然是 read-only；Hermes 仍是正式系統的 final acceptance，任何正式 DB、baseline、業務口徑或 Git 整合仍須遵守既有授權流程。
 
 Task 6 治理入口：
 

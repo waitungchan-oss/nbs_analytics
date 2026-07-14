@@ -52,6 +52,8 @@
 
 ### Task 1: Evidence Models, Configuration And Runtime Isolation
 
+狀態：verified
+
 **Files:**
 - Create: `backend/agents/__init__.py`
 - Create: `backend/agents/evidence_models.py`
@@ -305,6 +307,8 @@ git commit -m "feat: add agent evidence models and policies"
 ---
 
 ### Task 2: Safe Evidence Collector
+
+狀態：verified
 
 **Files:**
 - Create: `backend/agents/evidence_collector.py`
@@ -631,6 +635,8 @@ git commit -m "feat: collect allowlisted agent evidence"
 
 ### Task 3: Agent Runner, Fingerprint Cache And Telemetry
 
+狀態：verified
+
 **Files:**
 - Create: `backend/agents/agent_runtime.py`
 - Test: `tests/test_agent_runtime.py`
@@ -897,6 +903,8 @@ git commit -m "feat: add cached agent runtime telemetry"
 ---
 
 ### Task 4: Context Agent Service And CLI
+
+狀態：verified
 
 **Files:**
 - Create: `backend/agents/context_agent_service.py`
@@ -1183,6 +1191,8 @@ git commit -m "feat: add context evidence agent cli"
 ---
 
 ### Task 5: Review Agent, Verification Evidence And Strict PASS Gate
+
+狀態：verified
 
 **Files:**
 - Create: `backend/agents/review_agent_service.py`
@@ -1544,6 +1554,8 @@ git commit -m "feat: add strict review evidence agent"
 
 ### Task 6: Codex Auto-Dispatch Contract And Repo Instructions
 
+狀態：verified
+
 **Files:**
 - Create: `docs/agents/CODEX_AGENT_DISPATCH.md`
 - Create: `AGENTS.md`
@@ -1661,6 +1673,8 @@ git commit -m "docs: define codex agent dispatch contract"
 
 ### Task 7: Read-Only Integration Gate And Hermes Coverage
 
+狀態：verified
+
 **Files:**
 - Create: `tests/test_agent_read_only_contract.py`
 - Modify: `scripts/hermes_post_change_check.py`
@@ -1772,6 +1786,8 @@ git commit -m "test: govern agent evidence pipeline in hermes"
 
 ### Task 8: Full Verification, Telemetry Trial And Documentation Evidence
 
+狀態：verified（implementation 與 verification evidence 已提交；merge 前仍需 final review）
+
 **Files:**
 - Modify: `docs/agents/NBS_AGENT_ARCHITECTURE.md`
 - Modify: `docs/agents/CONTEXT_AGENT_CONTRACT.md` only if implementation names differ from the approved schema
@@ -1784,7 +1800,7 @@ git commit -m "test: govern agent evidence pipeline in hermes"
 - Requires: all prior Tasks committed and worktree changes attributable
 - Does not: merge to main or mutate formal data
 
-- [ ] **Step 1: Run compile for all new Python modules and CLIs**
+- [x] **Step 1: Run compile for all new Python modules and CLIs**
 
 ```bash
 .venv/bin/python -m py_compile \
@@ -1799,7 +1815,7 @@ git commit -m "test: govern agent evidence pipeline in hermes"
 
 Expected: exit 0 and no output.
 
-- [ ] **Step 2: Run the complete Agent test pack**
+- [x] **Step 2: Run the complete Agent test pack**
 
 ```bash
 .venv/bin/python -m pytest \
@@ -1816,7 +1832,7 @@ Expected: exit 0 and no output.
 
 Expected: PASS.
 
-- [ ] **Step 3: Run collect-only telemetry trial**
+- [x] **Step 3: Run collect-only telemetry trial**
 
 ```bash
 .venv/bin/python scripts/context_agent.py \
@@ -1835,7 +1851,7 @@ Expected: PASS.
 
 Expected: both bundles are valid JSON, remain below configured input budgets, contain no denied path content, and `.nbs_agent_runtime/` remains ignored.
 
-- [ ] **Step 4: Run full Python regression**
+- [x] **Step 4: Run full Python regression**
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -1843,7 +1859,7 @@ Expected: both bundles are valid JSON, remain below configured input budgets, co
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Run Vue verification and build**
+- [x] **Step 5: Run Vue verification and build**
 
 ```bash
 npm --prefix frontend run verify
@@ -1852,7 +1868,7 @@ npm --prefix frontend run build
 
 Expected: contract verification and Vite build PASS; tracked worktree remains unchanged.
 
-- [ ] **Step 6: Start services and run acceptance**
+- [x] **Step 6: Start services and run acceptance**
 
 ```bash
 .venv/bin/python scripts/system_manager.py start --no-browser
@@ -1861,7 +1877,7 @@ Expected: contract verification and Vite build PASS; tracked worktree remains un
 
 Expected: Streamlit, API and Vue are ready; acceptance status is `passed`.
 
-- [ ] **Step 7: Run Hermes read-only acceptance**
+- [x] **Step 7: Run Hermes read-only acceptance**
 
 ```bash
 .venv/bin/python scripts/hermes_post_change_check.py --json > /tmp/agent-evidence-hermes.json
@@ -1870,7 +1886,7 @@ Expected: Streamlit, API and Vue are ready; acceptance status is `passed`.
 
 Expected: `pass`; SQLite integrity `ok`; monthly baselines matched; 2026-05 actual remains `HKD 12,057,968`; Agent targeted tests included.
 
-- [ ] **Step 8: Update architecture and system-map evidence**
+- [x] **Step 8: Update architecture and system-map evidence**
 
 Update `NBS_AGENT_ARCHITECTURE.md` status to `verified` and record:
 
@@ -1882,7 +1898,7 @@ Update `NBS_AGENT_ARCHITECTURE.md` status to `verified` and record:
 
 Add a concise Agent Architecture section to `NBS_ANALYTICS_SYSTEM_MAP.md` linking the three contracts, two CLIs, `.nbs_agent_runtime/` and the boundary that Hermes remains final acceptance.
 
-- [ ] **Step 9: Review changed files and run final format checks**
+- [x] **Step 9: Review changed files and run final format checks**
 
 ```bash
 git diff --check
@@ -1892,7 +1908,7 @@ git diff --stat main...HEAD
 
 Expected: no whitespace errors; only planned files changed; `.nbs_agent_runtime/` absent from Git status.
 
-- [ ] **Step 10: Commit verification evidence**
+- [x] **Step 10: Commit verification evidence**
 
 ```bash
 git add \
@@ -1902,7 +1918,17 @@ git add \
 git commit -m "docs: verify agent evidence pipeline"
 ```
 
-- [ ] **Step 11: Request final code review before merge**
+- [ ] **Step 11: Request final code review before merge**（保留為 merge 前 gate，待 merge 前執行）
+
+#### Task 8 Verification Record
+
+- Implementation commits：`2b7243b`、`5c07e60`、`9e2670a`、`9b3f300`。
+- Agent pack：`108 passed`；full pytest：`321 passed`。
+- Context `--collect-only`：`8,566` estimated tokens，無 overflow；Review `--collect-only`：`28` 個 diff files。
+- denied path content：`0`。此數字只計資料內容，文件中描述 deny patterns 的文字不計入資料內容。
+- Read-only integration、Vue verify/build、system acceptance 均 passed。
+- Hermes `overallStatus=pass`；2026-05 baseline matched `HKD 12,057,968`。
+- Task 8 文件收尾與 verification evidence 已提交，並保留 merge 前 review 與使用者授權 gate。
 
 Review requirements:
 

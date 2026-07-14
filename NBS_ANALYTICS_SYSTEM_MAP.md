@@ -39,6 +39,21 @@ NBS Analytics 是一套本地企業營運駕駛艙：以 Streamlit 作為基準 
 
 ---
 
+## 2A. Agent Evidence Pipeline
+
+Agent Evidence Pipeline 是 Codex 的 read-only 證據整理與檢查層，用來縮小上下文、固定安全邊界與保存可重複驗證的結果：
+
+- Repo 入口與分派規則：[AGENTS.md](AGENTS.md)；完整架構：[NBS Agent Architecture](docs/agents/NBS_AGENT_ARCHITECTURE.md)。
+- Context contract：[CONTEXT_AGENT_CONTRACT.md](docs/agents/CONTEXT_AGENT_CONTRACT.md)；Review contract：[REVIEW_AGENT_CONTRACT.md](docs/agents/REVIEW_AGENT_CONTRACT.md)。
+- 兩個只讀 CLI：[context_agent.py](scripts/context_agent.py) 與 [review_agent.py](scripts/review_agent.py)。
+- Bundle、report、cache 與 telemetry 只寫入 `.nbs_agent_runtime/`，不作為正式資料來源。
+- Context/Review Agent 不修改程式、正式 SQLite、baseline、runtime evidence、業務口徑或 Git；它們只提供規劃與 code review 證據。
+- Hermes 不與 Agent 重複：Hermes 保留 runtime、SQLite integrity、baseline、服務與整體 system acceptance，仍是 final acceptance。
+
+Agent 流程為：`Brief -> collect-only evidence -> Context/Review -> Codex implementation -> full verification -> Hermes final acceptance`。Agent 通過不代表正式系統已驗收，正式 DB 與 baseline 仍以 Hermes 和既有治理 gate 為準。
+
+---
+
 ## 2. 全景流程圖
 
 ```mermaid
