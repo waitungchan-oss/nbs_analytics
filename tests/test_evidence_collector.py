@@ -214,6 +214,30 @@ def test_review_collection_uses_argv_and_captures_changed_files(tmp_path):
     assert len(bundle.repository["baseSha"]) == 40
 
 
+def test_review_collection_includes_allowlisted_untracked_files_but_not_denied_data(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "backend").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    untracked = tmp_path / "backend/new_agent.py"
+    untracked.write_text("VALUE = 1\n", encoding="utf-8")
+    denied = tmp_path / "backend/secret.db"
+    denied.write_text("formal rows", encoding="utf-8")
+
+    first = EvidenceCollector(tmp_path).collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+    second = EvidenceCollector(tmp_path).collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+    assert [item.source for item in first.evidence] == ["backend/new_agent.py"]
+    assert first.repository["dirtyFiles"] == ["backend/new_agent.py", "backend/secret.db"]
+    assert first.evidence[0].content == second.evidence[0].content
+    assert "VALUE = 1" in first.evidence[0].content
+    assert "formal rows" not in str(first.to_dict())
+
+
 def test_context_reports_deterministic_input_token_overflow(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path, context_input_tokens=5)

@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from time import perf_counter
-from typing import Protocol
+from typing import Callable, Protocol
 from uuid import uuid4
 
 from backend.agents.evidence_models import (
@@ -35,13 +35,31 @@ class AgentRunner(Protocol):
 
 
 def resolve_runtime_output_path(project_root: Path, raw_path: str) -> Path:
-    root = (project_root / ".nbs_agent_runtime").resolve()
+    project_lexical = Path(os.path.abspath(os.fspath(project_root)))
+    root_lexical = project_lexical / ".nbs_agent_runtime"
     candidate = Path(raw_path)
-    resolved = (project_root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    candidate_lexical = Path(os.path.abspath(
+        os.fspath(project_lexical / candidate if not candidate.is_absolute() else candidate)
+    ))
+    try:
+        relative = candidate_lexical.relative_to(root_lexical)
+    except ValueError as exc:
+        raise PermissionError(f"Agent output must stay under {root_lexical}") from exc
+    if relative == Path("."):
+        raise PermissionError(f"Agent output must be a file below {root_lexical}")
+    current = root_lexical
+    for part in relative.parts[:-1]:
+        if current.is_symlink():
+            raise PermissionError(f"Agent output parent cannot be a symlink: {current}")
+        current = current / part
+    if current.is_symlink():
+        raise PermissionError(f"Agent output parent cannot be a symlink: {current}")
+    root = root_lexical.resolve()
+    resolved = candidate_lexical.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise PermissionError(f"Agent output must stay under {root}") from exc
+        raise PermissionError(f"Agent output must stay under {root_lexical}") from exc
     resolved.parent.mkdir(parents=True, exist_ok=True)
     return resolved
 
@@ -251,6 +269,7 @@ class AgentRuntime:
         output_schema: str,
         instructions: str,
         evidence_payload: dict | None = None,
+        output_validator: Callable[[object], dict] | None = None,
     ) -> dict:
         public_evidence = bundle.to_dict() if evidence_payload is None else evidence_payload
         request_fingerprint = agent_request_fingerprint(
@@ -296,14 +315,19 @@ class AgentRuntime:
                     result = self._schema_check(
                         json.loads(report_path.read_text(encoding="utf-8")), output_schema
                     )
+                    if output_validator is not None:
+                        result = self._schema_check(output_validator(result), output_schema)
                     if estimate_tokens(json.dumps(result, ensure_ascii=False)) > self.output_token_limit:
                         raise ValueError("Cached agent output exceeds output token budget")
                     cache_hit = True
-                except (OSError, json.JSONDecodeError, ValueError):
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
                     cache_hit = False
+                    report_path.unlink(missing_ok=True)
 
             if not cache_hit:
                 result = self._schema_check(runner.run(payload), output_schema)
+                if output_validator is not None:
+                    result = self._schema_check(output_validator(result), output_schema)
                 if estimate_tokens(json.dumps(result, ensure_ascii=False)) > self.output_token_limit:
                     raise ValueError("Agent output exceeds output token budget")
                 self._write_json_atomic(report_path, result)

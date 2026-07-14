@@ -223,7 +223,9 @@ class EvidenceCollector:
     def _repository(self) -> tuple[dict, tuple[CommandEvidence, ...]]:
         head = self._run("git-head", ["git", "rev-parse", "HEAD"])
         branch = self._run("git-branch", ["git", "branch", "--show-current"])
-        status = self._run("git-status", ["git", "status", "--porcelain"])
+        status = self._run(
+            "git-status", ["git", "status", "--porcelain", "--untracked-files=all"],
+        )
         recent = self._run("git-log", ["git", "log", "-5", "--oneline"])
         dirty = sorted(line[3:] for line in status.stdout.splitlines() if len(line) > 3)
         return {
@@ -298,23 +300,47 @@ class EvidenceCollector:
             "git-diff-name-only",
             ["git", "diff", *diff_options, "--name-only", diff_range],
         )
+        untracked_command = None
+        untracked_paths: list[str] = []
+        if head_ref == "WORKTREE":
+            untracked_command = self._run(
+                "git-untracked-files",
+                ["git", "ls-files", "--others", "--exclude-standard"],
+            )
+            for relative in untracked_command.stdout.splitlines():
+                if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+                    raise PermissionError(f"Unsafe untracked path: {relative}")
+                try:
+                    self.policy.resolve_read_path(self.project_root / relative)
+                except PermissionError:
+                    continue
+                untracked_paths.append(relative)
+        tracked_paths = changed.stdout.splitlines()
+        selected_paths = sorted(dict.fromkeys([*tracked_paths, *untracked_paths]))
+        untracked_set = set(untracked_paths)
         patches: list[EvidenceItem] = []
         patch_commands: list[CommandEvidence] = []
-        for index, relative in enumerate(changed.stdout.splitlines()[:50]):
+        for index, relative in enumerate(selected_paths[:50]):
             if not relative or relative.startswith("/") or ".." in Path(relative).parts:
                 raise PermissionError(f"Unsafe changed path: {relative}")
             self.policy.resolve_read_path(self.project_root / relative)
-            patch = self._run(
-                f"git-diff-file-{index}",
-                ["git", "diff", *diff_options, diff_range, "--", relative],
-            )
+            if relative in untracked_set:
+                patch = self._run(
+                    f"git-diff-untracked-file-{index}",
+                    ["git", "diff", *diff_options, "--no-index", "--", "/dev/null", relative],
+                )
+            else:
+                patch = self._run(
+                    f"git-diff-file-{index}",
+                    ["git", "diff", *diff_options, diff_range, "--", relative],
+                )
             patch_commands.append(patch)
             patches.append(
                 EvidenceItem(
                     kind="diff",
                     source=relative,
                     content=patch.stdout,
-                    metadata={"truncated": patch.truncated},
+                    metadata={"truncated": patch.truncated, "untracked": relative in untracked_set},
                 )
             )
         return EvidenceBundle(
@@ -332,12 +358,19 @@ class EvidenceCollector:
                 "headRef": head_ref,
                 "headSha": head_sha,
                 "diffFileLimitExceeded": changed.truncated
-                or len(changed.stdout.splitlines()) > 50,
+                or bool(untracked_command and untracked_command.truncated)
+                or len(selected_paths) > 50,
             },
             guardrails={
                 "revenueScope": "不含掛賬核銷與TT退款轉團款",
                 "mayBaseline": "HKD 12,057,968",
             },
             evidence=tuple(patches),
-            commands=commands + (base_command, *(tuple() if head_command is None else (head_command,)), changed, *patch_commands),
+            commands=commands + (
+                base_command,
+                *(tuple() if head_command is None else (head_command,)),
+                changed,
+                *(tuple() if untracked_command is None else (untracked_command,)),
+                *patch_commands,
+            ),
         )

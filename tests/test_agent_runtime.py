@@ -150,6 +150,22 @@ def test_output_path_must_stay_inside_agent_runtime(tmp_path):
         resolve_runtime_output_path(tmp_path, "docs/context.json")
 
 
+def test_output_path_rejects_runtime_root_itself(tmp_path):
+    with pytest.raises(PermissionError, match="file below"):
+        resolve_runtime_output_path(tmp_path, ".nbs_agent_runtime")
+
+
+def test_output_path_rejects_symlinked_runtime_parent(tmp_path):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (project / ".nbs_agent_runtime").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(PermissionError, match="symlink"):
+        resolve_runtime_output_path(project, ".nbs_agent_runtime/reports/review.json")
+
+
 def test_allowlist_rejects_same_basename_from_different_path(tmp_path, monkeypatch):
     allowed_dir = tmp_path / "allowed"
     allowed_dir.mkdir()
@@ -167,6 +183,35 @@ def test_allowlist_rejects_same_basename_from_different_path(tmp_path, monkeypat
 def test_runtime_root_must_be_named_nbs_agent_runtime(tmp_path):
     with pytest.raises(PermissionError, match="runtime root"):
         AgentRuntime(tmp_path / "outside")
+
+
+def test_runtime_output_validator_rejects_fresh_and_cached_invalid_results(tmp_path):
+    class Runner:
+        calls = 0
+
+        def run(self, payload):
+            self.calls += 1
+            return {"schemaVersion": "context-summary-v1", "status": "bad" if self.calls < 3 else "ready"}
+
+    def validate(result):
+        if result.get("status") != "ready":
+            raise ValueError("invalid full output")
+        return result
+
+    runtime = AgentRuntime(tmp_path / ".nbs_agent_runtime")
+    runner = Runner()
+    runtime.run("context", make_bundle(), runner, "context-summary-v1", "contract")
+    with pytest.raises(ValueError, match="invalid full output"):
+        runtime.run(
+            "context", make_bundle(), runner, "context-summary-v1", "contract",
+            output_validator=validate,
+        )
+    result = runtime.run(
+        "context", make_bundle(), runner, "context-summary-v1", "contract",
+        output_validator=validate,
+    )
+    assert result["status"] == "ready"
+    assert runner.calls == 3
 
 
 def test_same_fingerprint_threaded_fill_calls_runner_once(tmp_path):

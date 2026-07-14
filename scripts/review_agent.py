@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import argparse
+import json
+import shlex
+import sys
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.agents.agent_runtime import SubprocessAgentRunner, resolve_runtime_output_path
+from backend.agents.evidence_collector import EvidenceCollector, EvidencePolicy
+from backend.agents.review_agent_service import (
+    build_review_evidence_payload,
+    format_review_markdown,
+    run_review_batches,
+)
+
+
+def exit_code_for_verdict(verdict: str | None) -> int:
+    if verdict in {None, "pass"}:
+        return 0
+    if verdict == "changes_required":
+        return 1
+    if verdict == "blocked":
+        return 2
+    if verdict == "context_overflow":
+        return 4
+    return 5
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Collect or run read-only Review Agent evidence")
+    parser.add_argument("--brief", required=True)
+    parser.add_argument("--base", default="main")
+    parser.add_argument("--head", default="WORKTREE")
+    parser.add_argument("--context")
+    parser.add_argument("--verification")
+    parser.add_argument("--collect-only", action="store_true")
+    parser.add_argument("--agent-command")
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--format", choices=("json", "markdown"), default="json")
+    parser.add_argument("--output")
+    return parser
+
+
+def _read_object(path: str, label: str) -> dict:
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _read_verification(path: str) -> list[dict]:
+    value = _read_object(path, "Verification evidence")
+    if set(value) != {"commands"} or not isinstance(value["commands"], list):
+        raise ValueError("Verification evidence must contain only a commands list")
+    commands = value["commands"]
+    expected = {"label", "argv", "exitCode", "stdoutTail", "stderrTail"}
+    for item in commands:
+        if not isinstance(item, dict) or set(item) != expected:
+            raise ValueError("Verification command schema is invalid")
+        if not isinstance(item["label"], str) or not item["label"]:
+            raise ValueError("Verification command label is invalid")
+        if not isinstance(item["argv"], list) or not all(
+            isinstance(argument, str) for argument in item["argv"]
+        ):
+            raise ValueError("Verification command argv is invalid")
+        if not isinstance(item["exitCode"], int) or isinstance(item["exitCode"], bool):
+            raise ValueError("Verification command exitCode is invalid")
+        if not isinstance(item["stdoutTail"], str) or not isinstance(item["stderrTail"], str):
+            raise ValueError("Verification command output tails are invalid")
+    return commands
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        policy = EvidencePolicy.from_project(PROJECT_ROOT)
+        output_path = (
+            resolve_runtime_output_path(PROJECT_ROOT, args.output) if args.output else None
+        )
+        brief = (PROJECT_ROOT / args.brief).resolve()
+        if not brief.is_file():
+            return 2
+        policy.resolve_read_path(brief)
+        bundle = EvidenceCollector(PROJECT_ROOT, policy=policy).collect_review(
+            brief, base_ref=args.base, head_ref=args.head,
+        )
+        if args.collect_only:
+            report = build_review_evidence_payload(
+                bundle, context_summary={}, verification=[],
+            )
+        else:
+            context_summary = _read_object(args.context, "Context summary") if args.context else {}
+            verification = _read_verification(args.verification) if args.verification else []
+            runner = None
+            if args.agent_command:
+                command = shlex.split(args.agent_command)
+                if not command:
+                    raise PermissionError("Agent command cannot be empty")
+                runner = SubprocessAgentRunner(
+                    command, allowed_executables=policy.agent_executables,
+                )
+            instructions = (PROJECT_ROOT / "docs/agents/REVIEW_AGENT_CONTRACT.md").read_text(
+                encoding="utf-8"
+            )
+            report = run_review_batches(
+                bundle,
+                context_summary=context_summary,
+                verification=verification,
+                runner=runner,
+                runtime_root=PROJECT_ROOT / ".nbs_agent_runtime",
+                instructions=instructions,
+                strict=args.strict,
+            )
+        rendered = (
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+            if args.format == "json"
+            else format_review_markdown(report)
+        )
+        if output_path is None:
+            sys.stdout.write(rendered)
+        else:
+            output_path.write_text(rendered, encoding="utf-8")
+        return 0 if args.collect_only else exit_code_for_verdict(report.get("verdict"))
+    except FileNotFoundError:
+        return 2
+    except (PermissionError, ValueError, json.JSONDecodeError, KeyError, TypeError, OSError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 3 if isinstance(exc, PermissionError) else 5
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
