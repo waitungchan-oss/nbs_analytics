@@ -1,10 +1,51 @@
-# Task 1 Report: Make SQLite Targets Explicit
+# Task 1 Report
 
 ## Status
 
+DONE_WITH_CONCERNS
+
+## Commit SHA
+
+`53557695a17047ad53630123541029f7a4a5b90b` (`feat: define implementation agent contract`)
+
+## Modified Files
+
+- `.gitignore`
+- `agent_config/implementation_commands.json`
+- `agent_config/implementation_policies.json`
+- `agent_config/token_budgets.json`
+- `backend/agents/implementation_models.py`
+- `backend/agents/evidence_models.py`
+- `backend/agents/agent_runtime.py`
+- `tests/test_implementation_models.py`
+
+The pre-existing modification to `.superpowers/sdd/progress.md` was preserved and not staged.
+
+## Tests And Results
+
+- `.venv/bin/python -m pytest tests/test_implementation_models.py -q`: could not start because this worktree has no `.venv/bin/python`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_implementation_models.py -q`: PASS, `7 passed`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_implementation_models.py tests/test_evidence_models.py tests/test_agent_runtime.py -q`: PASS, `32 passed`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/implementation_models.py backend/agents/evidence_models.py backend/agents/agent_runtime.py`: PASS.
+- JSON parse for implementation policy, implementation commands, and token budgets: PASS.
+- `git diff --check`: PASS.
+
+## Concerns
+
+- The task-local `.venv` requested by the brief is absent. Verification used the existing parent repository `.venv` at `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv`; no dependencies were installed.
+- Task 2+ guard, runner, service, and CLI files were intentionally not implemented.
+
+## Preserved Prior Report
+
+The prior contents of this path, which described an unrelated SQLite explicit-path task, are preserved below rather than discarded:
+
+### Task 1 Report: Make SQLite Targets Explicit
+
+#### Status
+
 DONE
 
-## Scope
+#### Scope
 
 - Added `resolve_db_path()` and explicit-path `get_db_connection()`.
 - Added `snapshot_sqlite_database()` with post-copy SQLite integrity validation.
@@ -13,7 +54,7 @@ DONE
 - Added `tests/test_database_explicit_path.py` from the task brief.
 - No upload adapters, baseline registry, formal revenue logic, or unrelated files were modified. `tests/test_database_rollback.py` required no change.
 
-## TDD Evidence
+#### TDD Evidence
 
 The new test file was run before production changes:
 
@@ -30,7 +71,7 @@ tests/test_database_explicit_path.py tests/test_database_rollback.py
 8 passed in 0.75s
 ```
 
-## Verification
+#### Verification
 
 ```text
 .venv/bin/python -m pytest -q
@@ -43,6 +84,6 @@ Additional checks passed:
 - May 2026 frozen baseline remains `12057968` / `HKD 12,057,968` in the existing baseline and acceptance artifacts.
 - Worktree scope review found only `database.py` and the new explicit-path test as code changes; no rollback test edit was needed.
 
-## Concerns
+#### Concerns
 
-None identified for Task 1. Existing callers continue to omit `db_path` and resolve through `DB_FILE`; explicit callers can now bind their target without mutating the default.
+None identified for the prior SQLite task. Existing callers continue to omit `db_path` and resolve through `DB_FILE`; explicit callers can now bind their target without mutating the default.
