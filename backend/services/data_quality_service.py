@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import Lock
 
 import pandas as pd
 
@@ -17,6 +19,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_QUALITY_CACHE_DIR = PROJECT_ROOT / ".nbs_runtime_cache"
 DATA_QUALITY_SERVICE_VERSION = "data-quality-v1"
 DATA_QUALITY_CACHE_PREFIX = "data_quality_"
+DATA_QUALITY_REQUIRED_KEYS = {
+    "status",
+    "scope",
+    "overallScore",
+    "overallHealth",
+    "latestDate",
+    "missingDays",
+    "unmatchedRows",
+    "excludedAmountRate",
+    "rawRows",
+    "officialRows",
+    "dimensions",
+    "fieldCompleteness",
+}
+_DATA_QUALITY_LOCKS: dict[str, Lock] = {}
+_DATA_QUALITY_LOCKS_GUARD = Lock()
 
 
 def _rate(numerator, denominator) -> float:
@@ -128,6 +146,21 @@ def _data_quality_cache_path(cache_dir: str | Path | None, cache_key: str) -> Pa
     return directory / f"{DATA_QUALITY_CACHE_PREFIX}{cache_key}.json"
 
 
+def _payload_checksum(payload: dict) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _data_quality_lock(cache_key: str) -> Lock:
+    with _DATA_QUALITY_LOCKS_GUARD:
+        return _DATA_QUALITY_LOCKS.setdefault(cache_key, Lock())
+
+
 def _load_data_quality_cache(path: Path, cache_key: str, generation_token: str) -> dict | None:
     try:
         wrapper = json.loads(path.read_text(encoding="utf-8"))
@@ -142,8 +175,13 @@ def _load_data_quality_cache(path: Path, cache_key: str, generation_token: str) 
         or not isinstance(wrapper.get("payload"), dict)
     ):
         return None
+    payload = wrapper["payload"]
+    if not DATA_QUALITY_REQUIRED_KEYS.issubset(payload):
+        return None
+    if wrapper.get("payloadSha256") != _payload_checksum(payload):
+        return None
     return {
-        **wrapper["payload"],
+        **payload,
         "cacheStatus": "hit",
         "generationToken": str(generation_token),
     }
@@ -160,11 +198,23 @@ def _save_data_quality_cache(
         "cacheKey": cache_key,
         "generationToken": str(generation_token),
         "payload": payload,
+        "payloadSha256": _payload_checksum(payload),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(json.dumps(wrapper, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, path)
+    with NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        json.dump(wrapper, handle, ensure_ascii=False)
+        temporary = Path(handle.name)
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build_data_quality_cached(
@@ -178,19 +228,22 @@ def build_data_quality_cached(
     cached = _load_data_quality_cache(cache_path, cache_key, generation_token)
     if cached is not None:
         return cached
-
-    raw_tour, raw_others = load_all_data_from_db(db_path=Path(db_path))
-    analysis_tour, analysis_others, audit = build_revenue_scope_frames(raw_tour, raw_others)
-    payload = build_data_quality_from_frames(
-        raw_tour,
-        raw_others,
-        analysis_tour,
-        analysis_others,
-        audit,
-    )
-    _save_data_quality_cache(cache_path, cache_key, generation_token, payload)
-    return {
-        **payload,
-        "cacheStatus": "rebuilt",
-        "generationToken": str(generation_token),
-    }
+    with _data_quality_lock(cache_key):
+        cached = _load_data_quality_cache(cache_path, cache_key, generation_token)
+        if cached is not None:
+            return cached
+        raw_tour, raw_others = load_all_data_from_db(db_path=Path(db_path))
+        analysis_tour, analysis_others, audit = build_revenue_scope_frames(raw_tour, raw_others)
+        payload = build_data_quality_from_frames(
+            raw_tour,
+            raw_others,
+            analysis_tour,
+            analysis_others,
+            audit,
+        )
+        _save_data_quality_cache(cache_path, cache_key, generation_token, payload)
+        return {
+            **payload,
+            "cacheStatus": "rebuilt",
+            "generationToken": str(generation_token),
+        }

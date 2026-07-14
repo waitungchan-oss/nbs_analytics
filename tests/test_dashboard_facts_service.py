@@ -1,3 +1,8 @@
+import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 
 from backend.services import dashboard_facts_service as service
@@ -203,3 +208,140 @@ def test_dashboard_read_model_repairs_corrupted_json(monkeypatch, tmp_path):
 
     assert rebuilt["readModelCacheStatus"] == "rebuilt"
     assert len(calls) == 2
+
+
+def test_dashboard_read_model_rebuilds_tampered_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        service,
+        "load_all_data_from_db",
+        lambda *, db_path: (_tour_frame(), _others_frame()),
+    )
+    calls = []
+
+    def build_analytics(branch_facts, specialist_facts, filters):
+        calls.append(filters)
+        return {
+            "branchRanking": [],
+            "specialistRanking": [],
+            "productDrilldown": {},
+            "monthlyTrend": [],
+            "reconciliation": {},
+        }
+
+    monkeypatch.setattr(service, "build_analytics_from_facts", build_analytics)
+    cache_dir = tmp_path / "cache"
+    kwargs = {**_kwargs(tmp_path), "cache_dir": cache_dir, "generation_token": "1:abc"}
+    service.build_dashboard_facts_read_model(**kwargs)
+    cache_file = next(cache_dir.glob("dashboard_read_model_*.json"))
+    wrapper = json.loads(cache_file.read_text(encoding="utf-8"))
+    wrapper["payload"]["status"] = "tampered"
+    cache_file.write_text(json.dumps(wrapper, ensure_ascii=False), encoding="utf-8")
+
+    rebuilt = service.build_dashboard_facts_read_model(**kwargs)
+
+    assert rebuilt["readModelCacheStatus"] == "rebuilt"
+    assert rebuilt["status"] == "ready"
+    assert len(calls) == 2
+
+
+def test_dashboard_json_cache_writers_use_unique_temporary_files(monkeypatch, tmp_path):
+    barrier = threading.Barrier(2)
+    original_replace = service.os.replace
+
+    def synchronized_replace(source, destination):
+        barrier.wait(timeout=2)
+        original_replace(source, destination)
+
+    monkeypatch.setattr(service.os, "replace", synchronized_replace)
+    path = tmp_path / "read-model.json"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(
+            pool.map(
+                lambda index: service._save_read_model_cache(
+                    path,
+                    "read-model-key",
+                    "facts-key",
+                    {"status": "ready", "writer": index},
+                ),
+                range(2),
+            )
+        )
+
+    assert path.exists()
+
+
+def test_dashboard_pickle_cache_writers_use_unique_temporary_files(monkeypatch, tmp_path):
+    barrier = threading.Barrier(2)
+    original_replace = service.os.replace
+
+    def synchronized_replace(source, destination):
+        barrier.wait(timeout=2)
+        original_replace(source, destination)
+
+    monkeypatch.setattr(service.os, "replace", synchronized_replace)
+    path = tmp_path / "facts.pkl"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda index: service._save_cached_payload(path, {"writer": index}), range(2)))
+
+    assert path.exists()
+
+
+def test_dashboard_facts_single_flight_avoids_duplicate_rebuild(monkeypatch, tmp_path):
+    calls = []
+    start = threading.Barrier(3)
+
+    def load_frames(*, db_path):
+        calls.append(db_path)
+        time.sleep(0.05)
+        return _tour_frame(), _others_frame()
+
+    def build():
+        start.wait(timeout=2)
+        return service.build_dashboard_facts(generation_token="1:abc", **_kwargs(tmp_path))
+
+    monkeypatch.setattr(service, "load_all_data_from_db", load_frames)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(build) for _ in range(2)]
+        start.wait(timeout=2)
+        results = [future.result(timeout=3) for future in futures]
+
+    assert len(calls) == 1
+    assert sorted(result["factsCacheStatus"] for result in results) == ["hit", "rebuilt"]
+
+
+def test_dashboard_read_model_single_flight_avoids_duplicate_analytics(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        service,
+        "load_all_data_from_db",
+        lambda *, db_path: (_tour_frame(), _others_frame()),
+    )
+    kwargs = {**_kwargs(tmp_path), "generation_token": "1:abc"}
+    service.build_dashboard_facts(**kwargs)
+    calls = []
+    start = threading.Barrier(3)
+
+    def build_analytics(branch_facts, specialist_facts, filters):
+        calls.append(filters)
+        time.sleep(0.05)
+        return {
+            "branchRanking": [],
+            "specialistRanking": [],
+            "productDrilldown": {},
+            "monthlyTrend": [],
+            "reconciliation": {},
+        }
+
+    def build():
+        start.wait(timeout=2)
+        return service.build_dashboard_facts_read_model(**kwargs)
+
+    monkeypatch.setattr(service, "build_analytics_from_facts", build_analytics)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(build) for _ in range(2)]
+        start.wait(timeout=2)
+        results = [future.result(timeout=3) for future in futures]
+
+    assert len(calls) == 1
+    assert sorted(result["readModelCacheStatus"] for result in results) == ["hit", "rebuilt"]

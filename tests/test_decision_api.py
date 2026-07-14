@@ -69,3 +69,85 @@ def test_decision_api_uses_generation_aware_quality_cache(monkeypatch):
     assert response.json()["provenance"]["factsCacheStatus"] == "hit"
     assert response.json()["provenance"]["readModelCacheStatus"] == "hit"
     assert response.json()["provenance"]["dataQualityCacheStatus"] == "hit"
+
+
+def test_decision_api_retries_once_when_generation_changes(monkeypatch):
+    generations = iter(
+        [
+            {"cacheToken": "1:old"},
+            {"cacheToken": "2:new"},
+            {"cacheToken": "2:new"},
+            {"cacheToken": "2:new"},
+        ]
+    )
+    facts_tokens = []
+    quality_tokens = []
+    monkeypatch.setattr(decisions_router, "load_cache_generation", lambda **kwargs: next(generations))
+    monkeypatch.setattr(
+        decisions_router,
+        "build_dashboard_facts_read_model",
+        lambda **kwargs: (
+            facts_tokens.append(kwargs["generation_token"])
+            or {
+                "status": "ready",
+                "generationToken": kwargs["generation_token"],
+                "revenueScope": "Scope",
+                "monthlyTotals": [],
+                "factsCacheStatus": "hit",
+                "readModelCacheStatus": "hit",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        decisions_router,
+        "build_data_quality_cached",
+        lambda **kwargs: (
+            quality_tokens.append(kwargs["generation_token"])
+            or {"status": "ready", "overallScore": 100, "cacheStatus": "hit"}
+        ),
+    )
+    monkeypatch.setattr(decisions_router, "build_forecast_read_model", lambda: {"status": "ready", "cache": {}})
+    monkeypatch.setattr(decisions_router, "build_system_health", lambda **kwargs: {"status": "ok", "latestAcceptance": {}})
+    monkeypatch.setattr(decisions_router, "load_decision_targets", lambda: {"status": "not_configured", "targets": [], "thresholds": {}})
+
+    response = TestClient(create_app()).get("/api/decisions/overview")
+
+    assert response.status_code == 200
+    assert response.json()["provenance"]["generationToken"] == "2:new"
+    assert facts_tokens == ["1:old", "2:new"]
+    assert quality_tokens == ["1:old", "2:new"]
+
+
+def test_decision_api_returns_conflict_when_generation_changes_twice(monkeypatch):
+    generations = iter(
+        [
+            {"cacheToken": "1:first"},
+            {"cacheToken": "2:second"},
+            {"cacheToken": "2:second"},
+            {"cacheToken": "3:third"},
+        ]
+    )
+    monkeypatch.setattr(decisions_router, "load_cache_generation", lambda **kwargs: next(generations))
+    monkeypatch.setattr(
+        decisions_router,
+        "build_dashboard_facts_read_model",
+        lambda **kwargs: {
+            "status": "ready",
+            "generationToken": kwargs["generation_token"],
+            "revenueScope": "Scope",
+            "monthlyTotals": [],
+        },
+    )
+    monkeypatch.setattr(
+        decisions_router,
+        "build_data_quality_cached",
+        lambda **kwargs: {"status": "ready", "overallScore": 100},
+    )
+    monkeypatch.setattr(decisions_router, "build_forecast_read_model", lambda: {"status": "ready", "cache": {}})
+    monkeypatch.setattr(decisions_router, "build_system_health", lambda **kwargs: {"status": "ok", "latestAcceptance": {}})
+    monkeypatch.setattr(decisions_router, "load_decision_targets", lambda: {"status": "not_configured", "targets": [], "thresholds": {}})
+
+    response = TestClient(create_app()).get("/api/decisions/overview")
+
+    assert response.status_code == 409
+    assert "Data generation changed" in response.json()["detail"]
