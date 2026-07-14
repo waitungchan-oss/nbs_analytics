@@ -49,6 +49,9 @@ Agent Evidence Pipeline 是 Codex 的 read-only 證據整理與檢查層，用�
 - Bundle、report、cache 與 telemetry 只寫入 `.nbs_agent_runtime/`，不作為正式資料來源。
 - Context/Review Agent 不修改程式、正式 SQLite、baseline、runtime evidence、業務口徑或 Git；它們只提供規劃與 code review 證據。
 - Hermes 不與 Agent 重複：Hermes 保留 runtime、SQLite integrity、baseline、服務與整體 system acceptance，仍是 final acceptance。
+- 最新 Evidence Pipeline 驗證：implementation commits 包含 `4ba657c`；Agent pack（implementation plan 指定 9 檔）`110 passed`，full pytest `329 passed`。
+- Context final estimated tokens：`8,284`，無 overflow；Review final：`29` 個 diff files，denied source paths `0`。
+- system acceptance、Vue verify/build 均 passed；Hermes `overallStatus=pass`；2026-05 baseline 維持 `HKD 12,057,968`。
 
 Agent 流程為：`Brief -> collect-only evidence -> Context/Review -> Codex implementation -> full verification -> Hermes final acceptance`。Agent 通過不代表正式系統已驗收，正式 DB 與 baseline 仍以 Hermes 和既有治理 gate 為準。
 

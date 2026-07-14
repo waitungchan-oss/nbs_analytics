@@ -1922,10 +1922,10 @@ git commit -m "docs: verify agent evidence pipeline"
 
 #### Task 8 Verification Record
 
-- Implementation commits：`2b7243b`、`5c07e60`、`9e2670a`、`9b3f300`。
-- Agent pack：`108 passed`；full pytest：`321 passed`。
-- Context `--collect-only`：`8,566` estimated tokens，無 overflow；Review `--collect-only`：`28` 個 diff files。
-- denied path content：`0`。此數字只計資料內容，文件中描述 deny patterns 的文字不計入資料內容。
+- Implementation commits：`2b7243b`、`5c07e60`、`9e2670a`、`9b3f300`、`4ba657c`。
+- Agent pack（implementation plan 指定 9 檔）：`110 passed`；full pytest：`329 passed`。
+- Context `--collect-only`：`8,284` estimated tokens，無 overflow；Review `--collect-only`：`29` 個 diff files。
+- denied source paths：`0`。此數字只計資料內容，文件中描述 deny patterns 的文字不計入資料內容。
 - Read-only integration、Vue verify/build、system acceptance 均 passed。
 - Hermes `overallStatus=pass`；2026-05 baseline matched `HKD 12,057,968`。
 - Task 8 文件收尾與 verification evidence 已提交，並保留 merge 前 review 與使用者授權 gate。

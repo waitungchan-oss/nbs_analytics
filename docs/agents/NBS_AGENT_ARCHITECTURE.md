@@ -392,10 +392,10 @@ Brief
 
 Task 5 至 Task 7 的實作與治理證據已完成核對：
 
-- Implementation commits：`2b7243b`、`5c07e60`、`9e2670a`、`9b3f300`。
-- Agent pack：`108 passed`；full pytest：`321 passed`。
-- Context `--collect-only`：`8,566` estimated tokens，無 overflow。
-- Review `--collect-only`：`28` 個 diff files；denied path content `0`。此數字只計資料內容，文件中描述 deny patterns 的文字不計入資料內容。
+- Implementation commits：`2b7243b`、`5c07e60`、`9e2670a`、`9b3f300`、`4ba657c`。
+- Agent pack（implementation plan 指定 9 檔）：`110 passed`；full pytest：`329 passed`。
+- Context `--collect-only`：`8,284` estimated tokens，無 overflow。
+- Review `--collect-only`：`29` 個 diff files；denied source paths `0`。此數字只計資料內容，文件中描述 deny patterns 的文字不計入資料內容。
 - Read-only integration：passed；tracked worktree、正式 SQLite DB 與 runtime generation 未被修改。
 - Vue verify/build：passed；system acceptance：passed。
 - Hermes：`overallStatus=pass`，並完成 monthly governance、SQLite integrity 與服務驗收。
