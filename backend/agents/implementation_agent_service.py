@@ -378,7 +378,10 @@ class ImplementationAgentService:
         try:
             return capture_worktree_state(self.project_root)
         except ValueError:
-            return WorktreeState(head="", changes={}, diff_lines=0)
+            return WorktreeState(
+                head="", changes={}, diff_lines=0,
+                index_fingerprint="", tree_fingerprint="",
+            )
 
     def _write_runtime_records(self, report: ImplementationRunReport, started: float) -> None:
         try:
@@ -420,4 +423,6 @@ class ImplementationAgentService:
             decision.reason or decision.status,
             paths=list(decision.changed_files),
             diffLines=decision.diff_lines,
+            indexFingerprintChanged=decision.index_fingerprint_changed,
+            treeFingerprintChanged=decision.tree_fingerprint_changed,
         )

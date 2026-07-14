@@ -132,7 +132,7 @@ def test_guard_rejects_diff_limits(tmp_git_repo):
     assert validate_changes(tmp_git_repo, contract, before).status == "blocked_diff_limit"
 
 
-def test_guard_rejects_staged_diff_limits_without_modifying_index(tmp_git_repo):
+def test_guard_rejects_index_transition_without_modifying_index(tmp_git_repo):
     contract = contract_for(tmp_git_repo, maxChangedFiles=1, maxDiffLines=2)
     before = capture_worktree_state(tmp_git_repo)
     write_three_line_change(tmp_git_repo / "src/allowed.py")
@@ -154,6 +154,7 @@ def test_guard_rejects_staged_diff_limits_without_modifying_index(tmp_git_repo):
         capture_output=True,
         check=True,
     ).stdout
-    assert decision.status == "blocked_diff_limit"
+    assert decision.status == "blocked_scope"
+    assert decision.index_fingerprint_changed is True
     assert decision.diff_lines == 4
     assert staged_after == staged_before

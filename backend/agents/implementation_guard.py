@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import subprocess
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ READ_ONLY_GIT = {
     "diff_numstat": ("git", "diff", "--numstat", "--"),
     "diff_numstat_cached": ("git", "diff", "--cached", "--numstat", "--"),
     "diff_numstat_head": ("git", "diff", "HEAD", "--numstat", "--"),
+    "diff_head_binary": ("git", "diff", "HEAD", "--binary", "--"),
+    "index_entries": ("git", "ls-files", "--stage", "-z"),
 }
 
 
@@ -29,6 +32,8 @@ class GuardDecision:
     changed_files: tuple[str, ...] = ()
     diff_lines: int = 0
     reason: str = ""
+    index_fingerprint_changed: bool = False
+    tree_fingerprint_changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,8 @@ class WorktreeState:
     head: str
     changes: Mapping[str, str]
     diff_lines: int
+    index_fingerprint: str
+    tree_fingerprint: str
 
 
 def _run_git(project_root: Path, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -52,6 +59,11 @@ def _run_git(project_root: Path, command: tuple[str, ...]) -> subprocess.Complet
 def _git_output(project_root: Path, name: str) -> str | None:
     completed = _run_git(project_root, READ_ONLY_GIT[name])
     return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _git_bytes(project_root: Path, name: str) -> bytes | None:
+    completed = _run_git(project_root, READ_ONLY_GIT[name])
+    return completed.stdout.encode() if completed.returncode == 0 else None
 
 
 def _status_paths(project_root: Path) -> dict[str, str] | None:
@@ -110,13 +122,46 @@ def _diff_lines(project_root: Path, changes: Mapping[str, str]) -> int:
     return total
 
 
+def _index_fingerprint(project_root: Path) -> str | None:
+    entries = _git_bytes(project_root, "index_entries")
+    return hashlib.sha256(entries).hexdigest() if entries is not None else None
+
+
+def _tree_fingerprint(project_root: Path, changes: Mapping[str, str]) -> str | None:
+    diff = _git_bytes(project_root, "diff_head_binary")
+    if diff is None:
+        return None
+    digest = hashlib.sha256()
+    digest.update(diff)
+    for path, status in sorted(changes.items()):
+        digest.update(status.encode())
+        digest.update(b"\0")
+        digest.update(path.encode())
+        digest.update(b"\0")
+        if status == "??":
+            candidate = project_root / path
+            if candidate.is_file():
+                digest.update(candidate.read_bytes())
+    return digest.hexdigest()
+
+
 def capture_worktree_state(project_root: Path) -> WorktreeState:
     root = Path(project_root).resolve()
     head = _git_output(root, "head")
     changes = _status_paths(root)
     if head is None or changes is None:
         raise ValueError("project_root must be a readable Git worktree")
-    return WorktreeState(head=head, changes=changes, diff_lines=_diff_lines(root, changes))
+    index_fingerprint = _index_fingerprint(root)
+    tree_fingerprint = _tree_fingerprint(root, changes)
+    if index_fingerprint is None or tree_fingerprint is None:
+        raise ValueError("Git index and tree fingerprints are unavailable")
+    return WorktreeState(
+        head=head,
+        changes=changes,
+        diff_lines=_diff_lines(root, changes),
+        index_fingerprint=index_fingerprint,
+        tree_fingerprint=tree_fingerprint,
+    )
 
 
 def _resolve_guard_path(project_root: Path, raw_path: str, denied_patterns: tuple[str, ...]) -> str:
@@ -195,6 +240,17 @@ def validate_changes(
         path for path in set(before.changes) | set(after.changes)
         if before.changes.get(path) != after.changes.get(path)
     ))
+    index_fingerprint_changed = before.index_fingerprint != after.index_fingerprint
+    tree_fingerprint_changed = before.tree_fingerprint != after.tree_fingerprint
+    if index_fingerprint_changed:
+        return GuardDecision(
+            "blocked_scope",
+            changed_files=changed,
+            diff_lines=after.diff_lines,
+            reason="runner changed the Git index",
+            index_fingerprint_changed=True,
+            tree_fingerprint_changed=tree_fingerprint_changed,
+        )
     for path in changed:
         try:
             normalized = _resolve_guard_path(root, path, denied_patterns)

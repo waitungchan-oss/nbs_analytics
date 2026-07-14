@@ -220,6 +220,26 @@ def test_service_stops_after_out_of_scope_write(service, contract, project_root)
     assert "README.md" in report.findings[0]["paths"]
 
 
+def test_service_blocks_allowed_source_write_that_mutates_git_index(
+    service, contract, project_root,
+):
+    def runner(request: dict) -> object:
+        (project_root / "src/allowed.py").write_text("value = 2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/allowed.py"], cwd=project_root, check=True)
+        return {
+            "schemaVersion": "implementation-response-v1",
+            "status": "completed",
+            "summary": "implemented approved task",
+            "requestedValidationCommandIds": ["pytest_targeted", "py_compile"],
+        }
+
+    report = service.execute(contract, runner)
+
+    assert report.status == "blocked_scope"
+    assert report.findings[0]["indexFingerprintChanged"] is True
+    assert "src/allowed.py" in report.findings[0]["paths"]
+
+
 def test_service_collects_context_for_the_contract(service, contract):
     bundle = service.collect(contract)
 
