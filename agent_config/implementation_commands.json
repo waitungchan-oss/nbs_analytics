@@ -1,8 +1,8 @@
 {
   "schemaVersion": "implementation-commands-v1",
   "commands": {
-    "pytest_targeted": {"prefix": [".venv/bin/python", "-m", "pytest"], "timeoutSeconds": 300},
-    "py_compile": {"prefix": [".venv/bin/python", "-m", "py_compile"], "timeoutSeconds": 120},
+    "pytest_targeted": {"prefix": [".venv/bin/python", "-m", "pytest"], "approvedRepositoryInterpreter": ".venv/bin/python", "timeoutSeconds": 300},
+    "py_compile": {"prefix": [".venv/bin/python", "-m", "py_compile"], "approvedRepositoryInterpreter": ".venv/bin/python", "timeoutSeconds": 120},
     "vue_verify": {"exact": ["npm", "run", "verify"], "cwd": "frontend", "timeoutSeconds": 300},
     "vue_build": {"exact": ["npm", "run", "build"], "cwd": "frontend", "timeoutSeconds": 300}
   }

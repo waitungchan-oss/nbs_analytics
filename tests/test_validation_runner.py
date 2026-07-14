@@ -52,6 +52,23 @@ def test_runner_resolves_project_local_interpreter_first(tmp_path):
     assert runner._resolve_interpreter(".venv/bin/python") == interpreter.resolve()
 
 
+def test_runner_rejects_worktree_interpreter_symlink_outside_approved_root(tmp_path):
+    repository = tmp_path / "repository"
+    worktree = repository / ".worktrees/implementation-agent"
+    outside = tmp_path / "outside/python"
+    (worktree / ".venv/bin").mkdir(parents=True)
+    outside.parent.mkdir()
+    outside.write_bytes(b"python")
+    outside.chmod(0o755)
+    (worktree / ".venv/bin/python").symlink_to(outside)
+
+    runner = object.__new__(ValidationRunner)
+    runner.project_root = worktree.resolve()
+
+    with pytest.raises(CommandRejected, match="approved virtualenv"):
+        runner._resolve_interpreter(".venv/bin/python")
+
+
 def test_runner_rejects_missing_allowlisted_interpreter(tmp_path):
     runner = object.__new__(ValidationRunner)
     runner.project_root = tmp_path.resolve()
@@ -66,6 +83,9 @@ def test_runner_real_allowlisted_python_invocation_returns_result():
     )
 
     assert isinstance(result, ValidationResult)
+    assert result.argv[0] == str(
+        (PROJECT_ROOT.parent.parent / ".venv/bin/python").resolve()
+    )
     assert result.exit_code == 0
     assert result.timed_out is False
 

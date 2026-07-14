@@ -94,7 +94,14 @@ class ValidationRunner:
             raise CommandRejected(f"command {command_id!r} has invalid argv")
         if command_id in {"pytest_targeted", "py_compile"}:
             prefix = list(prefix)
-            prefix[0] = str(self._resolve_interpreter(prefix[0]))
+            approved_repository_interpreter = config.get("approvedRepositoryInterpreter")
+            if not isinstance(approved_repository_interpreter, str):
+                raise CommandRejected(
+                    f"command {command_id!r} has no approved repository interpreter"
+                )
+            prefix[0] = str(
+                self._resolve_interpreter(prefix[0], approved_repository_interpreter)
+            )
         if command_id == "pytest_targeted":
             self._validate_pytest_arguments(arguments)
         elif command_id == "py_compile":
@@ -103,7 +110,9 @@ class ValidationRunner:
             raise CommandRejected(f"command {command_id!r} is not supported")
         return [*prefix, *arguments]
 
-    def _resolve_interpreter(self, configured: str) -> Path:
+    def _resolve_interpreter(
+        self, configured: str, approved_repository_interpreter: str | None = None
+    ) -> Path:
         configured_path = Path(configured)
         if configured_path.is_absolute() or ".." in configured_path.parts:
             raise CommandRejected("Python interpreter must be a repo-relative approved virtualenv")
@@ -111,22 +120,31 @@ class ValidationRunner:
             raise CommandRejected(
                 f"Python interpreter is not an approved virtualenv: {configured}"
             )
+        if approved_repository_interpreter is not None:
+            approved_path = Path(approved_repository_interpreter)
+            if approved_path != configured_path:
+                raise CommandRejected(
+                    "approved repository interpreter must use the configured lexical path"
+                )
 
         approved_root = self._approved_repository_root()
-        candidates = [self.project_root / configured_path]
-        if approved_root != self.project_root:
-            candidates.append(approved_root / configured_path)
+        if approved_root == self.project_root:
+            candidates = ((self.project_root / configured_path, True),)
+        else:
+            candidates = ((self.project_root / configured_path, False),)
+            if approved_repository_interpreter == str(configured_path):
+                candidates += ((approved_root / configured_path, True),)
 
-        for candidate in candidates:
-            virtualenv_root = candidate.parent.parent
-            if not self._is_under(virtualenv_root, approved_root):
-                continue
+        for candidate, allow_external_symlink in candidates:
             try:
                 resolved = candidate.resolve(strict=True)
             except OSError:
                 continue
-            if resolved.is_file() and resolved.stat().st_mode & 0o111:
-                return resolved
+            if not resolved.is_file() or not resolved.stat().st_mode & 0o111:
+                continue
+            if not allow_external_symlink and not self._is_under(resolved, approved_root):
+                continue
+            return resolved
 
         raise CommandRejected(
             "no executable approved virtualenv interpreter found; expected "
