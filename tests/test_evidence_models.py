@@ -39,6 +39,20 @@ def test_report_envelope_rejects_unknown_status():
         AgentReportEnvelope(schema_version="context-summary-v1", status="invented", payload={})
 
 
+def test_report_envelope_fields_cannot_be_overwritten_by_payload():
+    envelope = AgentReportEnvelope(
+        schema_version="context-summary-v1",
+        status="pass",
+        payload={"schemaVersion": "spoofed", "status": "blocked", "finding": "none"},
+    )
+
+    assert envelope.to_dict() == {
+        "schemaVersion": "context-summary-v1",
+        "status": "pass",
+        "finding": "none",
+    }
+
+
 def test_configs_are_valid_json_and_runtime_is_ignored():
     root = Path(__file__).resolve().parents[1]
     assert load_json_config(root, "agent_config/token_budgets.json")["context"]["inputTokens"] == 12000

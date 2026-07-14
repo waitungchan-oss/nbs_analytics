@@ -98,4 +98,4 @@ class AgentReportEnvelope:
             raise ValueError(f"Unsupported agent status: {self.status}")
 
     def to_dict(self) -> dict:
-        return {"schemaVersion": self.schema_version, "status": self.status, **self.payload}
+        return {**self.payload, "schemaVersion": self.schema_version, "status": self.status}
