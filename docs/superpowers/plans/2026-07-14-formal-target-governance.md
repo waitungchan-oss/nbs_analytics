@@ -25,11 +25,11 @@
 - Create: `tests/test_target_governance_service.py`
 - Modify: `.gitignore`
 
-- [ ] Write failing tests for valid config, invalid scope/month/amount, duplicate month, approved without approver, revision and history.
-- [ ] Implement schema validation and `not_configured` fallback.
-- [ ] Implement atomic save and append-only history.
-- [ ] Make decision loader expose approval status and make only approved targets active.
-- [ ] Run focused tests and commit.
+- [x] Write failing tests for valid config, invalid scope/month/amount, duplicate month, approved without approver, revision and history.
+- [x] Implement schema validation and `not_configured` fallback.
+- [x] Implement atomic save and append-only history.
+- [x] Make decision loader expose approval status and make only approved targets active.
+- [x] Run focused tests and commit.
 
 ### Task 2: Target configuration API
 
@@ -39,11 +39,11 @@
 - Modify: `backend/main.py`
 - Create: `tests/test_target_governance_api.py`
 
-- [ ] Add typed `GET /api/decisions/targets` and `PUT /api/decisions/targets`.
-- [ ] Return 422 with field-level validation messages; do not partially write invalid config.
-- [ ] Include current revision and recent history in GET response.
-- [ ] Add OpenAPI and API behavior tests.
-- [ ] Run focused API tests and commit.
+- [x] Add typed `GET /api/decisions/targets` and `PUT /api/decisions/targets`.
+- [x] Return 422 with field-level validation messages; do not partially write invalid config.
+- [x] Include current revision and recent history in GET response.
+- [x] Add OpenAPI and API behavior tests.
+- [x] Run focused API tests and commit.
 
 ### Task 3: Vue target governance form
 
@@ -52,19 +52,19 @@
 - Modify: `frontend/src/App.vue`
 - Modify: `frontend/scripts/verify-cockpit-contract.mjs`
 
-- [ ] Add target config load/save clients.
-- [ ] Add editable month target rows, draft/approved selector, updatedBy and changeReason fields.
-- [ ] Show current scope/population/revision and recent history.
-- [ ] After save, reload target config and decision overview; display validation errors without clearing existing data.
-- [ ] Run `npm run verify` and `npm run build`; commit.
+- [x] Add target config load/save clients.
+- [x] Add editable month target rows, draft/approved selector, updatedBy and changeReason fields.
+- [x] Show current scope/population/revision and recent history.
+- [x] After save, reload target config and decision overview; display validation errors without clearing existing data.
+- [x] Run `npm run verify` and `npm run build`; commit.
 
 ### Task 4: Full verification and Hermes
 
 **Files:**
 - Modify: none unless verification exposes a P2-6 regression.
 
-- [ ] Run target governance focused tests and complete pytest.
-- [ ] Run Vue checks and system acceptance.
-- [ ] Smoke test GET/PUT using temporary config paths and confirm invalid payload does not write.
-- [ ] Run Hermes and require SQLite integrity ok, baseline matched, generation matched, and issues empty.
-- [ ] Confirm clean worktree and report commit before merge options.
+- [x] Run target governance focused tests and complete pytest.
+- [x] Run Vue checks and system acceptance.
+- [x] Smoke test GET/PUT using temporary config paths and confirm invalid payload does not write.
+- [x] Run Hermes and require SQLite integrity ok, baseline matched, generation matched, and issues empty.
+- [x] Confirm clean worktree and report commit before merge options.
