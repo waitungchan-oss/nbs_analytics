@@ -170,9 +170,12 @@ def build_decision_overview(
             "factsStatus": facts.get("status"),
             "generationToken": facts.get("generationToken"),
             "revenueScope": facts.get("revenueScope"),
+            "factsCacheStatus": facts.get("factsCacheStatus"),
+            "readModelCacheStatus": facts.get("readModelCacheStatus"),
             "forecastStatus": forecast.get("status"),
             "forecastCache": forecast.get("cache") or {},
             "dataQualityStatus": quality.get("status"),
+            "dataQualityCacheStatus": quality.get("cacheStatus"),
             "systemHealthStatus": health.get("status"),
         },
     }
