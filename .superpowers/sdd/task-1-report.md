@@ -35,6 +35,15 @@ The pre-existing modification to `.superpowers/sdd/progress.md` was preserved an
 - The task-local `.venv` requested by the brief is absent. Verification used the existing parent repository `.venv` at `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv`; no dependencies were installed.
 - Task 2+ guard, runner, service, and CLI files were intentionally not implemented.
 
+## Review Finding Fix
+
+- Fixed `resolve_implementation_runtime_path()` to build its runtime root lexically and reject a symlinked `.nbs_agent_runtime` or any runtime parent component before resolving the final path.
+- Added `test_runtime_helper_rejects_symlinked_runtime_parent`, covering `project/.nbs_agent_runtime -> outside` and asserting `PermissionError`.
+- RED: `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_implementation_models.py -q -k symlinked_runtime_parent` -> FAIL, `Failed: DID NOT RAISE <class 'PermissionError'>`.
+- GREEN: `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_implementation_models.py tests/test_evidence_models.py tests/test_agent_runtime.py -q` -> PASS, `33 passed in 1.40s`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/agent_runtime.py` -> PASS.
+- `git diff --check` -> PASS.
+
 ## Preserved Prior Report
 
 The prior contents of this path, which described an unrelated SQLite explicit-path task, are preserved below rather than discarded:

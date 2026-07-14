@@ -112,3 +112,14 @@ def test_runtime_helper_is_confined_to_implementation_subdirectory(tmp_path):
     assert allowed == (tmp_path / ".nbs_agent_runtime/implementation/reports/run.json").resolve()
     with pytest.raises(PermissionError, match="implementation"):
         resolve_implementation_runtime_path(tmp_path, "../reports/run.json")
+
+
+def test_runtime_helper_rejects_symlinked_runtime_parent(tmp_path):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (project / ".nbs_agent_runtime").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(PermissionError, match="symlink"):
+        resolve_implementation_runtime_path(project, "reports/run.json")

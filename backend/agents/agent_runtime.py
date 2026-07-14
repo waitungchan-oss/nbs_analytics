@@ -65,7 +65,9 @@ def resolve_runtime_output_path(project_root: Path, raw_path: str) -> Path:
 
 
 def resolve_implementation_runtime_path(project_root: Path, raw_path: str) -> Path:
-    implementation_root = Path(project_root).resolve() / ".nbs_agent_runtime" / "implementation"
+    project_lexical = Path(os.path.abspath(os.fspath(project_root)))
+    runtime_root = project_lexical / ".nbs_agent_runtime"
+    implementation_root = runtime_root / "implementation"
     candidate = Path(raw_path)
     raw_candidate = implementation_root / candidate if not candidate.is_absolute() else candidate
     candidate_lexical = Path(os.path.abspath(os.fspath(raw_candidate)))
@@ -75,12 +77,10 @@ def resolve_implementation_runtime_path(project_root: Path, raw_path: str) -> Pa
         raise PermissionError(
             f"Implementation runtime output must stay under {implementation_root}"
         ) from exc
-    if implementation_root.is_symlink():
-        raise PermissionError("Implementation runtime root cannot be a symlink")
     if relative == Path("."):
         raise PermissionError("Implementation runtime output must be a file below implementation")
-    current = implementation_root
-    for part in relative.parts[:-1]:
+    current = runtime_root
+    for part in ("implementation", *relative.parts[:-1]):
         if current.is_symlink():
             raise PermissionError(f"Implementation runtime parent cannot be a symlink: {current}")
         current = current / part
