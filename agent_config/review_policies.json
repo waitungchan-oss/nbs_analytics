@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "review-policies-v1",
+  "strictRequiresVerification": true,
+  "riskKeywords": ["upload", "upsert", "rollback", "baseline", "revenue", "business_rules", "cache_generation", "export"],
+  "requiredHermesChecks": ["system-acceptance", "system-monitor", "phase2-baseline", "monthly-baseline-governance"],
+  "allowedVerdicts": ["pass", "changes_required", "blocked", "context_overflow", "invalid_bundle"],
+  "allowedSeverities": ["critical", "high", "medium", "low"]
+}

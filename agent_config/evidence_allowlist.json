@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "evidence-allowlist-v1",
+  "readRoots": ["docs", "Summay", "backend", "scripts", "tests"],
+  "rootFiles": ["AGENTS.md", "NBS_ANALYTICS_HANDOFF.md", "NBS_ANALYTICS_SYSTEM_MAP.md", "NBS_HERMES_MONITORING.md", "requirements.txt"],
+  "defaultContextFiles": ["AGENTS.md", "NBS_ANALYTICS_HANDOFF.md", "NBS_ANALYTICS_SYSTEM_MAP.md", "Summay/驗收基線.md"],
+  "extensions": [".md", ".py", ".json", ".js", ".mjs", ".vue", ".txt"],
+  "denyPatterns": [".env", "*.db", "*.sqlite", "*.xlsx", "*.xls", "*.csv", "*.pkl", "*.log", ".nbs_runtime/**", ".nbs_runtime_cache/**", "backups/**", "outputs/**", ".worktrees/**"],
+  "agentExecutables": ["codex", "claude"]
+}
