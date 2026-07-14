@@ -10,9 +10,11 @@ import {
   getDashboardSummary,
   getDataQuality,
   getDecisionOverview,
+  getDecisionTargets,
   getForecastInsights,
   getHealth,
   getStabilityHistory,
+  saveDecisionTargets,
   uploadMonthlyData
 } from './lib/api'
 import SvgBarChart from './components/SvgBarChart.vue'
@@ -28,6 +30,17 @@ const facts = ref(null)
 const factsError = ref('')
 const decisionOverview = ref(null)
 const decisionError = ref('')
+const targetConfig = ref(null)
+const targetHistory = ref([])
+const targetDrafts = ref([])
+const targetConfigError = ref('')
+const targetSaveMessage = ref('')
+const targetSaveBusy = ref(false)
+const targetVersion = ref('')
+const targetApprovalStatus = ref('draft')
+const targetUpdatedBy = ref('')
+const targetChangeReason = ref('')
+const targetApprovedBy = ref('')
 const summary = ref(null)
 const analytics = ref(null)
 const dataQuality = ref(null)
@@ -353,6 +366,63 @@ function historyStatusText(status) {
   return labels[status] || status || 'unknown'
 }
 
+function applyTargetConfig(payload) {
+  targetConfig.value = payload?.config || null
+  targetHistory.value = payload?.history || []
+  const config = targetConfig.value || {}
+  targetVersion.value = config.version || ''
+  targetApprovalStatus.value = config.approvalStatus || 'draft'
+  targetUpdatedBy.value = config.updatedBy || ''
+  targetChangeReason.value = config.changeReason || ''
+  targetApprovedBy.value = config.approvedBy || ''
+  targetDrafts.value = (config.targets || []).map(item => ({ ...item }))
+}
+
+function addTargetDraft() {
+  const fallbackMonth = context.value?.months?.slice(-1)[0] || '2026-07'
+  targetDrafts.value.push({
+    id: `${fallbackMonth}-combined-${targetDrafts.value.length + 1}`,
+    label: `${fallbackMonth} 合計目標`,
+    month: fallbackMonth,
+    scope: 'combined',
+    targetRevenue: 0
+  })
+}
+
+function removeTargetDraft(index) {
+  targetDrafts.value.splice(index, 1)
+}
+
+async function saveTargetConfiguration() {
+  try {
+    targetSaveBusy.value = true
+    targetConfigError.value = ''
+    targetSaveMessage.value = ''
+    const response = await saveDecisionTargets({
+      version: targetVersion.value,
+      scope: '不含掛賬核銷與TT退款轉團款',
+      population: '全部正式分社＋正式四人專職銷售組',
+      approvalStatus: targetApprovalStatus.value,
+      updatedBy: targetUpdatedBy.value,
+      changeReason: targetChangeReason.value,
+      approvedBy: targetApprovedBy.value || null,
+      thresholds: targetConfig.value?.thresholds || {
+        forecastGapPct: 0.05,
+        qualityWarningScore: 75,
+        qualityCriticalScore: 60
+      },
+      targets: targetDrafts.value
+    })
+    applyTargetConfig(response)
+    targetSaveMessage.value = `目標設定已保存，revision #${response.config?.revision || '—'}。`
+    await loadAll(false)
+  } catch (error) {
+    targetConfigError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    targetSaveBusy.value = false
+  }
+}
+
 function diagnosisStatusText(status) {
   if (!status) return 'Pending'
   const labels = {
@@ -505,7 +575,7 @@ async function loadAll(initial = false) {
     if (initial) loading.value = true
     else refreshing.value = true
     errorMessage.value = ''
-    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload, factsResult, decisionResult] = await Promise.all([
+    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload, factsResult, decisionResult, targetResult] = await Promise.all([
       getHealth(),
       getDashboardContext(),
       getStabilityHistory(20),
@@ -515,6 +585,9 @@ async function loadAll(initial = false) {
         .then(payload => ({ payload }))
         .catch(error => ({ error })),
       getDecisionOverview()
+        .then(payload => ({ payload }))
+        .catch(error => ({ error })),
+      getDecisionTargets()
         .then(payload => ({ payload }))
         .catch(error => ({ error }))
     ])
@@ -536,6 +609,12 @@ async function loadAll(initial = false) {
     } else {
       decisionOverview.value = decisionResult.payload
       decisionError.value = ''
+    }
+    if (targetResult.error) {
+      targetConfigError.value = targetResult.error instanceof Error ? targetResult.error.message : String(targetResult.error)
+    } else {
+      targetConfigError.value = ''
+      applyTargetConfig(targetResult.payload)
     }
     if (initial) setDefaultFilters(contextPayload)
     ;[summary.value, analytics.value] = await Promise.all([
@@ -868,6 +947,68 @@ onMounted(() => {
           </div>
           <div v-if="decisionOverview?.targetConfig?.status === 'not_configured'" class="health-issues">
             尚未設定管理目標；目前只顯示資料品質、系統健康與 Forecast 預警，不會捏造達成率。
+          </div>
+        </div>
+
+        <div class="panel target-governance-panel">
+          <div class="panel-table-title">Formal Target Configuration</div>
+          <div class="panel-note">
+            正式口徑：不含掛賬核銷與TT退款轉團款 · 母體：全部正式分社＋正式四人專職銷售組 ·
+            Current revision #{{ targetConfig?.revision ?? 0 }}
+          </div>
+          <div v-if="targetConfigError" class="health-issues">
+            <strong>Target configuration error</strong>
+            <div>{{ targetConfigError }}</div>
+          </div>
+          <div v-if="targetSaveMessage" class="success-banner">{{ targetSaveMessage }}</div>
+          <div class="upload-grid target-config-fields">
+            <label class="upload-field">
+              <span>Version</span>
+              <input v-model="targetVersion" type="text" placeholder="2026-07" />
+            </label>
+            <label class="upload-field">
+              <span>Approval status</span>
+              <select v-model="targetApprovalStatus">
+                <option value="draft">Draft</option>
+                <option value="approved">Approved</option>
+              </select>
+            </label>
+            <label class="upload-field">
+              <span>Updated by</span>
+              <input v-model="targetUpdatedBy" type="text" placeholder="管理層姓名" />
+            </label>
+            <label class="upload-field">
+              <span>Approved by</span>
+              <input v-model="targetApprovedBy" type="text" placeholder="Approved 時必填" />
+            </label>
+            <label class="upload-field">
+              <span>Change reason</span>
+              <input v-model="targetChangeReason" type="text" placeholder="本次目標設定原因" />
+            </label>
+          </div>
+          <div class="button-row upload-actions">
+            <button class="action-button secondary" :disabled="targetSaveBusy" @click="addTargetDraft">新增月份目標</button>
+            <button class="action-button primary" :disabled="targetSaveBusy" @click="saveTargetConfiguration">
+              {{ targetSaveBusy ? '保存中...' : '保存目標設定' }}
+            </button>
+          </div>
+          <div v-if="targetDrafts.length" class="table-scroll">
+            <table class="data-table compact">
+              <thead><tr><th>ID</th><th>標籤</th><th>月份</th><th>目標金額</th><th>操作</th></tr></thead>
+              <tbody>
+                <tr v-for="(target, index) in targetDrafts" :key="target.id">
+                  <td><input v-model="target.id" type="text" /></td>
+                  <td><input v-model="target.label" type="text" /></td>
+                  <td><input v-model="target.month" type="month" /></td>
+                  <td><input v-model.number="target.targetRevenue" type="number" min="0" step="1000" /></td>
+                  <td><button class="action-button secondary" :disabled="targetSaveBusy" @click="removeTargetDraft(index)">刪除</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="targetHistory.length" class="panel-note target-history-note">
+            最近變更：revision #{{ targetHistory[0]?.revision || '—' }} ·
+            {{ targetHistory[0]?.updatedBy || '—' }} · {{ targetHistory[0]?.changeReason || '—' }}
           </div>
         </div>
 

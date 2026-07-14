@@ -70,6 +70,17 @@ export function getDecisionOverview() {
   return requestJson('/api/decisions/overview')
 }
 
+export function getDecisionTargets() {
+  return requestJson('/api/decisions/targets')
+}
+
+export function saveDecisionTargets(payload) {
+  return requestJson('/api/decisions/targets', {
+    method: 'PUT',
+    body: JSON.stringify(payload)
+  })
+}
+
 export function getDashboardSummary(filters) {
   return requestJson('/api/dashboard/summary', {
     method: 'POST',
