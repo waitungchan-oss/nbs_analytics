@@ -76,6 +76,9 @@ def test_decision_overview_merges_snapshot_provenance_without_losing_existing_ke
             "rulesFingerprint": "rules-1",
             "snapshotAttemptCount": 2,
             "coreGenerationConsistent": True,
+            "generationToken": "snapshot-must-not-override-facts",
+            "forecastStatus": "snapshot-must-not-override-forecast",
+            "systemHealthStatus": "snapshot-must-not-override-health",
         },
     )
 
@@ -84,3 +87,4 @@ def test_decision_overview_merges_snapshot_provenance_without_losing_existing_ke
     assert result["provenance"]["coreGenerationConsistent"] is True
     assert result["provenance"]["generationToken"] == "2:abc"
     assert result["provenance"]["forecastStatus"] == "ready"
+    assert result["provenance"]["systemHealthStatus"] == "ok"
