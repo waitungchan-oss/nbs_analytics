@@ -72,6 +72,8 @@ class EvidencePolicy:
 
 class EvidenceCollector:
     _COMMAND_EXECUTABLES = frozenset({"git", "rg"})
+    _QUERY_MAX_FILES_PER_BATCH = 64
+    _QUERY_MAX_ARGUMENT_CHARACTERS = 6000
 
     def __init__(self, project_root: Path, *, policy: EvidencePolicy | None = None) -> None:
         self.project_root = project_root.resolve()
@@ -137,6 +139,8 @@ class EvidenceCollector:
         commands: list[CommandEvidence] = []
         candidates = self._candidate_paths()
         for index, query in enumerate(queries[:8]):
+            if len(found) >= 12:
+                break
             if not candidates:
                 commands.append(CommandEvidence(
                     label=f"rg-query-{index}",
@@ -146,19 +150,43 @@ class EvidenceCollector:
                     stderr="No policy-approved evidence files",
                 ))
                 continue
-            result = self._run(
-                f"rg-query-{index}",
-                ["rg", "--files-with-matches", "--fixed-strings", "--", query, *candidates],
-            )
-            commands.append(result)
-            for line in result.stdout.splitlines():
-                candidate = self.project_root / line
-                try:
-                    resolved = self.policy.resolve_read_path(candidate)
-                except PermissionError:
-                    continue
-                if resolved not in found:
-                    found.append(resolved)
+            prefix = ["rg", "--files-with-matches", "--fixed-strings", "--", query]
+            prefix_characters = sum(len(argument) + 1 for argument in prefix)
+            batches: list[tuple[str, ...]] = []
+            batch: list[str] = []
+            batch_characters = prefix_characters
+            for candidate in candidates:
+                candidate_characters = len(candidate) + 1
+                if prefix_characters + candidate_characters > self._QUERY_MAX_ARGUMENT_CHARACTERS:
+                    raise ValueError(f"Evidence candidate path is too long: {candidate}")
+                if batch and (
+                    len(batch) >= self._QUERY_MAX_FILES_PER_BATCH
+                    or batch_characters + candidate_characters > self._QUERY_MAX_ARGUMENT_CHARACTERS
+                ):
+                    batches.append(tuple(batch))
+                    batch = []
+                    batch_characters = prefix_characters
+                batch.append(candidate)
+                batch_characters += candidate_characters
+            if batch:
+                batches.append(tuple(batch))
+
+            for batch_index, candidate_batch in enumerate(batches):
+                result = self._run(
+                    f"rg-query-{index}-{batch_index}",
+                    [*prefix, *candidate_batch],
+                )
+                commands.append(result)
+                for line in result.stdout.splitlines():
+                    candidate = self.project_root / line
+                    try:
+                        resolved = self.policy.resolve_read_path(candidate)
+                    except PermissionError:
+                        continue
+                    if resolved not in found:
+                        found.append(resolved)
+                    if len(found) >= 12:
+                        break
                 if len(found) >= 12:
                     break
         return tuple(found), tuple(commands)

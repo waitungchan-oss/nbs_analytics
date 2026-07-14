@@ -113,6 +113,48 @@ def test_query_searches_only_policy_approved_files(tmp_path):
     assert not any(name in query_argv for name in ("secret.db", ".env", "secret.xlsx", "secret.log"))
 
 
+def test_query_batches_many_candidates_without_missing_matches(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    matching_sources = []
+    for index in range(70):
+        name = f"candidate-{index:03d}.md"
+        path = tmp_path / "docs" / name
+        path.write_text("batch-needle" if index < 5 else "other", encoding="utf-8")
+        if index < 5:
+            matching_sources.append(path.relative_to(tmp_path).as_posix())
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+
+    collector = EvidenceCollector(tmp_path)
+    rg_commands = []
+    original_run = collector._run
+
+    def capture(label, argv):
+        result = original_run(label, argv)
+        if label.startswith("rg-query-"):
+            rg_commands.append(result)
+        return result
+
+    collector._run = capture
+    bundle = collector.collect_context(
+        brief, base_ref="HEAD", queries=("batch-needle",),
+    )
+
+    sources = [item.source for item in bundle.evidence]
+    assert len(rg_commands) > 1
+    assert set(matching_sources).issubset(sources)
+    for command in rg_commands:
+        candidate_args = command.argv[5:]
+        assert len(candidate_args) <= collector._QUERY_MAX_FILES_PER_BATCH
+        assert sum(len(argument) + 1 for argument in command.argv) <= (
+            collector._QUERY_MAX_ARGUMENT_CHARACTERS
+        )
+
+
 def test_context_rejects_option_like_base_ref_without_creating_output(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)
