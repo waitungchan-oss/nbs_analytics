@@ -227,16 +227,17 @@ Implementation commits：
 - `f47540c`：builder exception propagation regression test。
 - `92ae4e9`：Decision API 接入 Application Snapshot。
 - `6f66763`：Decision provenance precedence regression test。
+- `70d967e`：限制公開 provenance，補 production wiring integration coverage，修正正式 runtime evidence。
 
 最終驗收證據（2026-07-14）：
 
 - affected modules compile：PASS。
-- P3-1 expanded targeted tests：`52 passed`。
-- full pytest：`217 passed in 28.40s`。
+- P3-1 focused contract tests：`20 passed`。
+- full pytest：`219 passed in 22.60s`。
 - Vue contract：PASS；production build：PASS。
-- Decision API profile：cold `401.752ms`；warm median `259.909ms`，低於 `300ms` gate。
+- Decision API profile：cold `240.639ms`；warm median `232.346ms`，低於 `300ms` gate。
 - service acceptance：`passed`；Streamlit `8502`、API `8601`、Vue `5173` 均由 P3-1 worktree 啟動並 ready。
-- Hermes：`overallStatus: pass`；擴充後 targeted pack `95 passed in 15.97s`。
+- Hermes：`overallStatus: pass`；擴充後 targeted pack `97 passed in 15.95s`。
 - system monitor：`status: ok`；SQLite integrity：`ok`；Acceptance Record `15`，latest data `2026-07-13`。
 - 2026-01 至 2026-06 六個 blocking monthly baseline：全部 `matched`。
 - 2026-05 frozen baseline：`HKD 12,057,968 matched`。

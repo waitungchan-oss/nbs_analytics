@@ -222,7 +222,7 @@ nbs_marketing_data.db
 - generation 連續改變時不回傳混代 payload，而是回 HTTP 409。
 - Forecast 目前仍使用獨立 AI cache，只回報 cache path/version/time/status；不得宣稱與 SQLite generation matched。
 - Snapshot 不新增持久 cache、不直接讀 Pandas 明細、不重算正式收入，也不包含 Decision judgement。
-- P3-1 驗收時 Decision API warm median 為 `259.909ms`，低於 `300ms` gate。
+- P3-1 最終驗收時 Decision API warm median 為 `232.346ms`，低於 `300ms` gate。
 
 ### 3.7 `forecasting.py`：AI 預測、回測與診斷層
 
