@@ -1,7 +1,7 @@
 ---
 type: codex-brief
 project: nbs_analytics
-status: design_ready
+status: verified
 priority: P3-1
 created: 2026-07-14
 tags: [nbs_analytics, codex, application-service, snapshot, generation, read-model, hermes]
@@ -39,6 +39,7 @@ Repo context：
 - `docs/superpowers/specs/2026-07-14-formal-target-governance-design.md`
 - `docs/superpowers/specs/2026-07-14-decision-api-performance-design.md`
 - `docs/superpowers/specs/2026-07-14-unified-application-snapshot-contract-design.md`
+- `docs/superpowers/plans/2026-07-14-unified-application-snapshot-contract.md`
 
 ## Observed State
 
@@ -215,6 +216,28 @@ API response 只加入既有 schema 可安全承載的欄位；若需要改公�
 
 ## 目前狀態
 
-`design_ready`
+`verified`
 
-Design spec 已建立並完成自我審查；尚未開始 implementation plan 或程式修改。
+P3-1 implementation 已在隔離 worktree 完成並通過驗收。
+
+Implementation commits：
+
+- `e56b6df`：public Business Rules Snapshot。
+- `1aa01d1`：generation-consistent Application Snapshot。
+- `f47540c`：builder exception propagation regression test。
+- `92ae4e9`：Decision API 接入 Application Snapshot。
+- `6f66763`：Decision provenance precedence regression test。
+
+最終驗收證據（2026-07-14）：
+
+- affected modules compile：PASS。
+- P3-1 expanded targeted tests：`52 passed`。
+- full pytest：`217 passed in 28.40s`。
+- Vue contract：PASS；production build：PASS。
+- Decision API profile：cold `401.752ms`；warm median `259.909ms`，低於 `300ms` gate。
+- service acceptance：`passed`；Streamlit `8502`、API `8601`、Vue `5173` 均由 P3-1 worktree 啟動並 ready。
+- Hermes：`overallStatus: pass`；擴充後 targeted pack `95 passed in 15.97s`。
+- system monitor：`status: ok`；SQLite integrity：`ok`；Acceptance Record `15`，latest data `2026-07-13`。
+- 2026-01 至 2026-06 六個 blocking monthly baseline：全部 `matched`。
+- 2026-05 frozen baseline：`HKD 12,057,968 matched`。
+- 正式口徑仍為「不含掛賬核銷與TT退款轉團款」；upload、rollback、報表、GMV、Forecast 算法與 target governance schema 均未修改。

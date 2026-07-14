@@ -1,11 +1,11 @@
 # NBS Analytics 系統全景地圖導航
 
-更新日期：2026-07-13
+更新日期：2026-07-14
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`  
 正式收入口徑：`不含掛賬核銷與TT退款轉團款`
 
-目前正式版本節點：`main@5046973`
-最新正式資料：Acceptance Record `14`；最新日期 `2026-07-12`
+目前正式版本節點：`main@ac40561`；P3-1 已在 `codex/p3-1-application-snapshot` 完成隔離驗收，尚未合併
+最新正式資料：Acceptance Record `15`；最新日期 `2026-07-13`
 
 ---
 
@@ -35,6 +35,7 @@ NBS Analytics 是一套本地企業營運駕駛艙：以 Streamlit 作為基準 
 - 所有 preflight、正式 upsert、governed gate、rollback、history 與 cache generation 都綁定明確 `db_path`，不再暫時改寫 `database.DB_FILE`。
 - 2026-01 至 2026-06 月度基準已全部升級為 blocking；目前六個月 checks 均 matched，2026-05 frozen baseline 維持 `HKD 12,057,968`。
 - Acceptance history、upload operation ID 與 data generation signature 互相對應；Hermes 會把缺失或 signature mismatch 視為 degraded/fail。
+- Decision API 透過 Application Snapshot service 固定 request-scoped generation，統一取得 Rules、Facts、Data Quality、Forecast、System Health 與 Target Config；HTTP router 不再自行編排 read models。
 
 ---
 
@@ -56,6 +57,8 @@ flowchart TD
     E3 --> F
     F --> F1["一筆 Stability History\noperation ID + timings + rollback evidence"]
     F1 --> F2["Data Generation\nDB signature + cache token"]
+    F2 --> Z["Application Snapshot\nRules + generation-aware read models"]
+    Z --> Z1["Decision API\nTargets / Alerts / Decisions"]
     F --> G["app_workflows._build_revenue_scope_frames\n正式淨收入口徑"]
     G --> H["pipeline.build_dashboard_data\n分社/專職/產品/線路/票務統計"]
     G --> I["forecasting.run_ai_prediction_tracks\nDaily / 7-Day / Month-End"]
@@ -183,12 +186,12 @@ nbs_marketing_data.db
 - `others_data`：票務、其它業務、未匹配或非旅行團資料。
 - `temp_ids`：upsert 刪舊時的技術輔助表。
 
-目前正式實例狀態（2026-07-13 驗收）：
+目前正式實例狀態（2026-07-14 驗收）：
 
 - `tour_data`：`6,676` 行。
 - `others_data`：`22,571` 行。
-- 最新正式資料日期：`2026-07-12`。
-- 最新 acceptance：Record `14`，upload status `accepted`，rollback `not_required`。
+- 最新正式資料日期：`2026-07-13`。
+- 最新 acceptance：Record `15`，upload status `accepted`，rollback `not_required`。
 - SQLite integrity：`ok`；data generation `1`，operation ID 與 Record 14 history matched，DB signature matched。
 
 ### 3.5 Upload Single-Writer 與治理服務
@@ -204,7 +207,24 @@ nbs_marketing_data.db
 | `cache_generation_service.py` | 保存 generation、operation ID 與 DB SHA-256；promotion metadata write 後刷新 signature，但不額外增加 generation。 |
 | `system_health_service.py` | 對照 lease、SQLite integrity、history、generation 與 DB signature，供 API/Hermes 監測。 |
 
-### 3.6 `forecasting.py`：AI 預測、回測與診斷層
+### 3.6 Application Snapshot 與 Decision API
+
+| 模組 | 職責 |
+|---|---|
+| `business_rules_service.py` | 將 Facts 使用的 branch mapping、target branches、cruise departments、sales reps 正規化為 request-scoped rules snapshot，並提供穩定 SHA-256 fingerprint。 |
+| `application_snapshot_service.py` | 使用明確 DB/runtime/cache/config paths，固定 generation token，協調既有 Facts、Data Quality、Forecast、System Health 與 Target Config read models。 |
+| `decision_service.py` | 根據 snapshot sources 建立 targets、alerts 與 management decision cards；既有 Facts/Forecast/Health provenance 保持 authoritative。 |
+| `routers/decisions.py` | 薄 HTTP adapter；只建立 snapshot、呼叫 Decision Service，並把連續 generation conflict 映射為 HTTP 409。 |
+
+一致性邊界：
+
+- Dashboard Facts 與 Data Quality 使用同一 generation token；組裝結束時 token 改變會整段重試一次。
+- generation 連續改變時不回傳混代 payload，而是回 HTTP 409。
+- Forecast 目前仍使用獨立 AI cache，只回報 cache path/version/time/status；不得宣稱與 SQLite generation matched。
+- Snapshot 不新增持久 cache、不直接讀 Pandas 明細、不重算正式收入，也不包含 Decision judgement。
+- P3-1 驗收時 Decision API warm median 為 `259.909ms`，低於 `300ms` gate。
+
+### 3.7 `forecasting.py`：AI 預測、回測與診斷層
 
 正式 tracks：
 
@@ -236,7 +256,7 @@ nbs_marketing_data.db
 - Forecast Governance、Feature Store / Lead Signal 都從現有 backtest/cache 派生，不重訓、不改權重。
 - 當 AI cache 被延後時，首頁仍會先顯示營運 dashboard；補算是使用者顯式操作，不會因為刷新頁面自動觸發。
 
-### 3.7 `business_calendar.py`：香港日曆與旅遊展特徵層
+### 3.8 `business_calendar.py`：香港日曆與旅遊展特徵層
 
 職責：
 
@@ -250,7 +270,7 @@ nbs_marketing_data.db
 .venv/bin/python scripts/validate_business_calendar.py
 ```
 
-### 3.8 `visuals.py`：圖表視覺層
+### 3.9 `visuals.py`：圖表視覺層
 
 職責：
 
@@ -517,11 +537,13 @@ Baseline drift 排查順序：
 - SQLite 仍是本地單機資料庫，未做多人權限與 schema migration 管理。
 - Streamlit rerun / page-load hot path 仍有約 12–15 秒固定等待需要以 profiling 重新定位；這是 P1 效能範圍，不得改動 P0 single-writer 或 baseline contract。
 
-P1 下一步：
+P3 後續方向：
 
-- 執行 `Streamlit Rerun Hot Path` Brief：量測 no-op repair、hidden tab reload、cache hit/rebuild check，移除可證明不必要的固定等待。
-- 以 cache hit、session rerun、hidden tab 與服務重啟四種情境驗證，並保持正式 DB page-load read-only。
-- P1 完成後仍需跑完整 tests、service acceptance、monthly blocking baseline 與 Hermes。
+- P3-2 建立 Read Model Registry，統一 cache key、schema version、checksum、命中狀態與失效策略。
+- P3-3 將 Forecast、Export 與完整 rebuild 改為可追蹤 background jobs，避免同步 request 長時間等待。
+- P3-4 抽象 Governance Repository，再按實際查詢與 transaction 需求評估 JSON/JSONL 遷移 SQLite。
+- P3-5 加入 request ID、operation ID、generation token、階段耗時與慢查詢 observability。
+- 後續 consumer 只可逐個接入 Application Snapshot/API，不可一次重寫 Streamlit、Dashboard API 與 Vue。
 - 驗收 GMV 排除訂單看板的真實業務清單與報表 sheets。
 - 持續優化 Daily WAPE，但保持正式 forecast 與診斷模型分離。
 - 以 Feature Store / Lead Signal 的 `NoFutureLeak` 與 readiness matrix 作為下一輪 Daily WAPE 實驗入口。

@@ -29,6 +29,10 @@ TARGETED_TESTS = [
     "tests/test_upload_orchestrator_service.py",
     "tests/test_upload_action_service.py",
     "tests/test_upload_single_writer_integration.py",
+    "tests/test_business_rules_service.py",
+    "tests/test_application_snapshot_service.py",
+    "tests/test_decision_service.py",
+    "tests/test_decision_api.py",
 ]
 
 
