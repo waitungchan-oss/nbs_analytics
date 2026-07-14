@@ -95,8 +95,10 @@ def main(argv: list[str] | None = None) -> int:
                 bundle, context_summary={}, verification=[],
             )
         else:
-            context_summary = _read_object(args.context, "Context summary") if args.context else {}
-            verification = _read_verification(args.verification) if args.verification else []
+            context_path = policy.resolve_input_path(Path(args.context)) if args.context else None
+            verification_path = policy.resolve_input_path(Path(args.verification)) if args.verification else None
+            context_summary = _read_object(str(context_path), "Context summary") if context_path else {}
+            verification = _read_verification(str(verification_path)) if verification_path else []
             runner = None
             if args.agent_command:
                 command = shlex.split(args.agent_command)
@@ -110,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             report = run_review_batches(
                 bundle,
+                project_root=PROJECT_ROOT,
                 context_summary=context_summary,
                 verification=verification,
                 runner=runner,

@@ -49,6 +49,10 @@ def verification():
     }]
 
 
+def runtime_path(project_root):
+    return project_root / ".nbs_agent_runtime"
+
+
 def context_summary(status="ready"):
     return {
         "schemaVersion": "context-summary-v1",
@@ -75,7 +79,7 @@ def test_review_payload_has_exact_public_contract():
 def test_strict_review_blocks_pass_without_verification(tmp_path):
     report = build_review_report(
         review_bundle(), context_summary=context_summary(), verification=[],
-        runner=ReviewRunner(), runtime_root=tmp_path,
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
         instructions="review-contract-v1", strict=True,
     )
     assert report["verdict"] == "blocked"
@@ -85,7 +89,7 @@ def test_strict_review_blocks_context_that_is_not_ready(tmp_path):
     runner = ReviewRunner()
     report = build_review_report(
         review_bundle(), context_summary=context_summary("context_overflow"), verification=verification(),
-        runner=runner, runtime_root=tmp_path, instructions="review-contract-v1", strict=True,
+        project_root=tmp_path, runner=runner, runtime_root=runtime_path(tmp_path), instructions="review-contract-v1", strict=True,
     )
     assert report["verdict"] == "blocked"
     assert runner.calls == 0
@@ -99,7 +103,7 @@ def test_strict_review_rejects_nonzero_verification_before_runner(tmp_path):
             "label": "targeted", "argv": ["pytest"], "exitCode": 1,
             "stdoutTail": "", "stderrTail": "failed",
         }], runner=runner,
-        runtime_root=tmp_path, instructions="review-contract-v1", strict=True,
+        project_root=tmp_path, runtime_root=runtime_path(tmp_path), instructions="review-contract-v1", strict=True,
     )
     assert report["verdict"] == "changes_required"
     assert runner.calls == 0
@@ -109,7 +113,7 @@ def test_strict_review_accepts_pass_and_keeps_hermes_fields(tmp_path):
     runner = ReviewRunner()
     report = build_review_report(
         review_bundle(), context_summary=context_summary(), verification=verification(),
-        runner=runner, runtime_root=tmp_path, instructions="review-contract-v1", strict=True,
+        project_root=tmp_path, runner=runner, runtime_root=runtime_path(tmp_path), instructions="review-contract-v1", strict=True,
     )
     assert report["verdict"] == "pass"
     assert report["residualRisk"] == ["Hermes pending"]
@@ -122,7 +126,7 @@ def test_strict_review_accepts_pass_and_keeps_hermes_fields(tmp_path):
 def test_strict_review_allows_dirty_files_attributed_to_diff(tmp_path):
     report = build_review_report(
         review_bundle(dirty=["x.py"]), context_summary=context_summary(),
-        verification=verification(), runner=ReviewRunner(), runtime_root=tmp_path,
+        verification=verification(), project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
         instructions="contract", strict=True,
     )
     assert report["verdict"] == "pass"
@@ -131,7 +135,7 @@ def test_strict_review_allows_dirty_files_attributed_to_diff(tmp_path):
 def test_strict_review_blocks_unattributed_dirty_file(tmp_path):
     report = build_review_report(
         review_bundle(dirty=["unrelated.py"]), context_summary=context_summary(),
-        verification=verification(), runner=ReviewRunner(), runtime_root=tmp_path,
+        verification=verification(), project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
         instructions="contract", strict=True,
     )
     assert report["verdict"] == "blocked"
@@ -146,7 +150,7 @@ def test_strict_review_rejects_truncated_evidence(tmp_path):
     )
     report = build_review_report(
         bundle, context_summary=context_summary(), verification=verification(),
-        runner=ReviewRunner(), runtime_root=tmp_path, instructions="contract", strict=True,
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path), instructions="contract", strict=True,
     )
     assert report["verdict"] == "context_overflow"
 
@@ -179,7 +183,7 @@ def test_single_file_over_budget_returns_overflow_before_runner(tmp_path):
     runner = ReviewRunner()
     report = build_review_report(
         review_bundle(content="x" * 10000), context_summary=context_summary(),
-        verification=verification(), runner=runner, runtime_root=tmp_path,
+        verification=verification(), project_root=tmp_path, runner=runner, runtime_root=runtime_path(tmp_path),
         instructions="review-contract-v1", input_token_limit=10, strict=True,
     )
     assert report["verdict"] == "context_overflow"
@@ -196,7 +200,7 @@ def test_review_rejects_output_over_budget(tmp_path):
     with pytest.raises(ValueError, match="output token budget"):
         build_review_report(
             review_bundle(), context_summary=context_summary(), verification=verification(),
-            runner=VerboseReviewRunner(), runtime_root=tmp_path,
+            project_root=tmp_path, runner=VerboseReviewRunner(), runtime_root=runtime_path(tmp_path),
             instructions="review-contract-v1", output_token_limit=10, strict=True,
         )
 
@@ -211,7 +215,7 @@ def test_review_rejects_malformed_runner_fingerprint(tmp_path):
     with pytest.raises(ValueError, match="fingerprint"):
         build_review_report(
             review_bundle(), context_summary=context_summary(), verification=verification(),
-            runner=BadRunner(), runtime_root=tmp_path, instructions="contract", strict=True,
+            project_root=tmp_path, runner=BadRunner(), runtime_root=runtime_path(tmp_path), instructions="contract", strict=True,
         )
 
 
@@ -249,7 +253,7 @@ def test_strict_review_rejects_malformed_context_summary(tmp_path, summary):
     with pytest.raises(ValueError, match="Context summary"):
         build_review_report(
             review_bundle(), context_summary=summary, verification=verification(),
-            runner=ReviewRunner(), runtime_root=tmp_path, instructions="contract", strict=True,
+            project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path), instructions="contract", strict=True,
         )
 
 
@@ -288,7 +292,7 @@ def test_strict_pass_requires_nonempty_gate_fields(tmp_path, field):
     with pytest.raises(ValueError, match=field):
         build_review_report(
             review_bundle(), context_summary=context_summary(), verification=verification(),
-            runner=IncompletePassRunner(), runtime_root=tmp_path,
+            project_root=tmp_path, runner=IncompletePassRunner(), runtime_root=runtime_path(tmp_path),
             instructions="contract", strict=True,
         )
 
@@ -305,11 +309,11 @@ def test_review_runtime_retries_after_invalid_fresh_output(tmp_path):
     with pytest.raises(ValueError, match="fingerprint"):
         build_review_report(
             review_bundle(), context_summary=context_summary(), verification=verification(),
-            runner=runner, runtime_root=tmp_path, instructions="contract", strict=True,
+            project_root=tmp_path, runner=runner, runtime_root=runtime_path(tmp_path), instructions="contract", strict=True,
         )
     report = build_review_report(
         review_bundle(), context_summary=context_summary(), verification=verification(),
-        runner=runner, runtime_root=tmp_path, instructions="contract", strict=True,
+        project_root=tmp_path, runner=runner, runtime_root=runtime_path(tmp_path), instructions="contract", strict=True,
     )
     assert report["verdict"] == "pass"
     assert runner.calls == 2
@@ -319,11 +323,11 @@ def test_strict_mode_changes_review_fingerprint_and_cache_identity(tmp_path):
     runner = ReviewRunner()
     strict_report = build_review_report(
         review_bundle(), context_summary=context_summary(), verification=verification(),
-        runner=runner, runtime_root=tmp_path, instructions="contract", strict=True,
+        project_root=tmp_path, runner=runner, runtime_root=runtime_path(tmp_path), instructions="contract", strict=True,
     )
     non_strict_report = build_review_report(
         review_bundle(), context_summary=context_summary(), verification=verification(),
-        runner=runner, runtime_root=tmp_path, instructions="contract", strict=False,
+        project_root=tmp_path, runner=runner, runtime_root=runtime_path(tmp_path), instructions="contract", strict=False,
     )
     assert strict_report["reviewFingerprint"] != non_strict_report["reviewFingerprint"]
     assert runner.calls == 2
@@ -347,3 +351,31 @@ def test_batch_merge_output_overflow_keeps_all_high_findings():
     )
     assert merged["verdict"] == "context_overflow"
     assert merged["findings"] == findings
+
+
+def test_review_service_rejects_runtime_outside_project(tmp_path):
+    project_root = tmp_path / "project"
+    external_runtime = tmp_path / "external" / ".nbs_agent_runtime"
+    with pytest.raises(PermissionError, match="project runtime"):
+        build_review_report(
+            review_bundle(), project_root=project_root,
+            context_summary=context_summary(), verification=verification(),
+            runner=ReviewRunner(), runtime_root=external_runtime,
+            instructions="contract", strict=True,
+        )
+
+
+def test_review_service_rejects_symlinked_runtime(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    external_runtime = tmp_path / "external-runtime"
+    external_runtime.mkdir()
+    symlink_runtime = project_root / ".nbs_agent_runtime"
+    symlink_runtime.symlink_to(external_runtime, target_is_directory=True)
+    with pytest.raises(PermissionError, match="symlink"):
+        build_review_report(
+            review_bundle(), project_root=project_root,
+            context_summary=context_summary(), verification=verification(),
+            runner=ReviewRunner(), runtime_root=symlink_runtime,
+            instructions="contract", strict=True,
+        )

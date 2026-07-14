@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -200,11 +201,22 @@ def _report(
     }
 
 
-def _runtime_root(path: Path) -> Path:
-    resolved = path.resolve()
-    if resolved.name == ".nbs_agent_runtime":
-        return resolved
-    return resolved / ".nbs_agent_runtime"
+def _runtime_path(project_root: Path, runtime_root: Path) -> Path:
+    expected_lexical = Path(os.path.abspath(os.fspath(project_root))) / ".nbs_agent_runtime"
+    raw_lexical = Path(os.path.abspath(os.fspath(runtime_root)))
+    if raw_lexical != expected_lexical:
+        raise PermissionError(
+            f"Agent runtime root must be the project runtime {expected_lexical}: {raw_lexical}"
+        )
+    if expected_lexical.is_symlink():
+        raise PermissionError("Agent runtime root cannot be a symlink")
+    expected = expected_lexical.resolve()
+    resolved = raw_lexical.resolve()
+    if resolved != expected:
+        raise PermissionError(
+            f"Agent runtime root must resolve to the project runtime {expected}: {resolved}"
+        )
+    return resolved
 
 
 def _validate_report(result: object, expected_fingerprint: str, *, strict: bool) -> dict:
@@ -251,6 +263,7 @@ def _validate_report(result: object, expected_fingerprint: str, *, strict: bool)
 def build_review_report(
     bundle: EvidenceBundle,
     *,
+    project_root: Path,
     context_summary: dict,
     verification: list[dict],
     runner: AgentRunner | None,
@@ -262,6 +275,7 @@ def build_review_report(
 ) -> dict:
     if input_token_limit <= 0 or output_token_limit <= 0:
         raise ValueError("Review Agent token budgets must be positive")
+    validated_runtime_root = _runtime_path(project_root, runtime_root)
     evidence_payload = build_review_evidence_payload(
         bundle, context_summary=context_summary, verification=verification,
     )
@@ -327,7 +341,7 @@ def build_review_report(
             residual_risk=["No AgentRunner was configured; use --collect-only or --agent-command."],
         )
     result = AgentRuntime(
-        _runtime_root(runtime_root),
+        validated_runtime_root,
         input_token_limit=input_token_limit,
         output_token_limit=output_token_limit,
     ).run(
@@ -423,6 +437,7 @@ def merge_review_batches(
 def run_review_batches(
     bundle: EvidenceBundle,
     *,
+    project_root: Path,
     context_summary: dict,
     verification: list[dict],
     runner: AgentRunner | None,
@@ -435,6 +450,7 @@ def run_review_batches(
     full_payload = build_review_evidence_payload(
         bundle, context_summary=context_summary, verification=verification,
     )
+    runtime_root = _runtime_path(project_root, runtime_root)
     runtime_instructions = _runtime_instructions(instructions, strict=strict)
     fingerprint = agent_request_fingerprint(
         bundle,
@@ -448,6 +464,7 @@ def run_review_batches(
     reports = [
         build_review_report(
             batch,
+            project_root=project_root,
             context_summary=context_summary,
             verification=verification,
             runner=runner,

@@ -1,6 +1,9 @@
 import json
 import subprocess
+import uuid
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +25,13 @@ def valid_context_summary():
         "unknowns": [],
         "contextFingerprint": "context-fingerprint",
     }
+
+
+def runtime_fixture(name, value):
+    path = ROOT / ".nbs_agent_runtime" / "test-inputs" / f"{name}-{uuid.uuid4().hex}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return path
 
 
 def test_context_cli_collect_only_outputs_json():
@@ -84,20 +94,57 @@ def test_review_cli_collect_only_outputs_review_bundle():
 
 
 def test_review_cli_strict_without_verification_exits_two(tmp_path):
-    context = tmp_path / "context.json"
-    context.write_text(json.dumps(valid_context_summary()), encoding="utf-8")
+    context = runtime_fixture("context", valid_context_summary())
     result = subprocess.run(
         [str(PYTHON), "scripts/review_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md", "--base", "HEAD", "--head", "WORKTREE", "--context", str(context), "--strict"],
         cwd=ROOT, text=True, capture_output=True, check=False,
     )
     assert result.returncode == 2
+    context.unlink()
+
+
+@pytest.mark.parametrize("filename", ["outside.json", "secret.env", "data.db", "report.xlsx", "events.log"])
+def test_review_cli_rejects_unsafe_input_paths(tmp_path, filename):
+    candidate = tmp_path / filename
+    candidate.write_text(json.dumps(valid_context_summary()), encoding="utf-8")
+    result = subprocess.run(
+        [str(PYTHON), "scripts/review_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md",
+         "--context", str(candidate), "--strict"],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 3
+
+
+def test_review_cli_accepts_runtime_input_and_rejects_symlink_escape(tmp_path):
+    context = runtime_fixture("context", valid_context_summary())
+    try:
+        result = subprocess.run(
+            [str(PYTHON), "scripts/review_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md",
+             "--context", str(context), "--strict"],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        assert result.returncode == 2
+
+        outside = tmp_path / "outside.json"
+        outside.write_text(json.dumps(valid_context_summary()), encoding="utf-8")
+        link = context.with_name(f"link-{uuid.uuid4().hex}.json")
+        link.symlink_to(outside)
+        try:
+            result = subprocess.run(
+                [str(PYTHON), "scripts/review_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md",
+                 "--context", str(link), "--strict"],
+                cwd=ROOT, text=True, capture_output=True, check=False,
+            )
+            assert result.returncode == 3
+        finally:
+            link.unlink()
+    finally:
+        context.unlink()
 
 
 def test_review_cli_rejects_malformed_verification_file(tmp_path):
-    context = tmp_path / "context.json"
-    context.write_text(json.dumps(valid_context_summary()), encoding="utf-8")
-    verification = tmp_path / "verification.json"
-    verification.write_text('{"commands":[{"exitCode":0}]}', encoding="utf-8")
+    context = runtime_fixture("context", valid_context_summary())
+    verification = runtime_fixture("verification", {"commands": [{"exitCode": 0}]})
     result = subprocess.run(
         [
             str(PYTHON), "scripts/review_agent.py",
@@ -109,3 +156,7 @@ def test_review_cli_rejects_malformed_verification_file(tmp_path):
     )
     assert result.returncode == 5
     assert result.stdout == ""
+
+
+    context.unlink()
+    verification.unlink()

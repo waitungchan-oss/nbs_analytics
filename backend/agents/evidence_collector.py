@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,43 @@ class EvidencePolicy:
         allowed = is_root_file or top in self.read_roots
         if not allowed or (not is_root_file and resolved.suffix not in self.extensions):
             raise PermissionError(f"Path is not allowlisted: {relative_text}")
+        return resolved
+
+    def resolve_input_path(self, path: Path) -> Path:
+        """Resolve Review inputs without allowing arbitrary files or symlink escapes."""
+        lexical_project = Path(os.path.abspath(os.fspath(self.project_root)))
+        lexical = Path(os.path.abspath(os.fspath(path)))
+        if not lexical.is_file():
+            raise PermissionError(f"Evidence input must be an existing file: {path}")
+
+        runtime_lexical = lexical_project / ".nbs_agent_runtime"
+        try:
+            relative_runtime = lexical.relative_to(runtime_lexical)
+        except ValueError:
+            return self.resolve_read_path(lexical)
+
+        if runtime_lexical.is_symlink():
+            raise PermissionError(f"Evidence input runtime cannot be a symlink: {runtime_lexical}")
+        current = runtime_lexical
+        for part in relative_runtime.parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                raise PermissionError(f"Evidence input path cannot contain symlinks: {current}")
+        if lexical.is_symlink():
+            raise PermissionError(f"Evidence input path cannot be a symlink: {lexical}")
+        resolved_runtime = runtime_lexical.resolve()
+        resolved = lexical.resolve()
+        try:
+            resolved.relative_to(resolved_runtime)
+        except ValueError as exc:
+            raise PermissionError(f"Evidence input must stay under {runtime_lexical}") from exc
+        relative_text = resolved.relative_to(lexical_project).as_posix()
+        if any(
+            fnmatch.fnmatch(relative_text, pattern)
+            or fnmatch.fnmatch(resolved.name, pattern)
+            for pattern in self.deny_patterns
+        ) or resolved.suffix not in self.extensions:
+            raise PermissionError(f"Denied evidence input path: {relative_text}")
         return resolved
 
 
