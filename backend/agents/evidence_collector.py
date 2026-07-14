@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from backend.agents.evidence_models import (
     CommandEvidence,
     EvidenceBundle,
     EvidenceItem,
+    estimate_tokens,
     load_json_config,
 )
 
@@ -24,6 +26,7 @@ class EvidencePolicy:
     max_file_lines: int
     max_command_characters: int
     agent_executables: tuple[str, ...]
+    context_input_tokens: int = 12000
 
     @classmethod
     def from_project(cls, project_root: Path) -> "EvidencePolicy":
@@ -31,6 +34,7 @@ class EvidencePolicy:
         allow = load_json_config(root, "agent_config/evidence_allowlist.json")
         budgets = load_json_config(root, "agent_config/token_budgets.json")
         excerpt = budgets["excerpt"]
+        context = budgets["context"]
         return cls(
             project_root=root,
             read_roots=tuple(allow["readRoots"]),
@@ -41,6 +45,7 @@ class EvidencePolicy:
             max_file_lines=int(excerpt["maxFileLines"]),
             max_command_characters=int(excerpt["maxCommandCharacters"]),
             agent_executables=tuple(allow["agentExecutables"]),
+            context_input_tokens=int(context["inputTokens"]),
         )
 
     def resolve_read_path(self, path: Path) -> Path:
@@ -106,16 +111,44 @@ class EvidenceCollector:
             metadata={"lineCount": len(lines), "truncated": len(lines) > len(selected)},
         )
 
+    def _candidate_paths(self) -> tuple[str, ...]:
+        candidates: set[str] = set()
+        roots = [self.project_root / root for root in self.policy.read_roots]
+        paths = [
+            self.project_root / relative
+            for relative in self.policy.root_files
+            if (self.project_root / relative).is_file()
+        ]
+        for root in roots:
+            if root.exists():
+                paths.extend(path for path in root.rglob("*") if path.is_file())
+        for path in paths:
+            try:
+                resolved = self.policy.resolve_read_path(path)
+            except PermissionError:
+                continue
+            candidates.add(resolved.relative_to(self.project_root).as_posix())
+        return tuple(sorted(candidates))
+
     def _query_paths(
         self, queries: tuple[str, ...]
     ) -> tuple[tuple[Path, ...], tuple[CommandEvidence, ...]]:
         found: list[Path] = []
         commands: list[CommandEvidence] = []
-        roots = [root for root in self.policy.read_roots if (self.project_root / root).exists()]
+        candidates = self._candidate_paths()
         for index, query in enumerate(queries[:8]):
+            if not candidates:
+                commands.append(CommandEvidence(
+                    label=f"rg-query-{index}",
+                    argv=("rg", "--files-with-matches", "--fixed-strings", "--", query),
+                    exit_code=1,
+                    stdout="",
+                    stderr="No policy-approved evidence files",
+                ))
+                continue
             result = self._run(
                 f"rg-query-{index}",
-                ["rg", "--files-with-matches", "--fixed-strings", "--", query, *roots],
+                ["rg", "--files-with-matches", "--fixed-strings", "--", query, *candidates],
             )
             commands.append(result)
             for line in result.stdout.splitlines():
@@ -129,6 +162,35 @@ class EvidenceCollector:
                 if len(found) >= 12:
                     break
         return tuple(found), tuple(commands)
+
+    def _resolve_ref(self, label: str, ref: str) -> tuple[str, CommandEvidence]:
+        if not ref or ref.startswith("-"):
+            raise ValueError(f"Invalid ref: {ref!r}")
+        command = self._run(
+            label,
+            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
+        )
+        sha = command.stdout.strip()
+        if command.exit_code != 0 or len(sha) != 40 or any(
+            character not in "0123456789abcdef" for character in sha.lower()
+        ):
+            raise ValueError(f"Unable to resolve immutable ref: {ref!r}")
+        return sha, command
+
+    @staticmethod
+    def _estimate_input_tokens(
+        task: dict,
+        guardrails: dict,
+        evidence: tuple[EvidenceItem, ...],
+        commands: tuple[CommandEvidence, ...],
+    ) -> int:
+        payload = {
+            "task": task,
+            "guardrails": guardrails,
+            "evidence": [item.to_dict() for item in evidence],
+            "commands": [item.to_dict() for item in commands],
+        }
+        return estimate_tokens(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
     def _repository(self) -> tuple[dict, tuple[CommandEvidence, ...]]:
         head = self._run("git-head", ["git", "rev-parse", "HEAD"])
@@ -151,7 +213,7 @@ class EvidenceCollector:
         queries: tuple[str, ...] = (),
     ) -> EvidenceBundle:
         repository, commands = self._repository()
-        base = self._run("git-base", ["git", "rev-parse", base_ref])
+        base_sha, base = self._resolve_ref("git-base", base_ref)
         query_paths, query_commands = self._query_paths(queries)
         default_paths = [
             self.project_root / relative
@@ -167,24 +229,47 @@ class EvidenceCollector:
             "scope": [],
             "forbidden": [],
         }
+        guardrails = {
+            "revenueScope": "不含掛賬核銷與TT退款轉團款",
+            "mayBaseline": "HKD 12,057,968",
+        }
+        all_commands = commands + (base,) + query_commands
+        estimated_input_tokens = self._estimate_input_tokens(
+            task, guardrails, evidence, all_commands,
+        )
+        repository = {
+            **repository,
+            "base": base_ref,
+            "baseSha": base_sha,
+            "estimatedInputTokens": estimated_input_tokens,
+            "contextOverflow": estimated_input_tokens > self.policy.context_input_tokens,
+        }
         return EvidenceBundle(
             schema_version="context-evidence-v1",
             task=task,
             repository=repository,
-            guardrails={
-                "revenueScope": "不含掛賬核銷與TT退款轉團款",
-                "mayBaseline": "HKD 12,057,968",
-            },
+            guardrails=guardrails,
             evidence=evidence,
-            commands=commands + (base,) + query_commands,
+            commands=all_commands,
         )
 
     def collect_review(
         self, brief_path: Path, base_ref: str = "main", head_ref: str = "WORKTREE"
     ) -> EvidenceBundle:
         repository, commands = self._repository()
-        diff_range = base_ref if head_ref == "WORKTREE" else f"{base_ref}...{head_ref}"
-        changed = self._run("git-diff-name-only", ["git", "diff", "--name-only", diff_range])
+        base_sha, base_command = self._resolve_ref("git-base", base_ref)
+        head_command = None
+        head_sha = None
+        if head_ref == "WORKTREE":
+            diff_range = base_sha
+        else:
+            head_sha, head_command = self._resolve_ref("git-head-ref", head_ref)
+            diff_range = f"{base_sha}...{head_sha}"
+        diff_options = ["--no-textconv", "--no-ext-diff"]
+        changed = self._run(
+            "git-diff-name-only",
+            ["git", "diff", *diff_options, "--name-only", diff_range],
+        )
         patches: list[EvidenceItem] = []
         patch_commands: list[CommandEvidence] = []
         for index, relative in enumerate(changed.stdout.splitlines()[:50]):
@@ -193,7 +278,7 @@ class EvidenceCollector:
             self.policy.resolve_read_path(self.project_root / relative)
             patch = self._run(
                 f"git-diff-file-{index}",
-                ["git", "diff", diff_range, "--", relative],
+                ["git", "diff", *diff_options, diff_range, "--", relative],
             )
             patch_commands.append(patch)
             patches.append(
@@ -215,7 +300,9 @@ class EvidenceCollector:
             repository={
                 **repository,
                 "base": base_ref,
+                "baseSha": base_sha,
                 "headRef": head_ref,
+                "headSha": head_sha,
                 "diffFileLimitExceeded": changed.truncated
                 or len(changed.stdout.splitlines()) > 50,
             },
@@ -224,5 +311,5 @@ class EvidenceCollector:
                 "mayBaseline": "HKD 12,057,968",
             },
             evidence=tuple(patches),
-            commands=commands + (changed, *patch_commands),
+            commands=commands + (base_command, *(tuple() if head_command is None else (head_command,)), changed, *patch_commands),
         )
