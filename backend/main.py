@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import dashboard, decisions, exports, health, insights, stability, upload
+from backend.routers import dashboard, decisions, exports, health, insights, stability, target_governance, upload
 
 
 def create_app() -> FastAPI:
@@ -38,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(dashboard.router)
     app.include_router(decisions.router)
+    app.include_router(target_governance.router)
     app.include_router(exports.router)
     app.include_router(stability.router)
     app.include_router(upload.router)
