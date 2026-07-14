@@ -14,6 +14,12 @@ ALLOWED_CONTEXT_STATUSES = {
 ALLOWED_REVIEW_STATUSES = {
     "pass", "changes_required", "blocked", "context_overflow", "invalid_bundle",
 }
+ALLOWED_IMPLEMENTATION_STATUSES = {
+    "completed", "changes_required", "blocked_invalid_contract", "blocked_dirty_worktree",
+    "blocked_wrong_branch", "blocked_head_mismatch", "blocked_scope", "blocked_high_risk",
+    "blocked_diff_limit", "validation_failed", "context_overflow", "invalid_agent_output",
+    "runtime_error",
+}
 
 
 def canonical_fingerprint(value: object) -> str:
@@ -93,7 +99,7 @@ class AgentReportEnvelope:
     payload: dict
 
     def __post_init__(self) -> None:
-        allowed = ALLOWED_CONTEXT_STATUSES | ALLOWED_REVIEW_STATUSES
+        allowed = ALLOWED_CONTEXT_STATUSES | ALLOWED_REVIEW_STATUSES | ALLOWED_IMPLEMENTATION_STATUSES
         if self.status not in allowed:
             raise ValueError(f"Unsupported agent status: {self.status}")
 

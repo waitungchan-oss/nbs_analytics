@@ -38,6 +38,7 @@ yarn-error.log*
 
 # Local Agent evidence, reports and token telemetry
 .nbs_agent_runtime/
+.nbs_agent_runtime/implementation/
 
 # Formal management target configuration is local governed state; commit only the schema/docs, not live targets.
 decision_targets.json

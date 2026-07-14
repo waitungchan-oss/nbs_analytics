@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "implementation-policy-v1",
+  "requiredBranchPrefix": "codex/",
+  "deniedRiskSurfaces": ["upload", "sqlite", "baseline", "rollback", "revenue", "business_rules", "export_schema"],
+  "deniedWritePatterns": [".git/**", "*.db", "*.sqlite", "*.sqlite3", "*.xlsx", "*.xls", "*.csv", ".env", ".env.*", ".nbs_runtime/**", ".nbs_agent_runtime/**", "logs/**", "exports/**", "backups/**"],
+  "limits": {"maxChangedFiles": 8, "maxDiffLines": 800, "maxRepairLoops": 2}
+}
