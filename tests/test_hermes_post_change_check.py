@@ -26,6 +26,14 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
         "tests/test_application_snapshot_service.py",
         "tests/test_decision_service.py",
         "tests/test_decision_api.py",
+        "tests/test_evidence_models.py",
+        "tests/test_evidence_collector.py",
+        "tests/test_agent_runtime.py",
+        "tests/test_context_agent_service.py",
+        "tests/test_review_agent_service.py",
+        "tests/test_agent_cli.py",
+        "tests/test_agent_dispatch_contract.py",
+        "tests/test_agent_read_only_contract.py",
     ]:
         assert test_name in targeted.command
 
