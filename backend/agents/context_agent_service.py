@@ -24,9 +24,42 @@ _REPORT_KEYS = {
     "schemaVersion", "status", "taskUnderstanding", "systemBoundaries", "relevantFiles",
     "dependencies", "recommendedTests", "risks", "unknowns", "contextFingerprint",
 }
+_REPORT_LIST_FIELDS = (
+    "taskUnderstanding", "systemBoundaries", "dependencies", "recommendedTests", "risks", "unknowns",
+)
+
+
+def _append_unique(values: list[dict], candidate: dict) -> None:
+    if candidate not in values:
+        values.append(candidate)
+
+
+def _semantic_symbol(item: EvidenceItem) -> dict:
+    try:
+        candidate = json.loads(item.content)
+    except (TypeError, json.JSONDecodeError):
+        candidate = {"queryId": item.source, "paths": item.content.splitlines()}
+    if isinstance(candidate, dict) and isinstance(candidate.get("queryId"), str) and isinstance(candidate.get("paths"), list) and all(isinstance(path, str) for path in candidate["paths"]):
+        return {"queryId": candidate["queryId"], "paths": candidate["paths"]}
+    return {"queryId": item.source, "paths": item.content.splitlines()}
 
 
 def build_context_evidence_payload(bundle: EvidenceBundle) -> dict:
+    symbols: list[dict] = []
+    for item in bundle.commands:
+        if item.label.startswith("rg-query-"):
+            _append_unique(symbols, {"queryId": item.label, "paths": item.stdout.splitlines()})
+    for item in bundle.evidence:
+        if item.kind == "symbol":
+            _append_unique(symbols, _semantic_symbol(item))
+    recent_changes: list[dict] = []
+    for item in bundle.commands:
+        if item.label == "git-log":
+            for line in item.stdout.splitlines():
+                _append_unique(recent_changes, {"summary": line})
+    for item in bundle.evidence:
+        if item.kind == "recent_change":
+            _append_unique(recent_changes, {"summary": item.content})
     unsigned = {
         "schemaVersion": CONTEXT_EVIDENCE_SCHEMA,
         "task": bundle.task,
@@ -36,18 +69,11 @@ def build_context_evidence_payload(bundle: EvidenceBundle) -> dict:
             item.to_dict() for item in bundle.evidence
             if item.kind == "document" and not item.source.startswith("tests/")
         ],
-        "symbols": [
-            {"queryId": item.label, "paths": item.stdout.splitlines()}
-            for item in bundle.commands if item.label.startswith("rg-query-")
-        ],
+        "symbols": symbols,
         "relatedTests": [
             item.to_dict() for item in bundle.evidence if item.source.startswith("tests/")
         ],
-        "recentChanges": [
-            {"summary": line}
-            for item in bundle.commands if item.label == "git-log"
-            for line in item.stdout.splitlines()
-        ],
+        "recentChanges": recent_changes,
     }
     return {**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)}
 
@@ -59,28 +85,21 @@ def context_bundle_from_payload(payload: dict) -> EvidenceBundle:
         raise ValueError("Unexpected context evidence schema")
     if set(payload) != _PUBLIC_KEYS:
         raise ValueError("Context evidence payload has unexpected or missing keys")
+    _validate_context_payload_shape(payload)
     unsigned = {key: value for key, value in payload.items() if key != "bundleFingerprint"}
     if canonical_fingerprint(unsigned) != payload.get("bundleFingerprint"):
         raise ValueError("Context evidence fingerprint does not match payload")
-    for key in ("task", "repository", "guardrails"):
-        if not isinstance(payload[key], dict):
-            raise ValueError(f"Context evidence {key} must be an object")
-    if not payload["task"].get("objective") or "scope" not in payload["task"]:
-        raise ValueError("Context evidence task is incomplete")
-    if not payload["repository"].get("head") or "dirtyFiles" not in payload["repository"]:
-        raise ValueError("Context evidence repository is incomplete")
     documents = [
         EvidenceItem(
-            kind=str(item.get("kind") or "document"), source=str(item["source"]),
-            content=str(item["content"]), metadata=dict(item.get("metadata") or {}),
+            kind=item["kind"], source=item["source"], content=item["content"], metadata=item["metadata"],
         )
         for item in [*payload["documents"], *payload["relatedTests"]]
     ]
     semantic = [
-        EvidenceItem(kind="symbol", source=str(item["queryId"]), content=json.dumps(item, ensure_ascii=False))
+        EvidenceItem(kind="symbol", source=item["queryId"], content=json.dumps(item, ensure_ascii=False))
         for item in payload["symbols"]
     ] + [
-        EvidenceItem(kind="recent_change", source="git-log", content=str(item["summary"]))
+        EvidenceItem(kind="recent_change", source="git-log", content=item["summary"])
         for item in payload["recentChanges"]
     ]
     return EvidenceBundle(
@@ -90,9 +109,39 @@ def context_bundle_from_payload(payload: dict) -> EvidenceBundle:
     )
 
 
+def _validate_context_payload_shape(payload: dict) -> None:
+    if not isinstance(payload.get("schemaVersion"), str) or not isinstance(payload.get("bundleFingerprint"), str):
+        raise ValueError("Context evidence schema and fingerprint must be strings")
+    for key in ("task", "repository", "guardrails"):
+        if not isinstance(payload[key], dict):
+            raise ValueError(f"Context evidence {key} must be an object")
+    task = payload["task"]
+    if not isinstance(task.get("objective"), str) or not isinstance(task.get("scope"), list) or not isinstance(task.get("forbidden"), list):
+        raise ValueError("Context evidence task is incomplete")
+    repository = payload["repository"]
+    if not isinstance(repository.get("head"), str) or not isinstance(repository.get("dirtyFiles"), list) or not all(isinstance(item, str) for item in repository["dirtyFiles"]):
+        raise ValueError("Context evidence repository is incomplete")
+    for key in ("documents", "relatedTests", "symbols", "recentChanges"):
+        if not isinstance(payload[key], list):
+            raise ValueError(f"Context evidence {key} must be a list")
+    for item in [*payload["documents"], *payload["relatedTests"]]:
+        if not isinstance(item, dict) or set(item) != {"kind", "source", "content", "metadata"}:
+            raise ValueError("Context evidence document item is invalid")
+        if not all(isinstance(item[field], str) for field in ("kind", "source", "content")) or not isinstance(item["metadata"], dict):
+            raise ValueError("Context evidence document item is invalid")
+    for item in payload["symbols"]:
+        if not isinstance(item, dict) or set(item) != {"queryId", "paths"} or not isinstance(item["queryId"], str) or not isinstance(item["paths"], list) or not all(isinstance(path, str) for path in item["paths"]):
+            raise ValueError("Context evidence symbol item is invalid")
+    for item in payload["recentChanges"]:
+        if not isinstance(item, dict) or set(item) != {"summary"} or not isinstance(item["summary"], str):
+            raise ValueError("Context evidence recent change item is invalid")
+
+
 def _runtime_path(runtime_root: Path) -> Path:
     resolved = Path(runtime_root).resolve()
-    return resolved if resolved.name == ".nbs_agent_runtime" else resolved / ".nbs_agent_runtime"
+    if resolved.name != ".nbs_agent_runtime":
+        raise PermissionError(f"Agent runtime root must be named .nbs_agent_runtime: {resolved}")
+    return resolved
 
 
 def _validate_report(result: object, expected_fingerprint: str) -> dict:
@@ -104,15 +153,15 @@ def _validate_report(result: object, expected_fingerprint: str) -> dict:
         raise ValueError("Context Agent output schema is invalid")
     if result["status"] not in ALLOWED_CONTEXT_STATUSES:
         raise ValueError("Context Agent output status is invalid")
-    for key in ("taskUnderstanding", "systemBoundaries", "dependencies", "recommendedTests", "risks", "unknowns"):
-        if not isinstance(result[key], list):
+    for key in _REPORT_LIST_FIELDS:
+        if not isinstance(result[key], list) or not all(isinstance(item, str) for item in result[key]):
             raise ValueError(f"Context Agent output field is not a list: {key}")
     if not isinstance(result["relevantFiles"], list):
         raise ValueError("Context Agent output field is not a list: relevantFiles")
     for item in result["relevantFiles"]:
-        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("reason"), str) or not isinstance(item.get("symbols"), list):
+        if not isinstance(item, dict) or set(item) != {"path", "reason", "symbols"} or not isinstance(item["path"], str) or not isinstance(item["reason"], str) or not isinstance(item["symbols"], list) or not all(isinstance(symbol, str) for symbol in item["symbols"]):
             raise ValueError("Context Agent relevantFiles schema is invalid")
-    if result["contextFingerprint"] != expected_fingerprint:
+    if not isinstance(result["contextFingerprint"], str) or result["contextFingerprint"] != expected_fingerprint:
         raise ValueError("Context Agent context fingerprint does not match")
     return result
 
@@ -127,6 +176,7 @@ def build_context_report(
     input_token_limit: int = 12000,
     output_token_limit: int = 1500,
 ) -> dict:
+    runtime_path = _runtime_path(runtime_root)
     payload = build_context_evidence_payload(bundle)
     if collect_only:
         return payload
@@ -154,15 +204,22 @@ def build_context_report(
             "contextFingerprint": expected_fingerprint,
         }
     result = AgentRuntime(
-        _runtime_path(runtime_root),
+        runtime_path,
         input_token_limit=input_token_limit,
         output_token_limit=output_token_limit,
     ).run(
         "context", bundle, runner, output_schema=CONTEXT_SUMMARY_SCHEMA,
         instructions=instructions, evidence_payload=payload,
     )
-    if result.get("status") == "context_overflow":
-        return result
+    if isinstance(result, dict) and result.get("status") == "context_overflow":
+        return {
+            "schemaVersion": CONTEXT_SUMMARY_SCHEMA,
+            "status": "context_overflow",
+            "taskUnderstanding": [], "systemBoundaries": [], "relevantFiles": [],
+            "dependencies": [], "recommendedTests": [], "risks": [],
+            "unknowns": ["Collector must reduce evidence before LLM dispatch."],
+            "contextFingerprint": expected_fingerprint,
+        }
     if estimate_tokens(json.dumps(result, ensure_ascii=False)) > output_token_limit:
         raise ValueError("Context Agent output token budget exceeded")
     return _validate_report(result, expected_fingerprint)
