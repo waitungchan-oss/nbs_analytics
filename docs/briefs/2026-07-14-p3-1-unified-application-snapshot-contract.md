@@ -1,7 +1,7 @@
 ---
 type: codex-brief
 project: nbs_analytics
-status: ready_for_design
+status: design_ready
 priority: P3-1
 created: 2026-07-14
 tags: [nbs_analytics, codex, application-service, snapshot, generation, read-model, hermes]
@@ -38,6 +38,7 @@ Repo context：
 - `docs/superpowers/specs/2026-07-13-management-decision-layer-design.md`
 - `docs/superpowers/specs/2026-07-14-formal-target-governance-design.md`
 - `docs/superpowers/specs/2026-07-14-decision-api-performance-design.md`
+- `docs/superpowers/specs/2026-07-14-unified-application-snapshot-contract-design.md`
 
 ## Observed State
 
@@ -214,6 +215,6 @@ API response 只加入既有 schema 可安全承載的欄位；若需要改公�
 
 ## 目前狀態
 
-`ready_for_design`
+`design_ready`
 
-本 Brief 已建立；尚未開始 design spec、implementation plan 或程式修改。
+Design spec 已建立並完成自我審查；尚未開始 implementation plan 或程式修改。
