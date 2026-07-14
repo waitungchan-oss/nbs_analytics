@@ -15,7 +15,7 @@ def init_repo(root: Path) -> None:
 def write_configs(root: Path, *, context_input_tokens: int = 12000) -> None:
     (root / "agent_config").mkdir()
     (root / "agent_config/evidence_allowlist.json").write_text(
-        '{"readRoots":["docs","backend","tests"],"rootFiles":["AGENTS.md"],'
+        '{"readRoots":["docs","backend","tests"],"rootFiles":["AGENTS.md",".gitignore"],'
         '"defaultContextFiles":[],"extensions":[".md",".py"],'
         '"denyPatterns":["*.db",".env","outputs/**"],"agentExecutables":["codex"]}',
         encoding="utf-8",
@@ -236,6 +236,16 @@ def test_review_collection_includes_allowlisted_untracked_files_but_not_denied_d
     assert first.evidence[0].content == second.evidence[0].content
     assert "VALUE = 1" in first.evidence[0].content
     assert "formal rows" not in str(first.to_dict())
+
+
+def test_allowlisted_extensionless_root_file_is_readable(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / ".gitignore").write_text(".nbs_agent_runtime/\n", encoding="utf-8")
+
+    policy = EvidencePolicy.from_project(tmp_path)
+
+    assert policy.resolve_read_path(tmp_path / ".gitignore").name == ".gitignore"
 
 
 def test_context_reports_deterministic_input_token_overflow(tmp_path):

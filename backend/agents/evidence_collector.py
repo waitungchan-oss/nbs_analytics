@@ -64,8 +64,9 @@ class EvidencePolicy:
             raise PermissionError(f"Denied evidence path: {relative_text}")
 
         top = relative.parts[0] if relative.parts else ""
-        allowed = relative_text in self.root_files or top in self.read_roots
-        if not allowed or resolved.suffix not in self.extensions:
+        is_root_file = relative_text in self.root_files
+        allowed = is_root_file or top in self.read_roots
+        if not allowed or (not is_root_file and resolved.suffix not in self.extensions):
             raise PermissionError(f"Path is not allowlisted: {relative_text}")
         return resolved
 
@@ -323,7 +324,14 @@ class EvidenceCollector:
         for index, relative in enumerate(selected_paths[:50]):
             if not relative or relative.startswith("/") or ".." in Path(relative).parts:
                 raise PermissionError(f"Unsafe changed path: {relative}")
-            self.policy.resolve_read_path(self.project_root / relative)
+            candidate_path = self.project_root / relative
+            try:
+                self.policy.resolve_read_path(candidate_path)
+            except PermissionError:
+                # A deleted denied-path artifact has no readable content to collect.
+                if not candidate_path.exists() and relative not in untracked_set:
+                    continue
+                raise
             if relative in untracked_set:
                 patch = self._run(
                     f"git-diff-untracked-file-{index}",
