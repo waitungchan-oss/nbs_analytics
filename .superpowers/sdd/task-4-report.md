@@ -46,3 +46,13 @@ No Task 5 TDD gate, Task 6 CLI, or Task 7 documentation/governance implementatio
 - No approved external Review Agent runner was configured for this isolated task, so an LLM review was not invoked.
 - `scripts/hermes_post_change_check.py` was not run after the user's instruction to avoid further long-running commands. In this isolated worktree, Hermes also depends on formal SQLite/runtime evidence outside Task 4's allowed write scope.
 - `planFingerprint` remains an opaque contract field defined by Task 1; this service transports it but does not introduce a new hash algorithm or acceptance rule.
+
+## Index Guard Fix Evidence
+
+- Review finding addressed: `validate_changes` now fingerprints `git ls-files --stage -z` and blocks any runner-induced Git index transition with `blocked_scope`.
+- The worktree/tree fingerprint remains separate, and the service report/telemetry records `indexFingerprintChanged` and `treeFingerprintChanged`.
+- Added regression coverage for an allowed source write followed by `git add`; the run is blocked and reports the changed path.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_implementation_agent_service.py tests/test_implementation_guard.py tests/test_implementation_models.py tests/test_validation_runner.py -q`: `48 passed in 5.02s`.
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/implementation_agent_service.py backend/agents/implementation_guard.py`: PASS, exit 0.
+- `git diff --check`: PASS, no output.
+- Hermes was intentionally not run per task instruction.
