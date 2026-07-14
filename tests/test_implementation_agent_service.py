@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from backend.agents.implementation_agent_service import ImplementationAgentService
+from backend.agents.implementation_guard import capture_worktree_state
 from backend.agents.implementation_models import (
     ImplementationTaskContract,
     ValidationResult,
@@ -235,9 +236,44 @@ def test_service_blocks_allowed_source_write_that_mutates_git_index(
 
     report = service.execute(contract, runner)
 
-    assert report.status == "blocked_scope"
-    assert report.findings[0]["indexFingerprintChanged"] is True
-    assert "src/allowed.py" in report.findings[0]["paths"]
+    assert report.status == "runtime_error"
+    assert "runner_error" == report.findings[0]["rule"]
+
+
+def test_service_blocks_transient_git_index_write_and_restores_index_state(
+    service, contract, project_root,
+):
+    index_path = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--git-path", "index"],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+    )
+    if not index_path.is_absolute():
+        index_path = project_root / index_path
+    before_mode = index_path.stat().st_mode
+    before_state = capture_worktree_state(project_root)
+
+    def runner(request: dict) -> object:
+        (project_root / "src/allowed.py").write_text("value = 3\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/allowed.py"], cwd=project_root, check=True)
+        subprocess.run(["git", "reset", "--", "src/allowed.py"], cwd=project_root, check=True)
+        return {
+            "schemaVersion": "implementation-response-v1",
+            "status": "completed",
+            "summary": "implemented approved task",
+            "requestedValidationCommandIds": ["pytest_targeted", "py_compile"],
+        }
+
+    report = service.execute(contract, runner)
+
+    assert report.status in {"blocked_scope", "runtime_error"}
+    assert index_path.stat().st_mode == before_mode
+    assert not index_path.with_name("index.lock").exists()
+    assert capture_worktree_state(project_root).index_fingerprint == before_state.index_fingerprint
 
 
 def test_service_collects_context_for_the_contract(service, contract):

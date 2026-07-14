@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import stat
 import json
+from contextlib import contextmanager
 from pathlib import Path
+import subprocess
 from time import perf_counter
 from typing import Any, Callable, Protocol
 from uuid import uuid4
@@ -150,7 +154,8 @@ class ImplementationAgentService:
                     started=started,
                 )
             try:
-                response = agent_command(request)
+                with self._protect_git_index():
+                    response = agent_command(request)
             except Exception as exc:
                 decision = self._post_write_decision(validated, before)
                 if decision.status != "allowed":
@@ -220,6 +225,37 @@ class ImplementationAgentService:
             }
 
         raise AssertionError("repair loop exhausted without returning")
+
+    @contextmanager
+    def _protect_git_index(self):
+        index_path = self._git_index_path()
+        lock_path = index_path.with_name(f"{index_path.name}.lock")
+        if lock_path.exists() or lock_path.is_symlink():
+            raise RuntimeError("Git index.lock already exists")
+
+        metadata = index_path.stat()
+        lock_path.mkdir()
+        try:
+            os.chmod(index_path, stat.S_IMODE(metadata.st_mode) & ~0o222)
+            yield
+        finally:
+            try:
+                os.rmdir(lock_path)
+            finally:
+                os.chmod(index_path, stat.S_IMODE(metadata.st_mode))
+                os.utime(index_path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+    def _git_index_path(self) -> Path:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--git-path", "index"],
+            cwd=self.project_root,
+            text=True,
+            capture_output=True,
+            check=True,
+            shell=False,
+        )
+        candidate = Path(completed.stdout.strip())
+        return candidate if candidate.is_absolute() else self.project_root / candidate
 
     def _validated_contract(self, contract: ImplementationTaskContract) -> ImplementationTaskContract:
         if not isinstance(contract, ImplementationTaskContract):
