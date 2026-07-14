@@ -66,3 +66,21 @@ def test_decision_overview_adds_quality_health_and_baseline_alerts():
 
     assert {"data_quality_low", "system_health_critical", "baseline_or_rollback_risk"} <= codes
     assert all(card["status"] == "open" for card in result["decisions"])
+
+
+def test_decision_overview_merges_snapshot_provenance_without_losing_existing_keys():
+    result = build_decision_overview(
+        **_sources(),
+        target_config={"version": "1", "targets": []},
+        snapshot_provenance={
+            "rulesFingerprint": "rules-1",
+            "snapshotAttemptCount": 2,
+            "coreGenerationConsistent": True,
+        },
+    )
+
+    assert result["provenance"]["rulesFingerprint"] == "rules-1"
+    assert result["provenance"]["snapshotAttemptCount"] == 2
+    assert result["provenance"]["coreGenerationConsistent"] is True
+    assert result["provenance"]["generationToken"] == "2:abc"
+    assert result["provenance"]["forecastStatus"] == "ready"

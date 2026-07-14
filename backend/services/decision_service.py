@@ -53,6 +53,7 @@ def build_decision_overview(
     quality: dict,
     health: dict,
     target_config: dict | None = None,
+    snapshot_provenance: dict | None = None,
 ) -> dict:
     config = target_config or load_decision_targets()
     thresholds = {**DEFAULT_THRESHOLDS, **(config.get("thresholds") or {})}
@@ -167,6 +168,7 @@ def build_decision_overview(
         "alerts": alerts,
         "decisions": decisions,
         "provenance": {
+            **(snapshot_provenance or {}),
             "factsStatus": facts.get("status"),
             "generationToken": facts.get("generationToken"),
             "revenueScope": facts.get("revenueScope"),
