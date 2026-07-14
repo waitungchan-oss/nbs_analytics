@@ -17,11 +17,19 @@
 - Cache reports use atomic replacement; telemetry is compact JSONL metadata without prompts, evidence contents, secrets, or full logs.
 - Runtime output paths are restricted to `.nbs_agent_runtime/`.
 
+## Review Follow-up
+
+- Executable allowlist now compares only canonically resolved executable paths; basename fallback was removed.
+- `AgentRuntime` rejects any resolved runtime root whose final directory name is not exactly `.nbs_agent_runtime`.
+- Per-fingerprint `fcntl.flock` locks under `.nbs_agent_runtime/locks/` serialize cache fills, recheck the report after lock acquisition, and release on exceptions.
+- Telemetry status is reduced to the allowlisted status enum or `unknown`; agent names and records are bounded, and JSONL rotates at 1 MiB under a telemetry lock.
+
 ## TDD And Verification
 
-- RED: initial focused collection failed because `backend.agents.agent_runtime` did not exist.
-- GREEN: focused runtime tests passed after implementation.
+- RED: four review regression tests failed before the hardening changes.
+- GREEN: focused runtime tests passed after the hardening changes.
 - Compile: passed for runtime and tests.
-- Focused + related: `19 passed` (`tests/test_agent_runtime.py tests/test_evidence_collector.py`).
-- Full suite: `244 passed`.
+- Focused runtime: `13 passed`.
+- Focused + related: `23 passed` (`tests/test_agent_runtime.py tests/test_evidence_collector.py`).
+- Full suite: `248 passed`.
 - `git diff --check`: passed.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import fcntl
+from contextlib import contextmanager
 import os
 import re
 import shutil
@@ -11,12 +13,21 @@ from time import perf_counter
 from typing import Protocol
 from uuid import uuid4
 
-from backend.agents.evidence_models import EvidenceBundle, canonical_fingerprint, estimate_tokens
+from backend.agents.evidence_models import (
+    ALLOWED_CONTEXT_STATUSES,
+    ALLOWED_REVIEW_STATUSES,
+    EvidenceBundle,
+    canonical_fingerprint,
+    estimate_tokens,
+)
 
 
 DEFAULT_INPUT_TOKEN_LIMIT = 12_000
 DEFAULT_OUTPUT_TOKEN_LIMIT = 1_500
 _SAFE_AGENT_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+_ALLOWED_TELEMETRY_RESULTS = ALLOWED_CONTEXT_STATUSES | ALLOWED_REVIEW_STATUSES
+_TELEMETRY_MAX_BYTES = 1024 * 1024
+_TELEMETRY_MAX_LINE_BYTES = 4096
 
 
 class AgentRunner(Protocol):
@@ -77,16 +88,13 @@ class SubprocessAgentRunner:
             raise ValueError("Agent timeout must be positive")
 
         executable = _resolve_executable(argv[0])
-        requested_name = Path(argv[0]).name
         allowed: set[Path] = set()
-        allowed_names: set[str] = set()
         for value in allowed_executables:
-            allowed_names.add(Path(value).name)
             try:
                 allowed.add(_resolve_executable(value))
             except FileNotFoundError:
                 continue
-        if executable not in allowed and requested_name not in allowed_names:
+        if executable not in allowed:
             raise PermissionError(f"Agent executable is not allowlisted: {executable}")
         self.argv = (str(executable), *argv[1:])
         self.timeout_seconds = timeout_seconds
@@ -122,6 +130,10 @@ class AgentRuntime:
         output_token_limit: int | None = None,
     ) -> None:
         self.runtime_root = runtime_root.resolve()
+        if self.runtime_root.name != ".nbs_agent_runtime":
+            raise PermissionError(
+                f"Agent runtime root must be named .nbs_agent_runtime: {self.runtime_root}"
+            )
         configured = self._load_configured_budgets()
         self.input_token_limit = input_token_limit or configured[0]
         self.output_token_limit = output_token_limit or configured[1]
@@ -143,7 +155,23 @@ class AgentRuntime:
         telemetry = self.runtime_root / "telemetry" / "agent_runs.jsonl"
         report.parent.mkdir(parents=True, exist_ok=True)
         telemetry.parent.mkdir(parents=True, exist_ok=True)
+        (self.runtime_root / "locks").mkdir(parents=True, exist_ok=True)
         return report, telemetry
+
+    def _lock_path(self, fingerprint: str) -> Path:
+        return self.runtime_root / "locks" / f"{fingerprint}.lock"
+
+    @staticmethod
+    @contextmanager
+    def _locked(path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield handle
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
 
     @staticmethod
     def _write_json_atomic(path: Path, value: dict) -> None:
@@ -180,9 +208,14 @@ class AgentRuntime:
         cache_hit: bool,
         started: float,
     ) -> None:
+        safe_agent_name = _SAFE_AGENT_NAME.sub("-", agent_name).strip(".-")[:64] or "agent"
+        candidate_result = (result or {}).get("status") or (result or {}).get("verdict")
+        telemetry_result = (
+            candidate_result if candidate_result in _ALLOWED_TELEMETRY_RESULTS else "unknown"
+        )
         record = {
             "runId": uuid4().hex,
-            "agent": agent_name,
+            "agent": safe_agent_name,
             "bundleFingerprint": bundle.fingerprint,
             "requestFingerprint": request_fingerprint,
             "inputCharacters": len(input_text),
@@ -192,10 +225,20 @@ class AgentRuntime:
             "filesIncluded": len(bundle.evidence),
             "cacheHit": cache_hit,
             "durationMs": round((perf_counter() - started) * 1000, 3),
-            "result": result.get("status") if result else "context_overflow",
+            "result": telemetry_result if result else "context_overflow",
         }
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        if len(line.encode("utf-8")) > _TELEMETRY_MAX_LINE_BYTES:
+            raise ValueError("Agent telemetry record exceeds size limit")
+        lock_path = self.runtime_root / "locks" / "telemetry.lock"
+        with self._locked(lock_path):
+            if path.exists() and path.stat().st_size + len(line.encode("utf-8")) > _TELEMETRY_MAX_BYTES:
+                rotated = path.with_name(f"{path.name}.1")
+                if rotated.exists():
+                    rotated.unlink()
+                os.replace(path, rotated)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
 
     def run(
         self,
@@ -243,22 +286,24 @@ class AgentRuntime:
             return result
 
         result: dict
-        cache_hit = report_path.exists()
-        if cache_hit:
-            try:
-                result = self._schema_check(
-                    json.loads(report_path.read_text(encoding="utf-8")), output_schema
-                )
-                if estimate_tokens(json.dumps(result, ensure_ascii=False)) > self.output_token_limit:
-                    raise ValueError("Cached agent output exceeds output token budget")
-            except (OSError, json.JSONDecodeError, ValueError):
-                cache_hit = False
+        cache_hit = False
+        with self._locked(self._lock_path(request_fingerprint)):
+            if report_path.exists():
+                try:
+                    result = self._schema_check(
+                        json.loads(report_path.read_text(encoding="utf-8")), output_schema
+                    )
+                    if estimate_tokens(json.dumps(result, ensure_ascii=False)) > self.output_token_limit:
+                        raise ValueError("Cached agent output exceeds output token budget")
+                    cache_hit = True
+                except (OSError, json.JSONDecodeError, ValueError):
+                    cache_hit = False
 
-        if not cache_hit:
-            result = self._schema_check(runner.run(payload), output_schema)
-            if estimate_tokens(json.dumps(result, ensure_ascii=False)) > self.output_token_limit:
-                raise ValueError("Agent output exceeds output token budget")
-            self._write_json_atomic(report_path, result)
+            if not cache_hit:
+                result = self._schema_check(runner.run(payload), output_schema)
+                if estimate_tokens(json.dumps(result, ensure_ascii=False)) > self.output_token_limit:
+                    raise ValueError("Agent output exceeds output token budget")
+                self._write_json_atomic(report_path, result)
 
         self._telemetry(
             telemetry_path,
