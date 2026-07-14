@@ -209,10 +209,13 @@ class AgentRuntime:
         started: float,
     ) -> None:
         safe_agent_name = _SAFE_AGENT_NAME.sub("-", agent_name).strip(".-")[:64] or "agent"
-        candidate_result = (result or {}).get("status") or (result or {}).get("verdict")
-        telemetry_result = (
-            candidate_result if candidate_result in _ALLOWED_TELEMETRY_RESULTS else "unknown"
-        )
+        telemetry_result = "unknown"
+        if result:
+            for key in ("status", "verdict"):
+                candidate_result = result.get(key)
+                if isinstance(candidate_result, str) and candidate_result in _ALLOWED_TELEMETRY_RESULTS:
+                    telemetry_result = candidate_result
+                    break
         record = {
             "runId": uuid4().hex,
             "agent": safe_agent_name,

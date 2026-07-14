@@ -23,13 +23,15 @@
 - `AgentRuntime` rejects any resolved runtime root whose final directory name is not exactly `.nbs_agent_runtime`.
 - Per-fingerprint `fcntl.flock` locks under `.nbs_agent_runtime/locks/` serialize cache fills, recheck the report after lock acquisition, and release on exceptions.
 - Telemetry status is reduced to the allowlisted status enum or `unknown`; agent names and records are bounded, and JSONL rotates at 1 MiB under a telemetry lock.
+- Telemetry `status` and `verdict` are accepted only when they are strings in the allowlist; list, dict, null, and other values normalize to `unknown` on fresh and cached runs.
 
 ## TDD And Verification
 
 - RED: four review regression tests failed before the hardening changes.
 - GREEN: focused runtime tests passed after the hardening changes.
+- Final P2 regression RED reproduced `TypeError` for list/dict telemetry values; GREEN passed after string-only normalization, including cache hits.
 - Compile: passed for runtime and tests.
-- Focused runtime: `13 passed`.
-- Focused + related: `23 passed` (`tests/test_agent_runtime.py tests/test_evidence_collector.py`).
-- Full suite: `248 passed`.
+- Focused runtime: `16 passed`.
+- Focused + related: `26 passed` (`tests/test_agent_runtime.py tests/test_evidence_collector.py`).
+- Full suite: `251 passed`.
 - `git diff --check`: passed.

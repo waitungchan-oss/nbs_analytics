@@ -228,3 +228,23 @@ def test_telemetry_status_is_allowlisted_and_jsonl_rotates(tmp_path):
     record = json.loads(telemetry.read_text(encoding="utf-8"))
     assert record["agent"] == "a" * 64
     assert record["result"] == "unknown"
+
+
+@pytest.mark.parametrize("malformed_status", [["ready"], {"status": "ready"}, None])
+def test_non_string_telemetry_status_is_unknown_on_fresh_and_cache_hit(tmp_path, malformed_status):
+    class Runner:
+        calls = 0
+
+        def run(self, payload):
+            self.calls += 1
+            return {"schemaVersion": "context-summary-v1", "status": malformed_status}
+
+    runtime = AgentRuntime(tmp_path / ".nbs_agent_runtime")
+    runner = Runner()
+    runtime.run("context", make_bundle(), runner, "context-summary-v1", "contract")
+    runtime.run("context", make_bundle(), runner, "context-summary-v1", "contract")
+
+    assert runner.calls == 1
+    lines = (tmp_path / ".nbs_agent_runtime/telemetry/agent_runs.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[-2])["result"] == "unknown"
+    assert json.loads(lines[-1])["result"] == "unknown"
