@@ -1,7 +1,7 @@
 # Agent Orchestrator Phase 1 Design
 
-狀態：approved for implementation planning  
-日期：2026-07-15  
+狀態：approved for implementation planning
+日期：2026-07-15
 範圍：CLI orchestration、run status、retention、macOS desktop notification
 
 ## 1. 目的
