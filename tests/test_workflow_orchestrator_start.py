@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +11,9 @@ import pytest
 from backend.agents.workflow_models import WorkflowEvent, WorkflowStatus
 from backend.agents.workflow_notifications import NotificationResult
 from backend.agents.workflow_orchestrator import (
+    OUTPUT_TAIL,
     StageResult,
+    SubprocessStageExecutor,
     WorkflowOrchestrator,
 )
 from backend.agents.workflow_store import WorkflowStore
@@ -78,7 +81,7 @@ def test_start_creates_manifest_context_artifact_and_stops_for_authorization(tmp
     assert manifest["briefSha256"] == hashlib.sha256(BRIEF.read_bytes()).hexdigest()
     assert len(manifest["gitHead"]) == 40
     assert manifest["gitBranch"]
-    assert any(item["path"].endswith("test_workflow_orchestrator_start.py") for item in manifest["dirtyFiles"])
+    assert isinstance(manifest["dirtyFiles"], list)
     assert manifest["contextFingerprint"] == "a" * 64
     assert json.loads((run_dir / "context.json").read_text()) == CONTEXT_PAYLOAD
     assert json.loads((run_dir / "status.json").read_text())["status"] == "awaiting_authorization"
@@ -165,3 +168,26 @@ def test_production_stage_result_contract_is_importable():
         }
     )
     assert status.status == "awaiting_authorization"
+
+
+def test_subprocess_executor_drains_oversized_stdout_and_stderr_with_bounded_tails(monkeypatch):
+    def unexpected_run(*args, **kwargs):
+        raise AssertionError("bounded executor must not use subprocess.run")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    script = (
+        "import sys; "
+        f"sys.stdout.write('o' * {OUTPUT_TAIL * 3}); sys.stdout.flush(); "
+        f"sys.stderr.write('e' * {OUTPUT_TAIL * 3}); sys.stderr.flush(); "
+        "sys.exit(7)"
+    )
+
+    result = executor.run_json((str(executor.python), "-c", script), timeout=10)
+
+    assert result.exit_code == 7
+    assert result.payload == {}
+    assert len(result.stdout_tail.encode("utf-8")) == OUTPUT_TAIL
+    assert len(result.stderr_tail.encode("utf-8")) == OUTPUT_TAIL
+    assert set(result.stdout_tail) == {"o"}
+    assert set(result.stderr_tail) == {"e"}

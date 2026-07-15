@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,31 +50,51 @@ class SubprocessStageExecutor:
 
     def run_json(self, argv: tuple[str, ...], *, timeout: int) -> StageResult:
         started = time.monotonic()
-        completed = subprocess.run(
+        process = subprocess.Popen(
             list(argv),
             cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=False,
-            timeout=timeout,
-            check=False,
         )
+        stdout_tail = bytearray()
+        stderr_tail = bytearray()
+        readers = (
+            threading.Thread(target=_drain_tail, args=(process.stdout, stdout_tail), daemon=True),
+            threading.Thread(target=_drain_tail, args=(process.stderr, stderr_tail), daemon=True),
+        )
+        for reader in readers:
+            reader.start()
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            for reader in readers:
+                reader.join()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+        stdout_text = bytes(stdout_tail).decode("utf-8", errors="replace")
+        stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
         payload: dict = {}
         try:
-            decoded = json.loads(completed.stdout)
+            decoded = json.loads(stdout_text)
             if not isinstance(decoded, dict):
                 raise ValueError("stage output must be a JSON object")
             payload = decoded
         except (json.JSONDecodeError, ValueError):
-            if completed.returncode == 0:
+            if process.returncode == 0:
                 raise ValueError("stage output is not a JSON object")
         return StageResult(
-            exit_code=completed.returncode,
+            exit_code=process.returncode,
             payload=payload,
-            stdout_tail=completed.stdout[-OUTPUT_TAIL:],
-            stderr_tail=completed.stderr[-OUTPUT_TAIL:],
+            stdout_tail=stdout_text,
+            stderr_tail=stderr_text,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
 
@@ -246,3 +267,13 @@ class WorkflowOrchestrator:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _drain_tail(stream, tail: bytearray) -> None:
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            return
+        tail.extend(chunk)
+        if len(tail) > OUTPUT_TAIL:
+            del tail[:-OUTPUT_TAIL]
