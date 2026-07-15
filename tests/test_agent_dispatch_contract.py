@@ -6,16 +6,46 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "docs/agents/CODEX_AGENT_DISPATCH.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
+ARCHITECTURE_PATH = ROOT / "docs/agents/NBS_AGENT_ARCHITECTURE.md"
+IMPLEMENTATION_CONTRACT_PATH = ROOT / "docs/agents/IMPLEMENTATION_AGENT_CONTRACT.md"
+
+
+def load_dispatch_rules():
+    text = DISPATCH_PATH.read_text(encoding="utf-8")
+    match = re.search(r"```json\n(.*?)\n```", text, re.S)
+    assert match
+    return json.loads(match.group(1))
 
 
 def test_dispatch_document_contains_machine_readable_rules():
-    text = (ROOT / "docs/agents/CODEX_AGENT_DISPATCH.md").read_text(encoding="utf-8")
-    match = re.search(r"```json\n(.*?)\n```", text, re.S)
-    assert match
-    rules = json.loads(match.group(1))
+    rules = load_dispatch_rules()
     assert rules["context"]["anyOf"]["changedCodeFilesGte"] == 2
     assert "upload" in rules["context"]["riskSurfaces"]
     assert rules["review"]["before"] == ["commit", "merge", "hermes"]
+
+
+def test_implementation_dispatch_rules_exactly_match_brief():
+    rules = load_dispatch_rules()
+    expected = {
+        "requiresApprovedPlan": True,
+        "requiresExplicitAuthorization": True,
+        "requiresIsolatedWorktree": True,
+        "requiredBranchPrefix": "codex/",
+        "maxTasksPerRun": 1,
+        "allowedTaskTypes": ["behavior", "refactor", "test", "documentation", "configuration"],
+        "deniedRiskSurfaces": [
+            "upload",
+            "sqlite",
+            "baseline",
+            "rollback",
+            "revenue",
+            "business_rules",
+            "export_schema",
+        ],
+        "after": ["review_agent", "full_verification", "hermes"],
+        "never": ["commit", "merge", "push", "service_management", "dependency_install"],
+    }
+    assert rules["implementation"] == expected
 
 
 def test_root_agents_links_all_governance_contracts():
@@ -24,16 +54,47 @@ def test_root_agents_links_all_governance_contracts():
         "docs/agents/NBS_AGENT_ARCHITECTURE.md",
         "docs/agents/CONTEXT_AGENT_CONTRACT.md",
         "docs/agents/REVIEW_AGENT_CONTRACT.md",
+        "docs/agents/IMPLEMENTATION_AGENT_CONTRACT.md",
         "docs/agents/CODEX_AGENT_DISPATCH.md",
         "NBS_HERMES_MONITORING.md",
     ]:
         assert path in text
 
 
-def test_dispatch_contract_requires_approved_plan_and_single_task():
+def test_codex_owns_post_implementation_governance():
     text = DISPATCH_PATH.read_text(encoding="utf-8")
-    assert '"requiresApprovedPlan": true' in text
-    assert '"maxTasksPerRun": 1' in text
+    for phrase in [
+        "Codex 建立並批准 implementation Task contract",
+        "Codex 檢查 final implementation report 與實際 diff",
+        "處理 findings",
+        "完成完整驗證",
+        "最後呼叫 Hermes",
+    ]:
+        assert phrase in text
+
+
+def test_review_findings_return_to_codex_before_single_task_redispatch():
+    text = ARCHITECTURE_PATH.read_text(encoding="utf-8")
+    assert 'RA -->|"Changes Required"| CP' in text
+    assert 'CD -->|"Authorize one Task"| IA' in text
+    assert 'RA -->|"Changes Required"| IA' not in text
+
+
+def test_contract_distinguishes_product_agent_from_sdd_worker():
+    text = IMPLEMENTATION_CONTRACT_PATH.read_text(encoding="utf-8")
+    assert "不包含 Codex Superpowers SDD worker" in text
+    assert "Task commit 由 Codex 編排流程持有" in text
+
+
+def test_implementation_agent_cannot_choose_next_task_or_use_prohibited_operations():
+    text = IMPLEMENTATION_CONTRACT_PATH.read_text(encoding="utf-8")
+    for phrase in [
+        "不得自行決定下一 Task",
+        "不得 commit、merge、push、管理服務或安裝 dependency",
+        "不得修改正式 SQLite、baseline、rollback、revenue、business rules 或 export schema",
+        "不得自行進行 full verification 或 Hermes",
+    ]:
+        assert phrase in text
 
 
 def test_repo_instructions_forbid_agent_git_and_formal_state_writes():

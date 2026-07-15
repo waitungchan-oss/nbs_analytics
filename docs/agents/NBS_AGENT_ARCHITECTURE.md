@@ -61,10 +61,11 @@ flowchart TD
     EB --> CA["Context Agent"]
     CA --> CP["Codex Design / Plan"]
     CP --> UA["User Authorization"]
-    UA --> IA["Implementation Agent (one approved Task)"]
+    UA --> CD["Codex Dispatch"]
+    CD -->|"Authorize one Task"| IA["Implementation Agent (one approved Task)"]
     IA --> TC["Test and Diff Collector"]
     TC --> RA["Review Agent"]
-    RA -->|"Changes Required"| IA
+    RA -->|"Changes Required"| CP
     RA -->|"Code Review PASS"| FV["Full Verification"]
     FV --> HA["Hermes Acceptance"]
     HA -->|"PASS"| DA["Future Documentation Agent"]
