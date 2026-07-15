@@ -6,6 +6,9 @@ import pytest
 from backend.agents.evidence_collector import EvidenceCollector, EvidencePolicy
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 def init_repo(root: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
@@ -37,6 +40,16 @@ def test_policy_rejects_path_escape_and_denied_data(tmp_path):
     denied.write_text("x", encoding="utf-8")
     with pytest.raises(PermissionError):
         policy.resolve_read_path(denied)
+
+
+def test_project_policy_allows_only_named_root_worker_governance_file():
+    policy = EvidencePolicy.from_project(PROJECT_ROOT)
+
+    allowed = policy.resolve_read_path(PROJECT_ROOT / "NBS_CODEX_WORKER_WORKFLOW.md")
+
+    assert allowed == PROJECT_ROOT / "NBS_CODEX_WORKER_WORKFLOW.md"
+    with pytest.raises(PermissionError, match="allowlisted"):
+        policy.resolve_read_path(PROJECT_ROOT / "UNLISTED_ROOT_GOVERNANCE.md")
 
 
 def test_context_collection_truncates_documents_and_never_reads_db(tmp_path):

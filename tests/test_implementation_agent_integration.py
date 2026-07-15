@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +14,20 @@ from backend.agents.implementation_models import (
     ImplementationTaskContract,
     ValidationResult,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _digest(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+
+def _project_formal_state_hashes() -> dict[str, str | None]:
+    return {
+        "db": _digest(ROOT / "nbs_marketing_data.db"),
+        "runtime": _digest(ROOT / ".nbs_runtime/data_generation.json"),
+    }
 
 
 def _git(root: Path, *args: str) -> str:
@@ -84,12 +97,10 @@ class FixtureValidationRunner:
 
 @dataclass
 class AgentFixture:
-    source_root: Path
     worktree: Path
     formal_db: Path
     formal_runtime: Path
     initial_index_fingerprint: str
-    formal_state_before_hostile: dict[str, str]
 
     def formal_state_hashes(self) -> dict[str, str]:
         return {
@@ -119,22 +130,14 @@ class AgentFixture:
 
     def run_hostile_task(self, *, target: str):
         assert target == "data/nbs_analytics.db"
-        fixture_copy = self.source_root.parent / "fixture-db-copy"
-        shutil.copy2(self.formal_db, fixture_copy)
         service = ImplementationAgentService(
             self.worktree,
             validation_runner=FixtureValidationRunner([0]),
         )
-        try:
-            return service.execute(
-                self._contract(("sandbox/example.py",), task_type="test", red_commands=()),
-                self._hostile_runner,
-            )
-        finally:
-            shutil.copy2(fixture_copy, self.formal_db)
-
-    def formal_state_restored_from_fixture_copy(self) -> bool:
-        return self.formal_state_hashes() == self.formal_state_before_hostile
+        return service.execute(
+            self._contract(("sandbox/example.py",), task_type="test", red_commands=()),
+            self._hostile_runner,
+        )
 
     def _contract(
         self,
@@ -215,19 +218,11 @@ def agent_fixture(tmp_path: Path) -> AgentFixture:
     _git(source_root, "worktree", "add", "-q", "-b", "codex/task-8-fixture", str(worktree), "HEAD")
 
     initial_index_fingerprint = capture_worktree_state(worktree).index_fingerprint
-    formal_state_before_hostile = {
-        "db": hashlib.sha256((worktree / "data/nbs_analytics.db").read_bytes()).hexdigest(),
-        "runtime": hashlib.sha256(
-            (worktree / ".nbs_runtime/data_generation.json").read_bytes()
-        ).hexdigest(),
-    }
     return AgentFixture(
-        source_root=source_root,
         worktree=worktree,
         formal_db=worktree / "data/nbs_analytics.db",
         formal_runtime=worktree / ".nbs_runtime/data_generation.json",
         initial_index_fingerprint=initial_index_fingerprint,
-        formal_state_before_hostile=formal_state_before_hostile,
     )
 
 
@@ -246,7 +241,18 @@ def test_agent_changes_only_approved_file_in_isolated_worktree(agent_fixture):
 
 
 def test_hostile_runner_cannot_receive_pass_after_formal_state_write(agent_fixture):
+    fixture_before = agent_fixture.formal_state_hashes()
+    project_before = _project_formal_state_hashes()
+
     report = agent_fixture.run_hostile_task(target="data/nbs_analytics.db")
 
+    fixture_after = agent_fixture.formal_state_hashes()
     assert report.status == "blocked_scope"
-    assert agent_fixture.formal_state_restored_from_fixture_copy()
+    assert report.changed_files == ("data/nbs_analytics.db",)
+    assert report.findings[0]["code"] == "blocked_scope"
+    assert report.findings[0]["paths"] == ["data/nbs_analytics.db"]
+    assert "policy" in report.findings[0]["message"]
+    assert fixture_after["db"] != fixture_before["db"]
+    assert fixture_after["runtime"] == fixture_before["runtime"]
+    assert _project_formal_state_hashes() == project_before
+    assert agent_fixture.git_index_unchanged()

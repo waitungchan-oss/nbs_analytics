@@ -118,6 +118,36 @@ def build_check_plan(
         )
     )
     if include_tests:
+        plan.extend(
+            [
+                CheckStep(
+                    "implementation-agent-core-tests",
+                    [
+                        py,
+                        "-m",
+                        "pytest",
+                        "tests/test_implementation_models.py",
+                        "tests/test_implementation_guard.py",
+                        "tests/test_validation_runner.py",
+                        "-q",
+                    ],
+                    timeout=600,
+                ),
+                CheckStep(
+                    "implementation-agent-integration-tests",
+                    [
+                        py,
+                        "-m",
+                        "pytest",
+                        "tests/test_implementation_agent_service.py",
+                        "tests/test_implementation_agent_cli.py",
+                        "tests/test_implementation_agent_integration.py",
+                        "-q",
+                    ],
+                    timeout=600,
+                ),
+            ]
+        )
         plan.append(
             CheckStep(
                 "targeted-tests",

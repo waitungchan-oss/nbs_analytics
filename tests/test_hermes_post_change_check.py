@@ -59,6 +59,31 @@ def test_implementation_agent_file_gate_is_read_only():
     assert "worktree" not in file_gate.command[2]
 
 
+def test_plan_has_exact_implementation_agent_test_pack_commands():
+    plan = post_check.build_check_plan(include_monitor=False, include_tests=True)
+    commands = {step.label: step.command for step in plan}
+    py = post_check.python_bin()
+
+    assert commands["implementation-agent-core-tests"] == [
+        py,
+        "-m",
+        "pytest",
+        "tests/test_implementation_models.py",
+        "tests/test_implementation_guard.py",
+        "tests/test_validation_runner.py",
+        "-q",
+    ]
+    assert commands["implementation-agent-integration-tests"] == [
+        py,
+        "-m",
+        "pytest",
+        "tests/test_implementation_agent_service.py",
+        "tests/test_implementation_agent_cli.py",
+        "tests/test_implementation_agent_integration.py",
+        "-q",
+    ]
+
+
 def test_plan_can_skip_monitor_and_tests_for_fast_dry_run():
     plan = post_check.build_check_plan(include_monitor=False, include_tests=False)
     labels = [step.label for step in plan]

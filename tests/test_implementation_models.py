@@ -73,14 +73,23 @@ def test_contract_round_trips_and_nested_models_serialize():
         contract_fingerprint=contract.fingerprint,
         start_head="a" * 40,
         end_head="b" * 40,
-        changed_files=("backend/agents/implementation_models.py",),
-        diff_stat={"files": 1, "insertions": 1, "deletions": 0},
+        changed_files=(
+            "backend/agents/implementation_models.py",
+            "tests/test_implementation_models.py",
+        ),
+        diff_stat={"files": 2, "insertions": 1, "deletions": 0},
         red_evidence=(validation,),
         green_evidence=(validation,),
+        repair_loops_used=1,
+        test_files_changed=("tests/test_implementation_models.py",),
+        production_files_changed=("backend/agents/implementation_models.py",),
         findings=(),
     )
     payload = report.to_dict()
     assert payload["redEvidence"][0]["commandId"] == "pytest_targeted"
+    assert payload["repairLoopsUsed"] == 1
+    assert payload["testFilesChanged"] == ["tests/test_implementation_models.py"]
+    assert payload["productionFilesChanged"] == ["backend/agents/implementation_models.py"]
     assert payload["status"] == "completed"
 
 
