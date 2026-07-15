@@ -277,8 +277,6 @@ class WorkflowOrchestrator:
             review_agent_command=review_agent_command,
             notify=notify,
         )
-        if authorization is None:
-            return self.store.load_status(run_id)
         if isinstance(authorization, WorkflowStatus):
             return authorization
         status, manifest, contract, contract_payload, implementation_runner = authorization
@@ -460,7 +458,7 @@ class WorkflowOrchestrator:
         implementation_agent_command: str,
         review_agent_command: str,
         notify: bool,
-    ) -> tuple[WorkflowStatus, WorkflowManifest, ImplementationTaskContract, dict, tuple[str, ...]] | WorkflowStatus | None:
+    ) -> tuple[WorkflowStatus, WorkflowManifest, ImplementationTaskContract, dict, tuple[str, ...]] | WorkflowStatus:
         try:
             with self.store.run_lock(run_id):
                 status = self.store.load_status(run_id)
@@ -497,7 +495,20 @@ class WorkflowOrchestrator:
                 )
                 return running, manifest, contract, contract.to_dict(), implementation_runner
         except WorkflowLockedError:
-            return None
+            current = self.store.load_status(run_id)
+            now = _now()
+            return WorkflowStatus(
+                STATUS_SCHEMA,
+                run_id,
+                current.stage,
+                "blocked",
+                current.started_at,
+                now,
+                now,
+                "Workflow approval is already running",
+                "blocked_run_locked",
+                current.artifact_bytes,
+            )
 
     @contextmanager
     def _approved_contract_snapshot(

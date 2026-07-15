@@ -460,7 +460,7 @@ def test_approve_changes_required_is_terminal_and_does_not_start_later_gates(tmp
     assert any("changes required" in title.lower() for title, _ in notifier.messages)
 
 
-def test_approve_returns_current_status_when_another_approve_holds_the_run_lock(tmp_path):
+def test_approve_lock_contention_returns_blocked_exit_semantics_without_mutating_run(tmp_path):
     flow, executor, _, started = started_run(tmp_path)
     contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
 
@@ -469,7 +469,13 @@ def test_approve_returns_current_status_when_another_approve_holds_the_run_lock(
             started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude"
         )
 
-    assert status.status == "awaiting_authorization"
+    from scripts.agent_workflow import _exit_code
+
+    assert status.status == "blocked"
+    assert status.error_code == "blocked_run_locked"
+    assert status.message == "Workflow approval is already running"
+    assert _exit_code(status.status) == 2
+    assert flow.store.load_status(started.run_id).status == "awaiting_authorization"
     assert executor.calls[1:] == []
 
 
