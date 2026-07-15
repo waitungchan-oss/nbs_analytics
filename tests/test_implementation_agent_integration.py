@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from backend.agents.implementation_agent_service import ImplementationAgentService
+from backend.agents.agent_runtime import SandboxedSubprocessAgentRunner
 from backend.agents.implementation_guard import capture_worktree_state
 from backend.agents.implementation_models import (
     ImplementationTaskContract,
@@ -133,6 +135,29 @@ class AgentFixture:
             self._hostile_runner,
         )
 
+    def run_sandboxed_task(
+        self,
+        script_name: str,
+        *,
+        allowed_write_paths: tuple[str, ...],
+        script_args: tuple[str, ...] = (),
+    ):
+        runner = SandboxedSubprocessAgentRunner(
+            [sys.executable, str(self.worktree / "tests/fixtures" / script_name), *script_args],
+            allowed_executables=(sys.executable,),
+            project_root=self.worktree,
+            allowed_write_paths=allowed_write_paths,
+            timeout_seconds=5,
+        )
+        service = ImplementationAgentService(
+            self.worktree,
+            validation_runner=FixtureValidationRunner([0, 0]),
+        )
+        return service.execute(
+            self._contract(allowed_write_paths, task_type="test", red_commands=()),
+            runner.run,
+        )
+
     def _contract(
         self,
         allowed_write_paths: tuple[str, ...],
@@ -195,6 +220,7 @@ def agent_fixture(tmp_path: Path) -> AgentFixture:
     (source_root / "docs").mkdir()
     (source_root / "sandbox").mkdir()
     (source_root / "tests/sandbox").mkdir(parents=True)
+    (source_root / "tests/fixtures").mkdir(parents=True)
     (source_root / "data").mkdir()
     (source_root / ".nbs_runtime").mkdir()
     (source_root / "AGENTS.md").write_text("fixture-only agent guardrails\n", encoding="utf-8")
@@ -202,6 +228,38 @@ def agent_fixture(tmp_path: Path) -> AgentFixture:
     (source_root / "sandbox/example.py").write_text("value = 1\n", encoding="utf-8")
     (source_root / "tests/sandbox/test_example.py").write_text(
         "def test_example():\n    assert False\n", encoding="utf-8"
+    )
+    (source_root / "tests/fixtures/allowed_runner.py").write_text(
+        "import json, pathlib, sys\n"
+        "json.load(sys.stdin)\n"
+        "pathlib.Path('sandbox/example.py').write_text('value = 3\\n', encoding='utf-8')\n"
+        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed',"
+        "'summary':'sandboxed allowed write','requestedValidationCommandIds':['pytest_targeted','py_compile']}))\n",
+        encoding="utf-8",
+    )
+    (source_root / "tests/fixtures/external_runner.py").write_text(
+        "import json, pathlib, sys\n"
+        "json.load(sys.stdin)\n"
+        "pathlib.Path(sys.argv[1]).write_bytes(b'CORRUPTED')\n"
+        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed'}))\n",
+        encoding="utf-8",
+    )
+    (source_root / "tests/fixtures/transient_runner.py").write_text(
+        "import json, pathlib, sys\n"
+        "json.load(sys.stdin)\n"
+        "db, sentinel = map(pathlib.Path, sys.argv[1:3])\n"
+        "before = db.read_bytes()\n"
+        "try:\n"
+        "    db.write_bytes(b'TRANSIENT')\n"
+        "except PermissionError:\n"
+        "    pass\n"
+        "else:\n"
+        "    sentinel.write_text('touched', encoding='utf-8')\n"
+        "    db.write_bytes(before)\n"
+        "pathlib.Path('sandbox/example.py').write_text('value = 4\\n', encoding='utf-8')\n"
+        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed',"
+        "'summary':'transient write was denied','requestedValidationCommandIds':['pytest_targeted','py_compile']}))\n",
+        encoding="utf-8",
     )
     (source_root / ".gitignore").write_text("*.db\n.nbs_runtime/\n", encoding="utf-8")
     _write_fixture_config(source_root)
@@ -253,3 +311,45 @@ def test_hostile_runner_cannot_receive_pass_after_formal_state_write(agent_fixtu
     assert fixture_after["db"] != fixture_before["db"]
     assert fixture_after["runtime"] == fixture_before["runtime"]
     assert agent_fixture.git_index_unchanged()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_production_sandbox_allows_exact_source_write(agent_fixture):
+    report = agent_fixture.run_sandboxed_task(
+        "allowed_runner.py",
+        allowed_write_paths=("sandbox/example.py",),
+    )
+
+    assert report.status == "completed"
+    assert report.changed_files == ("sandbox/example.py",)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_production_sandbox_blocks_external_formal_fixture(agent_fixture, tmp_path):
+    external = tmp_path / "external-formal.db"
+    external.write_bytes(b"FORMAL")
+
+    report = agent_fixture.run_sandboxed_task(
+        "external_runner.py",
+        allowed_write_paths=("sandbox/example.py",),
+        script_args=(str(external),),
+    )
+
+    assert report.status == "runtime_error"
+    assert external.read_bytes() == b"FORMAL"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_production_sandbox_denies_transient_ignored_db_before_touch(agent_fixture):
+    sentinel = agent_fixture.worktree / "sandbox/touched.txt"
+    before = agent_fixture.formal_db.read_bytes()
+
+    report = agent_fixture.run_sandboxed_task(
+        "transient_runner.py",
+        allowed_write_paths=("sandbox/example.py", "sandbox/touched.txt"),
+        script_args=(str(agent_fixture.formal_db), str(sentinel)),
+    )
+
+    assert report.status == "completed"
+    assert agent_fixture.formal_db.read_bytes() == before
+    assert not sentinel.exists()

@@ -9,6 +9,7 @@ import pytest
 
 from backend.agents.agent_runtime import (
     AgentRuntime,
+    SandboxedSubprocessAgentRunner,
     SubprocessAgentRunner,
     agent_request_fingerprint,
     resolve_runtime_output_path,
@@ -17,6 +18,114 @@ from backend.agents.evidence_models import EvidenceBundle
 
 
 PYTHON_ALLOWLIST = (sys.executable,)
+
+
+def _sandbox_runner(
+    root: Path,
+    script: Path,
+    allowed_write_paths: tuple[str, ...],
+) -> SandboxedSubprocessAgentRunner:
+    return SandboxedSubprocessAgentRunner(
+        [sys.executable, str(script)],
+        allowed_executables=PYTHON_ALLOWLIST,
+        project_root=root,
+        allowed_write_paths=allowed_write_paths,
+        timeout_seconds=5,
+    )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_allows_only_exact_approved_source_write(tmp_path):
+    target = tmp_path / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    script = tmp_path / "agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "json.load(sys.stdin)\n"
+        f"pathlib.Path({str(target)!r}).write_text('value = 2\\n', encoding='utf-8')\n"
+        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed'}))\n",
+        encoding="utf-8",
+    )
+
+    result = _sandbox_runner(tmp_path, script, ("src/allowed.py",)).run({"task": "allowed"})
+
+    assert result["status"] == "completed"
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_blocks_external_formal_state_write(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    external = tmp_path / "formal.db"
+    external.write_bytes(b"FORMAL")
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "json.load(sys.stdin)\n"
+        f"pathlib.Path({str(external)!r}).write_bytes(b'CORRUPTED')\n"
+        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed'}))\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Agent command failed"):
+        _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": "hostile"})
+
+    assert external.read_bytes() == b"FORMAL"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_denies_first_transient_ignored_db_write(tmp_path):
+    formal_db = tmp_path / "formal.db"
+    formal_db.write_bytes(b"FORMAL")
+    allowed = tmp_path / "src/allowed.py"
+    allowed.parent.mkdir()
+    allowed.write_text("value = 1\n", encoding="utf-8")
+    sentinel = tmp_path / "src/touched.txt"
+    script = tmp_path / "agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "json.load(sys.stdin)\n"
+        f"db = pathlib.Path({str(formal_db)!r})\n"
+        f"sentinel = pathlib.Path({str(sentinel)!r})\n"
+        "before = db.read_bytes()\n"
+        "try:\n"
+        "    db.write_bytes(b'TRANSIENT')\n"
+        "except PermissionError:\n"
+        "    pass\n"
+        "else:\n"
+        "    sentinel.write_text('touched', encoding='utf-8')\n"
+        "    db.write_bytes(before)\n"
+        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed'}))\n",
+        encoding="utf-8",
+    )
+
+    result = _sandbox_runner(
+        tmp_path,
+        script,
+        ("src/allowed.py", "src/touched.txt"),
+    ).run({"task": "transient"})
+
+    assert result["status"] == "completed"
+    assert formal_db.read_bytes() == b"FORMAL"
+    assert not sentinel.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_rejects_symlink_write_target(tmp_path):
+    external = tmp_path / "external.py"
+    external.write_text("value = 1\n", encoding="utf-8")
+    link = tmp_path / "allowed.py"
+    link.symlink_to(external)
+    script = tmp_path / "agent.py"
+    script.write_text("print('{}')\n", encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="symlink"):
+        _sandbox_runner(tmp_path, script, ("allowed.py",))
 
 
 def make_bundle(objective: str = "x") -> EvidenceBundle:

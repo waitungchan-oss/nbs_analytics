@@ -92,7 +92,7 @@ def test_cli_subprocess_redacts_embedded_external_path():
 def test_cli_maps_validation_failure_to_nonzero_exit(monkeypatch, contract_path: Path, capsys):
     import scripts.implementation_agent as cli
 
-    monkeypatch.setattr(cli, "_load_agent_runner", lambda _argv: lambda _request: {
+    monkeypatch.setattr(cli, "_load_agent_runner", lambda _argv, _contract: lambda _request: {
         "schemaVersion": "implementation-response-v1",
         "status": "completed",
         "summary": "done",
@@ -114,7 +114,7 @@ def test_cli_redacts_external_paths_and_environment_values(monkeypatch, contract
     import scripts.implementation_agent as cli
 
     monkeypatch.setenv("IMPLEMENTATION_AGENT_SECRET", "do-not-leak")
-    monkeypatch.setattr(cli, "_load_agent_runner", lambda _argv: lambda _request: None)
+    monkeypatch.setattr(cli, "_load_agent_runner", lambda _argv, _contract: lambda _request: None)
     monkeypatch.setattr(cli.ImplementationAgentService, "execute", lambda self, contract, runner: {
         "schemaVersion": "implementation-run-report-v1",
         "status": "runtime_error",
@@ -148,3 +148,32 @@ def test_cli_maps_wrong_worktree_to_blocked_exit():
     import scripts.implementation_agent as cli
 
     assert cli._exit_code("blocked_wrong_worktree") == 2
+
+
+def test_cli_fails_closed_before_runner_when_sandbox_backend_is_missing(
+    monkeypatch, contract_path: Path, capsys,
+):
+    import scripts.implementation_agent as cli
+
+    runner_called = False
+
+    class MissingSandboxRunner:
+        def __init__(self, *args, **kwargs):
+            raise PermissionError("implementation sandbox backend is unavailable")
+
+        def run(self, payload):
+            nonlocal runner_called
+            runner_called = True
+            return payload
+
+    monkeypatch.setattr(cli, "SandboxedSubprocessAgentRunner", MissingSandboxRunner)
+
+    exit_code = cli.main([
+        "--contract", str(contract_path), "--agent-command", "codex",
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert json.loads(captured.out)["status"] == "blocked_invalid_contract"
+    assert "sandbox backend" in captured.err
+    assert runner_called is False

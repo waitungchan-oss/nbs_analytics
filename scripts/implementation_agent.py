@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.agents.agent_runtime import SubprocessAgentRunner
+from backend.agents.agent_runtime import SandboxedSubprocessAgentRunner
 from backend.agents.evidence_models import EvidenceBundle
 from backend.agents.implementation_agent_service import ImplementationAgentService
 from backend.agents.implementation_models import ImplementationTaskContract
@@ -58,13 +58,18 @@ def _load_contract(raw_path: str) -> ImplementationTaskContract:
     return contract
 
 
-def _load_agent_runner(argv: list[str]):
+def _load_agent_runner(argv: list[str], contract: ImplementationTaskContract):
     policy_path = PROJECT_ROOT / "agent_config/evidence_allowlist.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     allowed = policy.get("agentExecutables", [])
     if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
         raise ValueError("agent executable policy is invalid")
-    return SubprocessAgentRunner(argv, allowed_executables=tuple(allowed)).run
+    return SandboxedSubprocessAgentRunner(
+        argv,
+        allowed_executables=tuple(allowed),
+        project_root=PROJECT_ROOT,
+        allowed_write_paths=contract.allowed_write_paths,
+    ).run
 
 
 def _redact(value: Any) -> Any:
@@ -146,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.agent_command:
             _render(_status_payload("blocked_invalid_contract", "explicit --agent-command is required"))
             return 2
-        report = service.execute(contract, _load_agent_runner(args.agent_command))
+        report = service.execute(contract, _load_agent_runner(args.agent_command, contract))
         payload = report.to_dict() if hasattr(report, "to_dict") else report
         _render(payload)
         return _exit_code(payload.get("status"))

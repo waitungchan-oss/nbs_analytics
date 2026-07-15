@@ -27,6 +27,7 @@ def write_config(root: Path) -> None:
                 "deniedWritePatterns": [".git/**", "*.db", ".nbs_agent_runtime/**"],
                 "highRiskWritePatterns": [
                     "database.py", "pipeline.py", "backend/routers/upload*.py",
+                    "rules.py", "rules_config.json", "data/monthly_revenue_baselines.json",
                     "backend/routers/export*.py",
                     "backend/services/upload*.py",
                     "backend/services/*rollback*.py", "backend/services/*baseline*.py",
@@ -204,6 +205,9 @@ def service(project_root: Path, validation_runner: FakeValidationRunner) -> Impl
         "backend/routers/upload.py",
         "backend/routers/exports.py",
         "scripts/monthly_baseline_check.py",
+        "data/monthly_revenue_baselines.json",
+        "rules.py",
+        "rules_config.json",
         "src/../database.py",
     ],
 )

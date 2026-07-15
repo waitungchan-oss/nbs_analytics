@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from time import perf_counter
@@ -159,6 +160,125 @@ class SubprocessAgentRunner:
             timeout=self.timeout_seconds,
             check=False,
             shell=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"Agent command failed with exit {completed.returncode}: {completed.stderr[:1000]}"
+            )
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Agent output is not valid JSON") from exc
+        if not isinstance(result, dict):
+            raise ValueError("Agent output must be a JSON object")
+        return result
+
+
+class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
+    """Run the production implementation command inside a contract write sandbox."""
+
+    def __init__(
+        self,
+        argv: list[str],
+        allowed_executables: tuple[str, ...],
+        *,
+        project_root: Path,
+        allowed_write_paths: tuple[str, ...],
+        timeout_seconds: int = 120,
+        sandbox_backend: str = "/usr/bin/sandbox-exec",
+    ) -> None:
+        if sys.platform != "darwin":
+            raise PermissionError("implementation sandbox backend is unsupported on this platform")
+        try:
+            backend = _resolve_executable(sandbox_backend)
+        except FileNotFoundError as exc:
+            raise PermissionError("implementation sandbox backend is unavailable") from exc
+        if backend != Path("/usr/bin/sandbox-exec").resolve():
+            raise PermissionError("implementation sandbox backend must be /usr/bin/sandbox-exec")
+        super().__init__(
+            argv,
+            allowed_executables=allowed_executables,
+            timeout_seconds=timeout_seconds,
+        )
+        self.project_root = project_root.resolve(strict=True)
+        if not self.project_root.is_dir():
+            raise PermissionError("implementation sandbox worktree must be a directory")
+        self.allowed_write_targets = self._resolve_write_targets(allowed_write_paths)
+        self.sandbox_backend = str(backend)
+        self.profile = self._build_profile(self.allowed_write_targets)
+
+    def _resolve_write_targets(self, raw_paths: tuple[str, ...]) -> tuple[Path, ...]:
+        if not raw_paths:
+            raise PermissionError("implementation sandbox requires approved write targets")
+        targets: set[Path] = set()
+        for raw in raw_paths:
+            relative = Path(raw)
+            if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
+                raise PermissionError(f"implementation sandbox write path is invalid: {raw}")
+            current = self.project_root
+            for part in relative.parts[:-1]:
+                current = current / part
+                if current.is_symlink():
+                    raise PermissionError(
+                        f"implementation sandbox write parent cannot be a symlink: {raw}"
+                    )
+                if not current.is_dir():
+                    raise PermissionError(
+                        f"implementation sandbox write parent must already exist: {raw}"
+                    )
+            lexical_target = self.project_root / relative
+            if lexical_target.is_symlink():
+                raise PermissionError(
+                    f"implementation sandbox write target cannot be a symlink: {raw}"
+                )
+            if lexical_target.exists() and not lexical_target.is_file():
+                raise PermissionError(
+                    f"implementation sandbox write target must be a file: {raw}"
+                )
+            resolved = lexical_target.resolve(strict=False)
+            try:
+                resolved.relative_to(self.project_root)
+            except ValueError as exc:
+                raise PermissionError(
+                    f"implementation sandbox write target escaped worktree: {raw}"
+                ) from exc
+            if resolved.exists() and resolved.stat().st_nlink > 1:
+                raise PermissionError(
+                    f"implementation sandbox write target cannot be a hard link: {raw}"
+                )
+            targets.add(resolved)
+        return tuple(sorted(targets, key=os.fspath))
+
+    @staticmethod
+    def _build_profile(targets: tuple[Path, ...]) -> str:
+        rules = [
+            "(version 1)",
+            "(deny default)",
+            "(allow process*)",
+            "(allow sysctl*)",
+            "(allow mach*)",
+            "(allow network*)",
+            "(allow file-read*)",
+        ]
+        rules.extend(
+            f"(allow file-write* (literal {json.dumps(os.fspath(target))}))"
+            for target in targets
+        )
+        return "\n".join(rules)
+
+    def run(self, payload: dict) -> dict:
+        environment = os.environ.copy()
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        completed = subprocess.run(
+            [self.sandbox_backend, "-p", self.profile, *self.argv],
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            timeout=self.timeout_seconds,
+            check=False,
+            shell=False,
+            cwd=self.project_root,
+            env=environment,
         )
         if completed.returncode != 0:
             raise RuntimeError(

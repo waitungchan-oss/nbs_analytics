@@ -21,6 +21,14 @@ Implementation Agent 只在已批准的 implementation plan、明確授權與獨
 - 不得修改正式 SQLite、baseline、rollback、revenue、business rules 或 export schema。
 - 不得自行進行 full verification 或 Hermes；Review Agent findings 必須交回 Codex 處理。
 
+## Production 執行安全邊界
+
+- Production Implementation Agent 只能經 `scripts/implementation_agent.py` 啟動。CLI 會把已核准 contract 傳給 macOS `/usr/bin/sandbox-exec`，child process 與其後代只可寫入 `allowedWritePaths` 的 canonical exact file targets。
+- Sandbox 允許必要的 process、sysctl、Mach、network 與 file read；不允許寫入 worktree 外、HOME、任意 temporary path、Git index、正式 DB/runtime 或未核准 sibling path。
+- allowed target 或其 parent 只要是 symlink、逃出 worktree、不是既有目錄，或 backend 不存在/平台不支援，即 fail closed，runner 不會執行，CLI 回 blocked 類 exit code `2`。
+- 執行前後 formal-state fingerprint 保留作 defense-in-depth，只偵測遺留污染並 quarantine，不取代 OS sandbox，也不提供 rollback。
+- `ImplementationAgentService.execute(..., callback)` 是測試與內部 adapter，不是 production security boundary；不得用 direct callback 取代 CLI sandbox 執行正式 Implementation Agent。
+
 ## 後續流程
 
 Codex 檢查 final implementation report 與實際 diff，啟動 Review Agent，處理 findings，再執行完整驗證及 Hermes。Implementation Agent 不可取代任何後續 gate。
