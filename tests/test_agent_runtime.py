@@ -117,6 +117,61 @@ def test_sandboxed_runner_excludes_secret_even_if_it_was_accidentally_tracked(tm
     assert target.read_text(encoding="utf-8") == "value = 2\n"
 
 
+@pytest.mark.parametrize(
+    "sensitive_path",
+    [
+        "Secrets/value.txt",
+        ".SSH/config",
+        ".aws/credentials",
+        "Credentials/profile.json",
+        ".npmrc",
+        ".NETRC",
+        ".pypirc",
+        "credentials.json",
+        "TOKEN.JSON",
+        "auth.json",
+        "id_rsa",
+        "id_ed25519",
+        "certificate.pfx",
+        "certificate.P12",
+        "certificate.pem",
+        "certificate.key",
+    ],
+)
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_excludes_common_tracked_credentials_but_keeps_governance_files(
+    tmp_path, sensitive_path,
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    governance = worktree / "agent_config/token_budgets.json"
+    governance.parent.mkdir()
+    governance.write_text('{"context": {}}\n', encoding="utf-8")
+    secret = worktree / sensitive_path
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("MUST_NOT_BE_STAGED\n", encoding="utf-8")
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "payload = json.load(sys.stdin)\n"
+        "root = pathlib.Path(payload['execution']['worktree'])\n"
+        f"assert not (root / {sensitive_path!r}).exists()\n"
+        "assert (root / 'agent_config/token_budgets.json').is_file()\n"
+        "(root / 'src/allowed.py').write_text('value = 2\\n', encoding='utf-8')\n"
+        f"print({_response('credential excluded')!r})\n",
+        encoding="utf-8",
+    )
+    _init_sandbox_fixture(worktree)
+
+    result = _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": {}})
+
+    assert result["status"] == "completed"
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
 def test_sandboxed_runner_denies_external_secret_read(tmp_path):
     worktree = tmp_path / "worktree"
@@ -210,11 +265,108 @@ def test_sandboxed_runner_kills_background_child_before_staging_validation(tmp_p
     )
     _init_sandbox_fixture(worktree)
 
-    result = _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": "child"})
+    with pytest.raises(RuntimeError, match="Agent command failed"):
+        _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": "child"})
 
     time.sleep(1.2)
+    assert target.read_text(encoding="utf-8") == "value = 1\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_denies_fork_and_setsid_before_late_child_can_start(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, os, pathlib, sys, time\n"
+        "json.load(sys.stdin)\n"
+        "child_started = False\n"
+        "try:\n"
+        "    pid = os.fork()\n"
+        "except PermissionError:\n"
+        "    pass\n"
+        "else:\n"
+        "    if pid == 0:\n"
+        "        os.setsid()\n"
+        "        time.sleep(0.5)\n"
+        "        pathlib.Path('src/allowed.py').write_text('value = 99\\n', encoding='utf-8')\n"
+        "        os._exit(0)\n"
+        "    child_started = True\n"
+        "assert not child_started\n"
+        f"print({_response('fork denied')!r})\n",
+        encoding="utf-8",
+    )
+    _init_sandbox_fixture(worktree)
+
+    result = _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": "child"})
+
+    time.sleep(0.7)
     assert result["status"] == "completed"
     assert target.read_text(encoding="utf-8") == "value = 1\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_second_call_overlays_first_unstaged_allowed_change(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "payload = json.load(sys.stdin)\n"
+        "target = pathlib.Path('src/allowed.py')\n"
+        "current = target.read_text(encoding='utf-8')\n"
+        "if payload.get('repair') is None:\n"
+        "    assert current == 'value = 1\\n'\n"
+        "    target.write_text('value = 2\\n', encoding='utf-8')\n"
+        "    response = {'schemaVersion': 'implementation-response-v1', 'status': 'needs_repair', "
+        "'summary': 'repair once', 'requestedValidationCommandIds': []}\n"
+        "else:\n"
+        "    assert current == 'value = 2\\n'\n"
+        "    target.write_text('value = 3\\n', encoding='utf-8')\n"
+        "    response = {'schemaVersion': 'implementation-response-v1', 'status': 'completed', "
+        "'summary': 'repaired', 'requestedValidationCommandIds': []}\n"
+        "print(json.dumps(response))\n",
+        encoding="utf-8",
+    )
+    _init_sandbox_fixture(worktree)
+    runner = _sandbox_runner(worktree, script, ("src/allowed.py",))
+
+    first = runner.run({"task": {}, "repair": None})
+    second = runner.run({"task": {}, "repair": {"reason": "repair once"}})
+
+    assert first["status"] == "needs_repair"
+    assert second["status"] == "completed"
+    assert target.read_text(encoding="utf-8") == "value = 3\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_sandboxed_runner_repair_overlay_fails_closed_for_nonregular_actual_target(
+    tmp_path, kind,
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    script = worktree / "agent.py"
+    script.write_text(f"print({_response()!r})\n", encoding="utf-8")
+    _init_sandbox_fixture(worktree)
+    runner = _sandbox_runner(worktree, script, ("src/allowed.py",))
+    target.unlink()
+    if kind == "symlink":
+        target.symlink_to(worktree / "agent.py")
+    else:
+        target.mkdir()
+
+    with pytest.raises(PermissionError, match="regular|symlink"):
+        runner.run({"task": {}})
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
@@ -318,6 +470,18 @@ def test_sandboxed_runner_accepts_existing_needs_repair_response_contract():
     assert SandboxedSubprocessAgentRunner._validate_response(
         json.dumps(response)
     ) == response
+
+
+def test_sandboxed_runner_fails_closed_on_non_darwin(monkeypatch, tmp_path):
+    monkeypatch.setattr("backend.agents.agent_runtime.sys.platform", "linux")
+
+    with pytest.raises(PermissionError, match="unsupported"):
+        SandboxedSubprocessAgentRunner(
+            [sys.executable, "agent.py"],
+            allowed_executables=PYTHON_ALLOWLIST,
+            project_root=tmp_path,
+            allowed_write_paths=("allowed.py",),
+        )
 
 
 def make_bundle(objective: str = "x") -> EvidenceBundle:

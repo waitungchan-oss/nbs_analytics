@@ -177,3 +177,21 @@ def test_cli_fails_closed_before_runner_when_sandbox_backend_is_missing(
     assert json.loads(captured.out)["status"] == "blocked_invalid_contract"
     assert "sandbox backend" in captured.err
     assert runner_called is False
+
+
+def test_cli_fails_closed_before_runner_on_non_darwin(
+    monkeypatch, contract_path: Path, capsys,
+):
+    import backend.agents.agent_runtime as runtime
+    import scripts.implementation_agent as cli
+
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+
+    exit_code = cli.main([
+        "--contract", str(contract_path), "--agent-command", "codex",
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert json.loads(captured.out)["status"] == "blocked_invalid_contract"
+    assert "unsupported on this platform" in captured.err

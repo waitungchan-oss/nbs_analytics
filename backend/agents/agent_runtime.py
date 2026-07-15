@@ -250,13 +250,24 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
 
     @staticmethod
     def _is_sensitive_path(relative: Path) -> bool:
-        protected_parts = {".git", ".nbs_runtime", ".nbs_agent_runtime", "secrets"}
-        if protected_parts.intersection(relative.parts):
+        parts = {part.lower() for part in relative.parts}
+        protected_parts = {
+            ".git", ".nbs_runtime", ".nbs_agent_runtime", "secrets",
+            ".ssh", ".aws", "credentials",
+        }
+        if protected_parts.intersection(parts):
             return True
         name = relative.name.lower()
         if name == ".env" or name.startswith(".env."):
             return True
-        return relative.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12"}
+        if name in {
+            ".npmrc", ".netrc", ".pypirc", "credentials.json", "token.json",
+            "auth.json", "id_rsa", "id_ed25519",
+        }:
+            return True
+        return relative.suffix.lower() in {
+            ".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx",
+        }
 
     def _tracked_files(self) -> tuple[Path, ...]:
         completed = subprocess.run(
@@ -305,6 +316,74 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
             parent.mkdir(parents=True, exist_ok=True)
             if parent.is_symlink():
                 raise PermissionError(f"staging write parent cannot be a symlink: {relative}")
+        self._overlay_actual_allowed_targets(staging)
+
+    def _read_actual_allowed_target(self, relative: Path) -> tuple[bytes, int] | None:
+        try:
+            parent_fd = self._open_actual_parent(relative, create_missing=False)
+        except FileNotFoundError:
+            return None
+        try:
+            try:
+                descriptor = os.open(
+                    relative.name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise PermissionError(
+                    f"actual implementation target cannot be a symlink: {relative}"
+                ) from exc
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode):
+                    raise PermissionError(
+                        f"actual implementation target is not a regular file: {relative}"
+                    )
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    content = handle.read()
+            finally:
+                os.close(descriptor)
+            return content, stat.S_IMODE(info.st_mode)
+        finally:
+            os.close(parent_fd)
+
+    @staticmethod
+    def _write_private_staging_target(path: Path, content: bytes, mode: int) -> None:
+        if path.is_symlink():
+            raise PermissionError(f"staging overlay target cannot be a symlink: {path}")
+        if path.exists():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise PermissionError(f"staging overlay target must be a private file: {path}")
+            path.unlink()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.fchmod(descriptor, mode)
+        finally:
+            os.close(descriptor)
+
+    def _overlay_actual_allowed_targets(self, staging: Path) -> None:
+        for relative in self.allowed_write_paths:
+            staged = staging / relative
+            actual = self._read_actual_allowed_target(relative)
+            if actual is None:
+                if staged.is_symlink() or (staged.exists() and not staged.is_file()):
+                    raise PermissionError(
+                        f"staging overlay target is not a regular file: {relative}"
+                    )
+                if staged.exists():
+                    staged.unlink()
+                continue
+            content, mode = actual
+            self._write_private_staging_target(staged, content, mode)
 
     @staticmethod
     def _read_private_file(path: Path, relative: str) -> tuple[bytes, int]:
@@ -381,6 +460,7 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
             "(deny default)",
             "(deny file-link)",
             "(allow process*)",
+            "(deny process-fork)",
             "(allow sysctl*)",
             "(allow mach*)",
             '(allow file-read* (literal "/"))',
@@ -465,7 +545,7 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
             raise ValueError("Agent output validation commands are invalid")
         return result
 
-    def _open_actual_parent(self, relative: Path) -> int:
+    def _open_actual_parent(self, relative: Path, *, create_missing: bool = True) -> int:
         flags = os.O_RDONLY | os.O_DIRECTORY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -478,6 +558,8 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
                 try:
                     child = os.open(part, flags, dir_fd=descriptor)
                 except FileNotFoundError:
+                    if not create_missing:
+                        raise
                     os.mkdir(part, mode=0o755, dir_fd=descriptor)
                     child = os.open(part, flags, dir_fd=descriptor)
                 os.close(descriptor)

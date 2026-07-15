@@ -23,11 +23,12 @@ Implementation Agent 只在已批准的 implementation plan、明確授權與獨
 
 ## Production 執行安全邊界
 
-- Production Implementation Agent 只能經 `scripts/implementation_agent.py` 啟動。Controller 先用 Git index 建立 disposable staging copy；只複製 tracked regular files，不使用 hardlink，並排除 `.git`、`.env`、SQLite、private key、`.nbs_runtime/`、`.nbs_agent_runtime/` 與 secrets。Coding worker 永遠不在正式 worktree 執行。
+- Production Implementation Agent 只能經 `scripts/implementation_agent.py` 啟動。Controller 先用 Git index 建立 disposable staging copy，再只以可信任 Controller 將 `allowedWritePaths` 的目前未 staged regular-file 內容覆蓋 staging，讓 repair round 承接上一輪核准修改；overlay 不使用 hardlink，遇到 symlink 或非 regular target 即 fail closed。其餘內容只複製安全的 tracked regular files，並以大小寫不敏感規則排除 `.git`、`.env*`、SQLite、`.nbs_runtime/`、`.nbs_agent_runtime/`、`Secrets/`、`.ssh/`、`.aws/`、`credentials/`、常見 auth dotfiles、credential JSON 與 private key/certificate。`token_budgets.json` 等普通治理檔不受影響。Coding worker 永遠不在正式 worktree 執行。
 - Payload 的 `task.approvedWorktree` 及 `execution.worktree` 會指向 staging；原 contract fingerprint 只保留批准身份，不代表 worker 可取得正式 worktree 路徑。Public implementation report 與 telemetry schema 不因此改變。
 - macOS `/usr/bin/sandbox-exec` 採 deny-default：不允許 network；file read 只限 staging、resolved executable 所需 runtime 及必要 system runtime；file write 只限 staging 內 `allowedWritePaths` 的 exact targets。Worker 環境不繼承 HOME 或 controller secrets。
-- Worker 在獨立 process group 執行；主程序完成、失敗或 timeout 後，Controller 都會終止整個 process group，再驗證 staging 沒有未核准變更。Late child 無法在驗證後改寫正式檔案。
+- Phase 1 worker 禁止 `process-fork`，不支援子 process、daemon 或 background validation；compile/tests 一律由可信任 Controller 的 Validation Runner 執行。Worker 仍在獨立 process group 執行，主程序完成、失敗或 timeout 後，Controller 都會清理該 process group，再驗證 staging 沒有未核准變更。
 - 只有 response 通過 Implementation response schema、worker 成功退出、staging scope 驗證通過後，可信任 Controller 才會套用檔案。套用使用 actual parent dirfd、private temporary inode 與 atomic `replace`，不會原地 truncate 可能被換成 hardlink 的 target；套用後再次驗證內容、link count 與 parent path，race 時 fail closed。
+- 多檔變更採逐檔 atomic replace，不承諾整批 transaction atomicity；若後續檔案套用失敗，流程必須 blocked 並保留現場供 quarantine/review，不得自動宣稱完成。
 - allowed target 或 parent 只要是 symlink、逃出 worktree、非 regular file，或 sandbox backend 不存在/平台不支援，即 fail closed。CLI 回 blocked 類 exit code `2`；正式 state fingerprint 仍保留作 defense-in-depth 與 quarantine 證據。
 - Phase 1 production local coding worker 明確是 offline worker。需要 network 的模型 transport 必須在另一個受控邊界產生 response，不得把可聯網 CLI、普通 callback 或 service callback 當成本 worker 的 production isolation boundary。
 - `ImplementationAgentService.execute(..., callback)` 是測試與內部 adapter，不是 production security boundary；不得用 direct callback 取代 CLI sandbox 執行正式 Implementation Agent。
