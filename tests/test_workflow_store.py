@@ -97,6 +97,23 @@ def test_store_round_trips_manifest_status_approval_and_artifact(store, manifest
     assert (run_dir / "approval.json").is_file()
 
 
+def test_write_approval_rejects_duplicate_approval(store, manifest):
+    store.create_run(manifest, _status())
+    store.write_approval(manifest.run_id, _approval())
+
+    with pytest.raises(FileExistsError, match="approval"):
+        store.write_approval(manifest.run_id, _approval())
+
+
+def test_write_approval_rejects_existing_symlink(store, manifest):
+    store.create_run(manifest, _status())
+    approval_path = store.runs_root / manifest.run_id / "approval.json"
+    approval_path.symlink_to(store.runs_root / manifest.run_id / "missing-approval.json")
+
+    with pytest.raises(PermissionError, match="approval"):
+        store.write_approval(manifest.run_id, _approval())
+
+
 def test_store_appends_events_without_replacing_previous_events(store, manifest):
     store.create_run(manifest, _status())
 

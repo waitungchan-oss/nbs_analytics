@@ -76,7 +76,12 @@ class WorkflowStore:
         if approval.run_id != run_id:
             raise ValueError("approval run ID does not match run ID")
         with self.run_lock(run_id):
-            self._atomic_json(self._run_file(run_id, "approval.json"), approval.to_dict())
+            approval_path = self._run_file(run_id, "approval.json")
+            if approval_path.is_symlink():
+                raise PermissionError("approval target must not be a symlink")
+            if approval_path.exists():
+                raise FileExistsError("approval already exists")
+            self._atomic_json(approval_path, approval.to_dict())
 
     def transition(self, run_id: str, status: WorkflowStatus, event: WorkflowEvent) -> None:
         if status.run_id != run_id or event.run_id != run_id:
