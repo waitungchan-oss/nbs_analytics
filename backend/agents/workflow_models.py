@@ -120,14 +120,20 @@ def _git_sha_value(value: Any, key: str) -> str:
 
 
 def _normalize_dirty_files(value: Any) -> tuple[dict[str, str], ...]:
-    if not isinstance(value, (list, tuple)):
-        raise WorkflowSchemaError("dirtyFiles must be a list or tuple")
+    if not isinstance(value, list):
+        raise WorkflowSchemaError("dirtyFiles must be a list")
     normalized = []
     for item in value:
         if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
             raise WorkflowSchemaError("dirtyFiles entries must contain path and sha256")
         normalized.append({"path": _string(item, "path"), "sha256": _sha256(item, "sha256")})
     return tuple(normalized)
+
+
+def _normalize_constructor_dirty_files(value: Any) -> tuple[dict[str, str], ...]:
+    if isinstance(value, tuple):
+        value = list(value)
+    return _normalize_dirty_files(value)
 
 
 @dataclass(frozen=True)
@@ -150,7 +156,7 @@ class WorkflowManifest:
         _sha256_value(self.brief_sha256, "briefSha256")
         _string_value(self.git_branch, "gitBranch")
         _git_sha_value(self.git_head, "gitHead")
-        object.__setattr__(self, "dirty_files", _normalize_dirty_files(self.dirty_files))
+        object.__setattr__(self, "dirty_files", _normalize_constructor_dirty_files(self.dirty_files))
         object.__setattr__(self, "created_at", _timestamp_value(self.created_at, "createdAt"))
         _sha256_value(self.context_fingerprint, "contextFingerprint")
 

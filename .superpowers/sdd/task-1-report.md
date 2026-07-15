@@ -12,18 +12,19 @@ DONE
 
 ## TDD Evidence
 
-Review-fix regression tests were added for direct constructor validation and `Z` timestamp normalization. The focused RED run was:
+The strict JSON regression test for tuple `dirtyFiles` was added before the implementation fix. The focused RED run was:
 
 ```text
-10 collected, 2 failed, 8 passed
+11 collected, 1 failed, 10 passed
 ```
 
-The failures were the expected pre-fix failures: invalid direct constructors did not raise, and Python 3.9-compatible `Z` timestamp parsing was rejected.
+The failure was the expected pre-fix failure: tuple `dirtyFiles` was accepted by `WorkflowManifest.from_dict()`.
 
 ## Fix
 
 - Added shared value-level validation in `__post_init__` so direct dataclass construction and `from_dict()` enforce the same necessary schema, status, hash, timestamp, metadata, and transition invariants.
 - Normalized valid UTC `Z` timestamps to `+00:00`, which is parseable by Python 3.9 and remains stable through `to_dict()` / `from_dict()` round trips.
+- Restricted JSON `dirtyFiles` validation to lists while preserving the existing tuple-backed direct constructor representation.
 
 ## Verification
 
@@ -39,6 +40,13 @@ After adding the two review-fix regression cases, the same focused command was r
 ```text
 /Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
 10 passed
+```
+
+After the strict JSON tuple fix, the focused command was rerun:
+
+```text
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
+11 passed
 ```
 
 `git diff --check` was also executed successfully.

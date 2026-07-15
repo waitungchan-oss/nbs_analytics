@@ -199,6 +199,14 @@ def test_models_reject_unknown_or_missing_fields():
         WorkflowApproval.from_dict(payload)
 
 
+def test_manifest_rejects_tuple_dirty_files_from_json_payload():
+    payload = manifest_payload()
+    payload["dirtyFiles"] = tuple(payload["dirtyFiles"])
+
+    with pytest.raises(WorkflowSchemaError, match="dirtyFiles must be a list"):
+        WorkflowManifest.from_dict(payload)
+
+
 def test_status_rejects_unknown_status_and_illegal_event_transition():
     payload = status_payload()
     payload["status"] = "not-a-status"
