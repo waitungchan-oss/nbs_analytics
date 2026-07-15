@@ -261,6 +261,7 @@ class WorkflowStatus:
             raise WorkflowSchemaError(f"schemaVersion must be {STATUS_SCHEMA}")
         _string_value(self.run_id, "runId")
         _string_value(self.stage, "stage")
+        _string_value(self.status, "status")
         if self.status not in WORKFLOW_STATUSES:
             raise WorkflowSchemaError("status is not a known workflow status")
         object.__setattr__(self, "started_at", _timestamp_value(self.started_at, "startedAt"))
@@ -269,6 +270,7 @@ class WorkflowStatus:
             object.__setattr__(self, "completed_at", _timestamp_value(self.completed_at, "completedAt"))
         if self.error_code is not None:
             _string_value(self.error_code, "errorCode")
+        _string_value(self.message, "message")
         if isinstance(self.artifact_bytes, bool) or not isinstance(self.artifact_bytes, int) or self.artifact_bytes < 0:
             raise WorkflowSchemaError("artifactBytes must be a non-negative integer")
 
@@ -339,6 +341,8 @@ class WorkflowEvent:
         if (self.from_status is None) != (self.to_status is None):
             raise WorkflowSchemaError("fromStatus and toStatus must both be null or strings")
         if self.from_status is not None:
+            _string_value(self.from_status, "fromStatus")
+            _string_value(self.to_status, "toStatus")
             if self.from_status not in WORKFLOW_STATUSES or self.to_status not in WORKFLOW_STATUSES:
                 raise WorkflowSchemaError("event statuses are not known workflow statuses")
             if not legal_transition(self.from_status, self.to_status):
@@ -359,6 +363,8 @@ class WorkflowEvent:
         if (from_status is None) != (to_status is None):
             raise WorkflowSchemaError("fromStatus and toStatus must both be null or strings")
         if from_status is not None:
+            _string_value(from_status, "fromStatus")
+            _string_value(to_status, "toStatus")
             if from_status not in WORKFLOW_STATUSES or to_status not in WORKFLOW_STATUSES:
                 raise WorkflowSchemaError("event statuses are not known workflow statuses")
             if not legal_transition(from_status, to_status):

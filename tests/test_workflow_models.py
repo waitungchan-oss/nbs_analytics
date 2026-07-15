@@ -207,6 +207,57 @@ def test_manifest_rejects_tuple_dirty_files_from_json_payload():
         WorkflowManifest.from_dict(payload)
 
 
+def test_status_constructor_rejects_empty_message_and_malformed_status():
+    with pytest.raises(WorkflowSchemaError, match="message"):
+        WorkflowStatus(
+            schema_version=STATUS_SCHEMA,
+            run_id="run-123",
+            stage="authorization",
+            status="awaiting_authorization",
+            started_at="2026-07-15T10:00:00+00:00",
+            updated_at="2026-07-15T10:05:00+00:00",
+            completed_at=None,
+            message="",
+            error_code=None,
+            artifact_bytes=0,
+        )
+
+    with pytest.raises(WorkflowSchemaError, match="status"):
+        WorkflowStatus(
+            schema_version=STATUS_SCHEMA,
+            run_id="run-123",
+            stage="authorization",
+            status=[],
+            started_at="2026-07-15T10:00:00+00:00",
+            updated_at="2026-07-15T10:05:00+00:00",
+            completed_at=None,
+            message="malformed status",
+            error_code=None,
+            artifact_bytes=0,
+        )
+
+
+def test_event_rejects_malformed_status_values_as_schema_errors():
+    with pytest.raises(WorkflowSchemaError, match="fromStatus"):
+        WorkflowEvent(
+            schema_version=EVENT_SCHEMA,
+            run_id="run-123",
+            event_id="event-1",
+            event_type="status_transition",
+            from_status=[],
+            to_status="context_running",
+            occurred_at="2026-07-15T10:00:01+00:00",
+            message="malformed transition",
+            metadata={},
+        )
+
+    payload = event_payload()
+    payload["fromStatus"] = "created"
+    payload["toStatus"] = []
+    with pytest.raises(WorkflowSchemaError, match="toStatus"):
+        WorkflowEvent.from_dict(payload)
+
+
 def test_status_rejects_unknown_status_and_illegal_event_transition():
     payload = status_payload()
     payload["status"] = "not-a-status"
