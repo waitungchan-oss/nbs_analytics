@@ -123,6 +123,70 @@ def test_timestamps_must_be_iso_8601():
         WorkflowStatus.from_dict(payload)
 
 
+def test_public_constructors_reject_invalid_states():
+    with pytest.raises(WorkflowSchemaError, match="briefSha256"):
+        WorkflowManifest(
+            schema_version=MANIFEST_SCHEMA,
+            run_id="run-123",
+            brief_path="briefs/task.md",
+            brief_sha256="invalid",
+            git_branch="codex/agent-orchestrator-phase1",
+            git_head="b" * 40,
+            dirty_files=(),
+            created_at="2026-07-15T10:00:00+00:00",
+            context_fingerprint="d" * 64,
+        )
+
+    with pytest.raises(WorkflowSchemaError, match="authorizationStatus"):
+        WorkflowApproval(
+            schema_version=APPROVAL_SCHEMA,
+            run_id="run-123",
+            contract_path=".nbs_agent_runtime/contracts/task-1.json",
+            contract_fingerprint="a" * 64,
+            approved_base_sha="b" * 40,
+            approved_at="2026-07-15T10:05:00+00:00",
+            authorization_status="pending",
+        )
+
+    with pytest.raises(WorkflowSchemaError, match="status"):
+        WorkflowStatus(
+            schema_version=STATUS_SCHEMA,
+            run_id="run-123",
+            stage="authorization",
+            status="not-a-status",
+            started_at="2026-07-15T10:00:00+00:00",
+            updated_at="2026-07-15T10:05:00+00:00",
+            completed_at=None,
+            message="invalid status",
+            error_code=None,
+            artifact_bytes=0,
+        )
+
+    with pytest.raises(WorkflowSchemaError, match="transition"):
+        WorkflowEvent(
+            schema_version=EVENT_SCHEMA,
+            run_id="run-123",
+            event_id="event-1",
+            event_type="status_transition",
+            from_status="completed",
+            to_status="implementation_running",
+            occurred_at="2026-07-15T10:00:01+00:00",
+            message="invalid transition",
+            metadata={},
+        )
+
+
+def test_z_timestamps_are_normalized_for_python_39_and_round_trip():
+    payload = status_payload()
+    payload["startedAt"] = "2026-07-15T10:00:00Z"
+    payload["updatedAt"] = "2026-07-15T10:05:00Z"
+    status = WorkflowStatus.from_dict(payload)
+
+    assert status.started_at == "2026-07-15T10:00:00+00:00"
+    assert status.updated_at == "2026-07-15T10:05:00+00:00"
+    assert WorkflowStatus.from_dict(status.to_dict()) == status
+
+
 def test_models_reject_unknown_or_missing_fields():
     payload = manifest_payload()
     payload["unexpected"] = True

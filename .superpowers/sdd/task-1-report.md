@@ -1,4 +1,4 @@
-# Task 1 Report: Make SQLite Targets Explicit
+# Task 1 Report: Workflow schemas and legal state transitions
 
 ## Status
 
@@ -6,43 +6,52 @@ DONE
 
 ## Scope
 
-- Added `resolve_db_path()` and explicit-path `get_db_connection()`.
-- Added `snapshot_sqlite_database()` with post-copy SQLite integrity validation.
-- Added optional explicit targets to `hot_backup_database()`, `upsert_to_db()`, `load_all_data_from_db()`, and `restore_database_from_backup()`.
-- Preserved omitted-argument call sites, existing transaction boundaries, and restore ordering: validate backup, quarantine live DB, replace, validate restored DB.
-- Added `tests/test_database_explicit_path.py` from the task brief.
-- No upload adapters, baseline registry, formal revenue logic, or unrelated files were modified. `tests/test_database_rollback.py` required no change.
+- Added `backend/agents/workflow_models.py` with the four workflow dataclasses, exact schema versions, strict JSON validation, canonical SHA-256 fingerprints, workflow status sets, and legal transitions.
+- Added `tests/test_workflow_models.py` covering authorization gating, terminal-state re-entry, exact status sets, canonical fingerprints, round trips, ISO-8601 timestamps, strict keys, unknown statuses, and illegal event transitions.
+- Did not modify SQLite, baseline, runtime, Hermes, or unrelated files.
 
 ## TDD Evidence
 
-The new test file was run before production changes:
+Review-fix regression tests were added for direct constructor validation and `Z` timestamp normalization. The focused RED run was:
 
 ```text
-2 failed
-TypeError: load_all_data_from_db() got an unexpected keyword argument 'db_path'
-AttributeError: module 'database' has no attribute 'snapshot_sqlite_database'
+10 collected, 2 failed, 8 passed
 ```
 
-After the minimal implementation:
+The failures were the expected pre-fix failures: invalid direct constructors did not raise, and Python 3.9-compatible `Z` timestamp parsing was rejected.
 
-```text
-tests/test_database_explicit_path.py tests/test_database_rollback.py
-8 passed in 0.75s
-```
+## Fix
+
+- Added shared value-level validation in `__post_init__` so direct dataclass construction and `from_dict()` enforce the same necessary schema, status, hash, timestamp, metadata, and transition invariants.
+- Normalized valid UTC `Z` timestamps to `+00:00`, which is parseable by Python 3.9 and remains stable through `to_dict()` / `from_dict()` round trips.
 
 ## Verification
 
+Controller-executed focused verification:
+
 ```text
-.venv/bin/python -m pytest -q
-141 passed in 15.69s
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
+8 passed
 ```
 
-Additional checks passed:
+After adding the two review-fix regression cases, the same focused command was rerun:
 
-- `git diff --check`
-- May 2026 frozen baseline remains `12057968` / `HKD 12,057,968` in the existing baseline and acceptance artifacts.
-- Worktree scope review found only `database.py` and the new explicit-path test as code changes; no rollback test edit was needed.
+```text
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
+10 passed
+```
+
+`git diff --check` was also executed successfully.
+
+## Self-review
+
+- `legal_transition()` defaults unknown or terminal source statuses to no outgoing transition.
+- `WorkflowStatus` accepts only the exact workflow status set and validates timestamps, nullable completion/error fields, and non-negative artifact bytes.
+- All `from_dict()` methods reject missing or unknown keys and enforce their exact schema version.
+- `WorkflowEvent` rejects illegal status transitions while allowing metadata-only events with both status fields null.
+- `canonical_sha256()` uses sorted keys, compact JSON separators, UTF-8, and SHA-256.
 
 ## Concerns
 
-None identified for Task 1. Existing callers continue to omit `db_path` and resolve through `DB_FILE`; explicit callers can now bind their target without mutating the default.
+- No SQLite, baseline, runtime, Hermes, or unrelated Task files were modified.
+- Only the focused workflow model test file was executed; no broader test result is claimed here.

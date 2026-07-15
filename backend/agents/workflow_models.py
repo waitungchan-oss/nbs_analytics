@@ -64,26 +64,42 @@ def _check_payload(payload: Mapping[str, Any], required: set[str], allowed: set[
         raise WorkflowSchemaError("workflow payload keys are invalid (" + "; ".join(detail) + ")")
 
 
-def _string(payload: Mapping[str, Any], key: str) -> str:
-    value = payload[key]
+def _string_value(value: Any, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise WorkflowSchemaError(f"{key} must be a non-empty string")
     return value
 
 
-def _timestamp(payload: Mapping[str, Any], key: str) -> str:
-    value = _string(payload, key)
+def _string(payload: Mapping[str, Any], key: str) -> str:
+    return _string_value(payload[key], key)
+
+
+def _timestamp_value(value: Any, key: str) -> str:
+    value = _string_value(value, key)
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise WorkflowSchemaError(f"{key} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
         raise WorkflowSchemaError(f"{key} must include a timezone")
-    return value
+    return parsed.isoformat()
+
+
+def _timestamp(payload: Mapping[str, Any], key: str) -> str:
+    return _timestamp_value(payload[key], key)
 
 
 def _sha256(payload: Mapping[str, Any], key: str) -> str:
     value = _string(payload, key)
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise WorkflowSchemaError(f"{key} must be a lowercase SHA-256 hex digest")
+    return value
+
+
+def _sha256_value(value: Any, key: str) -> str:
+    value = _string_value(value, key)
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
         raise WorkflowSchemaError(f"{key} must be a lowercase SHA-256 hex digest")
     return value
@@ -94,6 +110,24 @@ def _git_sha(payload: Mapping[str, Any], key: str) -> str:
     if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
         raise WorkflowSchemaError(f"{key} must be a Git SHA-1 hex digest")
     return value
+
+
+def _git_sha_value(value: Any, key: str) -> str:
+    value = _string_value(value, key)
+    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+        raise WorkflowSchemaError(f"{key} must be a Git SHA-1 hex digest")
+    return value
+
+
+def _normalize_dirty_files(value: Any) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise WorkflowSchemaError("dirtyFiles must be a list or tuple")
+    normalized = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise WorkflowSchemaError("dirtyFiles entries must contain path and sha256")
+        normalized.append({"path": _string(item, "path"), "sha256": _sha256(item, "sha256")})
+    return tuple(normalized)
 
 
 @dataclass(frozen=True)
@@ -108,18 +142,22 @@ class WorkflowManifest:
     created_at: str
     context_fingerprint: str
 
+    def __post_init__(self) -> None:
+        if self.schema_version != MANIFEST_SCHEMA:
+            raise WorkflowSchemaError(f"schemaVersion must be {MANIFEST_SCHEMA}")
+        _string_value(self.run_id, "runId")
+        _string_value(self.brief_path, "briefPath")
+        _sha256_value(self.brief_sha256, "briefSha256")
+        _string_value(self.git_branch, "gitBranch")
+        _git_sha_value(self.git_head, "gitHead")
+        object.__setattr__(self, "dirty_files", _normalize_dirty_files(self.dirty_files))
+        object.__setattr__(self, "created_at", _timestamp_value(self.created_at, "createdAt"))
+        _sha256_value(self.context_fingerprint, "contextFingerprint")
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "WorkflowManifest":
         keys = {"schemaVersion", "runId", "briefPath", "briefSha256", "gitBranch", "gitHead", "dirtyFiles", "createdAt", "contextFingerprint"}
         _check_payload(payload, keys, keys)
-        dirty_files = payload["dirtyFiles"]
-        if not isinstance(dirty_files, list):
-            raise WorkflowSchemaError("dirtyFiles must be a list")
-        normalized = []
-        for item in dirty_files:
-            if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
-                raise WorkflowSchemaError("dirtyFiles entries must contain path and sha256")
-            normalized.append({"path": _string(item, "path"), "sha256": _sha256(item, "sha256")})
         if _string(payload, "schemaVersion") != MANIFEST_SCHEMA:
             raise WorkflowSchemaError(f"schemaVersion must be {MANIFEST_SCHEMA}")
         return cls(
@@ -129,7 +167,7 @@ class WorkflowManifest:
             brief_sha256=_sha256(payload, "briefSha256"),
             git_branch=_string(payload, "gitBranch"),
             git_head=_git_sha(payload, "gitHead"),
-            dirty_files=tuple(normalized),
+            dirty_files=_normalize_dirty_files(payload["dirtyFiles"]),
             created_at=_timestamp(payload, "createdAt"),
             context_fingerprint=_sha256(payload, "contextFingerprint"),
         )
@@ -157,6 +195,17 @@ class WorkflowApproval:
     approved_base_sha: str
     approved_at: str
     authorization_status: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != APPROVAL_SCHEMA:
+            raise WorkflowSchemaError(f"schemaVersion must be {APPROVAL_SCHEMA}")
+        _string_value(self.run_id, "runId")
+        _string_value(self.contract_path, "contractPath")
+        _sha256_value(self.contract_fingerprint, "contractFingerprint")
+        _git_sha_value(self.approved_base_sha, "approvedBaseSha")
+        object.__setattr__(self, "approved_at", _timestamp_value(self.approved_at, "approvedAt"))
+        if self.authorization_status != "approved":
+            raise WorkflowSchemaError("authorizationStatus must be approved")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "WorkflowApproval":
@@ -200,6 +249,22 @@ class WorkflowStatus:
     message: str
     error_code: str | None
     artifact_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.schema_version != STATUS_SCHEMA:
+            raise WorkflowSchemaError(f"schemaVersion must be {STATUS_SCHEMA}")
+        _string_value(self.run_id, "runId")
+        _string_value(self.stage, "stage")
+        if self.status not in WORKFLOW_STATUSES:
+            raise WorkflowSchemaError("status is not a known workflow status")
+        object.__setattr__(self, "started_at", _timestamp_value(self.started_at, "startedAt"))
+        object.__setattr__(self, "updated_at", _timestamp_value(self.updated_at, "updatedAt"))
+        if self.completed_at is not None:
+            object.__setattr__(self, "completed_at", _timestamp_value(self.completed_at, "completedAt"))
+        if self.error_code is not None:
+            _string_value(self.error_code, "errorCode")
+        if isinstance(self.artifact_bytes, bool) or not isinstance(self.artifact_bytes, int) or self.artifact_bytes < 0:
+            raise WorkflowSchemaError("artifactBytes must be a non-negative integer")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "WorkflowStatus":
@@ -258,6 +323,24 @@ class WorkflowEvent:
     occurred_at: str
     message: str
     metadata: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.schema_version != EVENT_SCHEMA:
+            raise WorkflowSchemaError(f"schemaVersion must be {EVENT_SCHEMA}")
+        _string_value(self.run_id, "runId")
+        _string_value(self.event_id, "eventId")
+        _string_value(self.event_type, "eventType")
+        if (self.from_status is None) != (self.to_status is None):
+            raise WorkflowSchemaError("fromStatus and toStatus must both be null or strings")
+        if self.from_status is not None:
+            if self.from_status not in WORKFLOW_STATUSES or self.to_status not in WORKFLOW_STATUSES:
+                raise WorkflowSchemaError("event statuses are not known workflow statuses")
+            if not legal_transition(self.from_status, self.to_status):
+                raise WorkflowSchemaError("event transition is illegal")
+        object.__setattr__(self, "occurred_at", _timestamp_value(self.occurred_at, "occurredAt"))
+        _string_value(self.message, "message")
+        if not isinstance(self.metadata, dict):
+            raise WorkflowSchemaError("metadata must be an object")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "WorkflowEvent":
