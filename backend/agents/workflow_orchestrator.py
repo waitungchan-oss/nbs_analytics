@@ -56,13 +56,19 @@ class SubprocessStageExecutor:
     def __init__(self, project_root: Path) -> None:
         self.project_root = Path(project_root).resolve()
         self.python = self.project_root / ".venv" / "bin" / "python"
+        if not self.python.is_file() and self.project_root.parent.name == ".worktrees":
+            self.python = self.project_root.parent.parent / ".venv" / "bin" / "python"
         if not self.python.is_file():
             raise FileNotFoundError(f"Repository Python was not found: {self.python}")
 
     def run_json(self, argv: tuple[str, ...], *, timeout: int, require_json: bool = True) -> StageResult:
         started = time.monotonic()
+        command = list(argv)
+        worktree_python = self.project_root / ".venv" / "bin" / "python"
+        if command and Path(command[0]) == worktree_python and not worktree_python.is_file():
+            command[0] = str(self.python)
         process = subprocess.Popen(
-            list(argv),
+            command,
             cwd=self.project_root,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
