@@ -1,9 +1,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -124,10 +121,17 @@ def test_status_list_and_prune_render_json_and_wire_retention(tmp_path, monkeypa
     assert calls == ["plan", ({"report": "planned"}, False)]
 
 
-@pytest.mark.parametrize("command", ["run", "approve"])
-def test_cli_requires_explicit_approval_inputs(command, capsys):
+def test_cli_run_without_context_runner_collects_only_and_awaits_authorization(capsys):
     import scripts.agent_workflow as cli
 
-    argv = [command, "--brief", "docs/agents/CODEX_AGENT_DISPATCH.md"] if command == "run" else [command, "--run-id", "run-1", "--contract", "task.json"]
-    assert cli.main(argv) == 2
+    assert cli.main([
+        "run", "--brief", "docs/agents/CODEX_AGENT_DISPATCH.md", "--no-notify",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "awaiting_authorization"
+
+
+def test_cli_approve_requires_explicit_runner_inputs(capsys):
+    import scripts.agent_workflow as cli
+
+    assert cli.main(["approve", "--run-id", "run-1", "--contract", "task.json"]) == 2
     assert json.loads(capsys.readouterr().out)["status"] == "blocked"
