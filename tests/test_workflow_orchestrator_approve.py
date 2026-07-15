@@ -34,7 +34,7 @@ class FakeExecutor:
     results: list[StageResult]
     calls: list[tuple[tuple[str, ...], int]]
 
-    def run_json(self, argv: tuple[str, ...], *, timeout: int) -> StageResult:
+    def run_json(self, argv: tuple[str, ...], *, timeout: int, require_json: bool = True) -> StageResult:
         self.calls.append((argv, timeout))
         return self.results.pop(0)
 
@@ -146,10 +146,19 @@ def add_successful_approval_stages(
     ])
 
 
-def test_approve_runs_implementation_targeted_evidence_and_review_without_persisting_runners(tmp_path):
+def add_passing_final_gates(executor: FakeExecutor) -> None:
+    executor.results.extend([
+        result({"tests": "passed"}),
+        result({"status": "passed"}),
+        result({"overallStatus": "pass"}),
+    ])
+
+
+def test_approve_runs_fixed_final_gates_and_persists_terminal_evidence_without_persisting_runners(tmp_path):
     flow, executor, notifier, started = started_run(tmp_path)
     contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
     add_successful_approval_stages(flow, executor, started, contract_path)
+    add_passing_final_gates(executor)
 
     status = flow.approve(
         started.run_id, contract_path,
@@ -157,8 +166,16 @@ def test_approve_runs_implementation_targeted_evidence_and_review_without_persis
         review_agent_command="claude --json",
     )
 
-    assert status.status == "review_running"
-    assert [call[0][1] for call in executor.calls[1:]] == ["scripts/implementation_agent.py", "scripts/review_agent.py"]
+    assert status.status == "completed"
+    assert status.completed_at == status.updated_at
+    python = str(ROOT / ".venv/bin/python")
+    assert [call[0] for call in executor.calls[1:]] == [
+        (python, "scripts/implementation_agent.py", "--contract", str(contract_path), "--agent-command", "codex", "exec", "--json"),
+        (python, "scripts/review_agent.py", "--brief", BRIEF.as_posix(), "--base", flow.store.load_manifest(started.run_id).git_head, "--head", "WORKTREE", "--context", str(tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id / "context.json"), "--verification", str(tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id / "targeted-verification.json"), "--agent-command", "claude --json", "--strict"),
+        (python, "-m", "pytest", "-q"),
+        (python, "scripts/system_manager.py", "acceptance"),
+        (python, "scripts/hermes_post_change_check.py", "--skip-monitor", "--json"),
+    ]
     implementation_argv = executor.calls[1][0]
     assert implementation_argv[-4:] == ("--agent-command", "codex", "exec", "--json")
     review_argv = executor.calls[2][0]
@@ -178,7 +195,56 @@ def test_approve_runs_implementation_targeted_evidence_and_review_without_persis
         "stdoutTail": "x" * 12000,
         "stderrTail": "",
     }
-    assert all("Full verification" not in title and "Hermes" not in title for title, _ in notifier.messages)
+    assert json.loads((run_dir / "full-verification.json").read_text()) == {
+        "fullPytest": {"tests": "passed"},
+        "acceptance": {"status": "passed"},
+    }
+    assert json.loads((run_dir / "hermes.json").read_text()) == {"overallStatus": "pass"}
+    assert any(title == "Implementation completed" for title, _ in notifier.messages)
+    assert any(title == "Workflow completed" for title, _ in notifier.messages)
+    assert all(" start" not in " ".join(argv) and " stop" not in " ".join(argv) for argv, _ in executor.calls)
+
+
+@pytest.mark.parametrize(
+    ("final_results", "artifact", "expected_error"),
+    [
+        ([result({}, exit_code=1)], {"fullPytest": {}}, "full_verification_blocked"),
+        ([result({"tests": "passed"}), result({"status": "failed"})], {"fullPytest": {"tests": "passed"}, "acceptance": {"status": "failed"}}, "full_verification_blocked"),
+    ],
+)
+def test_approve_blocks_full_verification_before_hermes(tmp_path, final_results, artifact, expected_error):
+    flow, executor, notifier, started = started_run(tmp_path)
+    contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    add_successful_approval_stages(flow, executor, started, contract_path)
+    executor.results.extend(final_results)
+
+    status = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
+
+    assert status.status == "blocked"
+    assert status.error_code == expected_error
+    assert status.completed_at == status.updated_at
+    assert len(executor.calls) == 3 + len(final_results)
+    run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id
+    assert json.loads((run_dir / "full-verification.json").read_text()) == artifact
+    assert not (run_dir / "hermes.json").exists()
+    assert any(title == "Workflow blocked" for title, _ in notifier.messages)
+
+
+@pytest.mark.parametrize("hermes_result", [result({"overallStatus": "fail"}), result({}, exit_code=1)])
+def test_approve_blocks_when_hermes_does_not_pass(tmp_path, hermes_result):
+    flow, executor, notifier, started = started_run(tmp_path)
+    contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    add_successful_approval_stages(flow, executor, started, contract_path)
+    executor.results.extend([result({"tests": "passed"}), result({"status": "passed"}), hermes_result])
+
+    status = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
+
+    assert status.status == "blocked"
+    assert status.error_code == "hermes_blocked"
+    assert status.completed_at == status.updated_at
+    run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id
+    assert json.loads((run_dir / "hermes.json").read_text()) == hermes_result.payload
+    assert any(title == "Workflow blocked" for title, _ in notifier.messages)
 
 
 def test_approve_blocks_when_brief_identity_drifts(tmp_path):
@@ -329,10 +395,11 @@ def test_approve_duplicate_returns_running_status_without_second_approval_or_exe
     flow, executor, _, started = started_run(tmp_path)
     contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
     add_successful_approval_stages(flow, executor, started, contract_path)
+    add_passing_final_gates(executor)
 
     first = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
     second = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
 
-    assert first.status == "review_running"
+    assert first.status == "completed"
     assert second == first
-    assert len(executor.calls) == 3
+    assert len(executor.calls) == 6

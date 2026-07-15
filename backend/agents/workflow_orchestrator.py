@@ -47,7 +47,7 @@ class StageResult:
 
 
 class StageExecutor(Protocol):
-    def run_json(self, argv: tuple[str, ...], *, timeout: int) -> StageResult: ...
+    def run_json(self, argv: tuple[str, ...], *, timeout: int, require_json: bool = True) -> StageResult: ...
 
 
 class SubprocessStageExecutor:
@@ -57,7 +57,7 @@ class SubprocessStageExecutor:
         if not self.python.is_file():
             raise FileNotFoundError(f"Repository Python was not found: {self.python}")
 
-    def run_json(self, argv: tuple[str, ...], *, timeout: int) -> StageResult:
+    def run_json(self, argv: tuple[str, ...], *, timeout: int, require_json: bool = True) -> StageResult:
         started = time.monotonic()
         process = subprocess.Popen(
             list(argv),
@@ -120,7 +120,7 @@ class SubprocessStageExecutor:
                 raise ValueError("stage output must be a JSON object")
             payload = decoded
         except (json.JSONDecodeError, ValueError):
-            if process.returncode == 0:
+            if process.returncode == 0 and require_json:
                 raise ValueError("stage output is not a JSON object")
         finally:
             stdout_spool.close()
@@ -337,7 +337,67 @@ class WorkflowOrchestrator:
                 error_code=f"review_{target}", notify=notify, stage="review",
             )
         self._notify(notify, "Review passed", f"Review passed for {run_id}; full verification is pending")
-        return self.store.load_status(run_id)
+        return self._run_final_gates(run_id, notify=notify)
+
+    def _run_final_gates(self, run_id: str, *, notify: bool) -> WorkflowStatus:
+        status = self._transition(
+            run_id, self.store.load_status(run_id), "full_verification_running",
+            "Full verification started", notify=False, stage="full_verification",
+        )
+        verification: dict[str, dict] = {}
+        try:
+            full_pytest = self.stage_executor.run_json(
+                self._full_pytest_argv(), timeout=CONTEXT_TIMEOUT, require_json=False,
+            )
+        except Exception as exc:
+            return self._transition(
+                run_id, status, "blocked", str(exc), error_code="full_verification_blocked",
+                notify=notify, stage="full_verification",
+            )
+        verification["fullPytest"] = full_pytest.payload
+        self.store.write_artifact(run_id, "full-verification.json", verification)
+        if full_pytest.exit_code != 0:
+            return self._transition(
+                run_id, self.store.load_status(run_id), "blocked", "Full pytest did not pass",
+                error_code="full_verification_blocked", notify=notify, stage="full_verification",
+            )
+        try:
+            acceptance = self.stage_executor.run_json(self._acceptance_argv(), timeout=CONTEXT_TIMEOUT)
+        except Exception as exc:
+            return self._transition(
+                run_id, self.store.load_status(run_id), "blocked", str(exc), error_code="full_verification_blocked",
+                notify=notify, stage="full_verification",
+            )
+        verification["acceptance"] = acceptance.payload
+        self.store.write_artifact(run_id, "full-verification.json", verification)
+        if acceptance.exit_code != 0 or acceptance.payload.get("status") != "passed":
+            return self._transition(
+                run_id, self.store.load_status(run_id), "blocked", "System acceptance did not pass",
+                error_code="full_verification_blocked", notify=notify, stage="full_verification",
+            )
+
+        status = self._transition(
+            run_id, self.store.load_status(run_id), "hermes_running", "Hermes started",
+            notify=False, stage="hermes",
+        )
+        try:
+            hermes = self.stage_executor.run_json(self._hermes_argv(), timeout=CONTEXT_TIMEOUT)
+        except Exception as exc:
+            return self._transition(
+                run_id, status, "blocked", str(exc), error_code="hermes_blocked", notify=notify, stage="hermes",
+            )
+        self.store.write_artifact(run_id, "hermes.json", hermes.payload)
+        if hermes.exit_code != 0 or hermes.payload.get("overallStatus") != "pass":
+            self._notify(notify, "Hermes failed", f"Hermes did not pass for {run_id}")
+            return self._transition(
+                run_id, self.store.load_status(run_id), "blocked", "Hermes did not pass",
+                error_code="hermes_blocked", notify=notify, stage="hermes",
+            )
+        self._notify(notify, "Hermes passed", f"Hermes passed for {run_id}")
+        return self._transition(
+            run_id, self.store.load_status(run_id), "completed", "Workflow completed",
+            notify=notify, stage="hermes",
+        )
 
     def _authorize_approval(
         self,
@@ -481,6 +541,18 @@ class WorkflowOrchestrator:
             "--agent-command", command, "--strict",
         )
 
+    def _full_pytest_argv(self) -> tuple[str, ...]:
+        return (str(self.project_root / ".venv" / "bin" / "python"), "-m", "pytest", "-q")
+
+    def _acceptance_argv(self) -> tuple[str, ...]:
+        return (str(self.project_root / ".venv" / "bin" / "python"), "scripts/system_manager.py", "acceptance")
+
+    def _hermes_argv(self) -> tuple[str, ...]:
+        return (
+            str(self.project_root / ".venv" / "bin" / "python"),
+            "scripts/hermes_post_change_check.py", "--skip-monitor", "--json",
+        )
+
     def _normalize_targeted_evidence(self, payload: dict) -> list[dict]:
         commands: list[dict] = []
         for field in ("redEvidence", "greenEvidence"):
@@ -540,6 +612,7 @@ class WorkflowOrchestrator:
                 "changes_required": "Review changes required",
                 "blocked": "Workflow blocked",
                 "failed": "Workflow failed",
+                "completed": "Workflow completed",
             }
             self._notify(True, titles.get(target, "Workflow update"), message)
         return status

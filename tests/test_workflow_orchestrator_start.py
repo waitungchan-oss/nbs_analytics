@@ -252,6 +252,21 @@ def test_subprocess_executor_parses_successful_json_larger_than_tail(monkeypatch
     assert len(result.stdout_tail.encode("utf-8")) == OUTPUT_TAIL
 
 
+def test_subprocess_executor_allows_successful_text_output_when_json_is_not_required(monkeypatch):
+    def unexpected_run(*args, **kwargs):
+        raise AssertionError("bounded executor must not use subprocess.run")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    script = "import sys; sys.stdout.write('35 passed in 1.58s\\n')"
+
+    result = executor.run_json((str(executor.python), "-c", script), timeout=10, require_json=False)
+
+    assert result.exit_code == 0
+    assert result.payload == {}
+    assert result.stdout_tail == "35 passed in 1.58s\n"
+
+
 def test_subprocess_executor_kills_process_group_on_timeout(monkeypatch):
     calls: list[tuple] = []
 
