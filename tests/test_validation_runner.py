@@ -9,6 +9,12 @@ from backend.agents.validation_runner import CommandRejected, ValidationRunner
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = (
+    PROJECT_ROOT.parent.parent
+    if PROJECT_ROOT.parent.name == ".worktrees"
+    else PROJECT_ROOT
+)
+REPOSITORY_PYTHON = (REPOSITORY_ROOT / ".venv/bin/python").resolve()
 
 
 def completed(stdout="", stderr="", returncode=0):
@@ -83,9 +89,7 @@ def test_runner_real_allowlisted_python_invocation_returns_result():
     )
 
     assert isinstance(result, ValidationResult)
-    assert result.argv[0] == str(
-        (PROJECT_ROOT.parent.parent / ".venv/bin/python").resolve()
-    )
+    assert result.argv[0] == str(REPOSITORY_PYTHON)
     assert result.exit_code == 0
     assert result.timed_out is False
 
@@ -118,7 +122,7 @@ def test_runner_caps_each_output_stream_and_returns_stable_result(monkeypatch):
     assert len(result.stderr) == 32000
     assert result.command_id == "py_compile"
     assert result.argv == (
-        str((PROJECT_ROOT.parent.parent / ".venv/bin/python").resolve()),
+        str(REPOSITORY_PYTHON),
         "-m", "py_compile", "app.py"
     )
     assert result.exit_code == 3
@@ -137,7 +141,7 @@ def test_runner_accepts_pytest_targets_and_integer_maxfail(monkeypatch):
     )
 
     assert calls[0][0][0] == [
-        str((PROJECT_ROOT.parent.parent / ".venv/bin/python").resolve()),
+        str(REPOSITORY_PYTHON),
         "-m", "pytest", "tests/test_implementation_models.py", "-q", "--maxfail=2"
     ]
 

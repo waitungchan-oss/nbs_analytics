@@ -7,7 +7,9 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = Path("/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python")
+REPOSITORY_ROOT = ROOT.parent.parent if ROOT.parent.name == ".worktrees" else ROOT
+PYTHON = REPOSITORY_ROOT / ".venv/bin/python"
+PLAN_PATH = "docs/superpowers/plans/2026-07-14-implementation-agent.md"
 
 
 def _head() -> str:
@@ -18,11 +20,11 @@ def _head() -> str:
 
 @pytest.fixture
 def contract_path(tmp_path: Path) -> Path:
-    plan = ROOT / ".superpowers/sdd/implementation-agent/task-6-brief.md"
+    plan = ROOT / PLAN_PATH
     contract = {
         "schemaVersion": "implementation-task-v1",
         "taskId": "Task-6",
-        "planPath": ".superpowers/sdd/implementation-agent/task-6-brief.md",
+        "planPath": PLAN_PATH,
         "planFingerprint": hashlib.sha256(plan.read_bytes()).hexdigest(),
         "objective": "Expose the implementation agent JSON CLI",
         "approvedBaseSha": _head(),

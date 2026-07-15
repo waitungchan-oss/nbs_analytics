@@ -142,3 +142,35 @@ shasum -a 256 nbs_marketing_data.db
 ```
 
 Expected: clean `main`; database hash unchanged from the pre-change value.
+
+### Task 4: Make Agent verification portable between root and worktrees
+
+**Files:**
+- Modify: `tests/test_validation_runner.py`
+- Modify: `tests/test_implementation_agent_cli.py`
+
+**Interfaces:**
+- Consumes: the existing `ValidationRunner` repository-root contract and a tracked implementation plan.
+- Produces: the same Agent verification behavior when tests run from the repository root or a linked `.worktrees/<name>` checkout.
+
+- [ ] **Step 1: Reproduce the root-only failure**
+
+Run the Hermes targeted pack from the repository root. Expected RED: validation tests expect `PROJECT_ROOT.parent.parent/.venv`, while CLI tests cannot find the ignored Task 6 brief.
+
+- [ ] **Step 2: Use a root/worktree-aware expected repository path**
+
+In `tests/test_validation_runner.py`, define `REPOSITORY_ROOT` as `PROJECT_ROOT` for the root checkout and `PROJECT_ROOT.parent.parent` for linked project worktrees. Derive `REPOSITORY_PYTHON` once and use it in all interpreter assertions.
+
+- [ ] **Step 3: Replace the ignored CLI fixture dependency**
+
+In `tests/test_implementation_agent_cli.py`, derive the same repository root for the Python executable and use tracked plan `docs/superpowers/plans/2026-07-14-implementation-agent.md` for `planPath` and `planFingerprint`.
+
+- [ ] **Step 4: Verify root and worktree execution**
+
+Run:
+
+```bash
+.venv/bin/python -m pytest tests/test_validation_runner.py tests/test_implementation_agent_cli.py -q
+```
+
+Expected: all tests pass from both the repository root and the linked feature worktree.
