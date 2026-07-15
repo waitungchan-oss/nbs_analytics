@@ -23,13 +23,14 @@ from .workflow_models import (
     EVENT_SCHEMA,
     MANIFEST_SCHEMA,
     STATUS_SCHEMA,
+    TERMINAL_STATUSES,
     WorkflowEvent,
     WorkflowApproval,
     WorkflowManifest,
     WorkflowStatus,
 )
 from .workflow_notifications import WorkflowNotifier, build_notifier
-from .workflow_store import WorkflowStore
+from .workflow_store import WorkflowLockedError, WorkflowStore
 
 
 OUTPUT_TAIL = 12000
@@ -261,38 +262,19 @@ class WorkflowOrchestrator:
         review_agent_command: str,
         notify: bool = True,
     ) -> WorkflowStatus:
-        status = self.store.load_status(run_id)
-        if status.status != "awaiting_authorization":
-            return status
-        try:
-            implementation_runner = self._approved_runner(implementation_agent_command)
-            self._approved_runner(review_agent_command)
-            manifest = self.store.load_manifest(run_id)
-            contract_file = Path(contract_path).resolve()
-            contract = ImplementationTaskContract.from_dict(
-                json.loads(contract_file.read_text(encoding="utf-8"))
-            )
-            self._validate_approval_identity(manifest, contract, contract_file)
-        except (OSError, ValueError, json.JSONDecodeError, PermissionError) as exc:
-            return self._transition(
-                run_id, status, "blocked", str(exc), error_code="blocked_authorization", notify=notify,
-                stage="authorization",
-            )
+        authorization = self._authorize_approval(
+            run_id,
+            contract_path,
+            implementation_agent_command=implementation_agent_command,
+            review_agent_command=review_agent_command,
+            notify=notify,
+        )
+        if authorization is None:
+            return self.store.load_status(run_id)
+        if isinstance(authorization, WorkflowStatus):
+            return authorization
+        status, manifest, contract_file, contract, implementation_runner = authorization
 
-        approval = WorkflowApproval(
-            schema_version=APPROVAL_SCHEMA,
-            run_id=run_id,
-            contract_path=self._relative_or_absolute(contract_file),
-            contract_fingerprint=contract.fingerprint,
-            approved_base_sha=contract.approved_base_sha,
-            approved_at=_now(),
-            authorization_status="approved",
-        )
-        self.store.write_approval(run_id, approval)
-        status = self._transition(
-            run_id, self.store.load_status(run_id), "implementation_running",
-            "Implementation agent started", notify=False, stage="implementation",
-        )
         try:
             implementation = self.stage_executor.run_json(
                 self._implementation_argv(contract_file, implementation_runner), timeout=CONTEXT_TIMEOUT,
@@ -303,6 +285,13 @@ class WorkflowOrchestrator:
                 notify=notify, stage="implementation",
             )
         self.store.write_artifact(run_id, "implementation.json", implementation.payload)
+        try:
+            self._validate_implementation_report(implementation.payload, contract, manifest)
+        except ValueError as exc:
+            return self._transition(
+                run_id, self.store.load_status(run_id), "failed", str(exc),
+                error_code="failed_implementation_report", notify=notify, stage="implementation",
+            )
         if implementation.exit_code != 0 or implementation.payload.get("status") != "completed":
             return self._transition(
                 run_id, self.store.load_status(run_id), "failed", "Implementation agent failed",
@@ -349,6 +338,93 @@ class WorkflowOrchestrator:
             )
         self._notify(notify, "Review passed", f"Review passed for {run_id}; full verification is pending")
         return self.store.load_status(run_id)
+
+    def _authorize_approval(
+        self,
+        run_id: str,
+        contract_path: Path,
+        *,
+        implementation_agent_command: str,
+        review_agent_command: str,
+        notify: bool,
+    ) -> tuple[WorkflowStatus, WorkflowManifest, Path, ImplementationTaskContract, tuple[str, ...]] | WorkflowStatus | None:
+        try:
+            with self.store.run_lock(run_id):
+                status = self.store.load_status(run_id)
+                if status.status != "awaiting_authorization":
+                    return status
+                try:
+                    implementation_runner = self._approved_runner(implementation_agent_command)
+                    self._approved_runner(review_agent_command)
+                    manifest = self.store.load_manifest(run_id)
+                    contract_file = Path(contract_path).resolve()
+                    contract = ImplementationTaskContract.from_dict(
+                        json.loads(contract_file.read_text(encoding="utf-8"))
+                    )
+                    self._validate_approval_identity(manifest, contract, contract_file)
+                    approval = WorkflowApproval(
+                        schema_version=APPROVAL_SCHEMA,
+                        run_id=run_id,
+                        contract_path=self._relative_or_absolute(contract_file),
+                        contract_fingerprint=contract.fingerprint,
+                        approved_base_sha=contract.approved_base_sha,
+                        approved_at=_now(),
+                        authorization_status="approved",
+                    )
+                    if not self._write_approval_locked(run_id, approval):
+                        return status
+                except (OSError, ValueError, json.JSONDecodeError, PermissionError) as exc:
+                    blocked = self._transition_locked(
+                        run_id, status, "blocked", str(exc), error_code="blocked_authorization", stage="authorization",
+                    )
+                    self._notify(notify, "Workflow blocked", str(exc))
+                    return blocked
+                running = self._transition_locked(
+                    run_id, status, "implementation_running", "Implementation agent started",
+                    error_code=None, stage="implementation",
+                )
+                return running, manifest, contract_file, contract, implementation_runner
+        except WorkflowLockedError:
+            return None
+
+    def _write_approval_locked(self, run_id: str, approval: WorkflowApproval) -> bool:
+        approval_path = self.store._run_file(run_id, "approval.json")
+        if approval_path.is_symlink():
+            raise PermissionError("approval target must not be a symlink")
+        if approval_path.exists():
+            return False
+        self.store._atomic_json(approval_path, approval.to_dict())
+        return True
+
+    def _transition_locked(
+        self, run_id: str, current: WorkflowStatus, target: str, message: str, *, error_code: str | None, stage: str,
+    ) -> WorkflowStatus:
+        now = _now()
+        completed_at = now if target in TERMINAL_STATUSES else None
+        status = WorkflowStatus(
+            STATUS_SCHEMA, run_id, stage, target, current.started_at, now, completed_at,
+            message, error_code, current.artifact_bytes,
+        )
+        event = WorkflowEvent(
+            EVENT_SCHEMA, run_id, f"event-{uuid4().hex}", "status_transition", current.status,
+            target, now, message, {"stage": stage},
+        )
+        self.store._append_event(run_id, event)
+        self.store._atomic_json(self.store._run_file(run_id, "status.json"), status.to_dict())
+        return status
+
+    def _validate_implementation_report(
+        self, payload: dict, contract: ImplementationTaskContract, manifest: WorkflowManifest,
+    ) -> None:
+        expected = {
+            "schemaVersion": "implementation-run-report-v1",
+            "taskId": contract.task_id,
+            "contractFingerprint": contract.fingerprint,
+            "startHead": manifest.git_head,
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                raise ValueError(f"implementation report {key} does not match approved identity")
 
     def _validate_approval_identity(
         self, manifest: WorkflowManifest, contract: ImplementationTaskContract, contract_file: Path,
@@ -454,7 +530,8 @@ class WorkflowOrchestrator:
 
     def _transition(self, run_id: str, current: WorkflowStatus, target: str, message: str, *, error_code: str | None = None, notify: bool = False, stage: str = "context") -> WorkflowStatus:
         now = _now()
-        status = WorkflowStatus(STATUS_SCHEMA, run_id, stage, target, current.started_at, now, None, message, error_code, current.artifact_bytes)
+        completed_at = now if target in TERMINAL_STATUSES else None
+        status = WorkflowStatus(STATUS_SCHEMA, run_id, stage, target, current.started_at, now, completed_at, message, error_code, current.artifact_bytes)
         event = WorkflowEvent(EVENT_SCHEMA, run_id, f"event-{uuid4().hex}", "status_transition", current.status, target, now, message, {"stage": stage})
         self.store.transition(run_id, status, event)
         if notify:

@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 
 from backend.agents.workflow_notifications import NotificationResult
+from backend.agents.implementation_models import ImplementationTaskContract
 from backend.agents.workflow_orchestrator import StageResult, WorkflowOrchestrator
-from backend.agents.workflow_store import WorkflowLockedError, WorkflowStore
+from backend.agents.workflow_store import WorkflowStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +52,14 @@ def result(payload: dict, exit_code: int = 0) -> StageResult:
     return StageResult(exit_code, payload, "implementation stdout", "implementation stderr", 4)
 
 
-def implementation_payload(*, status: str = "completed") -> dict:
+def implementation_payload(
+    *,
+    status: str = "completed",
+    schema_version: str = "implementation-run-report-v1",
+    task_id: str = "task-6",
+    contract_fingerprint: str = "b" * 64,
+    start_head: str = "c" * 40,
+) -> dict:
     evidence = {
         "commandId": "pytest_targeted",
         "argv": [str(ROOT / ".venv/bin/python"), "-m", "pytest", "tests/test_workflow_orchestrator_approve.py", "-q"],
@@ -62,11 +70,11 @@ def implementation_payload(*, status: str = "completed") -> dict:
         "timedOut": False,
     }
     return {
-        "schemaVersion": "implementation-run-report-v1",
+        "schemaVersion": schema_version,
         "status": status,
-        "taskId": "task-6",
-        "contractFingerprint": "b" * 64,
-        "startHead": "c" * 40,
+        "taskId": task_id,
+        "contractFingerprint": contract_fingerprint,
+        "startHead": start_head,
         "endHead": "c" * 40,
         "changedFiles": ["backend/agents/workflow_orchestrator.py"],
         "diffStat": {"files": 1, "lines": 10},
@@ -116,13 +124,32 @@ def started_run(tmp_path: Path, *stage_results: StageResult):
     return flow, executor, notifier, status
 
 
-def test_approve_runs_implementation_targeted_evidence_and_review_without_persisting_runners(tmp_path):
-    flow, executor, notifier, started = started_run(
-        tmp_path,
-        result(implementation_payload()),
-        result({"schemaVersion": "review-report-v1", "verdict": "pass", "findings": []}),
+def add_successful_approval_stages(
+    flow: WorkflowOrchestrator,
+    executor: FakeExecutor,
+    started,
+    contract_path: Path,
+    review_payload: dict | None = None,
+    *,
+    implementation_overrides: dict | None = None,
+) -> None:
+    manifest = flow.store.load_manifest(started.run_id)
+    task = ImplementationTaskContract.from_dict(json.loads(contract_path.read_text(encoding="utf-8")))
+    implementation = implementation_payload(
+        contract_fingerprint=task.fingerprint,
+        start_head=manifest.git_head,
     )
+    implementation.update(implementation_overrides or {})
+    executor.results.extend([
+        result(implementation),
+        result(review_payload or {"schemaVersion": "review-report-v1", "verdict": "pass", "findings": []}),
+    ])
+
+
+def test_approve_runs_implementation_targeted_evidence_and_review_without_persisting_runners(tmp_path):
+    flow, executor, notifier, started = started_run(tmp_path)
     contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    add_successful_approval_stages(flow, executor, started, contract_path)
 
     status = flow.approve(
         started.run_id, contract_path,
@@ -245,26 +272,67 @@ def test_approve_requires_both_runner_commands(tmp_path, implementation_command,
 
 
 def test_approve_changes_required_is_terminal_and_does_not_start_later_gates(tmp_path):
-    flow, executor, notifier, started = started_run(
-        tmp_path,
-        result(implementation_payload()),
-        result({"schemaVersion": "review-report-v1", "verdict": "changes_required", "findings": [{"severity": "high"}]}, exit_code=1),
-    )
+    flow, executor, notifier, started = started_run(tmp_path)
     contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    add_successful_approval_stages(
+        flow,
+        executor,
+        started,
+        contract_path,
+        {"schemaVersion": "review-report-v1", "verdict": "changes_required", "findings": [{"severity": "high"}]},
+    )
 
     status = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
 
     assert status.status == "changes_required"
+    assert status.completed_at == status.updated_at
     assert len(executor.calls) == 3
     assert any("changes required" in title.lower() for title, _ in notifier.messages)
 
 
-def test_approve_returns_blocked_when_another_approve_holds_the_run_lock(tmp_path):
+def test_approve_returns_current_status_when_another_approve_holds_the_run_lock(tmp_path):
     flow, executor, _, started = started_run(tmp_path)
     contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
 
     with flow.store.run_lock(started.run_id):
-        with pytest.raises(WorkflowLockedError):
-            flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
+        status = flow.approve(
+            started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude"
+        )
 
+    assert status.status == "awaiting_authorization"
     assert executor.calls[1:] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schemaVersion", "implementation-run-report-v0"),
+        ("taskId", "task-7"),
+        ("contractFingerprint", "0" * 64),
+        ("startHead", "0" * 40),
+    ],
+)
+def test_approve_fails_closed_when_implementation_report_identity_mismatches(tmp_path, field, value):
+    flow, executor, _, started = started_run(tmp_path)
+    contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    add_successful_approval_stages(flow, executor, started, contract_path, implementation_overrides={field: value})
+
+    status = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
+
+    assert status.status == "failed"
+    assert status.error_code == "failed_implementation_report"
+    assert status.completed_at == status.updated_at
+    assert len(executor.calls) == 2
+
+
+def test_approve_duplicate_returns_running_status_without_second_approval_or_execution(tmp_path):
+    flow, executor, _, started = started_run(tmp_path)
+    contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    add_successful_approval_stages(flow, executor, started, contract_path)
+
+    first = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
+    second = flow.approve(started.run_id, contract_path, implementation_agent_command="codex", review_agent_command="claude")
+
+    assert first.status == "review_running"
+    assert second == first
+    assert len(executor.calls) == 3
