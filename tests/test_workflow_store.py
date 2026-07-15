@@ -220,3 +220,30 @@ def test_artifact_bytes_counts_only_allowed_stage_artifacts(store, manifest):
     expected = (run_dir / "context.json").stat().st_size + (run_dir / "review.json").stat().st_size
     assert store.artifact_bytes(manifest.run_id) == expected
 
+
+def test_artifact_bytes_rejects_dangling_symlink(store, manifest):
+    store.create_run(manifest, _status())
+    artifact = store.runs_root / manifest.run_id / "context.json"
+    artifact.symlink_to(store.runs_root / manifest.run_id / "missing.json")
+
+    with pytest.raises(PermissionError, match="artifact"):
+        store.artifact_bytes(manifest.run_id)
+
+
+def test_create_run_cleans_up_when_status_write_fails(store, manifest, monkeypatch):
+    original = store._atomic_json
+    calls = 0
+
+    def fail_on_status(path, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated status write failure")
+        return original(path, payload)
+
+    monkeypatch.setattr(store, "_atomic_json", fail_on_status)
+
+    with pytest.raises(OSError, match="simulated status write failure"):
+        store.create_run(manifest, _status())
+
+    assert not (store.runs_root / manifest.run_id).exists()

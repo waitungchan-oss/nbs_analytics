@@ -4,6 +4,7 @@ import errno
 import fcntl
 import json
 import os
+import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -46,15 +47,23 @@ class WorkflowStore:
         if manifest.run_id != status.run_id:
             raise ValueError("manifest and status run IDs must match")
         run_dir = self._run_dir(manifest.run_id)
+        if run_dir.is_symlink():
+            raise PermissionError("run target must not be a symlink")
+        if run_dir.exists():
+            raise FileExistsError(run_dir)
+        staging = Path(tempfile.mkdtemp(prefix=f".{manifest.run_id}.", dir=self.runs_root))
         try:
-            run_dir.mkdir()
-        except FileExistsError:
+            self._assert_regular_directory(staging, "staging run directory")
+            self._atomic_json(staging / "manifest.json", manifest.to_dict())
+            self._atomic_json(staging / "status.json", status.to_dict())
             if run_dir.is_symlink():
                 raise PermissionError("run target must not be a symlink")
+            if run_dir.exists():
+                raise FileExistsError(run_dir)
+            os.rename(staging, run_dir)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
             raise
-        self._assert_regular_directory(run_dir, "run directory")
-        self._atomic_json(run_dir / "manifest.json", manifest.to_dict())
-        self._atomic_json(run_dir / "status.json", status.to_dict())
         return run_dir
 
     def load_manifest(self, run_id: str) -> WorkflowManifest:
@@ -134,6 +143,8 @@ class WorkflowStore:
         total = 0
         for name in ALLOWED_ARTIFACTS - {"approval.json"}:
             path = run_dir / name
+            if path.is_symlink():
+                raise PermissionError("artifact must be a regular file")
             if not path.exists():
                 continue
             self._assert_regular_file(path, "artifact")
