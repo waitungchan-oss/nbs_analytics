@@ -67,6 +67,26 @@ def test_cli_requires_explicit_runner_for_execution(contract_path: Path):
     assert "Traceback" not in result.stdout
 
 
+def test_cli_parse_failure_emits_single_json_document():
+    result = run_cli("--unknown-argument")
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["status"] == "blocked_invalid_contract"
+    assert result.stdout.strip().endswith("}")
+    assert "usage:" in result.stderr
+
+
+def test_cli_subprocess_redacts_embedded_external_path():
+    external_contract = Path("/private/tmp/unique_task6_external_path_9f3c2b.json")
+    result = run_cli("--contract", str(external_contract))
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked_invalid_contract"
+    assert str(external_contract) not in result.stdout
+    assert "/private/tmp" not in result.stdout
+
+
 def test_cli_maps_validation_failure_to_nonzero_exit(monkeypatch, contract_path: Path, capsys):
     import scripts.implementation_agent as cli
 

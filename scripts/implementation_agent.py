@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,8 @@ _EXIT_CODES = {
     "context_overflow": 4,
     "runtime_error": 5,
 }
+
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?:[^\s'\"<>]+)")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -82,13 +85,23 @@ def _redact(value: Any) -> Any:
     redacted = value
     for secret in sorted(environment_values, key=len, reverse=True):
         redacted = redacted.replace(secret, "[REDACTED]")
-    candidate = Path(redacted)
-    if candidate.is_absolute():
+
+    def redact_path(match: re.Match[str]) -> str:
+        token = match.group(0)
+        suffix = ""
+        while token and token[-1] in ":;,.)]}":
+            suffix = token[-1] + suffix
+            token = token[:-1]
+        candidate = Path(token)
+        if not candidate.is_absolute():
+            return match.group(0)
         try:
             candidate.resolve().relative_to(project)
         except ValueError:
-            return "[REDACTED_PATH]"
-    return redacted
+            return "[REDACTED_PATH]" + suffix
+        return match.group(0)
+
+    return _ABSOLUTE_PATH_RE.sub(redact_path, redacted)
 
 
 def _render(payload: Any) -> None:
@@ -107,7 +120,13 @@ def _exit_code(status: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    try:
+        args = _parser().parse_args(argv)
+    except SystemExit as exc:
+        if exc.code == 2:
+            _render(_status_payload("blocked_invalid_contract", "invalid command-line arguments"))
+            return 2
+        raise
     try:
         contract = _load_contract(args.contract)
         service = ImplementationAgentService(PROJECT_ROOT)
