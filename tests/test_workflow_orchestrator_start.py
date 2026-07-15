@@ -31,6 +31,17 @@ CONTEXT_PAYLOAD = {
     "unknowns": [],
     "contextFingerprint": "a" * 64,
 }
+COLLECT_ONLY_PAYLOAD = {
+    "schemaVersion": "context-evidence-v1",
+    "task": {"id": "task-5", "objective": "collect context", "scope": [], "forbidden": []},
+    "repository": {"head": "a" * 40, "dirtyFiles": []},
+    "guardrails": {"revenueScope": "read-only"},
+    "documents": [],
+    "symbols": [],
+    "relatedTests": [],
+    "recentChanges": [],
+    "bundleFingerprint": "b" * 64,
+}
 
 
 @dataclass
@@ -99,6 +110,17 @@ def test_start_defaults_to_collect_only_and_does_not_persist_command(tmp_path):
     assert "--output" not in argv
     run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / result.run_id
     assert "context_agent_command" not in (run_dir / "manifest.json").read_text()
+
+
+def test_collect_only_context_evidence_payload_stops_for_authorization(tmp_path):
+    stage = executor(COLLECT_ONLY_PAYLOAD)
+
+    result = make_orchestrator(tmp_path, stage, FakeNotifier([])).start(BRIEF)
+
+    assert result.status == "awaiting_authorization"
+    run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / result.run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["contextFingerprint"] == COLLECT_ONLY_PAYLOAD["bundleFingerprint"]
 
 
 def test_start_forwards_supplied_context_command_without_persisting_it(tmp_path):
@@ -191,3 +213,21 @@ def test_subprocess_executor_drains_oversized_stdout_and_stderr_with_bounded_tai
     assert len(result.stderr_tail.encode("utf-8")) == OUTPUT_TAIL
     assert set(result.stdout_tail) == {"o"}
     assert set(result.stderr_tail) == {"e"}
+
+
+def test_subprocess_executor_parses_successful_json_larger_than_tail(monkeypatch):
+    def unexpected_run(*args, **kwargs):
+        raise AssertionError("bounded executor must not use subprocess.run")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    expected_padding = "x" * (OUTPUT_TAIL * 2)
+    payload = {"status": "ready", "contextFingerprint": "a" * 64, "padding": expected_padding}
+    encoded = json.dumps(payload, ensure_ascii=False)
+    script = f"import sys; sys.stdout.write({encoded!r}); sys.stdout.flush()"
+
+    result = executor.run_json((str(executor.python), "-c", script), timeout=10)
+
+    assert result.exit_code == 0
+    assert result.payload == payload
+    assert len(result.stdout_tail.encode("utf-8")) == OUTPUT_TAIL

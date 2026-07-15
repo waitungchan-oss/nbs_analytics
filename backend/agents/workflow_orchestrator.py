@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -60,8 +61,9 @@ class SubprocessStageExecutor:
         )
         stdout_tail = bytearray()
         stderr_tail = bytearray()
+        stdout_spool = tempfile.TemporaryFile(mode="w+b")
         readers = (
-            threading.Thread(target=_drain_tail, args=(process.stdout, stdout_tail), daemon=True),
+            threading.Thread(target=_drain_stdout, args=(process.stdout, stdout_spool, stdout_tail), daemon=True),
             threading.Thread(target=_drain_tail, args=(process.stderr, stderr_tail), daemon=True),
         )
         for reader in readers:
@@ -83,13 +85,16 @@ class SubprocessStageExecutor:
         stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
         payload: dict = {}
         try:
-            decoded = json.loads(stdout_text)
+            stdout_spool.seek(0)
+            decoded = json.load(stdout_spool)
             if not isinstance(decoded, dict):
                 raise ValueError("stage output must be a JSON object")
             payload = decoded
         except (json.JSONDecodeError, ValueError):
             if process.returncode == 0:
                 raise ValueError("stage output is not a JSON object")
+        finally:
+            stdout_spool.close()
         return StageResult(
             exit_code=process.returncode,
             payload=payload,
@@ -146,7 +151,7 @@ class WorkflowOrchestrator:
             )
 
         payload = result.payload
-        fingerprint = payload.get("contextFingerprint")
+        fingerprint = payload.get("contextFingerprint") or payload.get("bundleFingerprint")
         if not isinstance(fingerprint, str) or len(fingerprint) != 64 or any(
             character not in "0123456789abcdef" for character in fingerprint
         ):
@@ -182,7 +187,14 @@ class WorkflowOrchestrator:
         self._transition(run_id, status, "context_running", "Context collection started")
         self.store.write_artifact(run_id, "context.json", payload)
 
-        if result.exit_code != 0 or payload.get("status") != "ready":
+        context_succeeded = result.exit_code == 0 and (
+            payload.get("status") == "ready"
+            or (
+                payload.get("schemaVersion") == "context-evidence-v1"
+                and _is_sha256(payload.get("bundleFingerprint"))
+            )
+        )
+        if not context_succeeded:
             target = "blocked" if result.exit_code != 0 else "failed"
             message = payload.get("status") or "Context stage failed"
             return self._transition(
@@ -277,3 +289,20 @@ def _drain_tail(stream, tail: bytearray) -> None:
         tail.extend(chunk)
         if len(tail) > OUTPUT_TAIL:
             del tail[:-OUTPUT_TAIL]
+
+
+def _drain_stdout(stream, spool, tail: bytearray) -> None:
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            return
+        spool.write(chunk)
+        tail.extend(chunk)
+        if len(tail) > OUTPUT_TAIL:
+            del tail[:-OUTPUT_TAIL]
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )

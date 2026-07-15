@@ -56,3 +56,19 @@ passed
 git diff --check
 passed with no output
 ```
+
+## Re-review Fixes: collect-only schema and full JSON parsing
+
+- Accepted the existing collect-only `context-evidence-v1` payload with a valid `bundleFingerprint` as a successful Context stage, and persisted that fingerprint in the manifest before stopping at `awaiting_authorization`.
+- Changed stdout handling to drain into a disk-backed `TemporaryFile` while retaining only the final 12,000 bytes as the report tail. Successful JSON is parsed from the complete spool, so valid payloads larger than the tail remain supported without unbounded in-memory capture.
+- Kept stderr as a bounded tail and preserved timeout kill/wait behavior.
+- Added regressions for real-shaped collect-only payloads and successful JSON larger than 12,000 bytes.
+
+Re-review verification:
+
+```text
+RED: 2 focused failures reproduced the collect-only status mismatch and oversized successful JSON tail parse failure.
+
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_orchestrator_start.py -q
+11 passed in 0.27s
+```
