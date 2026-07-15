@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "agent-workflow-retention-v1",
+  "retainDays": 90,
+  "retainLatestTerminalRuns": 30,
+  "stageArtifactMaxBytes": 5242880,
+  "runArtifactSoftCapBytes": 26214400,
+  "commandOutputTailCharacters": 12000
+}
