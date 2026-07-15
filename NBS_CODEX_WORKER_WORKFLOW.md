@@ -88,6 +88,8 @@ Codex worker 必須收到：
 - baseline 驗收命令
 - 回報格式
 
+Codex 必須先建立並批准 Task contract，且每次只分派一個 Task。worker 不得自行決定下一 Task；完成後 Codex 檢查 final implementation report 與實際 diff，必須交給 Review Agent，再處理 findings、完整驗證及 Hermes。
+
 ### Step 3: Monitor worker
 
 Hermes 監控：
@@ -189,6 +191,8 @@ Hermes 回報：
 5. 不要執行 upload / upsert / rollback apply。
 6. 不要刪除 backup / quarantine / logs。
 7. 只做任務要求的最小修改，不做無關重構。
+8. 不得 commit 或 merge，不得修改正式 SQLite；不得自行進行 full verification 或 Hermes。
+9. final implementation report 與實際 diff 必須交給 Review Agent。
 
 開發規則：
 - 使用 TDD：先寫 failing test，確認 fail，再實作，最後確認 pass。

@@ -37,14 +37,14 @@ Obsidian Brief
 - Context Agent 只輸出規劃所需的最小上下文。
 - Review Agent 只檢查已批准需求、實際 diff、測試證據與風險。
 - Hermes 繼續負責 runtime、SQLite、baseline、服務、Git 與整體驗收。
-- 所有 Agent 維持 read-only；任何寫入、修復、commit 或 merge 仍由已授權的 Codex 流程執行。
+- Context Agent 與 Review Agent 維持 read-only；Implementation Agent 只可在已批准的單一 Task contract 與獨立 worktree 內做 allowlisted 修改。
 - Agent 失效時，Codex 可直接使用 Evidence Bundle 繼續工作。
 
 ## 4. 明確非目標
 
 第一階段不建立：
 
-- 自動修改程式的 Implementation Agent。
+- 可自行選擇 Task、越過 Review、完整驗證或 Hermes 的自主 Implementation Agent。
 - 自動 commit、merge、rollback 或 baseline promotion。
 - 向量資料庫或長駐索引服務。
 - Agent Web UI 或新的 FastAPI endpoint。
@@ -61,7 +61,7 @@ flowchart TD
     EB --> CA["Context Agent"]
     CA --> CP["Codex Design / Plan"]
     CP --> UA["User Authorization"]
-    UA --> IA["Codex or Future Implementation Agent"]
+    UA --> IA["Implementation Agent (one approved Task)"]
     IA --> TC["Test and Diff Collector"]
     TC --> RA["Review Agent"]
     RA -->|"Changes Required"| IA
@@ -95,7 +95,8 @@ flowchart TD
 | Evidence Collector | 白名單讀取、搜尋、裁剪、fingerprint、telemetry | 語意判斷、tracked source 修改、正式驗收 |
 | Validation Runner | 執行已批准 compile、tests、verify/build，保存精簡結果 | 修復失敗、放寬 gate、寫入正式資料 |
 | Context Agent | 任務理解、相關檔案、依賴、風險、建議測試 | 修改程式、執行完整驗收、判定正式 baseline |
-| Codex | 設計、implementation plan、授權後修改、修正與整合 | 把未驗證輸出當成完成證據 |
+| Codex | 建立/批准 Task contract、分派單一 Task、檢查 report 與 diff、處理 findings、完整驗證、Hermes 與整合 | 把未驗證輸出當成完成證據 |
+| Implementation Agent | 在獨立 worktree 內執行一個已批准 allowlisted Task，提交 final implementation report 與實際 diff | 決定下一 Task、commit、merge、push、正式 SQLite、baseline、rollback、完整驗證或 Hermes |
 | Review Agent | requirement coverage、diff findings、測試缺口、residual risk | 修改檔案、取代 Hermes、正式 baseline 裁決 |
 | Hermes | runtime、SQLite integrity、baseline、服務、Git 與系統驗收 | 功能設計、逐行 code review、未授權修復 |
 
@@ -363,7 +364,7 @@ Implementation 至少驗證：
 ## 19. 未來 Agent Roadmap
 
 1. **Diagnostic Agent**：針對失敗測試與 runtime evidence 找根因，不直接修復。
-2. **Implementation Agent**：只執行已批准 plan 的單一 Task，逐 Task review。
+2. **Implementation Agent**：只執行已批准 plan 的單一 Task，逐 Task review；完整約束見 `IMPLEMENTATION_AGENT_CONTRACT.md`。
 3. **Documentation Agent**：只根據已驗證 evidence 回填 Brief、ADR 與 system map。
 4. **Git Integration Agent**：只在所有 gate PASS 且獲授權後 stage、commit 或 merge。
 
@@ -387,6 +388,8 @@ Brief
 ```
 
 本文是 architecture truth source。兩份 Agent contract 可以更精簡，但不得放寬本文的權限、資料保護、Token 或 Hermes 邊界。如 implementation plan 需要越出本文件範圍，必須停止並重新取得使用者批准。
+
+Implementation Agent 的 routing 由 `CODEX_AGENT_DISPATCH.md` machine-readable rules 決定：Codex 建立/批准 contract、分派一個 Task、檢查 report 與實際 diff、啟動 Review Agent、處理 findings、執行完整驗證並呼叫 Hermes。Implementation Agent 不得自行決定下一 Task。
 
 ## 21. Implementation Evidence
 
