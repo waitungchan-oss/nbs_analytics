@@ -1,11 +1,13 @@
 # Codex Agent Dispatch Contract
 
 版本：v1
-狀態：implementation_in_progress
+狀態：active
 
 ## 文件目的
 
 本文件定義 Codex 何時收集 Context、何時要求 Review、何時分派 Implementation Agent，以及三者與 Hermes 的邊界。它是工作流程契約，不會在 NBS Analytics application runtime 內自動執行 Agent。
+
+目前分派由 Codex 依本契約逐步呼叫三個 Agent CLI；尚未建立統一 Agent Orchestrator、macOS 桌面通知或 Streamlit Agent Operations 頁面。這些後續能力只能編排與展示既有狀態，不得放寬人工授權、sandbox、Review、完整驗證或 Hermes gate。
 
 ## 人類可讀流程
 

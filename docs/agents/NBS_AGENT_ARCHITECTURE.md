@@ -1,12 +1,12 @@
 # NBS Agent Architecture
 
-狀態：verified
-版本：v1 Evidence Bundle Pipeline
-日期：2026-07-14
+狀態：active
+版本：v1.1 Evidence Bundle and Implementation Pipeline
+日期：2026-07-15
 
 ## 1. 文件目的
 
-本文件定義 NBS Analytics 的 Agent 協作架構。第一階段建立 Context Agent 與 Review Agent，透過本地 Evidence Collector 先收集、裁剪及指紋化證據，再由 LLM 做有限範圍的上下文壓縮與 code review。
+本文件定義 NBS Analytics 的 Agent 協作架構。目前已建立 Context Agent、Review Agent 與受控 Implementation Agent；本地 Evidence Collector 先收集、裁剪及指紋化證據，再由 LLM 做有限範圍的上下文壓縮、單一批准 Task 實作與 code review。
 
 這套架構的目的不是增加更多自主代理，而是減少主 Codex 重複讀取 repo、文件、diff 與測試輸出的 Token，同時維持 frozen baseline、正式口徑、Git、Hermes 與人工授權治理。
 
@@ -42,7 +42,7 @@ Obsidian Brief
 
 ## 4. 明確非目標
 
-第一階段不建立：
+目前已驗收階段不建立：
 
 - 可自行選擇 Task、越過 Review、完整驗證或 Hermes 的自主 Implementation Agent。
 - 自動 commit、merge、rollback 或 baseline promotion。
@@ -74,10 +74,11 @@ flowchart TD
     HA -->|"FAIL"| DG["Future Diagnostic Agent"]
     DG --> CP
 
-    subgraph P1["Phase 1"]
+    subgraph P1["Active Agent Pipeline"]
       EC
       EB
       CA
+      IA
       TC
       RA
     end
@@ -241,6 +242,10 @@ Token budget 是上限，不是必須用完的配額。超出上限時回傳 `co
   --context .nbs_agent_runtime/reports/context.json \
   --strict \
   --output .nbs_agent_runtime/reports/review.json
+
+.venv/bin/python scripts/implementation_agent.py \
+  --contract .nbs_agent_runtime/contracts/<task>.json \
+  --agent-command <approved-offline-worker-command>
 ```
 
 統一 exit code：
@@ -317,31 +322,46 @@ Token budget 是上限，不是必須用完的配額。超出上限時回傳 `co
 
 不得保存完整 prompt、原始營銷資料、secrets 或完整 exports。成效指標包括 bundle 壓縮率、cache hit、平均輸入 Token、Review findings 與避免返工次數。
 
-## 17. 第一階段檔案結構
+## 17. 目前檔案結構
 
 ```text
 docs/agents/
   NBS_AGENT_ARCHITECTURE.md
   CONTEXT_AGENT_CONTRACT.md
   REVIEW_AGENT_CONTRACT.md
+  IMPLEMENTATION_AGENT_CONTRACT.md
+  CODEX_AGENT_DISPATCH.md
 agent_config/
   evidence_allowlist.json
   token_budgets.json
   review_policies.json
+  implementation_commands.json
+  implementation_policies.json
 backend/agents/
   evidence_models.py
   evidence_collector.py
   context_agent_service.py
   review_agent_service.py
   agent_runtime.py
+  implementation_models.py
+  implementation_guard.py
+  implementation_agent_service.py
+  validation_runner.py
 scripts/
   context_agent.py
   review_agent.py
+  implementation_agent.py
 tests/
   test_evidence_collector.py
   test_context_agent_service.py
   test_review_agent_service.py
   test_agent_cli.py
+  test_implementation_models.py
+  test_implementation_guard.py
+  test_validation_runner.py
+  test_implementation_agent_service.py
+  test_implementation_agent_cli.py
+  test_implementation_agent_integration.py
 .nbs_agent_runtime/
   bundles/
   reports/
@@ -362,12 +382,13 @@ Implementation 至少驗證：
 - Collector 不修改 DB、runtime、Git index 或工作樹。
 - Full pytest、system acceptance、Hermes 與 2026-05 baseline 保持通過。
 
-## 19. 未來 Agent Roadmap
+## 19. 後續 Roadmap
 
-1. **Diagnostic Agent**：針對失敗測試與 runtime evidence 找根因，不直接修復。
-2. **Implementation Agent**：只執行已批准 plan 的單一 Task，逐 Task review；完整約束見 `IMPLEMENTATION_AGENT_CONTRACT.md`。
-3. **Documentation Agent**：只根據已驗證 evidence 回填 Brief、ADR 與 system map。
-4. **Git Integration Agent**：只在所有 gate PASS 且獲授權後 stage、commit 或 merge。
+1. **Agent Orchestrator**：以 CLI 編排 Context、人工授權點、Implementation、Review、完整驗證及 Hermes；保存 run status，第一階段提供 macOS 桌面通知，但不擴大任何 Agent 權限。
+2. **Agent Operations**：在 Streamlit 提供 read-only 圖形化執行狀態、耗時、Token、findings 與 Hermes 結果，不直接操作 Git、SQLite、baseline 或正式服務。
+3. **Diagnostic Agent**：針對失敗測試與 runtime evidence 找根因，不直接修復。
+4. **Documentation Agent**：只根據已驗證 evidence 回填 Brief、ADR 與 system map。
+5. **Git Integration Agent**：只在所有 gate PASS 且獲授權後 stage、commit 或 merge。
 
 未來 Agent 仍必須服從同一 Evidence Bundle、權限白名單、fingerprint、telemetry 與人工授權規則。
 
@@ -394,20 +415,20 @@ Implementation Agent 的 routing 由 `CODEX_AGENT_DISPATCH.md` machine-readable 
 
 ## 21. Implementation Evidence
 
-Task 5 至 Task 7 的實作與治理證據已完成核對：
+Context、Review 與 Implementation Agent 的最終實作及治理證據已完成核對：
 
-- Implementation commits：`2b7243b`、`5c07e60`、`9e2670a`、`9b3f300`、`4ba657c`。
-- Agent pack（implementation plan 指定 9 檔）：`110 passed`；full pytest：`329 passed`。
-- Context `--collect-only`：`8,284` estimated tokens，無 overflow。
-- Review `--collect-only`：`29` 個 diff files；denied source paths `0`。此數字只計資料內容，文件中描述 deny patterns 的文字不計入資料內容。
-- Read-only integration：passed；tracked worktree、正式 SQLite DB 與 runtime generation 未被修改。
-- Vue verify/build：passed；system acceptance：passed。
-- Hermes：`overallStatus=pass`，並完成 monthly governance、SQLite integrity 與服務驗收。
-- 2026-05 baseline matched：`HKD 12,057,968`。
+- Implementation Agent commits：`5355769` 至 `57df42c`；`main` 已 fast-forward 至 `57df42c`。
+- Full pytest：`474 passed`。
+- Implementation Agent core tests：`46 passed`；integration tests：`54 passed`。
+- Hermes targeted pack：`350 passed`；`overallStatus=pass`。
+- System acceptance：Streamlit、FastAPI 與 Vue 全部 ready。
+- Context/Review read-only integration：passed；tracked worktree、正式 SQLite DB 與 runtime generation 未被修改。
+- 正式 DB SHA-256 與合併前一致：`054b540b682bc3f8daf58f6930c67507169879979be264726b6805e939f25b56`。
+- 正式口徑 matched：`不含掛賬核銷與TT退款轉團款`；2026-05 baseline matched：`HKD 12,057,968`。
 
-以上證據只證明 Agent Evidence Pipeline 已通過本階段驗收。Context/Review Agent 仍然是 read-only；Hermes 仍是正式系統的 final acceptance，任何正式 DB、baseline、業務口徑或 Git 整合仍須遵守既有授權流程。
+以上證據證明目前 Agent Pipeline 已通過本階段驗收。Context/Review Agent 仍然是 read-only；Implementation Agent 仍只可執行一個已批准、allowlisted Task；Hermes 仍是正式系統的 final acceptance。任何正式 DB、baseline、業務口徑或 Git 整合仍須遵守既有授權流程。
 
-Task 6 治理入口：
+治理入口：
 
 - [Codex Auto-Dispatch Contract](CODEX_AGENT_DISPATCH.md)
 - [Repo-level Agent Instructions](../../AGENTS.md)
