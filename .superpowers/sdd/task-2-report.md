@@ -2,7 +2,7 @@
 
 ## Result
 
-DONE. Implemented the Task 2 safe run store, atomic JSON artifacts, append-only events, per-run advisory locks, path containment checks, symlink rejection, and artifact byte accounting. Applied review fixes for dangling symlinks and failure-atomic run creation.
+DONE. Implemented the Task 2 safe run store, atomic JSON artifacts, append-only events, per-run advisory locks, path containment checks, symlink rejection, and artifact byte accounting. Applied review fixes for dangling symlinks, failure-atomic run creation, and immutable approvals.
 
 ## Scope
 
@@ -31,6 +31,14 @@ Review-fix RED command:
 
 Result: `10 passed, 2 failed`; the two failures reproduced dangling-symlink skipping and a leftover run directory after status write failure.
 
+Re-review RED command:
+
+```text
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_store.py -q
+```
+
+Result: `12 passed, 2 failed`; the two failures reproduced duplicate approval overwrite and existing symlink acceptance behavior.
+
 ### GREEN
 
 Commands:
@@ -54,6 +62,13 @@ Review-fix GREEN:
 - `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/workflow_store.py`: passed
 - `git diff --check`: passed with no output
 
+Re-review GREEN:
+
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_store.py -q`: `14 passed in 0.08s`
+- Regression `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py tests/test_workflow_store.py -q`: `27 passed in 0.10s`
+- `/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/workflow_store.py`: passed
+- `git diff --check`: passed with no output
+
 ## Self-review
 
 - Atomic JSON writes use private same-directory temporary files, flush/fsync, `os.replace`, and parent directory fsync.
@@ -65,12 +80,15 @@ Review-fix GREEN:
 - `artifact_bytes()` checks `is_symlink()` before `exists()` so dangling links fail closed.
 - `create_run()` writes manifest/status in a staging directory and removes it on failure before rename.
 - `tests/test_workflow_store.py` ends with a single newline; `git diff --check` passed.
+- `write_approval()` checks symlinks and existing targets inside the run lock, rejecting duplicate or redirected approvals without overwriting.
 
 ## Commit
 
 Focused implementation commit: `289008e5e21f74189606f86b941fd56cb0f8bf32` (`feat: persist safe agent workflow state`)
 
 Focused review-fix commit: `d28cf53db544dd9c8ad2c35608be4025c556b9f5` (`fix: harden workflow store safety`)
+
+Focused re-review fix commit: `c9e9c0bf403b47661f78f2a4cb3806498146c11e` (`fix: make workflow approval immutable`)
 
 ## Concerns
 
