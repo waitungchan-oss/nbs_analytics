@@ -84,24 +84,27 @@ class SubprocessStageExecutor:
         )
         for reader in readers:
             reader.start()
+        stop_overflow_watcher = threading.Event()
+        overflow_watcher = threading.Thread(
+            target=_terminate_on_stdout_overflow,
+            args=(process, stdout_overflow, stop_overflow_watcher),
+            daemon=True,
+        )
+        overflow_watcher.start()
         timeout_error: subprocess.TimeoutExpired | None = None
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             timeout_error = exc
-            if os.name == "posix":
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            else:
-                process.kill()
+            _terminate_process_group(process)
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
         finally:
+            stop_overflow_watcher.set()
+            overflow_watcher.join(timeout=1)
             for reader in readers:
                 reader.join(timeout=1)
             if any(reader.is_alive() for reader in readers):
@@ -114,10 +117,10 @@ class SubprocessStageExecutor:
                 process.stdout.close()
             if process.stderr is not None:
                 process.stderr.close()
-        if timeout_error is not None:
-            raise timeout_error
         if stdout_overflow.is_set():
             raise ValueError("stage stdout exceeds 5 MiB limit")
+        if timeout_error is not None:
+            raise timeout_error
         stdout_text = bytes(stdout_tail).decode("utf-8", errors="replace")
         stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
         payload: dict = {}
@@ -818,6 +821,25 @@ def _sanitized_stage_error(
     return default_code, f"{label} stage execution failed"
 
 
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        process.kill()
+
+
+def _terminate_on_stdout_overflow(
+    process: subprocess.Popen,
+    overflow: threading.Event,
+    stop: threading.Event,
+) -> None:
+    if overflow.wait() and not stop.is_set():
+        _terminate_process_group(process)
+
+
 def _drain_tail(stream, tail: bytearray) -> None:
     while True:
         try:
@@ -832,9 +854,10 @@ def _drain_tail(stream, tail: bytearray) -> None:
 
 
 def _drain_stdout(stream, output: bytearray, tail: bytearray, overflow: threading.Event) -> None:
+    read = getattr(stream, "read1", stream.read)
     while True:
         try:
-            chunk = stream.read(8192)
+            chunk = read(65536)
         except (OSError, ValueError):
             return
         if not chunk:
