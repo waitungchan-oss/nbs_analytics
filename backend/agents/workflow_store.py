@@ -103,6 +103,8 @@ class WorkflowStore:
     def write_artifact(self, run_id: str, name: str, payload: dict) -> Path:
         if Path(name).name != name:
             raise PermissionError("artifact path must stay inside the run directory")
+        if name == "approval.json":
+            raise ValueError("approval.json can only be written by write_approval")
         if name not in ALLOWED_ARTIFACTS:
             raise ValueError("artifact name is not allowed")
         target = self._run_file(run_id, name)

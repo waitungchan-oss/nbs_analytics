@@ -114,6 +114,14 @@ def test_write_approval_rejects_existing_symlink(store, manifest):
         store.write_approval(manifest.run_id, _approval())
 
 
+def test_write_artifact_rejects_approval_json(store, manifest):
+    store.create_run(manifest, _status())
+    store.write_approval(manifest.run_id, _approval())
+
+    with pytest.raises(ValueError, match="approval.json"):
+        store.write_artifact(manifest.run_id, "approval.json", {"authorizationStatus": "tampered"})
+
+
 def test_store_appends_events_without_replacing_previous_events(store, manifest):
     store.create_run(manifest, _status())
 
