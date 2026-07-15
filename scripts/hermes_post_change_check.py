@@ -41,6 +41,12 @@ TARGETED_TESTS = [
     "tests/test_agent_cli.py",
     "tests/test_agent_dispatch_contract.py",
     "tests/test_agent_read_only_contract.py",
+    "tests/test_implementation_models.py",
+    "tests/test_implementation_guard.py",
+    "tests/test_validation_runner.py",
+    "tests/test_implementation_agent_service.py",
+    "tests/test_implementation_agent_cli.py",
+    "tests/test_implementation_agent_integration.py",
 ]
 
 
@@ -71,6 +77,24 @@ def build_check_plan(
         "print(json.dumps(check_phase2_baseline(Path('nbs_marketing_data.db')), "
         "ensure_ascii=False, indent=2))"
     )
+    implementation_agent_file_code = (
+        "from pathlib import Path; "
+        "files=("
+        "'backend/agents/implementation_models.py',"
+        "'backend/agents/implementation_guard.py',"
+        "'backend/agents/validation_runner.py',"
+        "'backend/agents/implementation_agent_service.py',"
+        "'scripts/implementation_agent.py',"
+        "'tests/test_implementation_models.py',"
+        "'tests/test_implementation_guard.py',"
+        "'tests/test_validation_runner.py',"
+        "'tests/test_implementation_agent_service.py',"
+        "'tests/test_implementation_agent_cli.py',"
+        "'tests/test_implementation_agent_integration.py'); "
+        "missing=[path for path in files if not Path(path).is_file()]; "
+        "print('missing=' + ','.join(missing)); "
+        "raise SystemExit(bool(missing))"
+    )
     plan = [
         CheckStep("git-status", ["git", "status", "--short", "--branch"]),
         CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
@@ -85,6 +109,12 @@ def build_check_plan(
         CheckStep(
             "monthly-baseline-governance",
             [py, "scripts/monthly_baseline_check.py"],
+        )
+    )
+    plan.append(
+        CheckStep(
+            "implementation-agent-files",
+            [py, "-c", implementation_agent_file_code],
         )
     )
     if include_tests:

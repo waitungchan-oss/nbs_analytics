@@ -11,6 +11,7 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
     assert "system-monitor" in labels
     assert "phase2-baseline" in labels
     assert "monthly-baseline-governance" in labels
+    assert "implementation-agent-files" in labels
     assert "targeted-tests" in labels
     targeted = next(step for step in plan if step.label == "targeted-tests")
     assert "tests/test_monthly_baseline_service.py" in targeted.command
@@ -34,8 +35,28 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
         "tests/test_agent_cli.py",
         "tests/test_agent_dispatch_contract.py",
         "tests/test_agent_read_only_contract.py",
+        "tests/test_implementation_models.py",
+        "tests/test_implementation_guard.py",
+        "tests/test_validation_runner.py",
+        "tests/test_implementation_agent_service.py",
+        "tests/test_implementation_agent_cli.py",
+        "tests/test_implementation_agent_integration.py",
     ]:
         assert test_name in targeted.command
+
+
+def test_implementation_agent_file_gate_is_read_only():
+    plan = post_check.build_check_plan(include_monitor=False, include_tests=False)
+    file_gate = next(step for step in plan if step.label == "implementation-agent-files")
+
+    assert file_gate.command[1:3] == ["-c", file_gate.command[2]]
+    assert "backend/agents/implementation_models.py" in file_gate.command[2]
+    assert "backend/agents/implementation_guard.py" in file_gate.command[2]
+    assert "backend/agents/implementation_agent_service.py" in file_gate.command[2]
+    assert "scripts/implementation_agent.py" in file_gate.command[2]
+    assert "read_text" not in file_gate.command[2]
+    assert "write_text" not in file_gate.command[2]
+    assert "worktree" not in file_gate.command[2]
 
 
 def test_plan_can_skip_monitor_and_tests_for_fast_dry_run():

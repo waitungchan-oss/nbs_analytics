@@ -66,3 +66,17 @@ def test_collect_only_does_not_modify_tracked_db_or_runtime():
     assert context.returncode == 0, context.stderr
     assert review.returncode == 0, review.stderr
     assert after == before
+
+
+def test_hermes_targeted_pack_covers_implementation_agent_isolation_tests():
+    hermes_source = (ROOT / "scripts/hermes_post_change_check.py").read_text(encoding="utf-8")
+
+    for test_name in [
+        "tests/test_implementation_models.py",
+        "tests/test_implementation_guard.py",
+        "tests/test_validation_runner.py",
+        "tests/test_implementation_agent_service.py",
+        "tests/test_implementation_agent_cli.py",
+        "tests/test_implementation_agent_integration.py",
+    ]:
+        assert test_name in hermes_source
