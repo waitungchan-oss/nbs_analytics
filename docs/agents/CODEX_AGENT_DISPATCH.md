@@ -52,5 +52,5 @@ Codex 建立並批准 implementation Task contract 後，只可分派一個 Task
 - `--agent-command` 只可使用使用者或環境明確批准的 runner。
 - Agent 輸出不能取代 Codex 的規劃、使用者授權、完整驗證或 Hermes acceptance。
 - Implementation Agent 的完整約束見 `docs/agents/IMPLEMENTATION_AGENT_CONTRACT.md`；它只執行已批准的單一 Task，Codex 保留下一 Task 的決定權。
-- Production Implementation dispatch 必須經 `scripts/implementation_agent.py` 的 contract-aware macOS sandbox；不得直接把一般 subprocess 或 service callback 當成 production runner。Sandbox backend 缺失或不支援時必須停止並回 blocked exit `2`。
+- Production Implementation dispatch 必須經 `scripts/implementation_agent.py` 的 contract-aware macOS staging sandbox：offline coding worker 只讀 disposable tracked-files copy、無 network，完成後由可信任 Controller 原子套用核准檔案。需要 network 的模型 transport 必須與 coding worker 分離；不得直接把可聯網 subprocess、一般 callback 或 service callback 當成 production runner。Sandbox backend 缺失或不支援時必須停止並回 blocked exit `2`。
 - Hermes 邊界以 `NBS_HERMES_MONITORING.md` 為準，不與 Review Agent 重複。

@@ -1,4 +1,6 @@
 import json
+import os
+import socket
 import subprocess
 import sys
 import threading
@@ -20,6 +22,26 @@ from backend.agents.evidence_models import EvidenceBundle
 PYTHON_ALLOWLIST = (sys.executable,)
 
 
+def _init_sandbox_fixture(root: Path) -> None:
+    (root / ".gitignore").write_text(
+        "*.db\n.env\n.nbs_runtime/\n", encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Sandbox Test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+
+
+def _response(summary: str = "done") -> str:
+    return json.dumps({
+        "schemaVersion": "implementation-response-v1",
+        "status": "completed",
+        "summary": summary,
+        "requestedValidationCommandIds": [],
+    })
+
+
 def _sandbox_runner(
     root: Path,
     script: Path,
@@ -36,76 +58,233 @@ def _sandbox_runner(
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
 def test_sandboxed_runner_allows_only_exact_approved_source_write(tmp_path):
-    target = tmp_path / "src/allowed.py"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
     target.parent.mkdir()
     target.write_text("value = 1\n", encoding="utf-8")
-    script = tmp_path / "agent.py"
+    (worktree / ".env").write_text("MUST_NOT_BE_STAGED=1\n", encoding="utf-8")
+    (worktree / "formal.db").write_bytes(b"FORMAL")
+    script = worktree / "agent.py"
     script.write_text(
         "import json, pathlib, sys\n"
-        "json.load(sys.stdin)\n"
-        f"pathlib.Path({str(target)!r}).write_text('value = 2\\n', encoding='utf-8')\n"
-        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed'}))\n",
+        "payload = json.load(sys.stdin)\n"
+        "root = pathlib.Path(payload['execution']['worktree'])\n"
+        "assert payload['task']['approvedWorktree'] == str(root)\n"
+        "assert not (root / '.env').exists()\n"
+        "assert not (root / 'formal.db').exists()\n"
+        "(root / 'src/allowed.py').write_text('value = 2\\n', encoding='utf-8')\n"
+        f"print({ _response('staged allowed write')!r})\n",
         encoding="utf-8",
     )
+    _init_sandbox_fixture(worktree)
 
-    result = _sandbox_runner(tmp_path, script, ("src/allowed.py",)).run({"task": "allowed"})
+    result = _sandbox_runner(worktree, script, ("src/allowed.py",)).run({
+        "task": {"approvedWorktree": str(worktree)},
+    })
+
+    assert result["status"] == "completed"
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+    assert (worktree / ".env").read_text(encoding="utf-8") == "MUST_NOT_BE_STAGED=1\n"
+    assert (worktree / "formal.db").read_bytes() == b"FORMAL"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_excludes_secret_even_if_it_was_accidentally_tracked(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "payload = json.load(sys.stdin)\n"
+        "root = pathlib.Path(payload['execution']['worktree'])\n"
+        "assert not (root / '.env').exists()\n"
+        "pathlib.Path('src/allowed.py').write_text('value = 2\\n', encoding='utf-8')\n"
+        f"print({_response('tracked secret excluded')!r})\n",
+        encoding="utf-8",
+    )
+    _init_sandbox_fixture(worktree)
+    (worktree / ".env").write_text("TRACKED_SECRET=do-not-stage\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", ".env"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-qm", "accidental secret"], cwd=worktree, check=True)
+
+    result = _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": {}})
 
     assert result["status"] == "completed"
     assert target.read_text(encoding="utf-8") == "value = 2\n"
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
-def test_sandboxed_runner_blocks_external_formal_state_write(tmp_path):
+def test_sandboxed_runner_denies_external_secret_read(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     target = worktree / "src/allowed.py"
     target.parent.mkdir()
     target.write_text("value = 1\n", encoding="utf-8")
-    external = tmp_path / "formal.db"
-    external.write_bytes(b"FORMAL")
+    external = tmp_path / "external.env"
+    external.write_text("TOP_SECRET=do-not-leak\n", encoding="utf-8")
     script = worktree / "agent.py"
     script.write_text(
         "import json, pathlib, sys\n"
         "json.load(sys.stdin)\n"
-        f"pathlib.Path({str(external)!r}).write_bytes(b'CORRUPTED')\n"
-        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed'}))\n",
+        f"pathlib.Path({str(external)!r}).read_text(encoding='utf-8')\n"
+        f"print({_response('secret leaked')!r})\n",
         encoding="utf-8",
     )
+    _init_sandbox_fixture(worktree)
 
     with pytest.raises(RuntimeError, match="Agent command failed"):
         _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": "hostile"})
 
-    assert external.read_bytes() == b"FORMAL"
+    assert target.read_text(encoding="utf-8") == "value = 1\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_denies_localhost_network_and_indirect_formal_write(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    formal = tmp_path / "external-formal.db"
+    formal.write_bytes(b"FORMAL")
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(1)
+    port = listener.getsockname()[1]
+    connected = threading.Event()
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError:
+            return
+        with connection:
+            connected.set()
+            formal.write_bytes(b"CORRUPTED_BY_LOCAL_SERVICE")
+
+    server = threading.Thread(target=serve)
+    server.start()
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, socket, sys\n"
+        "json.load(sys.stdin)\n"
+        f"socket.create_connection(('127.0.0.1', {port}), timeout=1).close()\n"
+        f"print({_response('network reached')!r})\n",
+        encoding="utf-8",
+    )
+    _init_sandbox_fixture(worktree)
+
+    with pytest.raises(RuntimeError, match="Agent command failed"):
+        _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": "hostile"})
+
+    server.join(timeout=2)
+    listener.close()
+    assert not connected.is_set()
+    assert formal.read_bytes() == b"FORMAL"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_kills_background_child_before_staging_validation(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, os, pathlib, sys, time\n"
+        "json.load(sys.stdin)\n"
+        "if os.fork() == 0:\n"
+        "    os.close(1); os.close(2)\n"
+        "    time.sleep(1)\n"
+        "    pathlib.Path('src/allowed.py').write_text('value = 99\\n', encoding='utf-8')\n"
+        "    os._exit(0)\n"
+        f"print({_response('parent complete')!r})\n",
+        encoding="utf-8",
+    )
+    _init_sandbox_fixture(worktree)
+
+    result = _sandbox_runner(worktree, script, ("src/allowed.py",)).run({"task": "child"})
+
+    time.sleep(1.2)
+    assert result["status"] == "completed"
+    assert target.read_text(encoding="utf-8") == "value = 1\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+def test_sandboxed_runner_atomically_replaces_actual_hardlink_without_touching_external_inode(
+    tmp_path, monkeypatch,
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src/allowed.py"
+    target.parent.mkdir()
+    target.write_text("value = 1\n", encoding="utf-8")
+    external = tmp_path / "external.py"
+    external.write_text("FORMAL\n", encoding="utf-8")
+    script = worktree / "agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "json.load(sys.stdin)\n"
+        "pathlib.Path('src/allowed.py').write_text('value = 2\\n', encoding='utf-8')\n"
+        f"print({_response('race-safe write')!r})\n",
+        encoding="utf-8",
+    )
+    _init_sandbox_fixture(worktree)
+    runner = _sandbox_runner(worktree, script, ("src/allowed.py",))
+    original_apply = runner._apply_staged_changes
+
+    def race_before_apply(staging, changes):
+        target.unlink()
+        os.link(external, target)
+        original_apply(staging, changes)
+
+    monkeypatch.setattr(runner, "_apply_staged_changes", race_before_apply)
+
+    result = runner.run({"task": "race"})
+
+    assert result["status"] == "completed"
+    assert external.read_text(encoding="utf-8") == "FORMAL\n"
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+    assert target.stat().st_ino != external.stat().st_ino
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
 def test_sandboxed_runner_denies_first_transient_ignored_db_write(tmp_path):
-    formal_db = tmp_path / "formal.db"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    formal_db = worktree / "formal.db"
     formal_db.write_bytes(b"FORMAL")
-    allowed = tmp_path / "src/allowed.py"
+    allowed = worktree / "src/allowed.py"
     allowed.parent.mkdir()
     allowed.write_text("value = 1\n", encoding="utf-8")
-    sentinel = tmp_path / "src/touched.txt"
-    script = tmp_path / "agent.py"
+    sentinel = worktree / "src/touched.txt"
+    script = worktree / "agent.py"
     script.write_text(
         "import json, pathlib, sys\n"
         "json.load(sys.stdin)\n"
         f"db = pathlib.Path({str(formal_db)!r})\n"
         f"sentinel = pathlib.Path({str(sentinel)!r})\n"
-        "before = db.read_bytes()\n"
         "try:\n"
         "    db.write_bytes(b'TRANSIENT')\n"
         "except PermissionError:\n"
         "    pass\n"
         "else:\n"
         "    sentinel.write_text('touched', encoding='utf-8')\n"
-        "    db.write_bytes(before)\n"
-        "print(json.dumps({'schemaVersion':'implementation-response-v1','status':'completed'}))\n",
+        "pathlib.Path('src/allowed.py').write_text('value = 2\\n', encoding='utf-8')\n"
+        f"print({_response('transient denied')!r})\n",
         encoding="utf-8",
     )
+    _init_sandbox_fixture(worktree)
 
     result = _sandbox_runner(
-        tmp_path,
+        worktree,
         script,
         ("src/allowed.py", "src/touched.txt"),
     ).run({"task": "transient"})

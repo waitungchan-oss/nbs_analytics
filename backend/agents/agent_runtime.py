@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import fcntl
+import hashlib
 from contextlib import contextmanager
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import time
+from copy import deepcopy
 from pathlib import Path
 from time import perf_counter
 from typing import Callable, Protocol
@@ -175,7 +180,7 @@ class SubprocessAgentRunner:
 
 
 class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
-    """Run the production implementation command inside a contract write sandbox."""
+    """Run a production coding worker in a disposable tracked-files staging copy."""
 
     def __init__(
         self,
@@ -203,21 +208,26 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
         self.project_root = project_root.resolve(strict=True)
         if not self.project_root.is_dir():
             raise PermissionError("implementation sandbox worktree must be a directory")
-        self.allowed_write_targets = self._resolve_write_targets(allowed_write_paths)
+        root_info = self.project_root.stat()
+        self.project_root_identity = (root_info.st_dev, root_info.st_ino)
+        self.allowed_write_paths = self._validate_write_paths(allowed_write_paths)
         self.sandbox_backend = str(backend)
-        self.profile = self._build_profile(self.allowed_write_targets)
 
-    def _resolve_write_targets(self, raw_paths: tuple[str, ...]) -> tuple[Path, ...]:
+    def _validate_write_paths(self, raw_paths: tuple[str, ...]) -> tuple[Path, ...]:
         if not raw_paths:
             raise PermissionError("implementation sandbox requires approved write targets")
-        targets: set[Path] = set()
+        paths: set[Path] = set()
         for raw in raw_paths:
             relative = Path(raw)
             if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
                 raise PermissionError(f"implementation sandbox write path is invalid: {raw}")
+            if self._is_sensitive_path(relative):
+                raise PermissionError(f"implementation sandbox write path is protected: {raw}")
             current = self.project_root
             for part in relative.parts[:-1]:
                 current = current / part
+                if not current.exists():
+                    break
                 if current.is_symlink():
                     raise PermissionError(
                         f"implementation sandbox write parent cannot be a symlink: {raw}"
@@ -235,62 +245,383 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
                 raise PermissionError(
                     f"implementation sandbox write target must be a file: {raw}"
                 )
-            resolved = lexical_target.resolve(strict=False)
-            try:
-                resolved.relative_to(self.project_root)
-            except ValueError as exc:
-                raise PermissionError(
-                    f"implementation sandbox write target escaped worktree: {raw}"
-                ) from exc
-            if resolved.exists() and resolved.stat().st_nlink > 1:
-                raise PermissionError(
-                    f"implementation sandbox write target cannot be a hard link: {raw}"
-                )
-            targets.add(resolved)
-        return tuple(sorted(targets, key=os.fspath))
+            paths.add(relative)
+        return tuple(sorted(paths, key=lambda value: value.as_posix()))
 
     @staticmethod
-    def _build_profile(targets: tuple[Path, ...]) -> str:
+    def _is_sensitive_path(relative: Path) -> bool:
+        protected_parts = {".git", ".nbs_runtime", ".nbs_agent_runtime", "secrets"}
+        if protected_parts.intersection(relative.parts):
+            return True
+        name = relative.name.lower()
+        if name == ".env" or name.startswith(".env."):
+            return True
+        return relative.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12"}
+
+    def _tracked_files(self) -> tuple[Path, ...]:
+        completed = subprocess.run(
+            ["git", "ls-files", "-z", "--cached"],
+            cwd=self.project_root,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise PermissionError("implementation staging requires a readable Git index")
+        paths: list[Path] = []
+        for raw in completed.stdout.split(b"\0"):
+            if not raw:
+                continue
+            relative = Path(os.fsdecode(raw))
+            if relative.is_absolute() or ".." in relative.parts or ".git" in relative.parts:
+                raise PermissionError("Git index contains an unsafe staging path")
+            if self._is_sensitive_path(relative):
+                continue
+            paths.append(relative)
+        return tuple(paths)
+
+    def _create_staging_copy(self, staging: Path) -> None:
+        tracked = self._tracked_files()
+        if tracked:
+            completed = subprocess.run(
+                [
+                    "git", "checkout-index", "-z", "--stdin",
+                    f"--prefix={os.fspath(staging)}{os.sep}",
+                ],
+                cwd=self.project_root,
+                input=b"\0".join(os.fsencode(path) for path in tracked) + b"\0",
+                capture_output=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise PermissionError("implementation staging could not materialize Git index files")
+        for relative in tracked:
+            target = staging / relative
+            if target.is_symlink() or not target.is_file():
+                raise PermissionError(f"tracked staging source must be a regular file: {relative}")
+            if target.stat().st_nlink != 1:
+                raise PermissionError(f"staging copy unexpectedly shares an inode: {relative}")
+        for relative in self.allowed_write_paths:
+            parent = staging / relative.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            if parent.is_symlink():
+                raise PermissionError(f"staging write parent cannot be a symlink: {relative}")
+
+    @staticmethod
+    def _read_private_file(path: Path, relative: str) -> tuple[bytes, int]:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise PermissionError(f"staging file must be a private regular file: {relative}")
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                content = handle.read()
+        finally:
+            os.close(descriptor)
+        return content, stat.S_IMODE(info.st_mode)
+
+    @staticmethod
+    def _snapshot(root: Path) -> dict[str, tuple[str, int]]:
+        snapshot: dict[str, tuple[str, int]] = {}
+        for directory, names, files in os.walk(root, followlinks=False):
+            base = Path(directory)
+            for name in names:
+                path = base / name
+                if path.is_symlink():
+                    raise PermissionError(f"staging directory cannot contain symlinks: {path}")
+            for name in files:
+                path = base / name
+                relative = path.relative_to(root).as_posix()
+                content, mode = SandboxedSubprocessAgentRunner._read_private_file(path, relative)
+                snapshot[relative] = (
+                    hashlib.sha256(content).hexdigest(),
+                    mode,
+                )
+        return snapshot
+
+    def _staged_changes(
+        self,
+        staging: Path,
+        before: dict[str, tuple[str, int]],
+    ) -> dict[Path, bytes | None]:
+        after = self._snapshot(staging)
+        changed = {
+            Path(path) for path in set(before) | set(after)
+            if before.get(path) != after.get(path)
+        }
+        unexpected = changed - set(self.allowed_write_paths)
+        if unexpected:
+            rendered = ", ".join(sorted(path.as_posix() for path in unexpected))
+            raise PermissionError(f"staging worker changed unapproved paths: {rendered}")
+        changes: dict[Path, bytes | None] = {}
+        for relative in sorted(changed, key=lambda value: value.as_posix()):
+            staged = staging / relative
+            changes[relative] = (
+                self._read_private_file(staged, relative.as_posix())[0]
+                if staged.exists() else None
+            )
+        return changes
+
+    @staticmethod
+    def _runtime_read_roots(executable: Path) -> tuple[Path, ...]:
+        roots = {
+            Path("/System/Library"),
+            Path("/usr/lib"),
+            Path("/usr/share"),
+            Path("/private/var/db/dyld"),
+        }
+        if executable.name.startswith("python"):
+            roots.add(executable.parent.parent)
+        else:
+            roots.add(executable.parent)
+        return tuple(sorted((path.resolve() for path in roots if path.exists()), key=os.fspath))
+
+    def _build_profile(self, staging: Path, targets: tuple[Path, ...]) -> str:
         rules = [
             "(version 1)",
             "(deny default)",
+            "(deny file-link)",
             "(allow process*)",
             "(allow sysctl*)",
             "(allow mach*)",
-            "(allow network*)",
-            "(allow file-read*)",
+            '(allow file-read* (literal "/"))',
+            f"(allow file-read* (subpath {json.dumps(os.fspath(staging))}))",
+            f"(allow file-read* (literal {json.dumps(self.argv[0])}))",
+            '(allow file-read* (literal "/dev/null"))',
+            '(allow file-read* (literal "/dev/urandom"))',
         ]
+        rules.extend(
+            f"(allow file-read* (subpath {json.dumps(os.fspath(root))}))"
+            for root in self._runtime_read_roots(Path(self.argv[0]))
+        )
         rules.extend(
             f"(allow file-write* (literal {json.dumps(os.fspath(target))}))"
             for target in targets
         )
         return "\n".join(rules)
 
-    def run(self, payload: dict) -> dict:
-        environment = os.environ.copy()
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        completed = subprocess.run(
-            [self.sandbox_backend, "-p", self.profile, *self.argv],
-            input=json.dumps(payload, ensure_ascii=False),
-            text=True,
-            capture_output=True,
-            timeout=self.timeout_seconds,
-            check=False,
-            shell=False,
-            cwd=self.project_root,
-            env=environment,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"Agent command failed with exit {completed.returncode}: {completed.stderr[:1000]}"
-            )
+    def _staged_argv(self, staging: Path) -> list[str]:
+        argv = [self.argv[0]]
+        for raw in self.argv[1:]:
+            candidate = Path(raw)
+            if candidate.is_absolute():
+                try:
+                    relative = candidate.resolve().relative_to(self.project_root)
+                except ValueError:
+                    argv.append(raw)
+                else:
+                    argv.append(os.fspath(staging / relative))
+            else:
+                argv.append(raw)
+        return argv
+
+    def _staged_payload(self, payload: dict, staging: Path) -> dict:
+        actual = os.fspath(self.project_root)
+        replacement = os.fspath(staging)
+
+        def rewrite(value):
+            if isinstance(value, dict):
+                return {key: rewrite(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [rewrite(item) for item in value]
+            if isinstance(value, str) and (value == actual or value.startswith(actual + os.sep)):
+                return replacement + value[len(actual):]
+            return value
+
+        staged = rewrite(deepcopy(payload))
+        task = staged.get("task")
+        if isinstance(task, dict):
+            task["approvedWorktree"] = replacement
+        staged["execution"] = {"mode": "disposable-staging", "worktree": replacement}
+        return staged
+
+    @staticmethod
+    def _terminate_process_group(process_group: int) -> None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process_group, sig)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+
+    @staticmethod
+    def _validate_response(stdout: str) -> dict:
         try:
-            result = json.loads(completed.stdout)
+            result = json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise ValueError("Agent output is not valid JSON") from exc
-        if not isinstance(result, dict):
-            raise ValueError("Agent output must be a JSON object")
+        required = {
+            "schemaVersion", "status", "summary", "requestedValidationCommandIds",
+        }
+        if not isinstance(result, dict) or set(result) != required:
+            raise ValueError("Agent output is not a valid implementation response")
+        if result.get("schemaVersion") != "implementation-response-v1":
+            raise ValueError("Agent output implementation schema is invalid")
+        if result.get("status") not in {"completed", "changes_required"}:
+            raise ValueError("Agent output implementation status is invalid")
+        if not isinstance(result.get("summary"), str) or not result["summary"].strip():
+            raise ValueError("Agent output implementation summary is invalid")
+        commands = result.get("requestedValidationCommandIds")
+        if not isinstance(commands, list) or not all(isinstance(item, str) for item in commands):
+            raise ValueError("Agent output validation commands are invalid")
         return result
+
+    def _open_actual_parent(self, relative: Path) -> int:
+        flags = os.O_RDONLY | os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(self.project_root, flags)
+        try:
+            root_info = os.fstat(descriptor)
+            if (root_info.st_dev, root_info.st_ino) != self.project_root_identity:
+                raise PermissionError("implementation worktree root changed during execution")
+            for part in relative.parent.parts:
+                try:
+                    child = os.open(part, flags, dir_fd=descriptor)
+                except FileNotFoundError:
+                    os.mkdir(part, mode=0o755, dir_fd=descriptor)
+                    child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _atomic_replace(parent_fd: int, name: str, content: bytes | None, mode: int) -> None:
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            raise PermissionError(f"actual implementation target is not a regular file: {name}")
+        if content is None:
+            if info is not None:
+                os.unlink(name, dir_fd=parent_fd)
+            return
+        temporary = f".nbs-agent-{uuid4().hex}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.fchmod(descriptor, mode)
+        finally:
+            os.close(descriptor)
+        try:
+            os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except Exception:
+            try:
+                os.unlink(temporary, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def _apply_staged_changes(self, staging: Path, changes: dict[Path, bytes | None]) -> None:
+        prepared: list[tuple[Path, int, bytes | None, int]] = []
+        try:
+            for relative, content in changes.items():
+                parent_fd = self._open_actual_parent(relative)
+                mode = 0o644
+                staged = staging / relative
+                if staged.exists():
+                    info = staged.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        os.close(parent_fd)
+                        raise PermissionError(
+                            f"staged implementation target is not a private regular file: {relative}"
+                        )
+                    mode = stat.S_IMODE(info.st_mode)
+                prepared.append((relative, parent_fd, content, mode))
+            for relative, parent_fd, content, mode in prepared:
+                self._atomic_replace(parent_fd, relative.name, content, mode)
+        finally:
+            for _, parent_fd, _, _ in prepared:
+                os.close(parent_fd)
+        self._verify_actual_changes(changes)
+
+    def _verify_actual_changes(self, changes: dict[Path, bytes | None]) -> None:
+        for relative, expected in changes.items():
+            parent_fd = self._open_actual_parent(relative)
+            try:
+                try:
+                    descriptor = os.open(
+                        relative.name,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_fd,
+                    )
+                except FileNotFoundError:
+                    if expected is None:
+                        continue
+                    raise PermissionError(
+                        f"actual implementation target disappeared after replace: {relative}"
+                    )
+                try:
+                    info = os.fstat(descriptor)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise PermissionError(
+                            f"actual implementation target is not a private regular file: {relative}"
+                        )
+                    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                        actual = handle.read()
+                finally:
+                    os.close(descriptor)
+                if expected is None or actual != expected:
+                    raise PermissionError(
+                        f"actual implementation target changed during atomic apply: {relative}"
+                    )
+            finally:
+                os.close(parent_fd)
+
+    def run(self, payload: dict) -> dict:
+        with tempfile.TemporaryDirectory(prefix="nbs-implementation-staging-") as raw_staging:
+            staging = Path(raw_staging).resolve()
+            self._create_staging_copy(staging)
+            before = self._snapshot(staging)
+            targets = tuple(staging / relative for relative in self.allowed_write_paths)
+            profile = self._build_profile(staging, targets)
+            environment = {
+                "HOME": os.fspath(staging),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "TMPDIR": os.fspath(staging),
+            }
+            process = subprocess.Popen(
+                [self.sandbox_backend, "-p", profile, *self._staged_argv(staging)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=staging,
+                env=environment,
+                shell=False,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(
+                    json.dumps(self._staged_payload(payload, staging), ensure_ascii=False),
+                    timeout=self.timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                self._terminate_process_group(process.pid)
+                process.communicate()
+                raise
+            finally:
+                self._terminate_process_group(process.pid)
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Agent command failed with exit {process.returncode}: {stderr[:1000]}"
+                )
+            result = self._validate_response(stdout)
+            changes = self._staged_changes(staging, before)
+            self._apply_staged_changes(staging, changes)
+            return result
 
 
 class AgentRuntime:
