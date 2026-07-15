@@ -12,6 +12,10 @@ _CONTRACT_KEYS = {
     "approvedBaseSha", "approvedWorktree", "allowedWritePaths", "validationCommands",
     "riskSurfaces", "maxChangedFiles", "maxDiffLines", "maxRepairLoops",
 }
+_OPTIONAL_CONTRACT_KEYS = {
+    "taskType", "redCommands", "greenCommands", "approvedTestBehaviorChanges",
+}
+_TASK_TYPES = {"behavior", "refactor", "test", "documentation", "configuration"}
 _CONTRACT_SCHEMA = "implementation-task-v1"
 _REPORT_SCHEMA = "implementation-run-report-v1"
 
@@ -52,6 +56,10 @@ class ImplementationTaskContract:
     max_changed_files: int = 8
     max_diff_lines: int = 800
     max_repair_loops: int = 2
+    task_type: str = "refactor"
+    red_commands: tuple[str, ...] = ()
+    green_commands: tuple[str, ...] = ()
+    approved_test_behavior_changes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version != _CONTRACT_SCHEMA:
@@ -69,6 +77,15 @@ class ImplementationTaskContract:
             raise ValueError("allowedWritePaths must contain at least one path")
         if not self.validation_commands:
             raise ValueError("validationCommands must contain at least one command ID")
+        if self.task_type not in _TASK_TYPES:
+            raise ValueError("taskType is invalid")
+        for key, value in (
+            ("redCommands", self.red_commands),
+            ("greenCommands", self.green_commands),
+            ("approvedTestBehaviorChanges", self.approved_test_behavior_changes),
+        ):
+            if not all(isinstance(item, str) and item for item in value):
+                raise ValueError(f"{key} must be a list of strings")
         for key, value in (
             ("maxChangedFiles", self.max_changed_files),
             ("maxDiffLines", self.max_diff_lines),
@@ -81,7 +98,7 @@ class ImplementationTaskContract:
     def from_dict(cls, payload: dict[str, Any]) -> "ImplementationTaskContract":
         if not isinstance(payload, dict):
             raise ValueError("Implementation task contract must be an object")
-        if set(payload) != _CONTRACT_KEYS:
+        if not _CONTRACT_KEYS <= set(payload) <= (_CONTRACT_KEYS | _OPTIONAL_CONTRACT_KEYS):
             raise ValueError("Implementation task contract schema keys are invalid")
         schema_version = _require_string(payload, "schemaVersion")
         if schema_version != _CONTRACT_SCHEMA:
@@ -100,6 +117,13 @@ class ImplementationTaskContract:
             max_changed_files=_require_positive_int(payload, "maxChangedFiles"),
             max_diff_lines=_require_positive_int(payload, "maxDiffLines"),
             max_repair_loops=_require_positive_int(payload, "maxRepairLoops"),
+            task_type=payload.get("taskType", "refactor"),
+            red_commands=_require_string_list(payload, "redCommands") if "redCommands" in payload else (),
+            green_commands=_require_string_list(payload, "greenCommands") if "greenCommands" in payload else (),
+            approved_test_behavior_changes=(
+                _require_string_list(payload, "approvedTestBehaviorChanges")
+                if "approvedTestBehaviorChanges" in payload else ()
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,7 +141,15 @@ class ImplementationTaskContract:
             "maxChangedFiles": self.max_changed_files,
             "maxDiffLines": self.max_diff_lines,
             "maxRepairLoops": self.max_repair_loops,
+            "taskType": self.task_type,
+            "redCommands": list(self.red_commands),
+            "greenCommands": list(self.green_commands),
+            "approvedTestBehaviorChanges": list(self.approved_test_behavior_changes),
         }
+
+    @property
+    def effective_green_commands(self) -> tuple[str, ...]:
+        return self.green_commands or self.validation_commands
 
     @property
     def fingerprint(self) -> str:
@@ -158,6 +190,9 @@ class ImplementationRunReport:
     diff_stat: dict[str, int]
     red_evidence: tuple[ValidationResult, ...]
     green_evidence: tuple[ValidationResult, ...]
+    repair_loops_used: int
+    test_files_changed: tuple[str, ...]
+    production_files_changed: tuple[str, ...]
     findings: tuple[dict, ...]
 
     def __post_init__(self) -> None:
@@ -178,6 +213,9 @@ class ImplementationRunReport:
             "diffStat": self.diff_stat,
             "redEvidence": [item.to_dict() for item in self.red_evidence],
             "greenEvidence": [item.to_dict() for item in self.green_evidence],
+            "repairLoopsUsed": self.repair_loops_used,
+            "testFilesChanged": list(self.test_files_changed),
+            "productionFilesChanged": list(self.production_files_changed),
             "findings": list(self.findings),
         }
 

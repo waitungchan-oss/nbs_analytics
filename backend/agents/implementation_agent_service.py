@@ -36,6 +36,9 @@ _RESPONSE_KEYS = {
     "schemaVersion", "status", "summary", "requestedValidationCommandIds",
 }
 _RESPONSE_STATUSES = {"completed", "needs_repair"}
+_TEST_BYPASS_MARKERS = ("pytest.skip", "@pytest.mark.skip", "xfail", "# noqa")
+_PRODUCTION_PREFIXES = ("backend/", "frontend/", "src/")
+_OUTPUT_CAP = 32_000
 
 
 class ApprovedAgentCommand(Protocol):
@@ -136,11 +139,23 @@ class ImplementationAgentService:
                 started=started,
             )
 
+        red_evidence = self._run_validation_commands(validated.red_commands, validated)
+        if validated.task_type == "behavior" and not any(
+            result.command_id.startswith("pytest") and result.exit_code != 0 and not result.timed_out
+            for result in red_evidence
+        ):
+            return self._finish(
+                validated, status="changes_required",
+                finding=self._finding("missing_red_evidence", "behavior changes require a failing approved test command"),
+                before=before, red_evidence=red_evidence, started=started,
+            )
+
         green_evidence: list[ValidationResult] = []
         repair: dict[str, Any] | None = None
         max_repairs = min(
             validated.max_repair_loops,
             int(load_implementation_policy(self.project_root)["limits"]["maxRepairLoops"]),
+            2,
         )
         for attempt in range(max_repairs + 1):
             request = self._request(validated, bundle, repair=repair)
@@ -150,7 +165,9 @@ class ImplementationAgentService:
                     status="context_overflow",
                     finding=self._finding("request_token_limit", "implementation request exceeds its token budget"),
                     before=before,
+                    red_evidence=red_evidence,
                     green_evidence=green_evidence,
+                    repair_loops_used=attempt,
                     started=started,
                 )
             try:
@@ -161,11 +178,13 @@ class ImplementationAgentService:
                 if decision.status != "allowed":
                     return self._finish(
                         validated, status=decision.status, finding=self._decision_finding(decision),
-                        before=before, green_evidence=green_evidence, started=started,
+                        before=before, red_evidence=red_evidence, green_evidence=green_evidence,
+                        repair_loops_used=attempt, started=started,
                     )
                 return self._finish(
                     validated, status="runtime_error", finding=self._finding("runner_error", str(exc)),
-                    before=before, green_evidence=green_evidence, started=started,
+                    before=before, red_evidence=red_evidence, green_evidence=green_evidence,
+                    repair_loops_used=attempt, started=started,
                 )
 
             decision = self._post_write_decision(validated, before)
@@ -173,7 +192,8 @@ class ImplementationAgentService:
                 return self._finish(
                     validated, status=decision.status, finding=self._decision_finding(decision),
                     before=before, changed_files=decision.changed_files,
-                    diff_lines=decision.diff_lines, green_evidence=green_evidence, started=started,
+                    diff_lines=decision.diff_lines, red_evidence=red_evidence,
+                    green_evidence=green_evidence, repair_loops_used=attempt, started=started,
                 )
 
             try:
@@ -183,21 +203,32 @@ class ImplementationAgentService:
                     validated, status="invalid_agent_output",
                     finding=self._finding("invalid_agent_output", str(exc)), before=before,
                     changed_files=decision.changed_files, diff_lines=decision.diff_lines,
-                    green_evidence=green_evidence, started=started,
+                    red_evidence=red_evidence, green_evidence=green_evidence,
+                    repair_loops_used=attempt, started=started,
                 )
 
             if parsed["status"] == "needs_repair":
                 if attempt == max_repairs:
                     return self._finish(
-                        validated, status="changes_required",
+                        validated, status="validation_failed",
                         finding=self._finding("repair_limit", parsed["summary"]), before=before,
                         changed_files=decision.changed_files, diff_lines=decision.diff_lines,
-                        green_evidence=green_evidence, started=started,
+                        red_evidence=red_evidence, green_evidence=green_evidence,
+                        repair_loops_used=attempt, started=started,
                     )
                 repair = {"reason": parsed["summary"], "validation": []}
                 continue
 
-            results = self._run_validations(validated)
+            test_safety = self._test_safety_finding(validated, decision.changed_files)
+            if test_safety is not None:
+                return self._finish(
+                    validated, status="changes_required", finding=test_safety, before=before,
+                    changed_files=decision.changed_files, diff_lines=decision.diff_lines,
+                    red_evidence=red_evidence, green_evidence=green_evidence,
+                    repair_loops_used=attempt, started=started,
+                )
+
+            results = self._run_validation_commands(validated.effective_green_commands, validated)
             green_evidence.extend(results)
             failures = [result for result in results if result.exit_code != 0 or result.timed_out]
             if not failures:
@@ -206,18 +237,21 @@ class ImplementationAgentService:
                     return self._finish(
                         validated, status=final.status, finding=self._decision_finding(final),
                         before=before, changed_files=final.changed_files,
-                        diff_lines=final.diff_lines, green_evidence=green_evidence, started=started,
+                        diff_lines=final.diff_lines, red_evidence=red_evidence,
+                        green_evidence=green_evidence, repair_loops_used=attempt, started=started,
                     )
                 return self._finish(
                     validated, status="completed", before=before, changed_files=final.changed_files,
-                    diff_lines=final.diff_lines, green_evidence=green_evidence, started=started,
+                    diff_lines=final.diff_lines, red_evidence=red_evidence,
+                    green_evidence=green_evidence, repair_loops_used=attempt, started=started,
                 )
             if attempt == max_repairs:
                 return self._finish(
                     validated, status="validation_failed",
                     finding=self._finding("validation_failed", "approved validation command failed"),
                     before=before, changed_files=decision.changed_files,
-                    diff_lines=decision.diff_lines, green_evidence=green_evidence, started=started,
+                    diff_lines=decision.diff_lines, red_evidence=red_evidence,
+                    green_evidence=green_evidence, repair_loops_used=attempt, started=started,
                 )
             repair = {
                 "reason": "approved validation command failed",
@@ -309,7 +343,9 @@ class ImplementationAgentService:
             "contractFingerprint": contract.fingerprint,
             "task": contract.to_dict(),
             "context": bundle.to_dict(),
-            "validationCommandIds": list(contract.validation_commands),
+            "validationCommandIds": list(contract.effective_green_commands),
+            "redCommands": list(contract.red_commands),
+            "greenCommands": list(contract.effective_green_commands),
             "repair": repair,
         }
 
@@ -329,19 +365,23 @@ class ImplementationAgentService:
         requested = response.get("requestedValidationCommandIds")
         if not isinstance(requested, list) or not all(isinstance(item, str) for item in requested):
             raise ValueError("agent response requested validation commands are invalid")
-        if len(set(requested)) != len(requested) or tuple(requested) != contract.validation_commands:
+        if len(set(requested)) != len(requested) or tuple(requested) != contract.effective_green_commands:
             raise ValueError("agent response cannot change approved validation commands")
         if estimate_tokens(json.dumps(response, ensure_ascii=False, sort_keys=True)) > self._implementation_budget("outputTokens"):
             raise ValueError("agent response exceeds output token budget")
         return response
 
-    def _run_validations(self, contract: ImplementationTaskContract) -> list[ValidationResult]:
+    def _run_validation_commands(
+        self, command_ids: tuple[str, ...], contract: ImplementationTaskContract,
+    ) -> list[ValidationResult]:
         results: list[ValidationResult] = []
-        for command_id in contract.validation_commands:
+        for command_id in command_ids:
             try:
-                results.append(self.validation_runner.run(command_id, self._validation_arguments(command_id, contract)))
+                results.append(self._capped_result(
+                    self.validation_runner.run(command_id, self._validation_arguments(command_id, contract))
+                ))
             except CommandRejected as exc:
-                results.append(
+                results.append(self._capped_result(
                     ValidationResult(
                         command_id=command_id,
                         argv=(),
@@ -350,8 +390,16 @@ class ImplementationAgentService:
                         stderr=str(exc),
                         duration_ms=0,
                     )
-                )
+                ))
         return results
+
+    @staticmethod
+    def _capped_result(result: ValidationResult) -> ValidationResult:
+        return ValidationResult(
+            command_id=result.command_id, argv=result.argv, exit_code=result.exit_code,
+            stdout=result.stdout[:_OUTPUT_CAP], stderr=result.stderr[:_OUTPUT_CAP],
+            duration_ms=result.duration_ms, timed_out=result.timed_out,
+        )
 
     @staticmethod
     def _validation_arguments(
@@ -380,6 +428,32 @@ class ImplementationAgentService:
             )
         return decision
 
+    def _test_safety_finding(
+        self, contract: ImplementationTaskContract, changed_files: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        test_files = tuple(path for path in changed_files if path.startswith("tests/"))
+        if not test_files:
+            return None
+        completed = subprocess.run(
+            ["git", "diff", "--unified=0", "HEAD", "--", *test_files],
+            cwd=self.project_root, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, check=False, shell=False,
+        )
+        current_path = ""
+        for line in completed.stdout.splitlines():
+            if line.startswith("+++ b/"):
+                current_path = line[6:]
+                continue
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            if any(marker in line for marker in _TEST_BYPASS_MARKERS):
+                if current_path not in contract.approved_test_behavior_changes:
+                    return self._finding(
+                        "test_safety_violation", "new test bypass marker requires exact path approval",
+                        path=current_path,
+                    )
+        return None
+
     def _finish(
         self,
         contract: ImplementationTaskContract | None,
@@ -389,11 +463,17 @@ class ImplementationAgentService:
         before: WorktreeState | None = None,
         changed_files: tuple[str, ...] = (),
         diff_lines: int = 0,
+        red_evidence: list[ValidationResult] | None = None,
         green_evidence: list[ValidationResult] | None = None,
+        repair_loops_used: int = 0,
         started: float,
     ) -> ImplementationRunReport:
         current = self._current_state()
         task_id = contract.task_id if contract is not None else "unknown"
+        test_files_changed = tuple(path for path in changed_files if path.startswith("tests/"))
+        production_files_changed = tuple(
+            path for path in changed_files if path.startswith(_PRODUCTION_PREFIXES)
+        )
         report = ImplementationRunReport(
             schema_version=_REPORT_SCHEMA,
             status=status,
@@ -403,8 +483,11 @@ class ImplementationAgentService:
             end_head=current.head,
             changed_files=changed_files,
             diff_stat={"files": len(changed_files), "lines": diff_lines},
-            red_evidence=(),
+            red_evidence=tuple(red_evidence or ()),
             green_evidence=tuple(green_evidence or ()),
+            repair_loops_used=repair_loops_used,
+            test_files_changed=test_files_changed,
+            production_files_changed=production_files_changed,
             findings=tuple(() if finding is None else (finding,)),
         )
         self._write_runtime_records(report, started)
@@ -433,7 +516,9 @@ class ImplementationAgentService:
                 "taskId": report.task_id,
                 "changedFiles": len(report.changed_files),
                 "diffLines": report.diff_stat["lines"],
-                "validationCommands": len(report.green_evidence),
+                "redCommands": len(report.red_evidence),
+                "greenCommands": len(report.green_evidence),
+                "repairLoopsUsed": report.repair_loops_used,
                 "durationMs": round((perf_counter() - started) * 1000, 3),
                 "result": report.status,
             }
@@ -451,7 +536,7 @@ class ImplementationAgentService:
 
     @staticmethod
     def _finding(rule: str, message: str, **extra: Any) -> dict[str, Any]:
-        return {"rule": rule, "message": message, **extra}
+        return {"rule": rule, "code": rule, "message": message, **extra}
 
     def _decision_finding(self, decision: GuardDecision) -> dict[str, Any]:
         return self._finding(

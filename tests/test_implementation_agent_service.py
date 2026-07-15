@@ -150,6 +150,26 @@ def contract(project_root: Path) -> ImplementationTaskContract:
 
 
 @pytest.fixture
+def behavior_contract(project_root: Path) -> ImplementationTaskContract:
+    return make_contract(
+        project_root,
+        taskType="behavior",
+        redCommands=["pytest_targeted"],
+        greenCommands=["pytest_targeted", "py_compile"],
+    )
+
+
+@pytest.fixture
+def docs_contract(project_root: Path) -> ImplementationTaskContract:
+    return make_contract(
+        project_root,
+        taskType="documentation",
+        allowedWritePaths=["docs/task-4-brief.md"],
+        greenCommands=["py_compile"],
+    )
+
+
+@pytest.fixture
 def validation_runner() -> FakeValidationRunner:
     return FakeValidationRunner()
 
@@ -290,6 +310,73 @@ def test_service_collects_approved_plan_as_context_evidence(service, contract):
     assert any(item.source == contract.plan_path for item in bundle.evidence)
 
 
+def test_behavior_change_requires_red_evidence(service, behavior_contract, project_root, validation_runner):
+    behavior_contract = replace(behavior_contract, red_commands=())
+    runner = RunnerSpy(project_root)
+
+    report = service.execute(behavior_contract, runner.command)
+
+    assert report.status == "changes_required"
+    assert report.findings[0]["code"] == "missing_red_evidence"
+    assert runner.calls == 0
+
+
+def test_docs_only_task_does_not_require_red_evidence(service, docs_contract, project_root):
+    runner = RunnerSpy(
+        project_root,
+        write_path="docs/task-4-brief.md",
+        response={
+            "schemaVersion": "implementation-response-v1",
+            "status": "completed",
+            "summary": "updated approved documentation",
+            "requestedValidationCommandIds": ["py_compile"],
+        },
+    )
+
+    report = service.execute(docs_contract, runner.command)
+
+    assert report.status == "completed"
+    assert report.red_evidence == ()
+    assert report.test_files_changed == ()
+    assert report.production_files_changed == ()
+
+
+def test_failing_green_command_blocks_completion(
+    service, behavior_contract, project_root, validation_runner,
+):
+    validation_runner.exit_codes = [1, 1, 1, 1, 1, 1, 1]
+    runner = RunnerSpy(project_root)
+
+    report = service.execute(behavior_contract, runner.command)
+
+    assert report.status == "validation_failed"
+    assert report.red_evidence[0].exit_code == 1
+    assert report.green_evidence[0].exit_code == 1
+    assert report.repair_loops_used == 2
+    assert runner.calls == 3
+
+
+@pytest.mark.parametrize("marker", ["pytest.skip", "@pytest.mark.skip", "xfail", "# noqa"])
+def test_new_test_bypass_marker_requires_explicit_approval(
+    service, contract, project_root, marker,
+):
+    def marker_runner(request: dict) -> object:
+        (project_root / "tests/test_allowed.py").write_text(
+            f"def test_allowed():\n    {marker}\n    assert True\n", encoding="utf-8"
+        )
+        return {
+            "schemaVersion": "implementation-response-v1",
+            "status": "completed",
+            "summary": "implemented approved task",
+            "requestedValidationCommandIds": ["pytest_targeted", "py_compile"],
+        }
+
+    report = service.execute(contract, marker_runner)
+
+    assert report.status == "changes_required"
+    assert report.findings[0]["code"] == "test_safety_violation"
+
+
 def test_service_limits_repair_calls_and_writes_telemetry(
     service, contract, project_root, validation_runner,
 ):
@@ -300,5 +387,6 @@ def test_service_limits_repair_calls_and_writes_telemetry(
 
     assert report.status == "validation_failed"
     assert runner_spy.calls == 1 + contract.max_repair_loops
+    assert report.repair_loops_used == contract.max_repair_loops
     assert (project_root / ".nbs_agent_runtime/implementation/reports").is_dir()
     assert (project_root / ".nbs_agent_runtime/implementation/telemetry.jsonl").is_file()
