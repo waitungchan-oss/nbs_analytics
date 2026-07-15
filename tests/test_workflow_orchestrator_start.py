@@ -336,10 +336,14 @@ def test_subprocess_executor_rejects_stdout_over_stage_cap_without_full_spool(mo
 
     monkeypatch.setattr("backend.agents.workflow_orchestrator.tempfile.TemporaryFile", forbidden_spool)
     executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
-    script = "import sys; sys.stdout.write('x' * (5 * 1024 * 1024 + 1))"
+    script = (
+        "import sys, time; "
+        "sys.stdout.write('x' * (5 * 1024 * 1024 + 1)); sys.stdout.flush(); "
+        "time.sleep(30)"
+    )
 
     with pytest.raises(ValueError, match="stage stdout exceeds"):
-        executor.run_json((str(executor.python), "-c", script), timeout=10)
+        executor.run_json((str(executor.python), "-c", script), timeout=1)
 
 
 def test_subprocess_executor_allows_successful_text_output_when_json_is_not_required(monkeypatch):

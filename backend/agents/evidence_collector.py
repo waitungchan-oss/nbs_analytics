@@ -18,6 +18,7 @@ from backend.agents.evidence_models import (
 
 @dataclass(frozen=True)
 class EvidencePolicy:
+    _REVIEW_ROOT_SOURCE_EXTENSIONS = frozenset({".py"})
     project_root: Path
     read_roots: tuple[str, ...]
     root_files: tuple[str, ...]
@@ -73,7 +74,11 @@ class EvidencePolicy:
 
         top = relative.parts[0] if relative.parts else ""
         is_root_file = relative_text in self.root_files
-        is_tracked_root_source = allow_tracked_root_source and len(relative.parts) == 1
+        is_tracked_root_source = (
+            allow_tracked_root_source
+            and len(relative.parts) == 1
+            and resolved.suffix in self._REVIEW_ROOT_SOURCE_EXTENSIONS
+        )
         allowed = is_root_file or is_tracked_root_source or top in self.read_roots
         if not allowed or (not is_root_file and resolved.suffix not in self.extensions):
             raise PermissionError(f"Path is not allowlisted: {relative_text}")

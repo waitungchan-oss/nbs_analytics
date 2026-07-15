@@ -1,8 +1,8 @@
 # NBS Hermes Monitoring Contract
 
-更新日期：2026-06-30
+更新日期：2026-07-15
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`
-契約版本：v1 read-only monitoring
+契約版本：v1.1 read-only monitoring
 
 ---
 
@@ -46,6 +46,16 @@ Hermes 可以讀取以下來源：
 - `.nbs_runtime/health_history.jsonl`
 - `.nbs_runtime/restore_drill_latest.json`
 - `.nbs_runtime/diagnostics/`
+
+### Phase 1 Workflow Artifacts
+
+- `.nbs_agent_runtime/runs/<run-id>/manifest.json`
+- `.nbs_agent_runtime/runs/<run-id>/status.json`
+- `.nbs_agent_runtime/runs/<run-id>/events.jsonl`
+- `.nbs_agent_runtime/runs/<run-id>/approval.json` 與 allowlisted stage JSON artifact
+- `agent_config/workflow_retention.json`
+
+Hermes 只可 read-only 報告 workflow artifact、cap warning 與 retention state，不得寫入 artifact、執行 `prune` 或取代 Review / full verification gate。每個 stage artifact 的 hard cap 是 5 MiB；單一 run 的 stage artifact 合計超過 25 MiB 時 Store 會記錄 warning event，但不會由 Hermes 自動 compact。retention 僅可由既有 policy 的 best-effort housekeeping 或明確 `prune --apply` 處理合資格的 completed run；最新 30 個 terminal run 與非 completed run 均受保護。
 
 ### Logs
 
@@ -207,13 +217,8 @@ Hermes 不得自行要求或執行以下操作：
 - 是否有 SQLite backup / quarantine 新增。
 - 是否有 runtime logs 新錯誤。
 - 是否有 health history 新紀錄。
-- 是否有 Git branch / diff / worktree 可用。
-
-若目前不是 Git repo，Hermes 應明確回報：
-
-```text
-Git monitoring unavailable: current project is not a Git repository.
-```
+- Git branch、diff、recent commits 與 active worktrees。
+- 是否有 `.nbs_agent_runtime` artifact hard-cap rejection、soft-cap warning 或 retention skipped reason。
 
 ---
 
@@ -367,14 +372,7 @@ Hermes 應依任務類型選擇測試。
 
 ## 11. Git / Diff / Worktree Monitoring
 
-Current limitation:
-
-```text
-/Users/chanwaitung2025/Downloads/nbs_analytics is currently not a Git repository.
-Hermes cannot monitor branch, worktree, commit history, or git diff until the project is initialized as Git repo or moved into a Git workspace.
-```
-
-若未來 repo 化，Hermes 可使用：
+`/Users/chanwaitung2025/Downloads/nbs_analytics` 是 Git repository。Hermes 可使用：
 
 ```bash
 git status --short --branch

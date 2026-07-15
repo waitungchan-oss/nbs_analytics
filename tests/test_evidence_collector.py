@@ -287,6 +287,8 @@ def test_review_collection_keeps_legal_tracked_root_source_while_skipping_proces
     brief.write_text("objective", encoding="utf-8")
     root_source = tmp_path / "worker.py"
     root_source.write_text("VALUE = 1\n", encoding="utf-8")
+    root_note = tmp_path / "notes.md"
+    root_note.write_text("process note", encoding="utf-8")
     report = tmp_path / ".superpowers/sdd/task-report.md"
     report.write_text("process-only report", encoding="utf-8")
     secret = tmp_path / "backend/secret.db"
@@ -294,6 +296,7 @@ def test_review_collection_keeps_legal_tracked_root_source_while_skipping_proces
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
     root_source.write_text("VALUE = 2\n", encoding="utf-8")
+    root_note.write_text("process note changed", encoding="utf-8")
     report.write_text("process-only report changed", encoding="utf-8")
     secret.write_text("formal rows changed", encoding="utf-8")
 
@@ -302,6 +305,7 @@ def test_review_collection_keeps_legal_tracked_root_source_while_skipping_proces
     assert [item.source for item in bundle.evidence] == ["worker.py"]
     assert "+VALUE = 2" in bundle.evidence[0].content
     serialized = str(bundle.to_dict())
+    assert "process note" not in serialized
     assert "process-only report" not in serialized
     assert "formal rows" not in serialized
 
