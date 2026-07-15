@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +13,8 @@ import pytest
 
 from backend.agents.workflow_models import WorkflowEvent, WorkflowStatus
 from backend.agents.workflow_notifications import NotificationResult
+from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.context_agent_service import context_bundle_from_payload
 from backend.agents.workflow_orchestrator import (
     OUTPUT_TAIL,
     StageResult,
@@ -31,7 +36,7 @@ CONTEXT_PAYLOAD = {
     "unknowns": [],
     "contextFingerprint": "a" * 64,
 }
-COLLECT_ONLY_PAYLOAD = {
+_COLLECT_ONLY_UNSIGNED = {
     "schemaVersion": "context-evidence-v1",
     "task": {"id": "task-5", "objective": "collect context", "scope": [], "forbidden": []},
     "repository": {"head": "a" * 40, "dirtyFiles": []},
@@ -40,7 +45,10 @@ COLLECT_ONLY_PAYLOAD = {
     "symbols": [],
     "relatedTests": [],
     "recentChanges": [],
-    "bundleFingerprint": "b" * 64,
+}
+COLLECT_ONLY_PAYLOAD = {
+    **_COLLECT_ONLY_UNSIGNED,
+    "bundleFingerprint": canonical_fingerprint(_COLLECT_ONLY_UNSIGNED),
 }
 
 
@@ -121,6 +129,17 @@ def test_collect_only_context_evidence_payload_stops_for_authorization(tmp_path)
     run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / result.run_id
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["contextFingerprint"] == COLLECT_ONLY_PAYLOAD["bundleFingerprint"]
+    context_bundle_from_payload(COLLECT_ONLY_PAYLOAD)
+
+
+def test_malformed_collect_only_evidence_does_not_reach_authorization(tmp_path):
+    malformed = {**COLLECT_ONLY_PAYLOAD, "documents": [{"invalid": True}]}
+    stage = executor(malformed)
+
+    result = make_orchestrator(tmp_path, stage, FakeNotifier([])).start(BRIEF)
+
+    assert result.status == "failed"
+    assert result.status != "awaiting_authorization"
 
 
 def test_start_forwards_supplied_context_command_without_persisting_it(tmp_path):
@@ -231,3 +250,39 @@ def test_subprocess_executor_parses_successful_json_larger_than_tail(monkeypatch
     assert result.exit_code == 0
     assert result.payload == payload
     assert len(result.stdout_tail.encode("utf-8")) == OUTPUT_TAIL
+
+
+def test_subprocess_executor_kills_process_group_on_timeout(monkeypatch):
+    calls: list[tuple] = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = -signal.SIGKILL
+
+        def __init__(self):
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.wait_calls = 0
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            return self.returncode
+
+    process = FakeProcess()
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid + 1)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append(("killpg", pgid, sig)))
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        executor.run_json(("fake-python", "-c", "pass"), timeout=1)
+
+    assert calls[0][1]["start_new_session"] is True
+    assert ("killpg", 4322, signal.SIGKILL) in calls

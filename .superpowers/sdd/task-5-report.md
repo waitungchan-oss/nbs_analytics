@@ -72,3 +72,25 @@ RED: 2 focused failures reproduced the collect-only status mismatch and oversize
 /Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_orchestrator_start.py -q
 11 passed in 0.27s
 ```
+
+## Final Review Fixes: timeout process groups and collect-only validation
+
+- POSIX stage processes now start in a dedicated session and timeout handling terminates the complete process group with `os.killpg(..., signal.SIGKILL)`, then waits for reaping. Non-POSIX retains direct process termination.
+- Reader threads use bounded joins and close pipe streams as a fallback, so descendant-held pipes cannot make the orchestrator wait indefinitely. Reader functions tolerate closed streams during fallback cleanup.
+- Collect-only evidence is validated through `context_bundle_from_payload()` before acceptance; malformed schema, evidence shape, or canonical fingerprint cannot reach `awaiting_authorization`.
+- Added regressions for process-group timeout termination and malformed collect-only evidence.
+
+Final review verification:
+
+```text
+RED: timeout termination and malformed evidence regressions failed against the pre-fix implementation.
+
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_orchestrator_start.py -q
+13 passed in 0.30s
+
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/agents/workflow_orchestrator.py tests/test_workflow_orchestrator_start.py
+passed
+
+git diff --check
+passed with no output
+```

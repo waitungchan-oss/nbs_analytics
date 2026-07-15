@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -13,6 +15,7 @@ from typing import Callable, Protocol
 from uuid import uuid4
 
 from .evidence_collector import EvidencePolicy
+from .context_agent_service import context_bundle_from_payload
 from .workflow_models import (
     EVENT_SCHEMA,
     MANIFEST_SCHEMA,
@@ -58,6 +61,7 @@ class SubprocessStageExecutor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            start_new_session=os.name == "posix",
         )
         stdout_tail = bytearray()
         stderr_tail = bytearray()
@@ -68,19 +72,39 @@ class SubprocessStageExecutor:
         )
         for reader in readers:
             reader.start()
+        timeout_error: subprocess.TimeoutExpired | None = None
         try:
             process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-            raise
+        except subprocess.TimeoutExpired as exc:
+            timeout_error = exc
+            if os.name == "posix":
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
         finally:
             for reader in readers:
-                reader.join()
+                reader.join(timeout=1)
+            if any(reader.is_alive() for reader in readers):
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+                for reader in readers:
+                    reader.join(timeout=0.5)
             if process.stdout is not None:
                 process.stdout.close()
             if process.stderr is not None:
                 process.stderr.close()
+        if timeout_error is not None:
+            stdout_spool.close()
+            raise timeout_error
         stdout_text = bytes(stdout_tail).decode("utf-8", errors="replace")
         stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
         payload: dict = {}
@@ -187,12 +211,15 @@ class WorkflowOrchestrator:
         self._transition(run_id, status, "context_running", "Context collection started")
         self.store.write_artifact(run_id, "context.json", payload)
 
+        collect_only_valid = False
+        if payload.get("schemaVersion") == "context-evidence-v1":
+            try:
+                context_bundle_from_payload(payload)
+                collect_only_valid = True
+            except (TypeError, ValueError):
+                collect_only_valid = False
         context_succeeded = result.exit_code == 0 and (
-            payload.get("status") == "ready"
-            or (
-                payload.get("schemaVersion") == "context-evidence-v1"
-                and _is_sha256(payload.get("bundleFingerprint"))
-            )
+            payload.get("status") == "ready" or collect_only_valid
         )
         if not context_succeeded:
             target = "blocked" if result.exit_code != 0 else "failed"
@@ -283,7 +310,10 @@ def _now() -> str:
 
 def _drain_tail(stream, tail: bytearray) -> None:
     while True:
-        chunk = stream.read(8192)
+        try:
+            chunk = stream.read(8192)
+        except (OSError, ValueError):
+            return
         if not chunk:
             return
         tail.extend(chunk)
@@ -293,16 +323,16 @@ def _drain_tail(stream, tail: bytearray) -> None:
 
 def _drain_stdout(stream, spool, tail: bytearray) -> None:
     while True:
-        chunk = stream.read(8192)
+        try:
+            chunk = stream.read(8192)
+        except (OSError, ValueError):
+            return
         if not chunk:
             return
-        spool.write(chunk)
+        try:
+            spool.write(chunk)
+        except (OSError, ValueError):
+            return
         tail.extend(chunk)
         if len(tail) > OUTPUT_TAIL:
             del tail[:-OUTPUT_TAIL]
-
-
-def _is_sha256(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
-    )
