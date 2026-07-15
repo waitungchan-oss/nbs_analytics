@@ -7,14 +7,17 @@ import os
 import shutil
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from uuid import uuid4
 
 from .workflow_models import (
     WorkflowApproval,
     WorkflowEvent,
     WorkflowManifest,
     WorkflowStatus,
+    EVENT_SCHEMA,
     legal_transition,
 )
 
@@ -31,6 +34,8 @@ ALLOWED_ARTIFACTS = frozenset(
         "archive-summary.json",
     }
 )
+DEFAULT_STAGE_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_RUN_ARTIFACT_SOFT_CAP_BYTES = 25 * 1024 * 1024
 
 
 class WorkflowLockedError(RuntimeError):
@@ -38,10 +43,22 @@ class WorkflowLockedError(RuntimeError):
 
 
 class WorkflowStore:
-    def __init__(self, project_root: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        stage_artifact_max_bytes: int = DEFAULT_STAGE_ARTIFACT_MAX_BYTES,
+        run_artifact_soft_cap_bytes: int = DEFAULT_RUN_ARTIFACT_SOFT_CAP_BYTES,
+    ) -> None:
+        if isinstance(stage_artifact_max_bytes, bool) or stage_artifact_max_bytes <= 0:
+            raise ValueError("stage artifact cap must be a positive integer")
+        if isinstance(run_artifact_soft_cap_bytes, bool) or run_artifact_soft_cap_bytes <= 0:
+            raise ValueError("run artifact soft cap must be a positive integer")
         self.project_root = self._existing_directory(Path(project_root), "project root")
         self.runtime_root = self._prepare_directory(self.project_root / ".nbs_agent_runtime", "runtime root")
         self.runs_root = self._prepare_directory(self.runtime_root / "runs", "runs root")
+        self.stage_artifact_max_bytes = stage_artifact_max_bytes
+        self.run_artifact_soft_cap_bytes = run_artifact_soft_cap_bytes
 
     def create_run(self, manifest: WorkflowManifest, status: WorkflowStatus) -> Path:
         if manifest.run_id != status.run_id:
@@ -108,13 +125,37 @@ class WorkflowStore:
         if name not in ALLOWED_ARTIFACTS:
             raise ValueError("artifact name is not allowed")
         target = self._run_file(run_id, name)
+        artifact_bytes = self._json_bytes(payload)
+        if len(artifact_bytes) > self.stage_artifact_max_bytes:
+            raise ValueError("stage artifact exceeds hard cap")
         with self.run_lock(run_id):
+            previous_bytes = self.artifact_bytes(run_id)
             self._atomic_json(target, payload)
             status = self.load_status(run_id)
+            total_bytes = self.artifact_bytes(run_id)
             updated = WorkflowStatus.from_dict(
-                {**status.to_dict(), "artifactBytes": self.artifact_bytes(run_id)}
+                {**status.to_dict(), "artifactBytes": total_bytes}
             )
             self._atomic_json(self._run_file(run_id, "status.json"), updated.to_dict())
+            if previous_bytes <= self.run_artifact_soft_cap_bytes < total_bytes:
+                now = datetime.now(timezone.utc).isoformat()
+                self._append_event(
+                    run_id,
+                    WorkflowEvent(
+                        EVENT_SCHEMA,
+                        run_id,
+                        f"event-{uuid4().hex}",
+                        "artifact_size_warning",
+                        None,
+                        None,
+                        now,
+                        "Run artifact soft cap exceeded",
+                        {
+                            "artifactBytes": total_bytes,
+                            "runArtifactSoftCapBytes": self.run_artifact_soft_cap_bytes,
+                        },
+                    ),
+                )
         return target
 
     def append_event(self, run_id: str, event: WorkflowEvent) -> None:
@@ -227,12 +268,16 @@ class WorkflowStore:
             return json.load(handle)
 
     @staticmethod
+    def _json_bytes(payload: dict) -> bytes:
+        return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+    @staticmethod
     def _atomic_json(path: Path, payload: dict) -> None:
         parent = path.parent
         WorkflowStore._assert_regular_directory(parent, "artifact parent")
         if path.exists() or path.is_symlink():
             WorkflowStore._assert_regular_file(path, "artifact target")
-        encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        encoded = WorkflowStore._json_bytes(payload)
         fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
         temp_path = Path(temp_name)
         try:

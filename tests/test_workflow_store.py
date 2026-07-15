@@ -255,6 +255,44 @@ def test_artifact_bytes_rejects_dangling_symlink(store, manifest):
         store.artifact_bytes(manifest.run_id)
 
 
+def test_write_artifact_rejects_stage_payload_over_hard_cap(tmp_path, manifest):
+    limited = WorkflowStore(
+        tmp_path,
+        stage_artifact_max_bytes=128,
+        run_artifact_soft_cap_bytes=512,
+    )
+    limited.create_run(manifest, _status())
+
+    with pytest.raises(ValueError, match="stage artifact exceeds"):
+        limited.write_artifact(manifest.run_id, "context.json", {"content": "x" * 256})
+
+    assert not (limited.runs_root / manifest.run_id / "context.json").exists()
+
+
+def test_write_artifact_emits_warning_when_run_crosses_soft_cap(tmp_path, manifest):
+    limited = WorkflowStore(
+        tmp_path,
+        stage_artifact_max_bytes=512,
+        run_artifact_soft_cap_bytes=180,
+    )
+    limited.create_run(manifest, _status())
+
+    limited.write_artifact(manifest.run_id, "context.json", {"content": "x" * 80})
+    limited.write_artifact(manifest.run_id, "review.json", {"content": "y" * 80})
+
+    status = limited.load_status(manifest.run_id)
+    events = [
+        __import__("json").loads(line)
+        for line in (limited.runs_root / manifest.run_id / "events.jsonl").read_text().splitlines()
+    ]
+    assert status.artifact_bytes > 180
+    assert events[-1]["eventType"] == "artifact_size_warning"
+    assert events[-1]["metadata"] == {
+        "artifactBytes": status.artifact_bytes,
+        "runArtifactSoftCapBytes": 180,
+    }
+
+
 def test_create_run_cleans_up_when_status_write_fails(store, manifest, monkeypatch):
     original = store._atomic_json
     calls = 0
