@@ -41,10 +41,16 @@ def test_cli_fake_executor_runs_start_then_explicit_approval_to_completed_withou
     plan = tmp_path / "docs" / "plan.md"
     plan.write_text("# plan\n", encoding="utf-8")
     monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
-    context = {
-        "status": "ready", "taskUnderstanding": [], "systemBoundaries": [], "relevantFiles": [],
-        "dependencies": [], "recommendedTests": [], "risks": [], "unknowns": [], "contextFingerprint": "a" * 64,
+    from backend.agents.evidence_models import canonical_fingerprint
+
+    context_unsigned = {
+        "schemaVersion": "context-evidence-v1",
+        "task": {"id": "task-7", "objective": "complete fake workflow", "scope": [], "forbidden": []},
+        "repository": {"head": "b" * 40, "dirtyFiles": []},
+        "guardrails": {"revenueScope": "read-only"},
+        "documents": [], "symbols": [], "relatedTests": [], "recentChanges": [],
     }
+    context = {**context_unsigned, "bundleFingerprint": canonical_fingerprint(context_unsigned)}
     executor = FakeExecutor([_result(context)])
 
     def build_flow(*, notify, housekeeping=None):
@@ -95,6 +101,14 @@ def test_cli_fake_executor_runs_start_then_explicit_approval_to_completed_withou
     ]) == 0
     completed = json.loads(capsys.readouterr().out)
     assert completed["status"] == "completed"
+    review_argv = executor.calls[2][0]
+    assert "--task-contract" in review_argv
+    task_contract_path = Path(review_argv[review_argv.index("--task-contract") + 1])
+    implementation_argv = executor.calls[1][0]
+    implementation_contract_path = Path(implementation_argv[implementation_argv.index("--contract") + 1])
+    assert task_contract_path == implementation_contract_path
+    assert task_contract_path != contract_path
+    assert not task_contract_path.exists()
     run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / started["runId"]
     persisted = "\n".join(path.read_text(encoding="utf-8") for path in run_dir.iterdir() if path.is_file())
     assert "codex fake-implementation" not in persisted

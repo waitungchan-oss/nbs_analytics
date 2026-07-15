@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -175,8 +176,11 @@ class WorkflowOrchestrator:
         try:
             result = self.stage_executor.run_json(argv, timeout=CONTEXT_TIMEOUT)
         except Exception as exc:
+            code, message = _sanitized_stage_error(
+                "context", exc, default_code="failed_context_executor",
+            )
             return self._finish_failed(
-                brief_relative, brief_bytes, identity, None, "failed_context_executor", str(exc), notify
+                brief_relative, brief_bytes, identity, None, code, message, notify
             )
 
         payload = result.payload
@@ -273,15 +277,42 @@ class WorkflowOrchestrator:
             return self.store.load_status(run_id)
         if isinstance(authorization, WorkflowStatus):
             return authorization
-        status, manifest, contract_file, contract, implementation_runner = authorization
+        status, manifest, contract, contract_payload, implementation_runner = authorization
+        with self._approved_contract_snapshot(run_id, contract_payload, contract.fingerprint) as contract_file:
+            return self._execute_approved(
+                run_id,
+                status=status,
+                manifest=manifest,
+                contract_file=contract_file,
+                contract=contract,
+                implementation_runner=implementation_runner,
+                review_agent_command=review_agent_command,
+                notify=notify,
+            )
 
+    def _execute_approved(
+        self,
+        run_id: str,
+        *,
+        status: WorkflowStatus,
+        manifest: WorkflowManifest,
+        contract_file: Path,
+        contract: ImplementationTaskContract,
+        implementation_runner: tuple[str, ...],
+        review_agent_command: str,
+        notify: bool,
+    ) -> WorkflowStatus:
         try:
+            self._assert_approved_snapshot(contract_file, contract.fingerprint)
             implementation = self.stage_executor.run_json(
                 self._implementation_argv(contract_file, implementation_runner), timeout=CONTEXT_TIMEOUT,
             )
         except Exception as exc:
+            code, message = _sanitized_stage_error(
+                "implementation", exc, default_code="failed_implementation_executor",
+            )
             return self._transition(
-                run_id, status, "failed", str(exc), error_code="failed_implementation_executor",
+                run_id, status, "failed", message, error_code=code,
                 notify=notify, stage="implementation",
             )
         self.store.write_artifact(run_id, "implementation.json", implementation.payload)
@@ -315,12 +346,16 @@ class WorkflowOrchestrator:
             notify=False, stage="review",
         )
         try:
+            self._assert_approved_snapshot(contract_file, contract.fingerprint)
             review = self.stage_executor.run_json(
-                self._review_argv(manifest, run_id, review_agent_command), timeout=CONTEXT_TIMEOUT,
+                self._review_argv(manifest, run_id, review_agent_command, contract_file), timeout=CONTEXT_TIMEOUT,
             )
         except Exception as exc:
+            code, message = _sanitized_stage_error(
+                "review", exc, default_code="failed_review_executor",
+            )
             return self._transition(
-                run_id, status, "failed", str(exc), error_code="failed_review_executor",
+                run_id, status, "failed", message, error_code=code,
                 notify=notify, stage="review",
             )
         self.store.write_artifact(run_id, "review.json", review.payload)
@@ -350,8 +385,11 @@ class WorkflowOrchestrator:
                 self._full_pytest_argv(), timeout=CONTEXT_TIMEOUT, require_json=False,
             )
         except Exception as exc:
+            _, message = _sanitized_stage_error(
+                "full verification", exc, default_code="full_verification_blocked",
+            )
             return self._transition(
-                run_id, status, "blocked", str(exc), error_code="full_verification_blocked",
+                run_id, status, "blocked", message, error_code="full_verification_blocked",
                 notify=notify, stage="full_verification",
             )
         verification["fullPytest"] = {
@@ -369,8 +407,11 @@ class WorkflowOrchestrator:
         try:
             acceptance = self.stage_executor.run_json(self._acceptance_argv(), timeout=CONTEXT_TIMEOUT)
         except Exception as exc:
+            _, message = _sanitized_stage_error(
+                "system acceptance", exc, default_code="full_verification_blocked",
+            )
             return self._transition(
-                run_id, self.store.load_status(run_id), "blocked", str(exc), error_code="full_verification_blocked",
+                run_id, self.store.load_status(run_id), "blocked", message, error_code="full_verification_blocked",
                 notify=notify, stage="full_verification",
             )
         verification["acceptance"] = acceptance.payload
@@ -388,8 +429,11 @@ class WorkflowOrchestrator:
         try:
             hermes = self.stage_executor.run_json(self._hermes_argv(), timeout=CONTEXT_TIMEOUT)
         except Exception as exc:
+            _, message = _sanitized_stage_error(
+                "Hermes", exc, default_code="hermes_blocked",
+            )
             return self._transition(
-                run_id, status, "blocked", str(exc), error_code="hermes_blocked", notify=notify, stage="hermes",
+                run_id, status, "blocked", message, error_code="hermes_blocked", notify=notify, stage="hermes",
             )
         self.store.write_artifact(run_id, "hermes.json", hermes.payload)
         if hermes.exit_code != 0 or hermes.payload.get("overallStatus") != "pass":
@@ -412,7 +456,7 @@ class WorkflowOrchestrator:
         implementation_agent_command: str,
         review_agent_command: str,
         notify: bool,
-    ) -> tuple[WorkflowStatus, WorkflowManifest, Path, ImplementationTaskContract, tuple[str, ...]] | WorkflowStatus | None:
+    ) -> tuple[WorkflowStatus, WorkflowManifest, ImplementationTaskContract, dict, tuple[str, ...]] | WorkflowStatus | None:
         try:
             with self.store.run_lock(run_id):
                 status = self.store.load_status(run_id)
@@ -423,9 +467,8 @@ class WorkflowOrchestrator:
                     self._approved_runner(review_agent_command)
                     manifest = self.store.load_manifest(run_id)
                     contract_file = Path(contract_path).resolve()
-                    contract = ImplementationTaskContract.from_dict(
-                        json.loads(contract_file.read_text(encoding="utf-8"))
-                    )
+                    contract_payload = json.loads(contract_file.read_text(encoding="utf-8"))
+                    contract = ImplementationTaskContract.from_dict(contract_payload)
                     self._validate_approval_identity(manifest, contract, contract_file)
                     approval = WorkflowApproval(
                         schema_version=APPROVAL_SCHEMA,
@@ -448,9 +491,47 @@ class WorkflowOrchestrator:
                     run_id, status, "implementation_running", "Implementation agent started",
                     error_code=None, stage="implementation",
                 )
-                return running, manifest, contract_file, contract, implementation_runner
+                return running, manifest, contract, contract.to_dict(), implementation_runner
         except WorkflowLockedError:
             return None
+
+    @contextmanager
+    def _approved_contract_snapshot(
+        self,
+        run_id: str,
+        payload: dict,
+        expected_fingerprint: str,
+    ):
+        snapshots_root = self.store.runtime_root / "approved-snapshots"
+        if snapshots_root.is_symlink():
+            raise PermissionError("approved snapshot root must not be a symlink")
+        snapshots_root.mkdir(mode=0o700, exist_ok=True)
+        if not snapshots_root.is_dir() or snapshots_root.is_symlink():
+            raise PermissionError("approved snapshot root must be a regular directory")
+        with tempfile.TemporaryDirectory(prefix=f".{run_id}.", dir=snapshots_root) as directory:
+            snapshot = Path(directory) / "contract.json"
+            encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            fd = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(snapshot, 0o400)
+                self._assert_approved_snapshot(snapshot, expected_fingerprint)
+                yield snapshot
+            finally:
+                snapshot.unlink(missing_ok=True)
+
+    @staticmethod
+    def _assert_approved_snapshot(path: Path, expected_fingerprint: str) -> None:
+        if path.is_symlink() or not path.is_file():
+            raise PermissionError("approved contract snapshot is not a regular file")
+        contract = ImplementationTaskContract.from_dict(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        if contract.fingerprint != expected_fingerprint:
+            raise PermissionError("approved contract snapshot fingerprint changed")
 
     def _write_approval_locked(self, run_id: str, approval: WorkflowApproval) -> bool:
         approval_path = self.store._run_file(run_id, "approval.json")
@@ -535,13 +616,20 @@ class WorkflowOrchestrator:
             "--agent-command", *runner,
         )
 
-    def _review_argv(self, manifest: WorkflowManifest, run_id: str, command: str) -> tuple[str, ...]:
+    def _review_argv(
+        self,
+        manifest: WorkflowManifest,
+        run_id: str,
+        command: str,
+        contract_file: Path,
+    ) -> tuple[str, ...]:
         run_dir = self.store.runs_root / run_id
         return (
             str(self.project_root / ".venv" / "bin" / "python"),
             "scripts/review_agent.py", "--brief", manifest.brief_path,
             "--base", manifest.git_head, "--head", "WORKTREE",
             "--context", str(run_dir / "context.json"),
+            "--task-contract", str(contract_file),
             "--verification", str(run_dir / "targeted-verification.json"),
             "--agent-command", command, "--strict",
         )
@@ -598,12 +686,53 @@ class WorkflowOrchestrator:
             return completed.stdout.strip()
 
         dirty: list[dict[str, str]] = []
-        for line in run("status", "--porcelain", "--untracked-files=all").splitlines():
-            relative = line[3:]
-            path = self.project_root / relative
-            if path.is_file():
-                dirty.append({"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=self.project_root,
+            capture_output=True,
+            text=False,
+            shell=False,
+            check=True,
+        ).stdout
+        records = status.split(b"\0")
+        index = 0
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if not record:
+                continue
+            if len(record) < 4 or record[2:3] != b" ":
+                raise ValueError("Git porcelain status record is invalid")
+            state = record[:2].decode("ascii", errors="replace")
+            relative = record[3:].decode("utf-8", errors="replace")
+            entry = {
+                "status": state,
+                "path": relative,
+                "sha256": self._dirty_path_identity(relative, state),
+            }
+            if "R" in state or "C" in state:
+                if index >= len(records) or not records[index]:
+                    raise ValueError("Git porcelain rename record is incomplete")
+                entry["originalPath"] = records[index].decode("utf-8", errors="replace")
+                index += 1
+            dirty.append(entry)
+        dirty.sort(key=lambda item: (item["path"], item["status"], item.get("originalPath", "")))
         return {"head": run("rev-parse", "HEAD"), "branch": run("branch", "--show-current") or "(detached)", "dirtyFiles": dirty}
+
+    def _dirty_path_identity(self, relative: str, status: str) -> str:
+        path = self.project_root / relative
+        if path.is_symlink():
+            content = os.readlink(path).encode("utf-8", errors="surrogateescape")
+        elif path.is_file():
+            content = path.read_bytes()
+        else:
+            content = json.dumps(
+                {"path": relative, "status": status, "state": "missing-or-non-file"},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        return hashlib.sha256(content).hexdigest()
 
     def _transition(self, run_id: str, current: WorkflowStatus, target: str, message: str, *, error_code: str | None = None, notify: bool = False, stage: str = "context") -> WorkflowStatus:
         now = _now()
@@ -655,6 +784,23 @@ class WorkflowOrchestrator:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sanitized_stage_error(
+    stage: str,
+    error: Exception,
+    *,
+    default_code: str,
+) -> tuple[str, str]:
+    label = stage[:1].upper() + stage[1:]
+    if isinstance(error, subprocess.TimeoutExpired):
+        timeout_code = (
+            default_code[:-len("executor")] + "timeout"
+            if default_code.endswith("executor")
+            else default_code
+        )
+        return timeout_code, f"{label} stage timed out"
+    return default_code, f"{label} stage execution failed"
 
 
 def _drain_tail(stream, tail: bytearray) -> None:

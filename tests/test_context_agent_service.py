@@ -6,6 +6,7 @@ from backend.agents.context_agent_service import (
     build_context_evidence_payload,
     build_context_report,
     context_bundle_from_payload,
+    context_summary_from_evidence_payload,
 )
 from backend.agents.evidence_models import CommandEvidence, EvidenceBundle, EvidenceItem, canonical_fingerprint
 
@@ -68,6 +69,22 @@ def test_collect_only_returns_bundle_without_runner(tmp_path):
     )
     assert report["schemaVersion"] == "context-evidence-v1"
     assert report["bundleFingerprint"]
+
+
+def test_collect_only_context_evidence_converts_to_strict_review_summary():
+    payload = build_context_evidence_payload(make_bundle())
+
+    summary = context_summary_from_evidence_payload(payload)
+
+    assert set(summary) == {
+        "schemaVersion", "status", "taskUnderstanding", "systemBoundaries",
+        "relevantFiles", "dependencies", "recommendedTests", "risks", "unknowns",
+        "contextFingerprint",
+    }
+    assert summary["schemaVersion"] == "context-summary-v1"
+    assert summary["status"] == "ready"
+    assert summary["contextFingerprint"] == payload["bundleFingerprint"]
+    assert all(set(item) == {"path", "reason", "symbols"} for item in summary["relevantFiles"])
 
 
 def test_runtime_root_must_be_named_agent_runtime(tmp_path):

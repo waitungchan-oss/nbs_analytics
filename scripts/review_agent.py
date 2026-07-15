@@ -4,6 +4,7 @@ import argparse
 import json
 import shlex
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -12,7 +13,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.agent_runtime import SubprocessAgentRunner, resolve_runtime_output_path
+from backend.agents.context_agent_service import context_summary_from_evidence_payload
 from backend.agents.evidence_collector import EvidenceCollector, EvidencePolicy
+from backend.agents.implementation_models import ImplementationTaskContract
 from backend.agents.review_agent_service import (
     build_review_evidence_payload,
     format_review_markdown,
@@ -38,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--base", default="main")
     parser.add_argument("--head", default="WORKTREE")
     parser.add_argument("--context")
+    parser.add_argument("--task-contract")
     parser.add_argument("--verification")
     parser.add_argument("--collect-only", action="store_true")
     parser.add_argument("--agent-command")
@@ -76,6 +80,19 @@ def _read_verification(path: str) -> list[dict]:
     return commands
 
 
+def _review_task_from_implementation_contract(path: Path) -> dict:
+    payload = _read_object(str(path), "Implementation task contract")
+    contract = ImplementationTaskContract.from_dict(payload)
+    return {
+        **contract.to_dict(),
+        "scope": list(contract.allowed_write_paths),
+        "forbidden": [
+            "writes outside allowedWritePaths",
+            "SQLite, baseline, revenue, business rules, export schema, or Git integration",
+        ],
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -90,6 +107,12 @@ def main(argv: list[str] | None = None) -> int:
         bundle = EvidenceCollector(PROJECT_ROOT, policy=policy).collect_review(
             brief, base_ref=args.base, head_ref=args.head,
         )
+        if args.task_contract:
+            task_contract_path = policy.resolve_input_path(Path(args.task_contract))
+            bundle = replace(
+                bundle,
+                task=_review_task_from_implementation_contract(task_contract_path),
+            )
         if args.collect_only:
             report = build_review_evidence_payload(
                 bundle, context_summary={}, verification=[],
@@ -98,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
             context_path = policy.resolve_input_path(Path(args.context)) if args.context else None
             verification_path = policy.resolve_input_path(Path(args.verification)) if args.verification else None
             context_summary = _read_object(str(context_path), "Context summary") if context_path else {}
+            if context_summary.get("schemaVersion") == "context-evidence-v1":
+                context_summary = context_summary_from_evidence_payload(context_summary)
             verification = _read_verification(str(verification_path)) if verification_path else []
             runner = None
             if args.agent_command:

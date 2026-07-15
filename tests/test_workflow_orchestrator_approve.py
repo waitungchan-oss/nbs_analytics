@@ -177,15 +177,17 @@ def test_approve_runs_fixed_final_gates_and_persists_terminal_evidence_without_p
     assert status.status == "completed"
     assert status.completed_at == status.updated_at
     python = str(ROOT / ".venv/bin/python")
+    approved_snapshot = executor.calls[1][0][3]
     assert [call[0] for call in executor.calls[1:]] == [
-        (python, "scripts/implementation_agent.py", "--contract", str(contract_path), "--agent-command", "codex", "exec", "--json"),
-        (python, "scripts/review_agent.py", "--brief", BRIEF.as_posix(), "--base", flow.store.load_manifest(started.run_id).git_head, "--head", "WORKTREE", "--context", str(tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id / "context.json"), "--verification", str(tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id / "targeted-verification.json"), "--agent-command", "claude --json", "--strict"),
+        (python, "scripts/implementation_agent.py", "--contract", approved_snapshot, "--agent-command", "codex", "exec", "--json"),
+        (python, "scripts/review_agent.py", "--brief", BRIEF.as_posix(), "--base", flow.store.load_manifest(started.run_id).git_head, "--head", "WORKTREE", "--context", str(tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id / "context.json"), "--task-contract", approved_snapshot, "--verification", str(tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id / "targeted-verification.json"), "--agent-command", "claude --json", "--strict"),
         (python, "-m", "pytest", "-q"),
         (python, "scripts/system_manager.py", "acceptance"),
         (python, "scripts/hermes_post_change_check.py", "--skip-monitor", "--json"),
     ]
     implementation_argv = executor.calls[1][0]
     assert implementation_argv[-4:] == ("--agent-command", "codex", "exec", "--json")
+    assert not Path(approved_snapshot).exists()
     review_argv = executor.calls[2][0]
     assert review_argv[-3:] == ("--agent-command", "claude --json", "--strict")
     run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id
@@ -216,6 +218,38 @@ def test_approve_runs_fixed_final_gates_and_persists_terminal_evidence_without_p
     assert any(title == "Implementation completed" for title, _ in notifier.messages)
     assert any(title == "Workflow completed" for title, _ in notifier.messages)
     assert all(" start" not in " ".join(argv) and " stop" not in " ".join(argv) for argv, _ in executor.calls)
+
+
+def test_approve_dispatches_fingerprint_bound_snapshot_after_original_contract_is_replaced(tmp_path):
+    flow, executor, _, started = started_run(tmp_path)
+    contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    approved_payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    add_successful_approval_stages(flow, executor, started, contract_path)
+    add_passing_final_gates(executor)
+
+    original_run_json = executor.run_json
+
+    def replace_before_dispatch(argv, *, timeout, require_json=True):
+        if "scripts/implementation_agent.py" in argv:
+            replaced = {**approved_payload, "objective": "replacement must not execute"}
+            contract_path.write_text(json.dumps(replaced), encoding="utf-8")
+            dispatched_path = Path(argv[argv.index("--contract") + 1])
+            assert dispatched_path != contract_path
+            assert json.loads(dispatched_path.read_text(encoding="utf-8")) == approved_payload
+        return original_run_json(argv, timeout=timeout, require_json=require_json)
+
+    executor.run_json = replace_before_dispatch
+
+    status = flow.approve(
+        started.run_id,
+        contract_path,
+        implementation_agent_command="codex",
+        review_agent_command="claude",
+    )
+
+    assert status.status == "completed"
+    dispatched_path = Path(executor.calls[1][0][executor.calls[1][0].index("--contract") + 1])
+    assert not dispatched_path.exists()
 
 
 def test_approve_persists_bounded_text_evidence_for_full_pytest(tmp_path):

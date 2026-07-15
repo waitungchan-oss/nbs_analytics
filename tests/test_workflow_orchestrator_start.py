@@ -154,6 +154,38 @@ def test_start_forwards_supplied_context_command_without_persisting_it(tmp_path)
     assert "codex --json" not in (run_dir / "manifest.json").read_text()
 
 
+def test_git_identity_uses_nul_porcelain_and_records_delete_rename_and_status_paths(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "old name.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "deleted.py").write_text("DELETE = True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "mv", "old name.py", "new name.py"], cwd=tmp_path, check=True)
+    (tmp_path / "deleted.py").unlink()
+    (tmp_path / "untracked name.py").write_text("UNTRACKED = True\n", encoding="utf-8")
+
+    flow = object.__new__(WorkflowOrchestrator)
+    flow.project_root = tmp_path
+    identity = flow._git_identity()
+    entries = {item["path"]: item for item in identity["dirtyFiles"]}
+
+    assert entries["deleted.py"]["status"] == " D"
+    assert entries["new name.py"] == {
+        "status": "R ",
+        "path": "new name.py",
+        "originalPath": "old name.py",
+        "sha256": hashlib.sha256((tmp_path / "new name.py").read_bytes()).hexdigest(),
+    }
+    assert entries["untracked name.py"]["status"] == "??"
+    assert all(len(item["sha256"]) == 64 for item in entries.values())
+
+    before = identity["dirtyFiles"]
+    (tmp_path / "deleted.py").write_text("DELETE = False\n", encoding="utf-8")
+    assert flow._git_identity()["dirtyFiles"] != before
+
+
 def test_missing_or_denied_brief_blocks_before_context(tmp_path):
     stage = executor()
     orchestrator = make_orchestrator(tmp_path, stage, FakeNotifier([]))
@@ -174,6 +206,52 @@ def test_context_failure_is_recorded_as_blocked_or_failed(tmp_path, exit_code):
     assert result.error_code
     run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / result.run_id
     assert json.loads((run_dir / "status.json").read_text())["status"] == result.status
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code", "expected_message"),
+    [
+        (
+            subprocess.TimeoutExpired(["codex", "exec", "--token", "runner-secret"], 1),
+            "failed_context_timeout",
+            "Context stage timed out",
+        ),
+        (
+            RuntimeError("runner failed: codex exec --token runner-secret"),
+            "failed_context_executor",
+            "Context stage execution failed",
+        ),
+    ],
+)
+def test_stage_timeout_and_error_never_persist_or_notify_full_runner_argv(
+    tmp_path, error, expected_code, expected_message,
+):
+    class RaisingExecutor:
+        def run_json(self, argv, *, timeout, require_json=True):
+            raise error
+
+    notifier = FakeNotifier([])
+    flow = make_orchestrator(tmp_path, RaisingExecutor(), notifier)
+
+    status = flow.start(
+        BRIEF,
+        context_agent_command="codex exec --token runner-secret",
+    )
+
+    assert status.status == "failed"
+    assert status.error_code == expected_code
+    assert status.message == expected_message
+    run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / status.run_id
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in run_dir.iterdir()
+        if path.is_file() and path.name != ".lock"
+    )
+    notified = "\n".join(f"{title}\n{message}" for title, message in notifier.messages)
+    assert "runner-secret" not in persisted
+    assert "runner-secret" not in notified
+    assert "codex exec" not in persisted
+    assert "codex exec" not in notified
 
 
 def test_notifier_and_housekeeping_failures_only_emit_warnings(tmp_path):

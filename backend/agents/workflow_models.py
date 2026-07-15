@@ -124,9 +124,28 @@ def _normalize_dirty_files(value: Any) -> tuple[dict[str, str], ...]:
         raise WorkflowSchemaError("dirtyFiles must be a list")
     normalized = []
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
-            raise WorkflowSchemaError("dirtyFiles entries must contain path and sha256")
-        normalized.append({"path": _string(item, "path"), "sha256": _sha256(item, "sha256")})
+        if not isinstance(item, dict):
+            raise WorkflowSchemaError("dirtyFiles entries must be objects")
+        keys = set(item)
+        if keys == {"path", "sha256"}:
+            normalized.append({"path": _string(item, "path"), "sha256": _sha256(item, "sha256")})
+            continue
+        if keys not in (
+            {"status", "path", "sha256"},
+            {"status", "path", "originalPath", "sha256"},
+        ):
+            raise WorkflowSchemaError("dirtyFiles entry schema is invalid")
+        status = _string(item, "status")
+        if len(status) != 2:
+            raise WorkflowSchemaError("dirtyFiles status must contain two porcelain columns")
+        normalized_item = {
+            "status": status,
+            "path": _string(item, "path"),
+            "sha256": _sha256(item, "sha256"),
+        }
+        if "originalPath" in item:
+            normalized_item["originalPath"] = _string(item, "originalPath")
+        normalized.append(normalized_item)
     return tuple(normalized)
 
 

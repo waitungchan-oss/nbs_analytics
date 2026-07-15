@@ -110,6 +110,43 @@ def context_bundle_from_payload(payload: dict) -> EvidenceBundle:
     )
 
 
+def context_summary_from_evidence_payload(payload: dict) -> dict:
+    """Convert validated collect-only evidence into the strict Review context shape."""
+    bundle = context_bundle_from_payload(payload)
+    objective = bundle.task.get("objective")
+    forbidden = bundle.task.get("forbidden", [])
+    boundaries = [
+        f"{key}: {value}"
+        for key, value in sorted(bundle.guardrails.items())
+        if isinstance(key, str) and isinstance(value, (str, int, float, bool))
+    ]
+    relevant_files = [
+        {
+            "path": item.source,
+            "reason": "Collected read-only context evidence",
+            "symbols": [],
+        }
+        for item in bundle.evidence
+        if item.kind == "document"
+    ]
+    summary = {
+        "schemaVersion": CONTEXT_SUMMARY_SCHEMA,
+        "status": "ready",
+        "taskUnderstanding": [objective] if isinstance(objective, str) and objective else [],
+        "systemBoundaries": boundaries,
+        "relevantFiles": relevant_files,
+        "dependencies": [],
+        "recommendedTests": [
+            item.source for item in bundle.evidence
+            if item.kind == "document" and item.source.startswith("tests/")
+        ],
+        "risks": list(forbidden) if isinstance(forbidden, list) else [],
+        "unknowns": ["Context was collected without LLM summarization."],
+        "contextFingerprint": payload["bundleFingerprint"],
+    }
+    return _validate_report(summary, payload["bundleFingerprint"])
+
+
 def _validate_context_payload_shape(payload: dict) -> None:
     if not isinstance(payload.get("schemaVersion"), str) or not isinstance(payload.get("bundleFingerprint"), str):
         raise ValueError("Context evidence schema and fingerprint must be strings")
