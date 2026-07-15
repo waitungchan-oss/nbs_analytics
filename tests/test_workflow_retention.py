@@ -10,6 +10,7 @@ import pytest
 from backend.agents.workflow_retention import (
     RetentionCandidate,
     RetentionPolicy,
+    RetentionReport,
     WorkflowRetention,
 )
 
@@ -75,7 +76,7 @@ def test_old_completed_stage_reports_are_compacted_and_summary_precedes_delete(t
     before = {p.name: p.read_bytes() for p in path.iterdir()}
     retention = WorkflowRetention(tmp_path, policy=_policy())
     report = retention.plan(NOW)
-    assert report.candidates[0].delete_paths == ("context.json", "implementation.json")
+    assert report.candidates[0].delete_paths == ("context.json", "implementation.json", "events.jsonl")
     dry_before = {p.name: p.read_bytes() for p in path.iterdir()}
     retention.apply(report, dry_run=True)
     assert {p.name: p.read_bytes() for p in path.iterdir()} == dry_before == before
@@ -83,7 +84,7 @@ def test_old_completed_stage_reports_are_compacted_and_summary_precedes_delete(t
     assert not (path / "context.json").exists()
     assert (path / "manifest.json").exists()
     summary = json.loads((path / "archive-summary.json").read_text())
-    assert summary["deletedFiles"] == ["context.json", "implementation.json"]
+    assert summary["deletedFiles"] == ["context.json", "implementation.json", "events.jsonl"]
 
 
 def test_unknown_schema_symlink_and_external_path_are_skipped(tmp_path):
@@ -125,3 +126,118 @@ def test_apply_rejects_report_paths_outside_runs(tmp_path):
     with pytest.raises(PermissionError):
         retention.apply(report)
     assert outside.exists()
+
+
+def test_apply_rechecks_status_and_skips_stale_nonterminal_report(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, "stale", NOW - timedelta(days=200))
+    (path / "context.json").write_text("context")
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+    retention = WorkflowRetention(tmp_path, policy=_policy())
+    report = retention.plan(NOW)
+    status = json.loads((path / "status.json").read_text())
+    status["status"] = "implementation_running"
+    (path / "status.json").write_text(json.dumps(status))
+    retention.apply(report)
+    assert (path / "context.json").exists()
+    assert not (path / "archive-summary.json").exists()
+
+
+def test_apply_rechecks_latest_terminal_set_and_skips_newly_protected_run(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, "old", NOW - timedelta(days=200))
+    (path / "context.json").write_text("context")
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+    retention = WorkflowRetention(tmp_path, policy=_policy())
+    report = retention.plan(NOW)
+    changed = runs / "new-00" / "status.json"
+    status = json.loads(changed.read_text())
+    status["status"] = "implementation_running"
+    changed.write_text(json.dumps(status))
+    retention.apply(report)
+    assert (path / "context.json").exists()
+
+
+@pytest.mark.parametrize("run_id", ["", ".", "..", "a/b", "a/../b", "/absolute"])
+def test_apply_rejects_non_single_run_directory_ids(tmp_path, run_id):
+    retention = WorkflowRetention(tmp_path, policy=_policy())
+    report = RetentionReport(
+        generated_at=NOW.isoformat(),
+        candidates=(RetentionCandidate(run_id, "compact", ("test",), ("context.json",), 1),),
+    )
+    with pytest.raises(PermissionError):
+        retention.apply(report)
+
+
+def test_stage_cap_rejects_oversized_stage_and_run_soft_cap_compacts_all_stages(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, "oversized", NOW - timedelta(days=200))
+    (path / "context.json").write_bytes(b"x" * 11)
+    (path / "implementation.json").write_bytes(b"y" * 11)
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+    policy = RetentionPolicy(90, 30, 10, 15, 12_000)
+    report = WorkflowRetention(tmp_path, policy=policy).plan(NOW)
+    assert report.candidates == ()
+    policy = RetentionPolicy(90, 30, 20, 15, 12_000)
+    report = WorkflowRetention(tmp_path, policy=policy).plan(NOW)
+    assert report.candidates[0].delete_paths == ("context.json", "implementation.json", "events.jsonl")
+
+
+def test_old_completed_events_are_compacted_to_bounded_archive_summary(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, "old", NOW - timedelta(days=200))
+    event = {
+        "eventType": "failed",
+        "message": "failure",
+        "metadata": {"errorCode": "E_TEST", "riskSurface": "baseline"},
+        "commandOutput": "z" * 100,
+    }
+    (path / "events.jsonl").write_text(json.dumps(event) + "\n")
+    (path / "context.json").write_text("context")
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+    retention = WorkflowRetention(tmp_path, policy=RetentionPolicy(90, 30, 100, 1000, 12))
+    report = retention.plan(NOW)
+    retention.apply(report)
+    summary = json.loads((path / "archive-summary.json").read_text())
+    assert not (path / "events.jsonl").exists()
+    assert summary["eventSummary"]["errorCodes"] == ["E_TEST"]
+    assert len(json.dumps(summary)) <= 1000
+    assert len(summary["eventSummary"]["commandOutputTails"][0]) <= 12
+
+
+def test_apply_is_idempotent_for_the_same_report(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, "old", NOW - timedelta(days=200))
+    (path / "context.json").write_text("context")
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+    retention = WorkflowRetention(tmp_path, policy=_policy())
+    report = retention.plan(NOW)
+    retention.apply(report)
+    first_summary = (path / "archive-summary.json").read_bytes()
+    retention.apply(report)
+    assert (path / "archive-summary.json").read_bytes() == first_summary
+
+
+def test_policy_requires_object_and_positive_caps():
+    with pytest.raises(ValueError):
+        RetentionPolicy.from_dict([])
+    payload = {
+        "schemaVersion": "agent-workflow-retention-v1",
+        "retainDays": 90,
+        "retainLatestTerminalRuns": 30,
+        "stageArtifactMaxBytes": 0,
+        "runArtifactSoftCapBytes": 1,
+        "commandOutputTailCharacters": 1,
+    }
+    with pytest.raises(ValueError):
+        RetentionPolicy.from_dict(payload)
