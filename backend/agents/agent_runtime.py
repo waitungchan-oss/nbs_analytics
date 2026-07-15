@@ -265,6 +265,10 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
             "auth.json", "id_rsa", "id_ed25519",
         }:
             return True
+        if name.endswith(".json") and name.startswith(
+            ("client_secret", "service_account", "oauth_credentials")
+        ):
+            return True
         return relative.suffix.lower() in {
             ".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx",
         }
