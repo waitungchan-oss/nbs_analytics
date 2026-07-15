@@ -11,7 +11,7 @@ from typing import Protocol
 _OSASCRIPT = "/usr/bin/osascript"
 _TITLE_LIMIT = 80
 _MESSAGE_LIMIT = 240
-_ABSOLUTE_PATH = re.compile(r"(?<![\w])/(?:[^/\s]+/)*[^/\s]+")
+_ABSOLUTE_PATH = re.compile(r"(?<![\w])/(?!\s)[^\r\n]*")
 
 
 @dataclass(frozen=True)

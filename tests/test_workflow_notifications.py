@@ -81,6 +81,27 @@ def test_macos_notifier_removes_controls_paths_and_environment_values(
     assert "\x00" not in script
 
 
+def test_macos_notifier_redacts_absolute_paths_containing_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(workflow_notifications.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        workflow_notifications.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append(args[0]) or completed(),
+    )
+
+    MacOSWorkflowNotifier().send(
+        "title",
+        "/Users/chan waitung/Documents/secret.txt was opened",
+    )
+
+    script = calls[0][2]
+    assert "Documents/secret.txt" not in script
+    assert "secret.txt" not in script
+
+
 def test_macos_notifier_returns_warning_when_command_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
