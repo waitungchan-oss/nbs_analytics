@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -33,9 +33,11 @@ CONTEXT_PAYLOAD = {
 class FakeExecutor:
     results: list[StageResult]
     calls: list[tuple[tuple[str, ...], int]]
+    require_json_calls: list[bool] = field(default_factory=list)
 
     def run_json(self, argv: tuple[str, ...], *, timeout: int, require_json: bool = True) -> StageResult:
         self.calls.append((argv, timeout))
+        self.require_json_calls.append(require_json)
         return self.results.pop(0)
 
 
@@ -48,8 +50,14 @@ class FakeNotifier:
         return NotificationResult(False, None)
 
 
-def result(payload: dict, exit_code: int = 0) -> StageResult:
-    return StageResult(exit_code, payload, "implementation stdout", "implementation stderr", 4)
+def result(
+    payload: dict,
+    exit_code: int = 0,
+    *,
+    stdout_tail: str = "implementation stdout",
+    stderr_tail: str = "implementation stderr",
+) -> StageResult:
+    return StageResult(exit_code, payload, stdout_tail, stderr_tail, 4)
 
 
 def implementation_payload(
@@ -196,7 +204,12 @@ def test_approve_runs_fixed_final_gates_and_persists_terminal_evidence_without_p
         "stderrTail": "",
     }
     assert json.loads((run_dir / "full-verification.json").read_text()) == {
-        "fullPytest": {"tests": "passed"},
+        "fullPytest": {
+            "exitCode": 0,
+            "stdoutTail": "implementation stdout",
+            "stderrTail": "implementation stderr",
+            "payload": {"tests": "passed"},
+        },
         "acceptance": {"status": "passed"},
     }
     assert json.loads((run_dir / "hermes.json").read_text()) == {"overallStatus": "pass"}
@@ -205,11 +218,68 @@ def test_approve_runs_fixed_final_gates_and_persists_terminal_evidence_without_p
     assert all(" start" not in " ".join(argv) and " stop" not in " ".join(argv) for argv, _ in executor.calls)
 
 
+def test_approve_persists_bounded_text_evidence_for_full_pytest(tmp_path):
+    flow, executor, _, started = started_run(tmp_path)
+    contract_path = contract(tmp_path / "task.json", base=flow.store.load_manifest(started.run_id).git_head)
+    add_successful_approval_stages(flow, executor, started, contract_path)
+    full_pytest_stdout = "35 passed in 1.58s\n"
+    executor.results.extend([
+        result({}, stdout_tail=full_pytest_stdout, stderr_tail="pytest warning\n"),
+        result({"status": "passed"}),
+        result({"overallStatus": "pass"}),
+    ])
+
+    status = flow.approve(
+        started.run_id,
+        contract_path,
+        implementation_agent_command="codex",
+        review_agent_command="claude",
+    )
+
+    assert status.status == "completed"
+    assert executor.require_json_calls == [True, True, True, False, True, True]
+    run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id
+    assert json.loads((run_dir / "full-verification.json").read_text()) == {
+        "fullPytest": {
+            "exitCode": 0,
+            "stdoutTail": full_pytest_stdout,
+            "stderrTail": "pytest warning\n",
+            "payload": {},
+        },
+        "acceptance": {
+            "status": "passed",
+        },
+    }
+
+
 @pytest.mark.parametrize(
     ("final_results", "artifact", "expected_error"),
     [
-        ([result({}, exit_code=1)], {"fullPytest": {}}, "full_verification_blocked"),
-        ([result({"tests": "passed"}), result({"status": "failed"})], {"fullPytest": {"tests": "passed"}, "acceptance": {"status": "failed"}}, "full_verification_blocked"),
+        (
+            [result({}, exit_code=1)],
+            {
+                "fullPytest": {
+                    "exitCode": 1,
+                    "stdoutTail": "implementation stdout",
+                    "stderrTail": "implementation stderr",
+                    "payload": {},
+                }
+            },
+            "full_verification_blocked",
+        ),
+        (
+            [result({"tests": "passed"}), result({"status": "failed"})],
+            {
+                "fullPytest": {
+                    "exitCode": 0,
+                    "stdoutTail": "implementation stdout",
+                    "stderrTail": "implementation stderr",
+                    "payload": {"tests": "passed"},
+                },
+                "acceptance": {"status": "failed"},
+            },
+            "full_verification_blocked",
+        ),
     ],
 )
 def test_approve_blocks_full_verification_before_hermes(tmp_path, final_results, artifact, expected_error):

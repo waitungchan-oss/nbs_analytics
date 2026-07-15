@@ -354,7 +354,12 @@ class WorkflowOrchestrator:
                 run_id, status, "blocked", str(exc), error_code="full_verification_blocked",
                 notify=notify, stage="full_verification",
             )
-        verification["fullPytest"] = full_pytest.payload
+        verification["fullPytest"] = {
+            "exitCode": full_pytest.exit_code,
+            "stdoutTail": full_pytest.stdout_tail,
+            "stderrTail": full_pytest.stderr_tail,
+            "payload": full_pytest.payload,
+        }
         self.store.write_artifact(run_id, "full-verification.json", verification)
         if full_pytest.exit_code != 0:
             return self._transition(

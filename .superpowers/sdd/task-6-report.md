@@ -11,7 +11,7 @@ Completed locally on `codex/agent-orchestrator-phase1`.
   1. `(python, "-m", "pytest", "-q")`
   2. `(python, "scripts/system_manager.py", "acceptance")`
   3. `(python, "scripts/hermes_post_change_check.py", "--skip-monitor", "--json")`
-- `full-verification.json` persists the full-pytest and acceptance payloads; `hermes.json` persists the Hermes payload.
+- `full-verification.json` persists bounded full-pytest evidence (`exitCode`, `stdoutTail`, `stderrTail`, and `payload`) plus the existing acceptance payload; `hermes.json` persists the Hermes payload.
 - Full pytest failure or acceptance `status != "passed"` transitions to terminal `blocked` before Hermes starts.
 - Hermes failure or `overallStatus != "pass"` transitions to terminal `blocked`; Hermes pass transitions to terminal `completed`.
 - Terminal paths set `completedAt`; notifications cover Implementation completion, Review changes-required, blocked/failure, Hermes result, and workflow completion.
@@ -33,13 +33,17 @@ GREEN:
 ```text
 /Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest \
   tests/test_workflow_orchestrator_start.py tests/test_workflow_orchestrator_approve.py -q
-36 passed in 1.59s
+37 passed in 1.78s
 
 /Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile \
   backend/agents/workflow_orchestrator.py tests/test_workflow_orchestrator_approve.py
 
 git diff --check
 ```
+
+## Task 6 final fix
+
+Review found that successful text-only full pytest output was persisted as an empty payload. The focused approve regression now returns `35 passed in 1.58s` with `require_json=False` semantics and verifies the bounded terminal evidence is retained. The acceptance payload shape and final gate order remain unchanged; Task 7 is out of scope.
 
 ## Focused coverage
 
