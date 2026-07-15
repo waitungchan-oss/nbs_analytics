@@ -3,5 +3,6 @@
   "requiredBranchPrefix": "codex/",
   "deniedRiskSurfaces": ["upload", "sqlite", "baseline", "rollback", "revenue", "business_rules", "export_schema"],
   "deniedWritePatterns": [".git/**", "*.db", "*.sqlite", "*.sqlite3", "*.xlsx", "*.xls", "*.csv", ".env", ".env.*", ".nbs_runtime/**", ".nbs_agent_runtime/**", "logs/**", "exports/**", "backups/**"],
+  "highRiskWritePatterns": ["database.py", "pipeline.py", "backend/routers/upload*.py", "backend/routers/export*.py", "backend/services/upload*.py", "backend/services/*rollback*.py", "backend/services/*baseline*.py", "backend/services/*business_rule*.py", "backend/services/*revenue*.py", "backend/services/*export*.py", "scripts/*upload*.py", "scripts/*baseline*.py"],
   "limits": {"maxChangedFiles": 8, "maxDiffLines": 800, "maxRepairLoops": 2}
 }

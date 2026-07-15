@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import replace
@@ -24,6 +25,14 @@ def write_config(root: Path) -> None:
                 "requiredBranchPrefix": "codex/",
                 "deniedRiskSurfaces": ["baseline", "sqlite"],
                 "deniedWritePatterns": [".git/**", "*.db", ".nbs_agent_runtime/**"],
+                "highRiskWritePatterns": [
+                    "database.py", "pipeline.py", "backend/routers/upload*.py",
+                    "backend/routers/export*.py",
+                    "backend/services/upload*.py",
+                    "backend/services/*rollback*.py", "backend/services/*baseline*.py",
+                    "backend/services/*business_rule*.py", "backend/services/*revenue*.py",
+                    "backend/services/*export*.py", "scripts/*upload*.py", "scripts/*baseline*.py",
+                ],
                 "limits": {"maxChangedFiles": 8, "maxDiffLines": 800, "maxRepairLoops": 2},
             }
         ),
@@ -81,11 +90,12 @@ def head(root: Path) -> str:
 
 
 def make_contract(root: Path, **overrides: object) -> ImplementationTaskContract:
+    plan_path = root / "docs/task-4-brief.md"
     payload: dict[str, object] = {
         "schemaVersion": "implementation-task-v1",
         "taskId": "Task-4",
         "planPath": "docs/task-4-brief.md",
-        "planFingerprint": "a" * 64,
+        "planFingerprint": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
         "objective": "Orchestrate one approved implementation task",
         "approvedBaseSha": head(root),
         "approvedWorktree": str(root),
@@ -177,6 +187,61 @@ def validation_runner() -> FakeValidationRunner:
 @pytest.fixture
 def service(project_root: Path, validation_runner: FakeValidationRunner) -> ImplementationAgentService:
     return ImplementationAgentService(project_root, validation_runner=validation_runner)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "database.py",
+        "pipeline.py",
+        "backend/services/upload_preflight_service.py",
+        "backend/services/upload_rollback_service.py",
+        "backend/services/baseline_guard_service.py",
+        "backend/services/business_rules_service.py",
+        "backend/services/revenue_service.py",
+        "backend/services/export_schema_service.py",
+        "backend/services/report_export_service.py",
+        "backend/routers/upload.py",
+        "backend/routers/exports.py",
+        "scripts/monthly_baseline_check.py",
+        "src/../database.py",
+    ],
+)
+def test_service_infers_high_risk_from_allowed_write_paths(service, contract, path):
+    runner = RunnerSpy(service.project_root)
+
+    report = service.execute(replace(contract, allowed_write_paths=(path,)), runner.command)
+
+    assert report.status == "blocked_high_risk"
+    assert runner.calls == 0
+
+
+def test_service_does_not_misclassify_general_agent_modules(service, contract):
+    runner = RunnerSpy(service.project_root, write_path="src/allowed.py")
+    safe = replace(contract, allowed_write_paths=("backend/agents/example.py", "src/allowed.py"))
+
+    report = service.execute(safe, runner.command)
+
+    assert report.status == "completed"
+
+
+def test_service_rejects_plan_fingerprint_mismatch_before_runner(service, contract):
+    runner = RunnerSpy(service.project_root)
+
+    report = service.execute(replace(contract, plan_fingerprint="0" * 64), runner.command)
+
+    assert report.status == "blocked_invalid_contract"
+    assert report.findings[0]["code"] == "plan_fingerprint_mismatch"
+    assert runner.calls == 0
+
+
+def test_service_rejects_missing_plan_as_invalid_contract(service, contract):
+    runner = RunnerSpy(service.project_root)
+
+    report = service.execute(replace(contract, plan_path="docs/missing.md"), runner.command)
+
+    assert report.status == "blocked_invalid_contract"
+    assert runner.calls == 0
 
 
 def test_service_rejects_more_than_one_plan_task(service, contract, project_root):

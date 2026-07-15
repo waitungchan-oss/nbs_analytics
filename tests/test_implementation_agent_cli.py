@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -17,11 +18,12 @@ def _head() -> str:
 
 @pytest.fixture
 def contract_path(tmp_path: Path) -> Path:
+    plan = ROOT / ".superpowers/sdd/implementation-agent/task-6-brief.md"
     contract = {
         "schemaVersion": "implementation-task-v1",
         "taskId": "Task-6",
         "planPath": ".superpowers/sdd/implementation-agent/task-6-brief.md",
-        "planFingerprint": "a" * 64,
+        "planFingerprint": hashlib.sha256(plan.read_bytes()).hexdigest(),
         "objective": "Expose the implementation agent JSON CLI",
         "approvedBaseSha": _head(),
         "approvedWorktree": str(ROOT),
@@ -123,3 +125,26 @@ def test_cli_redacts_external_paths_and_environment_values(monkeypatch, contract
     captured = capsys.readouterr()
     assert str(contract_path) not in captured.out
     assert "do-not-leak" not in captured.out
+
+
+def test_cli_redacts_external_paths_and_environment_values_from_stderr(
+    monkeypatch, contract_path: Path, capsys,
+):
+    import scripts.implementation_agent as cli
+
+    secret = "stderr-secret-value"
+    external = "/private/tmp/implementation-agent-secret.json"
+    monkeypatch.setenv("IMPLEMENTATION_AGENT_SECRET", secret)
+    monkeypatch.setattr(cli, "_load_contract", lambda _path: (_ for _ in ()).throw(ValueError(f"{external} {secret}")))
+
+    assert cli.main(["--contract", str(contract_path), "--collect-only"]) == 2
+    captured = capsys.readouterr()
+    assert external not in captured.err
+    assert secret not in captured.err
+    assert "[REDACTED" in captured.err
+
+
+def test_cli_maps_wrong_worktree_to_blocked_exit():
+    import scripts.implementation_agent as cli
+
+    assert cli._exit_code("blocked_wrong_worktree") == 2

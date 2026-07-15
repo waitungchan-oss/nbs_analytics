@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import stat
 import json
+import fnmatch
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 import subprocess
@@ -39,6 +41,10 @@ _RESPONSE_STATUSES = {"completed", "needs_repair"}
 _TEST_BYPASS_MARKERS = ("pytest.skip", "@pytest.mark.skip", "xfail", "# noqa")
 _PRODUCTION_PREFIXES = ("backend/", "frontend/", "src/")
 _OUTPUT_CAP = 32_000
+
+
+class PlanFingerprintMismatch(ValueError):
+    pass
 
 
 class ApprovedAgentCommand(Protocol):
@@ -98,7 +104,14 @@ class ImplementationAgentService:
         started = perf_counter()
         try:
             validated = self._validated_contract(contract)
-        except (TypeError, ValueError) as exc:
+        except PlanFingerprintMismatch as exc:
+            return self._finish(
+                contract if isinstance(contract, ImplementationTaskContract) else None,
+                status="blocked_invalid_contract",
+                finding=self._finding("plan_fingerprint_mismatch", str(exc)),
+                started=started,
+            )
+        except (TypeError, ValueError, PermissionError) as exc:
             return self._finish(
                 contract if isinstance(contract, ImplementationTaskContract) else None,
                 status="blocked_invalid_contract",
@@ -308,21 +321,40 @@ class ImplementationAgentService:
     def _validated_contract(self, contract: ImplementationTaskContract) -> ImplementationTaskContract:
         if not isinstance(contract, ImplementationTaskContract):
             raise TypeError("contract must be an ImplementationTaskContract")
-        return ImplementationTaskContract.from_dict(contract.to_dict())
+        validated = ImplementationTaskContract.from_dict(contract.to_dict())
+        plan_path = self._approved_plan_path(validated)
+        raw_plan = plan_path.read_bytes()
+        try:
+            raw_plan.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("approved plan must be UTF-8 Markdown") from exc
+        actual = hashlib.sha256(raw_plan).hexdigest()
+        if actual != validated.plan_fingerprint.lower():
+            raise PlanFingerprintMismatch(
+                "planFingerprint must equal SHA-256 of the exact UTF-8 Markdown bytes"
+            )
+        return validated
 
     def _risk_decision(self, contract: ImplementationTaskContract) -> dict[str, Any] | None:
-        denied = set(load_implementation_policy(self.project_root)["deniedRiskSurfaces"])
+        policy = load_implementation_policy(self.project_root)
+        denied = set(policy["deniedRiskSurfaces"])
         blocked = sorted(set(contract.risk_surfaces) & denied)
-        if blocked:
-            return self._finding("high_risk_surface", "risk surface requires Codex handoff", surfaces=blocked)
+        path_patterns = tuple(policy.get("highRiskWritePatterns", ()))
+        normalized_paths = tuple(
+            Path(os.path.normpath(path)).as_posix() for path in contract.allowed_write_paths
+        )
+        blocked_paths = sorted(
+            path for path in normalized_paths
+            if any(fnmatch.fnmatch(path, pattern) for pattern in path_patterns)
+        )
+        if blocked or blocked_paths:
+            return self._finding(
+                "high_risk_surface", "risk surface requires Codex handoff",
+                surfaces=blocked, paths=blocked_paths,
+            )
         return None
 
-    def _approved_plan_evidence(
-        self,
-        contract: ImplementationTaskContract,
-        *,
-        max_lines: int,
-    ) -> EvidenceItem:
+    def _approved_plan_path(self, contract: ImplementationTaskContract) -> Path:
         raw_path = Path(contract.plan_path)
         if raw_path.is_absolute() or ".." in raw_path.parts:
             raise PermissionError("approved plan path must stay under project root")
@@ -336,6 +368,16 @@ class ImplementationAgentService:
             raise PermissionError("approved plan path must stay under project root") from exc
         if not relative.parts or relative.parts[0] not in {".superpowers", "docs"}:
             raise PermissionError("approved plan must be stored under .superpowers or docs")
+        return resolved
+
+    def _approved_plan_evidence(
+        self,
+        contract: ImplementationTaskContract,
+        *,
+        max_lines: int,
+    ) -> EvidenceItem:
+        resolved = self._approved_plan_path(contract)
+        relative = resolved.relative_to(self.project_root)
         lines = resolved.read_text(encoding="utf-8").splitlines()
         selected = lines[:max_lines]
         return EvidenceItem(
@@ -530,6 +572,7 @@ class ImplementationAgentService:
             return WorktreeState(
                 head="", changes={}, diff_lines=0,
                 index_fingerprint="", tree_fingerprint="",
+                formal_state_fingerprint="", formal_state_entries={},
             )
 
     def _write_runtime_records(
@@ -579,4 +622,5 @@ class ImplementationAgentService:
             diffLines=decision.diff_lines,
             indexFingerprintChanged=decision.index_fingerprint_changed,
             treeFingerprintChanged=decision.tree_fingerprint_changed,
+            formalStateFingerprintChanged=decision.formal_state_fingerprint_changed,
         )

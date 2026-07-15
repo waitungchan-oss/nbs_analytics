@@ -26,6 +26,7 @@ _EXIT_CODES = {
     "validation_failed": 3,
     "blocked_invalid_contract": 2,
     "blocked_dirty_worktree": 2,
+    "blocked_wrong_worktree": 2,
     "blocked_wrong_branch": 2,
     "blocked_head_mismatch": 2,
     "blocked_scope": 2,
@@ -108,6 +109,10 @@ def _render(payload: Any) -> None:
     sys.stdout.write(json.dumps(_redact(payload), ensure_ascii=False, indent=2) + "\n")
 
 
+def _render_stderr(message: str) -> None:
+    sys.stderr.write(str(_redact(message)) + "\n")
+
+
 def _status_payload(status: str, message: str = "") -> dict[str, str]:
     payload = {"schemaVersion": "implementation-run-report-v1", "status": status}
     if message:
@@ -146,11 +151,11 @@ def main(argv: list[str] | None = None) -> int:
         _render(payload)
         return _exit_code(payload.get("status"))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, PermissionError, FileNotFoundError) as exc:
-        print(str(exc), file=sys.stderr)
+        _render_stderr(str(exc))
         _render(_status_payload("blocked_invalid_contract", str(exc)))
         return 2
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
+        _render_stderr(str(exc))
         _render(_status_payload("runtime_error", str(exc)))
         return 5
 

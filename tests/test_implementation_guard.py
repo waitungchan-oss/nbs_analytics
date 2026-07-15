@@ -158,3 +158,58 @@ def test_guard_rejects_index_transition_without_modifying_index(tmp_git_repo):
     assert decision.index_fingerprint_changed is True
     assert decision.diff_lines == 4
     assert staged_after == staged_before
+
+
+@pytest.mark.parametrize(
+    "mutation", ["db", "sqlite", "env", "runtime", "create", "delete", "symlink", "type"],
+)
+def test_guard_detects_ignored_formal_state_changes(tmp_git_repo, mutation):
+    (tmp_git_repo / ".gitignore").write_text(
+        "*.db\n*.sqlite\n.nbs_runtime/\n.env\n", encoding="utf-8",
+    )
+    policy_path = tmp_git_repo / "agent_config/implementation_policies.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["deniedWritePatterns"].extend(("*.sqlite", ".env"))
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    runtime = tmp_git_repo / ".nbs_runtime"
+    runtime.mkdir()
+    database = tmp_git_repo / "formal.db"
+    database.write_bytes(b"formal-state")
+    sqlite = tmp_git_repo / "formal.sqlite"
+    sqlite.write_bytes(b"sqlite-state")
+    environment = tmp_git_repo / ".env"
+    environment.write_text("SECRET=stable\n", encoding="utf-8")
+    state = runtime / "state.json"
+    state.write_text('{"stable": true}\n', encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore", "agent_config/implementation_policies.json"],
+        cwd=tmp_git_repo, check=True,
+    )
+    subprocess.run(["git", "commit", "-qm", "ignore formal state"], cwd=tmp_git_repo, check=True)
+    contract = contract_for(tmp_git_repo)
+    before = capture_worktree_state(tmp_git_repo)
+
+    if mutation == "db":
+        database.write_bytes(b"changed")
+    elif mutation == "sqlite":
+        sqlite.write_bytes(b"changed")
+    elif mutation == "env":
+        environment.write_text("SECRET=changed\n", encoding="utf-8")
+    elif mutation == "runtime":
+        state.write_text('{"stable": false}\n', encoding="utf-8")
+    elif mutation == "create":
+        (runtime / "new.json").write_text("{}\n", encoding="utf-8")
+    elif mutation == "delete":
+        state.unlink()
+    elif mutation == "symlink":
+        database.unlink()
+        database.symlink_to("tracked.py")
+    else:
+        state.unlink()
+        state.mkdir()
+
+    decision = validate_changes(tmp_git_repo, contract, before)
+
+    assert decision.status == "blocked_scope"
+    assert decision.changed_files
+    assert decision.formal_state_fingerprint_changed is True

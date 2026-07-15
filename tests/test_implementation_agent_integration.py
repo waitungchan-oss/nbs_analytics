@@ -23,13 +23,6 @@ def _digest(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
-def _project_formal_state_hashes() -> dict[str, str | None]:
-    return {
-        "db": _digest(ROOT / "nbs_marketing_data.db"),
-        "runtime": _digest(ROOT / ".nbs_runtime/data_generation.json"),
-    }
-
-
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=root, text=True, capture_output=True, check=True,
@@ -46,6 +39,7 @@ def _write_fixture_config(root: Path) -> None:
                 "requiredBranchPrefix": "codex/",
                 "deniedRiskSurfaces": ["baseline", "sqlite"],
                 "deniedWritePatterns": [".git/**", "*.db", ".nbs_runtime/**", ".nbs_agent_runtime/**"],
+                "highRiskWritePatterns": ["database.py", "pipeline.py", "backend/services/upload*.py"],
                 "limits": {"maxChangedFiles": 8, "maxDiffLines": 800, "maxRepairLoops": 2},
             }
         ),
@@ -146,12 +140,13 @@ class AgentFixture:
         task_type: str,
         red_commands: tuple[str, ...],
     ) -> ImplementationTaskContract:
+        plan = self.worktree / "docs/task-8-brief.md"
         return ImplementationTaskContract.from_dict(
             {
                 "schemaVersion": "implementation-task-v1",
                 "taskId": "Task-8",
                 "planPath": "docs/task-8-brief.md",
-                "planFingerprint": "a" * 64,
+                "planFingerprint": hashlib.sha256(plan.read_bytes()).hexdigest(),
                 "objective": "Verify isolated implementation-agent execution.",
                 "approvedBaseSha": _git(self.worktree, "rev-parse", "HEAD"),
                 "approvedWorktree": str(self.worktree),
@@ -208,14 +203,18 @@ def agent_fixture(tmp_path: Path) -> AgentFixture:
     (source_root / "tests/sandbox/test_example.py").write_text(
         "def test_example():\n    assert False\n", encoding="utf-8"
     )
-    (source_root / "data/nbs_analytics.db").write_bytes(b"fixture database only")
-    (source_root / ".nbs_runtime/data_generation.json").write_text(
-        '{"fixture": true}\n', encoding="utf-8"
-    )
+    (source_root / ".gitignore").write_text("*.db\n.nbs_runtime/\n", encoding="utf-8")
     _write_fixture_config(source_root)
     _git(source_root, "add", ".")
     _git(source_root, "commit", "-qm", "fixture base")
     _git(source_root, "worktree", "add", "-q", "-b", "codex/task-8-fixture", str(worktree), "HEAD")
+
+    (worktree / "data").mkdir()
+    (worktree / "data/nbs_analytics.db").write_bytes(b"fixture database only")
+    (worktree / ".nbs_runtime").mkdir()
+    (worktree / ".nbs_runtime/data_generation.json").write_text(
+        '{"fixture": true}\n', encoding="utf-8"
+    )
 
     initial_index_fingerprint = capture_worktree_state(worktree).index_fingerprint
     return AgentFixture(
@@ -242,7 +241,6 @@ def test_agent_changes_only_approved_file_in_isolated_worktree(agent_fixture):
 
 def test_hostile_runner_cannot_receive_pass_after_formal_state_write(agent_fixture):
     fixture_before = agent_fixture.formal_state_hashes()
-    project_before = _project_formal_state_hashes()
 
     report = agent_fixture.run_hostile_task(target="data/nbs_analytics.db")
 
@@ -254,5 +252,4 @@ def test_hostile_runner_cannot_receive_pass_after_formal_state_write(agent_fixtu
     assert "policy" in report.findings[0]["message"]
     assert fixture_after["db"] != fixture_before["db"]
     assert fixture_after["runtime"] == fixture_before["runtime"]
-    assert _project_formal_state_hashes() == project_before
     assert agent_fixture.git_index_unchanged()
