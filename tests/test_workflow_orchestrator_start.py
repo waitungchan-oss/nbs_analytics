@@ -330,6 +330,18 @@ def test_subprocess_executor_parses_successful_json_larger_than_tail(monkeypatch
     assert len(result.stdout_tail.encode("utf-8")) == OUTPUT_TAIL
 
 
+def test_subprocess_executor_rejects_stdout_over_stage_cap_without_full_spool(monkeypatch):
+    def forbidden_spool(*args, **kwargs):
+        raise AssertionError("full stdout spool is forbidden")
+
+    monkeypatch.setattr("backend.agents.workflow_orchestrator.tempfile.TemporaryFile", forbidden_spool)
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    script = "import sys; sys.stdout.write('x' * (5 * 1024 * 1024 + 1))"
+
+    with pytest.raises(ValueError, match="stage stdout exceeds"):
+        executor.run_json((str(executor.python), "-c", script), timeout=10)
+
+
 def test_subprocess_executor_allows_successful_text_output_when_json_is_not_required(monkeypatch):
     def unexpected_run(*args, **kwargs):
         raise AssertionError("bounded executor must not use subprocess.run")

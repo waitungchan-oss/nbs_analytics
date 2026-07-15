@@ -6,9 +6,9 @@ import os
 import shlex
 import signal
 import subprocess
-import tempfile
 import threading
 import time
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +35,7 @@ from .workflow_store import WorkflowLockedError, WorkflowStore
 
 
 OUTPUT_TAIL = 12000
+STAGE_STDOUT_MAX_BYTES = 5 * 1024 * 1024
 CONTEXT_TIMEOUT = 120
 
 
@@ -69,11 +70,16 @@ class SubprocessStageExecutor:
             shell=False,
             start_new_session=os.name == "posix",
         )
+        stdout = bytearray()
         stdout_tail = bytearray()
         stderr_tail = bytearray()
-        stdout_spool = tempfile.TemporaryFile(mode="w+b")
+        stdout_overflow = threading.Event()
         readers = (
-            threading.Thread(target=_drain_stdout, args=(process.stdout, stdout_spool, stdout_tail), daemon=True),
+            threading.Thread(
+                target=_drain_stdout,
+                args=(process.stdout, stdout, stdout_tail, stdout_overflow),
+                daemon=True,
+            ),
             threading.Thread(target=_drain_tail, args=(process.stderr, stderr_tail), daemon=True),
         )
         for reader in readers:
@@ -109,22 +115,20 @@ class SubprocessStageExecutor:
             if process.stderr is not None:
                 process.stderr.close()
         if timeout_error is not None:
-            stdout_spool.close()
             raise timeout_error
+        if stdout_overflow.is_set():
+            raise ValueError("stage stdout exceeds 5 MiB limit")
         stdout_text = bytes(stdout_tail).decode("utf-8", errors="replace")
         stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
         payload: dict = {}
         try:
-            stdout_spool.seek(0)
-            decoded = json.load(stdout_spool)
+            decoded = json.loads(bytes(stdout).decode("utf-8"))
             if not isinstance(decoded, dict):
                 raise ValueError("stage output must be a JSON object")
             payload = decoded
         except (json.JSONDecodeError, ValueError):
             if process.returncode == 0 and require_json:
                 raise ValueError("stage output is not a JSON object")
-        finally:
-            stdout_spool.close()
         return StageResult(
             exit_code=process.returncode,
             payload=payload,
@@ -816,7 +820,7 @@ def _drain_tail(stream, tail: bytearray) -> None:
             del tail[:-OUTPUT_TAIL]
 
 
-def _drain_stdout(stream, spool, tail: bytearray) -> None:
+def _drain_stdout(stream, output: bytearray, tail: bytearray, overflow: threading.Event) -> None:
     while True:
         try:
             chunk = stream.read(8192)
@@ -824,10 +828,13 @@ def _drain_stdout(stream, spool, tail: bytearray) -> None:
             return
         if not chunk:
             return
-        try:
-            spool.write(chunk)
-        except (OSError, ValueError):
-            return
+        remaining = STAGE_STDOUT_MAX_BYTES - len(output)
+        if remaining <= 0:
+            overflow.set()
+        else:
+            output.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                overflow.set()
         tail.extend(chunk)
         if len(tail) > OUTPUT_TAIL:
             del tail[:-OUTPUT_TAIL]
