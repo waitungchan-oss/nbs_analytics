@@ -251,6 +251,32 @@ def test_review_collection_includes_allowlisted_untracked_files_but_not_denied_d
     assert "formal rows" not in str(first.to_dict())
 
 
+def test_review_collection_skips_tracked_process_reports_and_denied_data_without_reading_them(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "backend").mkdir()
+    (tmp_path / ".superpowers/sdd").mkdir(parents=True)
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    report = tmp_path / ".superpowers/sdd/task-report.md"
+    report.write_text("process-only report", encoding="utf-8")
+    secret = tmp_path / "backend/secret.db"
+    secret.write_text("formal rows", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    report.write_text("process-only report changed", encoding="utf-8")
+    secret.write_text("formal rows changed", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+    assert bundle.repository["dirtyFiles"] == [".superpowers/sdd/task-report.md", "backend/secret.db"]
+    assert not bundle.evidence
+    serialized = str(bundle.to_dict())
+    assert "process-only report" not in serialized
+    assert "formal rows" not in serialized
+
+
 def test_allowlisted_extensionless_root_file_is_readable(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)

@@ -52,9 +52,20 @@ git diff --check
 passed
 ```
 
-## Existing Regression Note
+## Review Fixes
 
-The required existing Agent regression command produced `233 passed, 1 failed`. The failure is pre-existing branch evidence scope: `tests/test_agent_cli.py::test_review_cli_accepts_runtime_input_and_rejects_symlink_escape` invokes Review collection against `base=main`; this branch already contains tracked `.superpowers/sdd/task-1-report.md` changes, which are outside `EvidencePolicy` allowlist, so collection returns exit 3 before the test's runtime-input assertion. Task 7 does not modify that policy or those historical task reports, and the Task 7 focused diff contains none of them.
+1. Added explicit `prune --apply` regression coverage with a fake retention service. It verifies the CLI passes `dry_run=False` and renders `"dryRun": false`.
+2. Resolved the prior `233 passed, 1 failed` Agent regression without adding `.superpowers` to the evidence allowlist. Process reports and all policy-denied tracked diff paths are now skipped by `EvidenceCollector.collect_review()` before any file read or patch command. This preserves the existing hard rejection of absolute paths and traversal paths, and continues to keep `.env`, DB, exports, and other denied paths out of Context/Review evidence. The collector regression creates both a tracked `.superpowers/sdd` report and a tracked DB file, then proves neither content is collected.
+
+Post-fix verification:
+
+```text
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py tests/test_workflow_store.py tests/test_workflow_notifications.py tests/test_workflow_retention.py tests/test_workflow_orchestrator_start.py tests/test_workflow_orchestrator_approve.py tests/test_agent_workflow_cli.py tests/test_agent_workflow_integration.py -q
+99 passed in 2.19s
+
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_runtime.py tests/test_context_agent_service.py tests/test_review_agent_service.py tests/test_agent_cli.py tests/test_agent_dispatch_contract.py tests/test_agent_read_only_contract.py tests/test_implementation_models.py tests/test_implementation_guard.py tests/test_validation_runner.py tests/test_implementation_agent_service.py tests/test_implementation_agent_cli.py tests/test_implementation_agent_integration.py -q
+234 passed in 28.92s
+```
 
 ## Review
 

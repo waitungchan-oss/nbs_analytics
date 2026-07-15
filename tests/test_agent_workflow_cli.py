@@ -117,6 +117,12 @@ def test_status_list_and_prune_render_json_and_wire_retention(tmp_path, monkeypa
     assert json.loads(capsys.readouterr().out)["dryRun"] is True
     assert calls == ["plan", ({"report": "planned"}, True)]
 
+    calls.clear()
+    assert cli.main(["prune", "--apply"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["dryRun"] is False
+    assert calls == ["plan", ({"report": "planned"}, False)]
+
 
 @pytest.mark.parametrize("command", ["run", "approve"])
 def test_cli_requires_explicit_approval_inputs(command, capsys):

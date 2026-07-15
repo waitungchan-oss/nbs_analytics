@@ -366,10 +366,8 @@ class EvidenceCollector:
             try:
                 self.policy.resolve_read_path(candidate_path)
             except PermissionError:
-                # A deleted denied-path artifact has no readable content to collect.
-                if not candidate_path.exists() and relative not in untracked_set:
-                    continue
-                raise
+                # Policy-denied process reports and sensitive files stay out of Review evidence.
+                continue
             if relative in untracked_set:
                 patch = self._run(
                     f"git-diff-untracked-file-{index}",
