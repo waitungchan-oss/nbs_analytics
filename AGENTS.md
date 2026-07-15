@@ -12,5 +12,8 @@
 - Implementation Agent 只可執行已批准且明確授權的一個 Task，不得自行決定下一 Task，不得 commit 或 merge。
 - Implementation Agent 不得修改正式 SQLite、baseline、rollback、revenue、business rules 或 export schema。
 - 完成一個 implementation Task 後，final implementation report 與實際 diff 必須交給 Review Agent；Review PASS 後由 Codex 處理 findings、完整驗證與 Hermes。
+- Phase 1 workflow 使用 `scripts/agent_workflow.py run`（或 `start`）只收集 Context，必須停在 `awaiting_authorization`；`approve` 每次都要明確帶 run ID、contract、Implementation runner、Review runner，禁止 implicit approval 或保存 runner command。
+- `status` / `list` 只讀 artifact；`run` 後 best-effort retention housekeeping 與明確 `prune --apply` 都可依 policy compact 合資格的舊 completed run，`prune --dry-run` 只產生計畫。Hermes 只 read-only 報告 orchestrator artifacts / retention，不執行 prune，也不與 Review 重複。
+- Streamlit Agent Operations 是 Phase 2 read-only work；不得成為 approval、dispatch、retention 或任何正式狀態寫入入口。
 
 正式口徑固定為「不含掛賬核銷與TT退款轉團款」；2026-05 baseline 固定為 `HKD 12,057,968`。

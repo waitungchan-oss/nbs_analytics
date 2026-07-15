@@ -47,7 +47,7 @@ Obsidian Brief
 - 可自行選擇 Task、越過 Review、完整驗證或 Hermes 的自主 Implementation Agent。
 - 自動 commit、merge、rollback 或 baseline promotion。
 - 向量資料庫或長駐索引服務。
-- Agent Web UI 或新的 FastAPI endpoint。
+- Agent Web UI 或新的 FastAPI endpoint；Streamlit Agent Operations 是 Phase 2 的 read-only 工作，不得成為 dispatch、approval 或 retention 的寫入入口。
 - 對正式 SQLite、營銷原始資料、業務規則或報表計算的變更。
 - Hermes 的替代品或第二套完整系統驗收器。
 - 自動選擇或購買外部模型。
@@ -247,6 +247,23 @@ Token budget 是上限，不是必須用完的配額。超出上限時回傳 `co
   --contract .nbs_agent_runtime/contracts/<task>.json \
   --agent-command <approved-offline-worker-command>
 ```
+
+### Phase 1 Workflow CLI
+
+`scripts/agent_workflow.py` 是 active 的 Phase 1 本地編排入口。所有 stdout 都是單一 JSON document；人類診斷只寫入經遮罩的 stderr。CLI 不保存 Context、Implementation 或 Review runner command，也不會自行選擇 runner。
+
+```bash
+.venv/bin/python scripts/agent_workflow.py run --brief docs/briefs/<brief>.md
+.venv/bin/python scripts/agent_workflow.py approve --run-id <run-id> --contract .nbs_agent_runtime/contracts/<task>.json --implementation-agent-command '<approved implementation runner>' --review-agent-command '<approved review runner>'
+.venv/bin/python scripts/agent_workflow.py status --run-id <run-id>
+.venv/bin/python scripts/agent_workflow.py list
+.venv/bin/python scripts/agent_workflow.py prune --dry-run
+.venv/bin/python scripts/agent_workflow.py prune --apply
+```
+
+`run`（亦可用 `start`）只收集 Context 並停在 `awaiting_authorization`；它絕不隱含 approval。只有帶齊明確 `run-id`、approved contract、Implementation runner 與 Review runner 的 `approve` 才可進入單一 Task。`--no-notify` 關閉 macOS notification；通知失敗只會留下 warning，不影響治理結果。
+
+每個 run 的 immutable manifest、status、events、approval 與階段 JSON artifact 保存在 `.nbs_agent_runtime/runs/<run-id>/`。retention policy 位於 `agent_config/workflow_retention.json`；`run` 完成 Context 後會 best-effort 執行 policy housekeeping，`prune --dry-run` 不寫入，`prune --apply` 可明確執行相同 policy 的 compact。Hermes 只 read-only 報告 artifact/retention state，不會執行 prune，也不取代 Review、full verification 或 Hermes gate。
 
 統一 exit code：
 

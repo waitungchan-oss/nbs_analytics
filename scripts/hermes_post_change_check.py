@@ -47,6 +47,14 @@ TARGETED_TESTS = [
     "tests/test_implementation_agent_service.py",
     "tests/test_implementation_agent_cli.py",
     "tests/test_implementation_agent_integration.py",
+    "tests/test_workflow_models.py",
+    "tests/test_workflow_store.py",
+    "tests/test_workflow_notifications.py",
+    "tests/test_workflow_retention.py",
+    "tests/test_workflow_orchestrator_start.py",
+    "tests/test_workflow_orchestrator_approve.py",
+    "tests/test_agent_workflow_cli.py",
+    "tests/test_agent_workflow_integration.py",
 ]
 
 
@@ -95,6 +103,13 @@ def build_check_plan(
         "print('missing=' + ','.join(missing)); "
         "raise SystemExit(bool(missing))"
     )
+    workflow_artifact_report_code = (
+        "from pathlib import Path; import json; "
+        "root=Path('.nbs_agent_runtime/runs'); "
+        "runs=[path for path in root.iterdir() if path.is_dir() and not path.is_symlink()] if root.is_dir() else []; "
+        "artifacts=('manifest.json','status.json','approval.json','context.json','implementation.json','review.json','full-verification.json','hermes.json','archive-summary.json'); "
+        "print(json.dumps({'schemaVersion':'agent-workflow-hermes-report-v1','runCount':len(runs),'artifactCounts':{name:sum((run_dir/name).is_file() and not (run_dir/name).is_symlink() for run_dir in runs) for name in artifacts},'retentionConfig':Path('agent_config/workflow_retention.json').is_file()}, sort_keys=True))"
+    )
     plan = [
         CheckStep("git-status", ["git", "status", "--short", "--branch"]),
         CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
@@ -109,6 +124,13 @@ def build_check_plan(
         CheckStep(
             "monthly-baseline-governance",
             [py, "scripts/monthly_baseline_check.py"],
+        )
+    )
+    plan.append(
+        CheckStep(
+            "workflow-artifact-retention-report",
+            [py, "-c", workflow_artifact_report_code],
+            required=False,
         )
     )
     plan.append(
@@ -247,6 +269,7 @@ def format_markdown_report(report: dict) -> str:
     baseline = _result_by_label(report, "phase2-baseline")
     monthly = _result_by_label(report, "monthly-baseline-governance")
     tests = _result_by_label(report, "targeted-tests")
+    workflow = _result_by_label(report, "workflow-artifact-retention-report")
     git_status = _result_by_label(report, "git-status")
     baseline_line = _first_matching_line(
         baseline.get("stdout", ""),
@@ -257,6 +280,7 @@ def format_markdown_report(report: dict) -> str:
         monthly.get("stdout", ""),
         ("promotionReady", "blockingStatus", "status"),
     )
+    workflow_line = _first_matching_line(workflow.get("stdout", ""), ("runCount", "retentionConfig"))
     changed_lines = [
         line.strip()
         for line in str(git_status.get("stdout", "") or "").splitlines()
@@ -280,12 +304,14 @@ def format_markdown_report(report: dict) -> str:
             f"- phase2-baseline: {_status_text(baseline)}",
             f"- monthly-baseline-governance: {_status_text(monthly)}",
             f"- targeted-tests: {_status_text(tests)}",
+            f"- workflow-artifact-retention-report: {_status_text(workflow)}",
             "",
             "## Evidence",
             "",
             f"- Baseline: `{baseline_line or 'not found in stdout'}`",
             f"- Monthly governance: `{monthly_line or 'not found in stdout'}`",
             f"- Tests: `{tests_line or 'not found in stdout'}`",
+            f"- Workflow artifacts / retention: `{workflow_line or 'not found in stdout'}`",
             "",
             "## Changed Files",
             "",
