@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import tempfile
@@ -16,11 +17,14 @@ from uuid import uuid4
 
 from .evidence_collector import EvidencePolicy
 from .context_agent_service import context_bundle_from_payload
+from .implementation_models import ImplementationTaskContract
 from .workflow_models import (
+    APPROVAL_SCHEMA,
     EVENT_SCHEMA,
     MANIFEST_SCHEMA,
     STATUS_SCHEMA,
     WorkflowEvent,
+    WorkflowApproval,
     WorkflowManifest,
     WorkflowStatus,
 )
@@ -248,6 +252,190 @@ class WorkflowOrchestrator:
             raise ValueError("Context agent command cannot be empty")
         return (*argv, "--agent-command", command)
 
+    def approve(
+        self,
+        run_id: str,
+        contract_path: Path,
+        *,
+        implementation_agent_command: str,
+        review_agent_command: str,
+        notify: bool = True,
+    ) -> WorkflowStatus:
+        status = self.store.load_status(run_id)
+        if status.status != "awaiting_authorization":
+            return status
+        try:
+            implementation_runner = self._approved_runner(implementation_agent_command)
+            self._approved_runner(review_agent_command)
+            manifest = self.store.load_manifest(run_id)
+            contract_file = Path(contract_path).resolve()
+            contract = ImplementationTaskContract.from_dict(
+                json.loads(contract_file.read_text(encoding="utf-8"))
+            )
+            self._validate_approval_identity(manifest, contract, contract_file)
+        except (OSError, ValueError, json.JSONDecodeError, PermissionError) as exc:
+            return self._transition(
+                run_id, status, "blocked", str(exc), error_code="blocked_authorization", notify=notify,
+                stage="authorization",
+            )
+
+        approval = WorkflowApproval(
+            schema_version=APPROVAL_SCHEMA,
+            run_id=run_id,
+            contract_path=self._relative_or_absolute(contract_file),
+            contract_fingerprint=contract.fingerprint,
+            approved_base_sha=contract.approved_base_sha,
+            approved_at=_now(),
+            authorization_status="approved",
+        )
+        self.store.write_approval(run_id, approval)
+        status = self._transition(
+            run_id, self.store.load_status(run_id), "implementation_running",
+            "Implementation agent started", notify=False, stage="implementation",
+        )
+        try:
+            implementation = self.stage_executor.run_json(
+                self._implementation_argv(contract_file, implementation_runner), timeout=CONTEXT_TIMEOUT,
+            )
+        except Exception as exc:
+            return self._transition(
+                run_id, status, "failed", str(exc), error_code="failed_implementation_executor",
+                notify=notify, stage="implementation",
+            )
+        self.store.write_artifact(run_id, "implementation.json", implementation.payload)
+        if implementation.exit_code != 0 or implementation.payload.get("status") != "completed":
+            return self._transition(
+                run_id, self.store.load_status(run_id), "failed", "Implementation agent failed",
+                error_code="failed_implementation", notify=notify, stage="implementation",
+            )
+        self._notify(notify, "Implementation completed", f"Implementation completed for {run_id}")
+        try:
+            verification = {"commands": self._normalize_targeted_evidence(implementation.payload)}
+        except (TypeError, ValueError) as exc:
+            return self._transition(
+                run_id, self.store.load_status(run_id), "failed", str(exc),
+                error_code="failed_targeted_evidence", notify=notify, stage="targeted_verification",
+            )
+        status = self._transition(
+            run_id, self.store.load_status(run_id), "targeted_verification_running",
+            "Targeted verification evidence recorded", notify=False, stage="targeted_verification",
+        )
+        self.store.write_artifact(run_id, "targeted-verification.json", verification)
+        status = self._transition(
+            run_id, self.store.load_status(run_id), "review_running", "Review agent started",
+            notify=False, stage="review",
+        )
+        try:
+            review = self.stage_executor.run_json(
+                self._review_argv(manifest, run_id, review_agent_command), timeout=CONTEXT_TIMEOUT,
+            )
+        except Exception as exc:
+            return self._transition(
+                run_id, status, "failed", str(exc), error_code="failed_review_executor",
+                notify=notify, stage="review",
+            )
+        self.store.write_artifact(run_id, "review.json", review.payload)
+        verdict = review.payload.get("verdict")
+        if verdict == "changes_required":
+            return self._transition(
+                run_id, self.store.load_status(run_id), "changes_required", "Review changes required",
+                error_code="review_changes_required", notify=notify, stage="review",
+            )
+        if review.exit_code != 0 or verdict != "pass":
+            target = "blocked" if verdict in {"blocked", "invalid_bundle", "context_overflow"} else "failed"
+            return self._transition(
+                run_id, self.store.load_status(run_id), target, "Review agent did not pass",
+                error_code=f"review_{target}", notify=notify, stage="review",
+            )
+        self._notify(notify, "Review passed", f"Review passed for {run_id}; full verification is pending")
+        return self.store.load_status(run_id)
+
+    def _validate_approval_identity(
+        self, manifest: WorkflowManifest, contract: ImplementationTaskContract, contract_file: Path,
+    ) -> None:
+        brief = self.policy.resolve_read_path(self.project_root / manifest.brief_path)
+        if hashlib.sha256(brief.read_bytes()).hexdigest() != manifest.brief_sha256:
+            raise ValueError("brief identity changed since context collection")
+        current = self._git_identity()
+        if (
+            current["branch"] != manifest.git_branch
+            or current["head"] != manifest.git_head
+            or current["dirtyFiles"] != list(manifest.dirty_files)
+        ):
+            raise ValueError("Git identity changed since context collection")
+        if Path(contract.approved_worktree).resolve() != self.project_root:
+            raise ValueError("contract approvedWorktree does not match this worktree")
+        if contract.approved_base_sha != manifest.git_head:
+            raise ValueError("contract approvedBaseSha does not match run base")
+        plan = Path(contract.plan_path)
+        if not plan.is_absolute():
+            plan = self.project_root / plan
+        plan = self.policy.resolve_read_path(plan)
+        if hashlib.sha256(plan.read_bytes()).hexdigest() != contract.plan_fingerprint:
+            raise ValueError("contract planFingerprint does not match plan content")
+        if not contract_file.is_file():
+            raise ValueError("implementation contract is not a regular file")
+
+    def _approved_runner(self, command: str) -> tuple[str, ...]:
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("agent command is required")
+        argv = tuple(shlex.split(command))
+        if not argv:
+            raise ValueError("agent command is required")
+        executable = Path(argv[0]).name
+        if executable not in self.policy.agent_executables:
+            raise PermissionError("agent command is not allowlisted")
+        return argv
+
+    def _implementation_argv(self, contract_file: Path, runner: tuple[str, ...]) -> tuple[str, ...]:
+        return (
+            str(self.project_root / ".venv" / "bin" / "python"),
+            "scripts/implementation_agent.py", "--contract", str(contract_file),
+            "--agent-command", *runner,
+        )
+
+    def _review_argv(self, manifest: WorkflowManifest, run_id: str, command: str) -> tuple[str, ...]:
+        run_dir = self.store.runs_root / run_id
+        return (
+            str(self.project_root / ".venv" / "bin" / "python"),
+            "scripts/review_agent.py", "--brief", manifest.brief_path,
+            "--base", manifest.git_head, "--head", "WORKTREE",
+            "--context", str(run_dir / "context.json"),
+            "--verification", str(run_dir / "targeted-verification.json"),
+            "--agent-command", command, "--strict",
+        )
+
+    def _normalize_targeted_evidence(self, payload: dict) -> list[dict]:
+        commands: list[dict] = []
+        for field in ("redEvidence", "greenEvidence"):
+            evidence = payload.get(field)
+            if not isinstance(evidence, list):
+                raise ValueError(f"{field} must be a list")
+            for item in evidence:
+                if not isinstance(item, dict):
+                    raise ValueError("targeted evidence item must be an object")
+                command_id, argv, exit_code = item.get("commandId"), item.get("argv"), item.get("exitCode")
+                if not isinstance(command_id, str) or not command_id:
+                    raise ValueError("targeted evidence commandId is invalid")
+                if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+                    raise ValueError("targeted evidence argv is invalid")
+                if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+                    raise ValueError("targeted evidence exitCode is invalid")
+                stdout, stderr = item.get("stdout", ""), item.get("stderr", "")
+                if not isinstance(stdout, str) or not isinstance(stderr, str):
+                    raise ValueError("targeted evidence output is invalid")
+                commands.append({
+                    "label": command_id, "argv": argv, "exitCode": exit_code,
+                    "stdoutTail": stdout[-OUTPUT_TAIL:], "stderrTail": stderr[-OUTPUT_TAIL:],
+                })
+        return commands
+
+    def _relative_or_absolute(self, path: Path) -> str:
+        try:
+            return path.relative_to(self.project_root).as_posix()
+        except ValueError:
+            return str(path)
+
     def _git_identity(self) -> dict:
         def run(*args: str) -> str:
             completed = subprocess.run(
@@ -264,13 +452,19 @@ class WorkflowOrchestrator:
                 dirty.append({"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
         return {"head": run("rev-parse", "HEAD"), "branch": run("branch", "--show-current") or "(detached)", "dirtyFiles": dirty}
 
-    def _transition(self, run_id: str, current: WorkflowStatus, target: str, message: str, *, error_code: str | None = None, notify: bool = False) -> WorkflowStatus:
+    def _transition(self, run_id: str, current: WorkflowStatus, target: str, message: str, *, error_code: str | None = None, notify: bool = False, stage: str = "context") -> WorkflowStatus:
         now = _now()
-        status = WorkflowStatus(STATUS_SCHEMA, run_id, "context", target, current.started_at, now, None, message, error_code, current.artifact_bytes)
-        event = WorkflowEvent(EVENT_SCHEMA, run_id, f"event-{uuid4().hex}", "status_transition", current.status, target, now, message, {"stage": "context"})
+        status = WorkflowStatus(STATUS_SCHEMA, run_id, stage, target, current.started_at, now, None, message, error_code, current.artifact_bytes)
+        event = WorkflowEvent(EVENT_SCHEMA, run_id, f"event-{uuid4().hex}", "status_transition", current.status, target, now, message, {"stage": stage})
         self.store.transition(run_id, status, event)
         if notify:
-            self._notify(True, "Awaiting authorization" if target == "awaiting_authorization" else "Context failed", message)
+            titles = {
+                "awaiting_authorization": "Awaiting authorization",
+                "changes_required": "Review changes required",
+                "blocked": "Workflow blocked",
+                "failed": "Workflow failed",
+            }
+            self._notify(True, titles.get(target, "Workflow update"), message)
         return status
 
     def _finish_failed(self, brief: str, content: bytes, identity: dict, fingerprint: str | None, code: str, message: str, notify: bool) -> WorkflowStatus:
