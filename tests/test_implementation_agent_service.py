@@ -418,3 +418,47 @@ def test_service_limits_repair_calls_and_writes_telemetry(
     assert report.repair_loops_used == contract.max_repair_loops
     assert (project_root / ".nbs_agent_runtime/implementation/reports").is_dir()
     assert (project_root / ".nbs_agent_runtime/implementation/telemetry.jsonl").is_file()
+
+
+def test_telemetry_minimizes_metadata_and_counts_actual_runner_tokens(
+    service, contract, project_root,
+):
+    completed_report = service.execute(contract, RunnerSpy(project_root).command)
+    blocked_report = service.execute(
+        replace(contract, risk_surfaces=("baseline",)),
+        RunnerSpy(project_root).command,
+    )
+
+    telemetry_path = project_root / ".nbs_agent_runtime/implementation/telemetry.jsonl"
+    telemetry = [json.loads(line) for line in telemetry_path.read_text(encoding="utf-8").splitlines()]
+
+    assert [record["status"] for record in telemetry] == [completed_report.status, blocked_report.status]
+    assert all(
+        set(record) == {
+            "taskId",
+            "status",
+            "durationMs",
+            "changedFiles",
+            "diffLines",
+            "estimatedInputTokens",
+            "estimatedOutputTokens",
+        }
+        for record in telemetry
+    )
+    assert all(record["taskId"] == contract.task_id for record in telemetry)
+    assert all(isinstance(record["status"], str) for record in telemetry)
+    assert all(
+        isinstance(record[key], (int, float)) and record[key] >= 0
+        for record in telemetry
+        for key in (
+            "durationMs",
+            "changedFiles",
+            "diffLines",
+            "estimatedInputTokens",
+            "estimatedOutputTokens",
+        )
+    )
+    assert telemetry[0]["estimatedInputTokens"] > 0
+    assert telemetry[0]["estimatedOutputTokens"] > 0
+    assert telemetry[1]["estimatedInputTokens"] == 0
+    assert telemetry[1]["estimatedOutputTokens"] == 0

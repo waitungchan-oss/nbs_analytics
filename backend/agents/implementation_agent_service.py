@@ -157,10 +157,22 @@ class ImplementationAgentService:
             int(load_implementation_policy(self.project_root)["limits"]["maxRepairLoops"]),
             2,
         )
+        estimated_input_tokens = 0
+        estimated_output_tokens = 0
+
+        def finish(*args: Any, **kwargs: Any) -> ImplementationRunReport:
+            return self._finish(
+                *args,
+                **kwargs,
+                estimated_input_tokens=estimated_input_tokens,
+                estimated_output_tokens=estimated_output_tokens,
+            )
+
         for attempt in range(max_repairs + 1):
             request = self._request(validated, bundle, repair=repair)
-            if estimate_tokens(json.dumps(request, ensure_ascii=False, sort_keys=True)) > self._implementation_budget("inputTokens"):
-                return self._finish(
+            request_tokens = self._estimate_payload_tokens(request)
+            if request_tokens > self._implementation_budget("inputTokens"):
+                return finish(
                     validated,
                     status="context_overflow",
                     finding=self._finding("request_token_limit", "implementation request exceeds its token budget"),
@@ -170,26 +182,28 @@ class ImplementationAgentService:
                     repair_loops_used=attempt,
                     started=started,
                 )
+            estimated_input_tokens += request_tokens
             try:
                 with self._protect_git_index():
                     response = agent_command(request)
             except Exception as exc:
                 decision = self._post_write_decision(validated, before)
                 if decision.status != "allowed":
-                    return self._finish(
+                    return finish(
                         validated, status=decision.status, finding=self._decision_finding(decision),
                         before=before, red_evidence=red_evidence, green_evidence=green_evidence,
                         repair_loops_used=attempt, started=started,
                     )
-                return self._finish(
+                return finish(
                     validated, status="runtime_error", finding=self._finding("runner_error", str(exc)),
                     before=before, red_evidence=red_evidence, green_evidence=green_evidence,
                     repair_loops_used=attempt, started=started,
                 )
 
+            estimated_output_tokens += self._estimate_payload_tokens(response)
             decision = self._post_write_decision(validated, before)
             if decision.status != "allowed":
-                return self._finish(
+                return finish(
                     validated, status=decision.status, finding=self._decision_finding(decision),
                     before=before, changed_files=decision.changed_files,
                     diff_lines=decision.diff_lines, red_evidence=red_evidence,
@@ -199,7 +213,7 @@ class ImplementationAgentService:
             try:
                 parsed = self._validated_response(response, validated)
             except ValueError as exc:
-                return self._finish(
+                return finish(
                     validated, status="invalid_agent_output",
                     finding=self._finding("invalid_agent_output", str(exc)), before=before,
                     changed_files=decision.changed_files, diff_lines=decision.diff_lines,
@@ -209,7 +223,7 @@ class ImplementationAgentService:
 
             test_safety = self._test_safety_finding(validated, decision.changed_files)
             if test_safety is not None:
-                return self._finish(
+                return finish(
                     validated, status="changes_required", finding=test_safety, before=before,
                     changed_files=decision.changed_files, diff_lines=decision.diff_lines,
                     red_evidence=red_evidence, green_evidence=green_evidence,
@@ -218,7 +232,7 @@ class ImplementationAgentService:
 
             if parsed["status"] == "needs_repair":
                 if attempt == max_repairs:
-                    return self._finish(
+                    return finish(
                         validated, status="validation_failed",
                         finding=self._finding("repair_limit", parsed["summary"]), before=before,
                         changed_files=decision.changed_files, diff_lines=decision.diff_lines,
@@ -234,19 +248,19 @@ class ImplementationAgentService:
             if not failures:
                 final = self._post_write_decision(validated, before)
                 if final.status != "allowed":
-                    return self._finish(
+                    return finish(
                         validated, status=final.status, finding=self._decision_finding(final),
                         before=before, changed_files=final.changed_files,
                         diff_lines=final.diff_lines, red_evidence=red_evidence,
                         green_evidence=green_evidence, repair_loops_used=attempt, started=started,
                     )
-                return self._finish(
+                return finish(
                     validated, status="completed", before=before, changed_files=final.changed_files,
                     diff_lines=final.diff_lines, red_evidence=red_evidence,
                     green_evidence=green_evidence, repair_loops_used=attempt, started=started,
                 )
             if attempt == max_repairs:
-                return self._finish(
+                return finish(
                     validated, status="validation_failed",
                     finding=self._finding("validation_failed", "approved validation command failed"),
                     before=before, changed_files=decision.changed_files,
@@ -371,6 +385,15 @@ class ImplementationAgentService:
             raise ValueError("agent response exceeds output token budget")
         return response
 
+    @staticmethod
+    def _estimate_payload_tokens(payload: object) -> int:
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            default=lambda value: f"<{type(value).__name__}>",
+        )
+        return max(1, estimate_tokens(serialized))
+
     def _run_validation_commands(
         self, command_ids: tuple[str, ...], contract: ImplementationTaskContract,
     ) -> list[ValidationResult]:
@@ -466,6 +489,8 @@ class ImplementationAgentService:
         red_evidence: list[ValidationResult] | None = None,
         green_evidence: list[ValidationResult] | None = None,
         repair_loops_used: int = 0,
+        estimated_input_tokens: int = 0,
+        estimated_output_tokens: int = 0,
         started: float,
     ) -> ImplementationRunReport:
         current = self._current_state()
@@ -490,7 +515,12 @@ class ImplementationAgentService:
             production_files_changed=production_files_changed,
             findings=tuple(() if finding is None else (finding,)),
         )
-        self._write_runtime_records(report, started)
+        self._write_runtime_records(
+            report,
+            started,
+            estimated_input_tokens=estimated_input_tokens,
+            estimated_output_tokens=estimated_output_tokens,
+        )
         return report
 
     def _current_state(self) -> WorktreeState:
@@ -502,7 +532,14 @@ class ImplementationAgentService:
                 index_fingerprint="", tree_fingerprint="",
             )
 
-    def _write_runtime_records(self, report: ImplementationRunReport, started: float) -> None:
+    def _write_runtime_records(
+        self,
+        report: ImplementationRunReport,
+        started: float,
+        *,
+        estimated_input_tokens: int = 0,
+        estimated_output_tokens: int = 0,
+    ) -> None:
         try:
             report_path = resolve_implementation_runtime_path(
                 self.project_root, f"reports/{report.contract_fingerprint or uuid4().hex}.json",
@@ -510,17 +547,13 @@ class ImplementationAgentService:
             report_path.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             telemetry_path = resolve_implementation_runtime_path(self.project_root, "telemetry.jsonl")
             telemetry = {
-                "runId": uuid4().hex,
-                "agent": "implementation",
-                "contractFingerprint": report.contract_fingerprint,
                 "taskId": report.task_id,
+                "status": report.status,
+                "durationMs": round((perf_counter() - started) * 1000, 3),
                 "changedFiles": len(report.changed_files),
                 "diffLines": report.diff_stat["lines"],
-                "redCommands": len(report.red_evidence),
-                "greenCommands": len(report.green_evidence),
-                "repairLoopsUsed": report.repair_loops_used,
-                "durationMs": round((perf_counter() - started) * 1000, 3),
-                "result": report.status,
+                "estimatedInputTokens": estimated_input_tokens,
+                "estimatedOutputTokens": estimated_output_tokens,
             }
             with telemetry_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(telemetry, ensure_ascii=False, separators=(",", ":")) + "\n")
