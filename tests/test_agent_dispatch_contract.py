@@ -86,11 +86,25 @@ def test_contract_distinguishes_product_agent_from_sdd_worker():
     assert "Task commit 由 Codex 編排流程持有" in text
 
 
+def test_product_agent_reports_head_boundaries_instead_of_commit_sha():
+    text = IMPLEMENTATION_CONTRACT_PATH.read_text(encoding="utf-8")
+    assert "startHead、endHead" in text
+    assert "commit SHA" not in text
+
+
+def test_product_agent_git_prohibition_has_no_authorization_exception():
+    text = IMPLEMENTATION_CONTRACT_PATH.read_text(encoding="utf-8")
+    assert "產品 Implementation Agent 不得 commit、merge、push。" in text
+    assert "除非 Codex" not in text
+    assert "Codex orchestration 只可在獨立授權後進行 Task commit。" in text
+
+
 def test_implementation_agent_cannot_choose_next_task_or_use_prohibited_operations():
     text = IMPLEMENTATION_CONTRACT_PATH.read_text(encoding="utf-8")
     for phrase in [
         "不得自行決定下一 Task",
-        "不得 commit、merge、push、管理服務或安裝 dependency",
+        "產品 Implementation Agent 不得 commit、merge、push",
+        "不得管理服務或安裝 dependency",
         "不得修改正式 SQLite、baseline、rollback、revenue、business rules 或 export schema",
         "不得自行進行 full verification 或 Hermes",
     ]:
