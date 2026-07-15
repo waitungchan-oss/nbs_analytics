@@ -207,6 +207,15 @@ class ImplementationAgentService:
                     repair_loops_used=attempt, started=started,
                 )
 
+            test_safety = self._test_safety_finding(validated, decision.changed_files)
+            if test_safety is not None:
+                return self._finish(
+                    validated, status="changes_required", finding=test_safety, before=before,
+                    changed_files=decision.changed_files, diff_lines=decision.diff_lines,
+                    red_evidence=red_evidence, green_evidence=green_evidence,
+                    repair_loops_used=attempt, started=started,
+                )
+
             if parsed["status"] == "needs_repair":
                 if attempt == max_repairs:
                     return self._finish(
@@ -218,15 +227,6 @@ class ImplementationAgentService:
                     )
                 repair = {"reason": parsed["summary"], "validation": []}
                 continue
-
-            test_safety = self._test_safety_finding(validated, decision.changed_files)
-            if test_safety is not None:
-                return self._finish(
-                    validated, status="changes_required", finding=test_safety, before=before,
-                    changed_files=decision.changed_files, diff_lines=decision.diff_lines,
-                    red_evidence=red_evidence, green_evidence=green_evidence,
-                    repair_loops_used=attempt, started=started,
-                )
 
             results = self._run_validation_commands(validated.effective_green_commands, validated)
             green_evidence.extend(results)

@@ -377,6 +377,34 @@ def test_new_test_bypass_marker_requires_explicit_approval(
     assert report.findings[0]["code"] == "test_safety_violation"
 
 
+def test_new_test_bypass_marker_rejects_needs_repair_before_retry(
+    service, contract, project_root,
+):
+    calls = 0
+
+    def marker_runner(request: dict) -> object:
+        nonlocal calls
+        calls += 1
+        (project_root / "tests/test_allowed.py").write_text(
+            "def test_allowed():\n    pytest.skip('bypass')\n    assert True\n",
+            encoding="utf-8",
+        )
+        if calls > 1:
+            raise AssertionError("test bypass must be rejected before repair")
+        return {
+            "schemaVersion": "implementation-response-v1",
+            "status": "needs_repair",
+            "summary": "approved validation failed",
+            "requestedValidationCommandIds": ["pytest_targeted", "py_compile"],
+        }
+
+    report = service.execute(contract, marker_runner)
+
+    assert report.status == "changes_required"
+    assert report.findings[0]["code"] == "test_safety_violation"
+    assert calls == 1
+
+
 def test_service_limits_repair_calls_and_writes_telemetry(
     service, contract, project_root, validation_runner,
 ):
