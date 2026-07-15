@@ -277,6 +277,35 @@ def test_review_collection_skips_tracked_process_reports_and_denied_data_without
     assert "formal rows" not in serialized
 
 
+def test_review_collection_keeps_legal_tracked_root_source_while_skipping_process_and_sensitive_paths(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "backend").mkdir()
+    (tmp_path / ".superpowers/sdd").mkdir(parents=True)
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    root_source = tmp_path / "worker.py"
+    root_source.write_text("VALUE = 1\n", encoding="utf-8")
+    report = tmp_path / ".superpowers/sdd/task-report.md"
+    report.write_text("process-only report", encoding="utf-8")
+    secret = tmp_path / "backend/secret.db"
+    secret.write_text("formal rows", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    root_source.write_text("VALUE = 2\n", encoding="utf-8")
+    report.write_text("process-only report changed", encoding="utf-8")
+    secret.write_text("formal rows changed", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+    assert [item.source for item in bundle.evidence] == ["worker.py"]
+    assert "+VALUE = 2" in bundle.evidence[0].content
+    serialized = str(bundle.to_dict())
+    assert "process-only report" not in serialized
+    assert "formal rows" not in serialized
+
+
 def test_allowlisted_extensionless_root_file_is_readable(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)

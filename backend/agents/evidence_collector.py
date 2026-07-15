@@ -50,6 +50,13 @@ class EvidencePolicy:
         )
 
     def resolve_read_path(self, path: Path) -> Path:
+        return self._resolve_read_path(path, allow_tracked_root_source=False)
+
+    def resolve_review_path(self, path: Path) -> Path:
+        """Allow a tracked root source diff without broadening untracked reads."""
+        return self._resolve_read_path(path, allow_tracked_root_source=True)
+
+    def _resolve_read_path(self, path: Path, *, allow_tracked_root_source: bool) -> Path:
         resolved = path.resolve()
         try:
             relative = resolved.relative_to(self.project_root)
@@ -66,7 +73,8 @@ class EvidencePolicy:
 
         top = relative.parts[0] if relative.parts else ""
         is_root_file = relative_text in self.root_files
-        allowed = is_root_file or top in self.read_roots
+        is_tracked_root_source = allow_tracked_root_source and len(relative.parts) == 1
+        allowed = is_root_file or is_tracked_root_source or top in self.read_roots
         if not allowed or (not is_root_file and resolved.suffix not in self.extensions):
             raise PermissionError(f"Path is not allowlisted: {relative_text}")
         return resolved
@@ -364,7 +372,8 @@ class EvidenceCollector:
                 raise PermissionError(f"Unsafe changed path: {relative}")
             candidate_path = self.project_root / relative
             try:
-                self.policy.resolve_read_path(candidate_path)
+                resolver = self.policy.resolve_read_path if relative in untracked_set else self.policy.resolve_review_path
+                resolver(candidate_path)
             except PermissionError:
                 # Policy-denied process reports and sensitive files stay out of Review evidence.
                 continue
