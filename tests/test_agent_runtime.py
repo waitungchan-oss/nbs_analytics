@@ -307,6 +307,19 @@ def test_sandboxed_runner_rejects_symlink_write_target(tmp_path):
         _sandbox_runner(tmp_path, script, ("allowed.py",))
 
 
+def test_sandboxed_runner_accepts_existing_needs_repair_response_contract():
+    response = {
+        "schemaVersion": "implementation-response-v1",
+        "status": "needs_repair",
+        "summary": "targeted validation failed",
+        "requestedValidationCommandIds": ["pytest_targeted"],
+    }
+
+    assert SandboxedSubprocessAgentRunner._validate_response(
+        json.dumps(response)
+    ) == response
+
+
 def make_bundle(objective: str = "x") -> EvidenceBundle:
     return EvidenceBundle(
         schema_version="context-evidence-v1",

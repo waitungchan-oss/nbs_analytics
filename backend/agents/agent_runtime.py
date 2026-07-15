@@ -456,7 +456,7 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
             raise ValueError("Agent output is not a valid implementation response")
         if result.get("schemaVersion") != "implementation-response-v1":
             raise ValueError("Agent output implementation schema is invalid")
-        if result.get("status") not in {"completed", "changes_required"}:
+        if result.get("status") not in {"completed", "needs_repair"}:
             raise ValueError("Agent output implementation status is invalid")
         if not isinstance(result.get("summary"), str) or not result["summary"].strip():
             raise ValueError("Agent output implementation summary is invalid")
