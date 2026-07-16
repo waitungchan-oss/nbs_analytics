@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from backend.services.agent_operations_service import AgentOperationsService
+from backend.agents.context_agent_service import build_context_evidence_payload
+from backend.agents.evidence_models import EvidenceBundle
+from backend.services.agent_operations_service import (
+    DEFAULT_STAGE_ARTIFACT_MAX_BYTES,
+    AgentOperationsService,
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -13,14 +18,27 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_policy(root: Path, *, stage_artifact_max_bytes: int = 5 * 1024 * 1024) -> None:
+    _write_json(root / "agent_config" / "workflow_retention.json", {
+        "schemaVersion": "agent-workflow-retention-v1",
+        "retainDays": 90,
+        "retainLatestTerminalRuns": 30,
+        "stageArtifactMaxBytes": stage_artifact_max_bytes,
+        "runArtifactSoftCapBytes": 25 * 1024 * 1024,
+        "commandOutputTailCharacters": 12_000,
+    })
+
+
 def _valid_run(root: Path, run_id: str = "run-123") -> Path:
+    if not (root / "agent_config" / "workflow_retention.json").exists():
+        _write_policy(root)
     run = root / ".nbs_agent_runtime" / "runs" / run_id
     _write_json(run / "manifest.json", {
         "schemaVersion": "agent-workflow-manifest-v1",
         "runId": run_id,
         "briefPath": "docs/briefs/agent-operations.md",
         "briefSha256": "a" * 64,
-        "gitBranch": "codex/agent-operations",
+        "gitBranch": "codex/agent-orchestrator-phase1",
         "gitHead": "b" * 40,
         "dirtyFiles": [],
         "createdAt": "2026-07-16T09:00:00+08:00",
@@ -41,7 +59,103 @@ def _valid_run(root: Path, run_id: str = "run-123") -> Path:
     return run
 
 
+def _write_event(run: Path, event_id: int, stage: str, occurred_at: str) -> None:
+    payload = {
+        "schemaVersion": "agent-workflow-event-v1",
+        "runId": run.name,
+        "eventId": f"event-{event_id}",
+        "eventType": "status_transition",
+        "fromStatus": "context_running",
+        "toStatus": "awaiting_authorization",
+        "occurredAt": occurred_at,
+        "message": "stage transition",
+        "metadata": {"stage": stage},
+    }
+    with (run / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
+def _verification_command() -> dict:
+    return {
+        "label": "pytest_targeted",
+        "argv": [".venv/bin/python", "-m", "pytest", "tests/test_agent_operations_service.py", "-q"],
+        "exitCode": 0,
+        "stdoutTail": "1 passed",
+        "stderrTail": "",
+    }
+
+
+def _full_verification_payload() -> dict:
+    return {
+        "fullPytest": {
+            "exitCode": 0,
+            "stdoutTail": "100 passed",
+            "stderrTail": "",
+            "payload": {},
+        },
+        "acceptance": {"status": "passed", "checks": {}},
+    }
+
+
+def _write_valid_stage_artifacts(run: Path) -> None:
+    _write_json(run / "context.json", {
+        "schemaVersion": "context-summary-v1",
+        "status": "ready",
+        "taskUnderstanding": [],
+        "systemBoundaries": [],
+        "relevantFiles": [],
+        "dependencies": [],
+        "recommendedTests": [],
+        "risks": [],
+        "unknowns": [],
+        "contextFingerprint": "a" * 64,
+    })
+    _write_json(run / "implementation.json", {
+        "schemaVersion": "implementation-run-report-v1",
+        "status": "completed",
+        "taskId": "task-2",
+        "contractFingerprint": "b" * 64,
+        "startHead": "c" * 40,
+        "endHead": "c" * 40,
+        "changedFiles": [],
+        "diffStat": {"files": 0, "lines": 0},
+        "redEvidence": [],
+        "greenEvidence": [],
+        "repairLoopsUsed": 0,
+        "testFilesChanged": [],
+        "productionFilesChanged": [],
+        "findings": [],
+        "durationMs": 1200,
+        "usage": {"inputTokens": 80, "outputTokens": 20},
+    })
+    _write_json(run / "targeted-verification.json", {"commands": [_verification_command()]})
+    _write_json(run / "review.json", {
+        "schemaVersion": "review-report-v1",
+        "verdict": "changes_required",
+        "durationMs": 400,
+        "findings": [{
+            "severity": "medium",
+            "file": "backend/services/agent_operations_service.py",
+            "line": 1,
+            "rule": "R1",
+            "evidence": "Add coverage",
+            "impact": "Missing regression coverage",
+            "recommendedAction": "Add coverage",
+        }],
+        "requirementCoverage": ["Task 2"],
+        "testCoverage": ["tests/test_agent_operations_service.py"],
+        "baselineRisk": "none",
+        "residualRisk": [],
+        "hermesRequiredChecks": ["post-change"],
+        "reviewFingerprint": "d" * 64,
+        "usage": {"inputTokens": 40, "outputTokens": 10},
+    })
+    _write_json(run / "full-verification.json", _full_verification_payload())
+    _write_json(run / "hermes.json", {"overallStatus": "pass"})
+
+
 def test_empty_runtime_returns_valid_snapshot(tmp_path):
+    _write_policy(tmp_path)
     snapshot = AgentOperationsService(tmp_path).build_snapshot()
     assert snapshot["schemaVersion"] == "agent-operations-snapshot-v1"
     assert snapshot["summary"]["runCount"] == 0
@@ -69,7 +183,10 @@ def test_valid_run_is_compacted_and_sorted(tmp_path):
     assert run["runId"] == "run-123"
     assert run["briefName"] == "agent-operations.md"
     assert run["gitHeadShort"] == "bbbbbbbb"
+    assert run["gitBranch"] == "codex/agent-orchestrator-phase1"
+    assert run["stage"] == "authorization"
     assert run["status"] == "awaiting_authorization"
+    assert run["errorCode"] is None
     assert run["durationMs"] == 180_000
     assert snapshot["summary"]["awaitingAuthorizationCount"] == 1
 
@@ -121,3 +238,667 @@ def test_os_error_diagnostic_does_not_leak_absolute_artifact_path(tmp_path):
 
     assert snapshot["runs"] == []
     assert str(tmp_path) not in json.dumps(snapshot["diagnostics"])
+
+
+def test_completed_run_aggregates_review_verification_hermes_and_tokens(tmp_path):
+    run = _valid_run(tmp_path, "run-complete")
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    status.update({
+        "stage": "hermes",
+        "status": "completed",
+        "completedAt": "2026-07-16T09:10:00+08:00",
+        "updatedAt": "2026-07-16T09:10:00+08:00",
+        "message": "Workflow completed",
+    })
+    _write_json(run / "status.json", status)
+    _write_valid_stage_artifacts(run)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["stages"]["implementation"] == {"available": True, "durationMs": 1200}
+    assert item["findings"] == {
+        "count": 1,
+        "highestSeverity": "medium",
+        "items": [{"severity": "medium", "code": "R1", "message": "Add coverage"}],
+    }
+    assert item["verification"] == {"status": "pass"}
+    assert item["hermes"] == {"status": "pass"}
+    assert item["tokenUsage"] == {"inputTokens": 120, "outputTokens": 30, "totalTokens": 150}
+    assert item["retentionState"] == "complete"
+
+
+def test_missing_usage_is_not_estimated(tmp_path):
+    _valid_run(tmp_path)
+
+    assert AgentOperationsService(tmp_path).build_snapshot()["runs"][0]["tokenUsage"] is None
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "payload"),
+    [
+        ("context.json", {"schemaVersion": "context-summary-v1", "status": "ready"}),
+        ("implementation.json", {"schemaVersion": "implementation-run-report-v0", "status": "completed"}),
+        ("implementation.json", {"schemaVersion": "implementation-run-report-v1", "status": "completed"}),
+        ("targeted-verification.json", {"commands": [{"exitCode": 0}]}),
+        ("review.json", {"schemaVersion": "review-report-v0", "verdict": "pass", "findings": []}),
+        ("review.json", {"schemaVersion": "review-report-v1", "verdict": "pass", "findings": []}),
+        ("full-verification.json", {"schemaVersion": "unknown-full-v1", **_full_verification_payload()}),
+        ("hermes.json", {"schemaVersion": "unknown-hermes-v1", "overallStatus": "pass"}),
+    ],
+)
+def test_stage_artifact_schema_or_fake_pass_fails_closed_without_token_usage(tmp_path, artifact_name, payload):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+    _write_json(run / artifact_name, payload)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"] == []
+    assert snapshot["summary"]["runCount"] == 0
+    assert snapshot["diagnostics"][0]["code"] == "invalid_run"
+    assert "tokenUsage" not in json.dumps(snapshot)
+
+
+def test_legacy_full_verification_and_hermes_payloads_without_schema_remain_available(tmp_path):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["verification"] == {"status": "pass"}
+    assert item["hermes"] == {"status": "pass"}
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_status"),
+    [
+        ({"fullPytest": _full_verification_payload()["fullPytest"]}, "blocked"),
+        ({
+            "fullPytest": {**_full_verification_payload()["fullPytest"], "exitCode": 1},
+        }, "fail"),
+        ({
+            "fullPytest": _full_verification_payload()["fullPytest"],
+            "acceptance": {"status": "failed"},
+        }, "fail"),
+        ({"acceptance": {"status": "passed"}}, "blocked"),
+    ],
+)
+def test_full_verification_real_partial_or_failed_artifacts_remain_available(tmp_path, payload, expected_status):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+    _write_json(run / "full-verification.json", payload)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["verification"] == {"status": expected_status}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"fullPytest": {**_full_verification_payload()["fullPytest"], "exitCode": True}},
+        {"fullPytest": {"exitCode": 0, "stdoutTail": "", "stderrTail": ""}},
+        {"fullPytest": {**_full_verification_payload()["fullPytest"], "unexpected": "field"}},
+        {"fullPytest": _full_verification_payload()["fullPytest"], "unknown": {}},
+        {"status": "pass", "commands": [_verification_command()]},
+        {"fullPytest": None},
+        {"acceptance": None},
+    ],
+)
+def test_full_verification_requires_exact_real_artifact_fields(tmp_path, payload):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+    _write_json(run / "full-verification.json", payload)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"] == []
+    assert snapshot["diagnostics"][0]["code"] == "invalid_run"
+
+
+def test_hermes_warning_artifact_remains_available(tmp_path):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+    _write_json(run / "hermes.json", {"overallStatus": "warning"})
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["hermes"] == {"status": "warning"}
+
+
+def test_review_pass_without_strict_evidence_fails_closed(tmp_path):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+    review_path = run / "review.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review.update({
+        "verdict": "pass",
+        "findings": [],
+        "requirementCoverage": [],
+        "testCoverage": [],
+        "residualRisk": [],
+        "hermesRequiredChecks": [],
+    })
+    _write_json(review_path, review)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"] == []
+    assert snapshot["diagnostics"][0]["code"] == "invalid_run"
+
+
+def test_context_evidence_v1_artifact_remains_available(tmp_path):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+    evidence = build_context_evidence_payload(EvidenceBundle(
+        schema_version="context-evidence-v1",
+        task={"objective": "Task 2", "scope": [], "forbidden": []},
+        repository={"branch": "codex/agent-orchestrator-phase1", "head": "b" * 40, "dirtyFiles": []},
+        guardrails={},
+    ))
+    _write_json(run / "context.json", evidence)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["stages"]["context"]["available"] is True
+
+
+def test_retention_config_and_archive_state_are_compacted_without_apply(tmp_path):
+    run = _valid_run(tmp_path)
+    _write_json(run / "archive-summary.json", {
+        "schemaVersion": "agent-workflow-archive-summary-v1",
+        "runId": run.name,
+    })
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["retention"] == {
+        "retainDays": 90,
+        "retainLatestTerminalRuns": 30,
+        "stageArtifactMaxBytes": 5 * 1024 * 1024,
+        "runArtifactSoftCapBytes": 25 * 1024 * 1024,
+        "commandOutputTailCharacters": 12_000,
+    }
+    assert snapshot["runs"][0]["retentionState"] == "archived_summary"
+    assert (run / "archive-summary.json").exists()
+
+
+def test_invalid_retention_config_is_reported_as_unavailable(tmp_path):
+    _valid_run(tmp_path)
+    _write_json(tmp_path / "agent_config" / "workflow_retention.json", {"schemaVersion": "unknown"})
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["retention"] == {"status": "unavailable"}
+    assert snapshot["diagnostics"] == [{
+        "code": "retention_config_invalid",
+        "path": "agent_config/workflow_retention.json",
+        "reason": "retention policy is invalid",
+    }]
+
+
+def test_final_500_valid_events_supply_bounded_stage_timing_without_raw_events(tmp_path):
+    run = _valid_run(tmp_path)
+    for index in range(501):
+        _write_event(run, index, "implementation", f"2026-07-16T09:{index // 60:02d}:{index % 60:02d}+00:00")
+    (run / "events.jsonl").write_text("{bad json}\n" + (run / "events.jsonl").read_text(encoding="utf-8"), encoding="utf-8")
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["stages"]["implementation"]["durationMs"] == 499_000
+    assert "events" not in item
+    assert "stage transition" not in json.dumps(item)
+
+
+@pytest.mark.parametrize("artifact_name", ["review.json", "archive-summary.json", "events.jsonl"])
+def test_symlink_or_non_regular_artifact_is_rejected(tmp_path, artifact_name):
+    run = _valid_run(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"verdict":"pass"}', encoding="utf-8")
+    (run / artifact_name).symlink_to(outside)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"] == []
+    assert snapshot["diagnostics"][0]["code"] == "unsafe_artifact"
+    assert str(tmp_path) not in json.dumps(snapshot["diagnostics"])
+
+
+def test_stage_directory_is_rejected_as_a_non_regular_artifact(tmp_path):
+    run = _valid_run(tmp_path)
+    (run / "review.json").mkdir()
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"] == []
+    assert snapshot["diagnostics"][0]["code"] == "unsafe_artifact"
+
+
+def test_oversize_stage_and_unknown_manifest_schema_are_isolated(tmp_path):
+    _write_policy(tmp_path, stage_artifact_max_bytes=2_048)
+    good = _valid_run(tmp_path, "good")
+    bad = _valid_run(tmp_path, "bad")
+    _write_json(bad / "review.json", {"message": "x" * 4_096})
+    unknown = _valid_run(tmp_path, "unknown")
+    manifest = json.loads((unknown / "manifest.json").read_text(encoding="utf-8"))
+    manifest["schemaVersion"] = "unknown-manifest-v1"
+    _write_json(unknown / "manifest.json", manifest)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert [item["runId"] for item in snapshot["runs"]] == [good.name]
+    assert {item["runId"] for item in snapshot["diagnostics"]} == {"bad", "unknown"}
+    assert {item["code"] for item in snapshot["diagnostics"]} == {"unsafe_artifact", "invalid_run"}
+
+
+def test_bad_run_is_isolated_without_leaking_paths_or_sensitive_stage_content(tmp_path):
+    good = _valid_run(tmp_path, "good")
+    _write_valid_stage_artifacts(good)
+    bad = _valid_run(tmp_path, "bad")
+    (bad / "manifest.json").write_text("{bad json", encoding="utf-8")
+    review_path = good / "review.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review["findings"][0]["severity"] = "high"
+    review["findings"][0]["rule"] = "R2"
+    review["findings"][0]["evidence"] = f"runner argv /Users/test/prompt stdout {tmp_path}"
+    _write_json(review_path, review)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert [item["runId"] for item in snapshot["runs"]] == ["good"]
+    assert snapshot["diagnostics"][0]["runId"] == "bad"
+    rendered = json.dumps(snapshot)
+    assert str(tmp_path) not in rendered
+    assert "argv" not in rendered
+    assert "stdout" not in rendered
+    assert "prompt" not in rendered
+
+
+def test_status_message_is_sanitized_before_it_reaches_the_snapshot(tmp_path):
+    run = _valid_run(tmp_path)
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    status["message"] = f"runner argv /Users/test/prompt stdout {tmp_path}"
+    _write_json(run / "status.json", status)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["message"] == "finding detail unavailable"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "note-/Users/secret",
+        "value._/Users/secret",
+        "tag~/Users/secret",
+        ". /Users/secret",
+    ],
+)
+def test_status_message_rejects_absolute_posix_path_after_any_delimiter(tmp_path, message):
+    run = _valid_run(tmp_path)
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    status["message"] = message
+    _write_json(run / "status.json", status)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["message"] == "finding detail unavailable"
+    assert "/Users/secret" not in json.dumps(item)
+
+
+def test_general_free_text_rejects_relative_branch_path():
+    assert AgentOperationsService._safe_message("codex/branch") == "finding detail unavailable"
+
+
+@pytest.mark.parametrize("uri", ["mailto:ops@example.com", "data:text/plain,secret", "urn:nbs:run-123"])
+def test_general_free_text_rejects_no_slash_uri_schemes(uri):
+    assert AgentOperationsService._safe_message(uri) == "finding detail unavailable"
+
+
+@pytest.mark.parametrize("stage", ["database_write", "service_management", "unknown_stage"])
+def test_stage_display_uses_exact_allowlist(stage):
+    assert AgentOperationsService._safe_stage(stage) == "value unavailable"
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["context", "authorization", "implementation", "targeted_verification", "review", "full_verification", "hermes"],
+)
+def test_stage_display_preserves_exact_allowlisted_values(stage):
+    assert AgentOperationsService._safe_stage(stage) == stage
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "codex//agent-orchestrator-phase1",
+        "/codex/agent-orchestrator-phase1",
+        "codex/agent-orchestrator-phase1/",
+        "codex/./agent-orchestrator-phase1",
+        "codex/../agent-orchestrator-phase1",
+        "codex/agent..orchestrator",
+        "codex/agent.",
+        "codex/agent.lock",
+        "codex/@{agent",
+        "codex\\agent",
+        "codex/agent branch",
+        "codex/agent:branch",
+        "codex/agent?branch",
+        "codex/agent*branch",
+        "codex/[agent]",
+        "codex/agent\x01branch",
+        ".hidden",
+        "codex/.hidden",
+    ],
+)
+def test_git_branch_rejects_invalid_refname_forms(branch):
+    assert AgentOperationsService._safe_git_branch(branch) == "value unavailable"
+
+
+def test_git_branch_preserves_normal_codex_branch():
+    assert AgentOperationsService._safe_git_branch("codex/agent-orchestrator-phase1") == "codex/agent-orchestrator-phase1"
+
+
+@pytest.mark.parametrize("unsafe_text", [
+    "note=/Users//secret",
+    "stdoutTail=/Users/[secret]/file",
+    "Exception: failed",
+])
+def test_general_free_text_fails_closed_for_sensitive_or_path_like_values(tmp_path, unsafe_text):
+    run = _valid_run(tmp_path)
+    _write_valid_stage_artifacts(run)
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    status.update({"message": unsafe_text, "errorCode": unsafe_text})
+    _write_json(run / "status.json", status)
+    review = json.loads((run / "review.json").read_text(encoding="utf-8"))
+    review["findings"][0]["evidence"] = unsafe_text
+    _write_json(run / "review.json", review)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["message"] == "finding detail unavailable"
+    assert item["errorCode"] == "finding detail unavailable"
+    assert item["findings"]["items"][0]["message"] == "finding detail unavailable"
+    assert unsafe_text not in json.dumps(item)
+
+
+@pytest.mark.parametrize(
+    ("message", "error_code"),
+    [
+        ("Cannot open '/Users/analyst/private/secret.db'", "OSError: '/Users/analyst/private/secret.db'"),
+        ("See file:///Users/analyst/private/secret.db", "file:///Users/analyst/private/secret.db"),
+        ("detail=[/Users/analyst/secret]", "detail=[/Users/analyst/secret]"),
+        ("path=/Users/analyst/secret", "path=/Users/analyst/secret"),
+        ("argument=[/Users/analyst/secret]", "option=/Users/analyst/secret"),
+    ],
+)
+def test_status_free_text_is_sanitized_for_quoted_paths_uris_and_exception_text(tmp_path, message, error_code):
+    run = _valid_run(tmp_path)
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    status.update({"message": message, "errorCode": error_code})
+    _write_json(run / "status.json", status)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["message"] == "finding detail unavailable"
+    assert item["errorCode"] == "finding detail unavailable"
+    rendered = json.dumps(item)
+    assert "/Users/" not in rendered
+    assert "file://" not in rendered
+    assert "OSError" not in rendered
+    assert "analyst" not in rendered
+    assert "secret" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_value", "snapshot_field"),
+    [
+        ("briefPath", "file:///Users/analyst/secret", "briefName"),
+        ("gitBranch", "detail=[/Users/analyst/secret]", "gitBranch"),
+        ("stage", "path=/Users/analyst/secret", "stage"),
+    ],
+)
+def test_artifact_identity_fields_are_sanitized_before_reaching_snapshot(tmp_path, field, unsafe_value, snapshot_field):
+    run = _valid_run(tmp_path)
+    manifest_path = run / "manifest.json"
+    status_path = run / "status.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    target = manifest if field in {"briefPath", "gitBranch"} else status
+    target[field] = unsafe_value
+    _write_json(manifest_path, manifest)
+    _write_json(status_path, status)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item[snapshot_field] == "value unavailable"
+    rendered = json.dumps(item)
+    assert "file://" not in rendered
+    assert "/Users/" not in rendered
+    assert "analyst" not in rendered
+    assert "secret" not in rendered
+
+
+def test_unsafe_run_id_is_isolated_without_echoing_its_identity(tmp_path):
+    _valid_run(tmp_path, "run-123")
+    _valid_run(tmp_path, "file:secret")
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert [item["runId"] for item in snapshot["runs"]] == ["run-123"]
+    assert snapshot["diagnostics"][-1]["code"] == "invalid_run"
+    assert "runId" not in snapshot["diagnostics"][-1]
+    assert "file:" not in json.dumps(snapshot["diagnostics"])
+    assert "secret" not in json.dumps(snapshot["diagnostics"])
+
+
+@pytest.mark.parametrize(
+    "archive_summary",
+    [
+        {"schemaVersion": "unknown", "runId": "run-123"},
+        {"schemaVersion": "agent-workflow-archive-summary-v1", "runId": "file:///Users/analyst/secret"},
+    ],
+)
+def test_archive_summary_requires_matching_schema_and_run_identity(tmp_path, archive_summary):
+    run = _valid_run(tmp_path)
+    _write_json(run / "archive-summary.json", archive_summary)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"][0]["retentionState"] == "complete"
+    assert snapshot["diagnostics"] == [{
+        "code": "invalid_archive_summary",
+        "path": ".nbs_agent_runtime/runs/run-123",
+        "reason": "archive summary is invalid",
+        "runId": "run-123",
+    }]
+    assert "file://" not in json.dumps(snapshot)
+    assert "/Users/" not in json.dumps(snapshot)
+
+
+def test_non_object_archive_summary_is_not_treated_as_archived(tmp_path):
+    run = _valid_run(tmp_path)
+    (run / "archive-summary.json").write_text("[]", encoding="utf-8")
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"] == []
+    assert snapshot["diagnostics"][0]["code"] == "invalid_run"
+    assert snapshot["diagnostics"][0]["runId"] == "run-123"
+
+
+@pytest.mark.parametrize("artifact_name", ["manifest.json", "status.json"])
+def test_oversize_core_artifact_is_isolated_before_json_load(tmp_path, monkeypatch, artifact_name):
+    _write_policy(tmp_path, stage_artifact_max_bytes=2_048)
+    run = _valid_run(tmp_path)
+    artifact_path = run / artifact_name
+    artifact_path.write_bytes(b"x" * 2_049)
+    original_open = Path.open
+    opened_core_artifact = False
+
+    def guarded_open(path, *args, **kwargs):
+        nonlocal opened_core_artifact
+        if path == artifact_path:
+            opened_core_artifact = True
+            raise AssertionError("oversize core artifact must be rejected before json.load")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert opened_core_artifact is False
+    assert snapshot["runs"] == []
+    assert snapshot["diagnostics"][0]["code"] == "unsafe_artifact"
+    assert str(tmp_path) not in json.dumps(snapshot["diagnostics"])
+
+
+def test_oversize_retention_config_is_not_opened_and_uses_bounded_default(tmp_path, monkeypatch):
+    run = _valid_run(tmp_path)
+    retention_path = tmp_path / "agent_config" / "workflow_retention.json"
+    retention_path.write_bytes(b"x" * (DEFAULT_STAGE_ARTIFACT_MAX_BYTES + 1))
+    original_open = Path.open
+    opened_retention_config = False
+
+    def guarded_open(path, *args, **kwargs):
+        nonlocal opened_retention_config
+        if path == retention_path:
+            opened_retention_config = True
+            raise AssertionError("oversize retention config must be rejected before json.load")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert opened_retention_config is False
+    assert [item["runId"] for item in snapshot["runs"]] == [run.name]
+    assert snapshot["retention"] == {"status": "unavailable"}
+    assert snapshot["diagnostics"] == [{
+        "code": "retention_config_invalid",
+        "path": "agent_config/workflow_retention.json",
+        "reason": "retention policy is invalid",
+    }]
+
+
+def test_event_reader_tails_from_end_without_iterating_or_reading_the_whole_file(tmp_path, monkeypatch):
+    run = _valid_run(tmp_path)
+    events_path = run / "events.jsonl"
+    events_path.write_text(
+        "".join(
+            json.dumps({
+                "schemaVersion": "agent-workflow-event-v1",
+                "runId": run.name,
+                "eventId": f"event-{index}",
+                "eventType": "status_transition",
+                "fromStatus": "context_running",
+                "toStatus": "awaiting_authorization",
+                "occurredAt": f"2026-07-16T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                "message": "stage transition",
+                "metadata": {"stage": "implementation"},
+            }) + "\n"
+            for index in range(3_000)
+        ),
+        encoding="utf-8",
+    )
+
+    class TailReadSpy:
+        def __init__(self, handle):
+            self._handle = handle
+            self.bytes_read = 0
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def read(self, size=-1):
+            assert size != -1, "event reader must use fixed-size reads"
+            data = self._handle.read(size)
+            self.bytes_read += len(data)
+            return data
+
+        def __iter__(self):
+            raise AssertionError("event reader must not iterate the whole file")
+
+        def seek(self, *args):
+            return self._handle.seek(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    original_open = Path.open
+    readers = []
+
+    def tracked_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == events_path:
+            reader = TailReadSpy(handle)
+            readers.append(reader)
+            return reader
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["stages"]["implementation"]["durationMs"] == 499_000
+    assert readers
+    assert readers[0].bytes_read < events_path.stat().st_size
+
+
+def test_event_reader_stops_at_fixed_scan_budget_for_invalid_or_other_run_events(tmp_path, monkeypatch):
+    run = _valid_run(tmp_path)
+    events_path = run / "events.jsonl"
+    event_scan_budget = 1 * 1024 * 1024
+    invalid_line = (b"x" * 2_047) + b"\n"
+    events_path.write_bytes(invalid_line * ((event_scan_budget // len(invalid_line)) + 2))
+    assert event_scan_budget < events_path.stat().st_size < DEFAULT_STAGE_ARTIFACT_MAX_BYTES
+
+    class TailReadSpy:
+        def __init__(self, handle):
+            self._handle = handle
+            self.bytes_read = 0
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def read(self, size=-1):
+            assert size != -1, "event reader must use fixed-size reads"
+            data = self._handle.read(size)
+            self.bytes_read += len(data)
+            return data
+
+        def __iter__(self):
+            raise AssertionError("event reader must not iterate the whole file")
+
+        def seek(self, *args):
+            return self._handle.seek(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    original_open = Path.open
+    readers = []
+
+    def tracked_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == events_path:
+            reader = TailReadSpy(handle)
+            readers.append(reader)
+            return reader
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["stages"]["implementation"]["durationMs"] is None
+    assert readers
+    assert readers[0].bytes_read == event_scan_budget
