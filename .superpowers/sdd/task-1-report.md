@@ -1,74 +1,97 @@
-# Task 1 Report: Workflow schemas and legal state transitions
+# Task 1 Implementation Report
 
-## Status
+## 修改檔案
 
-DONE
+- `backend/services/agent_operations_service.py`
+- `tests/test_agent_operations_service.py`
 
-## Scope
+另外依要求建立本報告：`.superpowers/sdd/task-1-report.md`。
 
-- Added `backend/agents/workflow_models.py` with the four workflow dataclasses, exact schema versions, strict JSON validation, canonical SHA-256 fingerprints, workflow status sets, and legal transitions.
-- Added `tests/test_workflow_models.py` covering authorization gating, terminal-state re-entry, exact status sets, canonical fingerprints, round trips, ISO-8601 timestamps, strict keys, unknown statuses, and illegal event transitions.
-- Did not modify SQLite, baseline, runtime, Hermes, or unrelated files.
+## RED
 
-## TDD Evidence
+命令：
 
-The strict JSON regression test for tuple `dirtyFiles` was added before the implementation fix. The focused RED run was:
-
-```text
-11 collected, 1 failed, 10 passed
+```bash
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py -q
 ```
 
-The failure was the expected pre-fix failure: tuple `dirtyFiles` was accepted by `WorkflowManifest.from_dict()`.
+結果：正確失敗。pytest collection 因尚未存在的
+`backend.services.agent_operations_service` 而回報
+`ModuleNotFoundError`，exit code `2`。
 
-## Fix
+## GREEN
 
-- Added shared value-level validation in `__post_init__` so direct dataclass construction and `from_dict()` enforce the same necessary schema, status, hash, timestamp, metadata, and transition invariants.
-- Normalized valid UTC `Z` timestamps to `+00:00`, which is parseable by Python 3.9 and remains stable through `to_dict()` / `from_dict()` round trips.
-- Restricted JSON `dirtyFiles` validation to lists while preserving the existing tuple-backed direct constructor representation.
-- Validated `WorkflowStatus.message` as a non-empty string and validated status transition values as strings before set membership checks, so malformed lists raise `WorkflowSchemaError` instead of `TypeError`.
+命令：
 
-## Verification
-
-Controller-executed focused verification:
-
-```text
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
-8 passed
+```bash
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py tests/test_workflow_models.py -q
 ```
 
-After adding the two review-fix regression cases, the same focused command was rerun:
+結果：`15 passed in 0.07s`，exit code `0`。
 
-```text
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
-10 passed
+另行執行：
+
+```bash
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/services/agent_operations_service.py
+git diff --check
 ```
 
-After the strict JSON tuple fix, the focused command was rerun:
-
-```text
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
-11 passed
-```
-
-After the final review fixes, the focused command was rerun:
-
-```text
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_workflow_models.py -q
-13 passed
-```
-
-`git diff --check` was also executed successfully.
+兩者均成功，exit code `0`。
 
 ## Self-review
 
-- `legal_transition()` defaults unknown or terminal source statuses to no outgoing transition.
-- `WorkflowStatus` accepts only the exact workflow status set and validates timestamps, nullable completion/error fields, and non-negative artifact bytes.
-- `WorkflowStatus` validates non-empty messages, and status transition values are type-checked before membership tests.
-- All `from_dict()` methods reject missing or unknown keys and enforce their exact schema version.
-- `WorkflowEvent` rejects illegal status transitions while allowing metadata-only events with both status fields null.
-- `canonical_sha256()` uses sorted keys, compact JSON separators, UTF-8, and SHA-256.
+- 使用既有 `WorkflowManifest.from_dict`、`WorkflowStatus.from_dict` 與 `RetentionPolicy.from_path`，沒有重複 schema 驗證。
+- snapshot reader 維持 read-only；缺失 runtime 不建立目錄。
+- `_safe_root` 拒絕既有 symlink，並拒絕 resolved path 位於 `project_root` 外的 runtime root。
+- run manifest/status 檔案拒絕 symlink 與非 regular file；無效 run 只進入 bounded diagnostics，不中斷其他 valid runs。
+- snapshot 只輸出 project-relative diagnostics path，避免絕對路徑洩漏。
+- 既有 `.nbs_agent_runtime/` 為 worktree 原有且 ignored 的目錄，本 Task 未建立或修改。
+- 未修改正式 DB、baseline、runtime、服務或其他 workflow artifacts。
 
-## Concerns
+## Commit
 
-- No SQLite, baseline, runtime, Hermes, or unrelated Task files were modified.
-- Only the focused workflow model test file was executed; no broader test result is claimed here.
+`d001e0a` (`feat: build agent operations snapshot`)
+
+## 未完成項
+
+無。Task 2 未開始。
+
+## Task 1 Hardening Fix
+
+### Findings Fixed
+
+- Medium: run 與 retention diagnostics 不再回傳 `str(exc)`；固定 safe reason allowlist 阻止 `OSError`、`PermissionError` 或 schema error 將絕對 artifact path 或未界限內容帶到 UI。
+- Low: empty runtime 明確驗證不建立 `.nbs_agent_runtime`；runtime root 的 dangling symlink 與 project root 外 resolved path 都 fail closed。
+- Low: malformed schema 與 symlink artifact 都只產生 project-relative、bounded diagnostics；`completedAt` 存在時 duration 優先於 `updatedAt`。
+
+### TDD Evidence
+
+RED command:
+
+```bash
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py -q
+```
+
+Result: `3 failed, 3 passed in 0.09s`, exit code `1`. The failures reproduced the dangling runtime-root symlink gap, unbounded malformed-artifact diagnostic, and `PermissionError` absolute path leak.
+
+GREEN command:
+
+```bash
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py -q
+```
+
+Result: `6 passed in 0.05s`, exit code `0`.
+
+### Final Verification
+
+```bash
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py tests/test_workflow_models.py -q
+/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/services/agent_operations_service.py
+git diff --check
+```
+
+Result: `19 passed in 0.05s`; compile and diff check both exit code `0`.
+
+### Commit
+
+`5007d1b` (`fix: harden agent operations diagnostics`)
