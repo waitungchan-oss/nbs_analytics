@@ -10,6 +10,12 @@ from backend.agents.workflow_retention import RetentionPolicy
 
 
 SNAPSHOT_SCHEMA = "agent-operations-snapshot-v1"
+_SAFE_DIAGNOSTIC_REASONS = frozenset({
+    "runs root is not a regular directory",
+    "run path is not a regular directory",
+    "run artifact is invalid",
+    "retention policy is invalid",
+})
 
 
 class AgentOperationsService:
@@ -36,7 +42,7 @@ class AgentOperationsService:
 
     def _safe_root(self, candidate: Path) -> Path:
         candidate = candidate.expanduser()
-        if candidate.exists() and candidate.is_symlink():
+        if candidate.is_symlink():
             raise ValueError("runtime root must not be a symlink")
         resolved = candidate.resolve(strict=False)
         try:
@@ -64,7 +70,7 @@ class AgentOperationsService:
                     raise ValueError("runId does not match manifest, status, and directory")
                 runs.append(self._compact_run(manifest, status))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
-                diagnostics.append(self._diagnostic(run_path, str(exc)))
+                diagnostics.append(self._diagnostic(run_path, "run artifact is invalid"))
         return runs
 
     @staticmethod
@@ -116,7 +122,7 @@ class AgentOperationsService:
         try:
             policy = RetentionPolicy.from_path(self.retention_path)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            diagnostics.append(self._diagnostic(self.retention_path, str(exc)))
+            diagnostics.append(self._diagnostic(self.retention_path, "retention policy is invalid"))
             return None
         return {
             "retainDays": policy.retain_days,
@@ -131,4 +137,10 @@ class AgentOperationsService:
             display_path = str(path.resolve(strict=False).relative_to(self.project_root))
         except ValueError:
             display_path = path.name
-        return {"path": display_path, "reason": reason}
+        return {"path": display_path, "reason": self._safe_reason(reason)}
+
+    @staticmethod
+    def _safe_reason(reason: str) -> str:
+        if reason in _SAFE_DIAGNOSTIC_REASONS:
+            return reason
+        return "operation artifact is invalid"
