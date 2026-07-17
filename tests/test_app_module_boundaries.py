@@ -25,6 +25,23 @@ def test_pages_module_hosts_page_orchestration():
     assert "def _render_upload_area" in pages_source
 
 
+def test_agent_operations_is_the_fourth_top_level_tab():
+    source = PAGES_PATH.read_text(encoding="utf-8")
+
+    expected = '["經營分析大盤", "業務規則配置", "GMV 排除訂單看板", "Agent Operations"]'
+    assert expected in source
+    assert "def _render_agent_operations_tab" in source
+    assert "AgentOperationsService" in source
+    assert "render_agent_operations" in source
+
+
+def test_agent_operations_reader_does_not_leak_into_thin_entrypoint():
+    source = APP_PATH.read_text(encoding="utf-8")
+
+    assert "AgentOperationsService" not in source
+    assert ".nbs_agent_runtime" not in source
+
+
 def test_config_tab_starts_with_monthly_baseline_governance_panel():
     import ast
 

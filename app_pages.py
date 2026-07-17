@@ -6,6 +6,7 @@ import json
 import time
 import traceback
 from html import escape
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -102,7 +103,28 @@ from app_workflows import (
 )
 from backend.services.upload_lock_service import UploadBusyError, acquire_upload_lease
 from backend.services.upload_orchestrator_service import execute_upload_operation
+from agent_operations_rendering import render_agent_operations
+from backend.services.agent_operations_service import AgentOperationsService
 from streamlit_rendering import *
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _load_agent_operations_snapshot(*, force: bool = False) -> dict:
+    key = "AGENT_OPERATIONS_SNAPSHOT"
+    if force or key not in st.session_state:
+        st.session_state[key] = AgentOperationsService(PROJECT_ROOT).build_snapshot()
+    return st.session_state[key]
+
+
+def _render_agent_operations_tab() -> None:
+    snapshot = _load_agent_operations_snapshot()
+
+    def refresh() -> None:
+        _load_agent_operations_snapshot(force=True)
+
+    render_agent_operations(snapshot, on_refresh=refresh)
 
 
 def _coerce_entity_audit_dataframe(value: object) -> pd.DataFrame:
@@ -2443,10 +2465,12 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    tab_dash, tab_conf, tab_gmv = st.tabs(["經營分析大盤", "業務規則配置", "GMV 排除訂單看板"])
+    tab_dash, tab_conf, tab_gmv, tab_agent_operations = st.tabs(["經營分析大盤", "業務規則配置", "GMV 排除訂單看板", "Agent Operations"])
     with tab_dash:
         _render_dashboard_tab()
     with tab_conf:
         _render_config_tab()
     with tab_gmv:
         _render_gmv_exclusion_tab()
+    with tab_agent_operations:
+        _render_agent_operations_tab()

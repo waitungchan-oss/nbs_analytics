@@ -141,3 +141,37 @@ def test_render_non_empty_snapshot_covers_main_ui_contract(monkeypatch):
     assert any(call[0] == "subheader" and call[1][0] == "Selected run" for call in calls)
     assert any(call[0] == "subheader" and call[1][0] == "Retention and diagnostics" for call in calls)
     assert any(call[0] == "warning" and "Diagnostics: 1" in call[1][0] for call in calls)
+
+
+def test_agent_operations_snapshot_is_session_scoped_and_force_refresh_is_manual(monkeypatch):
+    import app_pages
+
+    unrelated = {
+        "PROCESSED_DATA_CACHE": object(),
+        "AI_FORECAST_CACHE": object(),
+        "EXPORT_WORKBOOKS": object(),
+        "UPLOAD_LAST_RESULT": object(),
+    }
+    session_state = dict(unrelated)
+    build_calls = []
+
+    class FakeService:
+        def __init__(self, project_root):
+            self.project_root = project_root
+
+        def build_snapshot(self):
+            build_calls.append(self.project_root)
+            return {"schemaVersion": "agent-operations-snapshot-v1", "build": len(build_calls)}
+
+    monkeypatch.setattr(app_pages.st, "session_state", session_state)
+    monkeypatch.setattr(app_pages, "AgentOperationsService", FakeService)
+
+    first = app_pages._load_agent_operations_snapshot()
+    second = app_pages._load_agent_operations_snapshot()
+    forced = app_pages._load_agent_operations_snapshot(force=True)
+
+    assert first is second
+    assert forced["build"] == 2
+    assert len(build_calls) == 2
+    for key, value in unrelated.items():
+        assert session_state[key] is value
