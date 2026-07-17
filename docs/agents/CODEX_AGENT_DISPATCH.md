@@ -7,7 +7,7 @@
 
 本文件定義 Codex 何時收集 Context、何時要求 Review、何時分派 Implementation Agent，以及三者與 Hermes 的邊界。它是工作流程契約，不會在 NBS Analytics application runtime 內自動執行 Agent。
 
-目前分派由 Codex 依本契約逐步呼叫三個 Agent CLI；Phase 1 已提供 `scripts/agent_workflow.py` 本地 orchestrator CLI 與可選 macOS notification。它只編排既有狀態，不得放寬人工授權、sandbox、Review、完整驗證或 Hermes gate。Streamlit Agent Operations 仍是 Phase 2 read-only 工作，不得成為 dispatch、approval 或 retention 寫入入口。
+目前分派由 Codex 依本契約逐步呼叫三個 Agent CLI；Phase 1 已提供 `scripts/agent_workflow.py` 本地 orchestrator CLI 與可選 macOS notification。它只編排既有狀態，不得放寬人工授權、sandbox、Review、完整驗證或 Hermes gate。Streamlit Agent Operations 是現行 read-only view，讀取 `agent-operations-snapshot-v1`，不得成為 dispatch、approval 或 retention 寫入入口。
 
 ## 人類可讀流程
 
@@ -18,6 +18,8 @@ Codex 建立並批准 implementation Task contract 後，只可分派一個 Task
 Phase 1 CLI 的 `run`（或 `start`）只執行 Context collection 並回傳 `awaiting_authorization`；沒有任何 implicit approval。`approve` 必須逐次提供 run ID、approved contract、Implementation runner 和 Review runner，這些 command 不會寫入 run artifact。`status` / `list` 僅讀取 artifact；`run` 後的 best-effort housekeeping 及 `prune --apply` 都依既有 retention policy compact 合資格的已完成 run，`prune --dry-run` 只計畫而不寫入。`--no-notify` 可停用通知；通知失敗只記錄 warning。
 
 若環境或使用者明確配置了已批准的 runner，Codex 才可使用 `--agent-command` 將 bundle 交給該 runner。未明確配置時不得自行選擇外部模型或命令。Collector、Context Agent 與 Review Agent 均不得修改 SQLite、baseline、runtime、Git 或程式碼；Hermes 仍負責正式服務、資料庫完整性、baseline、runtime 與整體驗收。
+
+Agent Operations 只讀 Phase 1 artifacts，不是第二個 source of truth。UI 僅支援「手動重新整理」session-scoped snapshot，且不清除 dashboard caches；不得批准、執行、停止、刪除或 prune workflow。Token usage 僅在 supplied 時顯示，否則顯示 `未提供`。
 
 ## Machine-readable dispatch rules
 

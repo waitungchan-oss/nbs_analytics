@@ -57,6 +57,14 @@ Hermes 可以讀取以下來源：
 
 Hermes 只可 read-only 報告 workflow artifact、cap warning 與 retention state，不得寫入 artifact、執行 `prune` 或取代 Review / full verification gate。每個 stage artifact 的 hard cap 是 5 MiB；單一 run 的 stage artifact 合計超過 25 MiB 時 Store 會記錄 warning event，但不會由 Hermes 自動 compact。retention 僅可由既有 policy 的 best-effort housekeeping 或明確 `prune --apply` 處理合資格的 completed run；最新 30 個 terminal run 與非 completed run 均受保護。
 
+### Agent Operations Read-only View
+
+Agent Operations 是現行 Streamlit read-only view，讀取 Phase 1 artifacts 並消費
+`agent-operations-snapshot-v1`；它不是第二個 source of truth。Hermes 可驗證 snapshot
+內容與 read-only 行為，但不得寫入 UI artifacts、批准、執行、停止、刪除或 prune workflow，
+也不得操作 retention。UI 的「手動重新整理」不清除 dashboard caches；Token usage 未提供時顯示
+`未提供`。
+
 ### Logs
 
 - `.nbs_runtime/logs/api.log`

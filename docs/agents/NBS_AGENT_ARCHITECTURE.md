@@ -47,7 +47,7 @@ Obsidian Brief
 - 可自行選擇 Task、越過 Review、完整驗證或 Hermes 的自主 Implementation Agent。
 - 自動 commit、merge、rollback 或 baseline promotion。
 - 向量資料庫或長駐索引服務。
-- Agent Web UI 或新的 FastAPI endpoint；Streamlit Agent Operations 是 Phase 2 的 read-only 工作，不得成為 dispatch、approval 或 retention 的寫入入口。
+- Agent Web UI 或新的 FastAPI endpoint；Streamlit Agent Operations 是現行的 read-only 工作，不得成為 dispatch、approval 或 retention 的寫入入口。
 - 對正式 SQLite、營銷原始資料、業務規則或報表計算的變更。
 - Hermes 的替代品或第二套完整系統驗收器。
 - 自動選擇或購買外部模型。
@@ -399,17 +399,26 @@ Implementation 至少驗證：
 - Collector 不修改 DB、runtime、Git index 或工作樹。
 - Full pytest、system acceptance、Hermes 與 2026-05 baseline 保持通過。
 
-## 19. 後續 Roadmap
+## 19. Agent Operations 現行邊界
+
+Agent Operations 是現行的 Streamlit read-only view，讀取 Phase 1 artifacts 並呈現
+`agent-operations-snapshot-v1`。它不是第二個 source of truth，也不改寫 workflow 狀態。
+
+- 資料來源是 Phase 1 workflow artifacts；view 不建立 duplicate status store。
+- 使用者只能透過「手動重新整理」更新 session-scoped snapshot；重新整理不清除 dashboard caches。
+- UI 不得批准、執行、停止、刪除或 prune workflow，也不得操作 Git、SQLite、baseline 或正式服務。
+- Token usage 只有在 telemetry supplied 時顯示；未提供時顯示 `未提供`，不估算 quota 或 token。
+
+## 20. 後續 Roadmap
 
 1. **Agent Orchestrator**：以 CLI 編排 Context、人工授權點、Implementation、Review、完整驗證及 Hermes；保存 run status，第一階段提供 macOS 桌面通知，但不擴大任何 Agent 權限。
-2. **Agent Operations**：在 Streamlit 提供 read-only 圖形化執行狀態、耗時、Token、findings 與 Hermes 結果，不直接操作 Git、SQLite、baseline 或正式服務。
-3. **Diagnostic Agent**：針對失敗測試與 runtime evidence 找根因，不直接修復。
-4. **Documentation Agent**：只根據已驗證 evidence 回填 Brief、ADR 與 system map。
-5. **Git Integration Agent**：只在所有 gate PASS 且獲授權後 stage、commit 或 merge。
+2. **Diagnostic Agent**：針對失敗測試與 runtime evidence 找根因，不直接修復。
+3. **Documentation Agent**：只根據已驗證 evidence 回填 Brief、ADR 與 system map。
+4. **Git Integration Agent**：只在所有 gate PASS 且獲授權後 stage、commit 或 merge。
 
 未來 Agent 仍必須服從同一 Evidence Bundle、權限白名單、fingerprint、telemetry 與人工授權規則。
 
-## 20. 治理與正式流程
+## 21. 治理與正式流程
 
 ```text
 Brief
@@ -430,7 +439,7 @@ Brief
 
 Implementation Agent 的 routing 由 `CODEX_AGENT_DISPATCH.md` machine-readable rules 決定：Codex 建立/批准 contract、分派一個 Task、檢查 report 與實際 diff、啟動 Review Agent、處理 findings、執行完整驗證並呼叫 Hermes。Implementation Agent 不得自行決定下一 Task。
 
-## 21. Implementation Evidence
+## 22. Implementation Evidence
 
 Context、Review 與 Implementation Agent 的最終實作及治理證據已完成核對：
 
