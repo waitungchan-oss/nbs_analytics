@@ -477,6 +477,8 @@ class WorkflowOrchestrator:
                     implementation_runner = self._approved_runner(implementation_agent_command)
                     self._approved_runner(review_agent_command)
                     manifest = self.store.load_manifest(run_id)
+                    if manifest.run_id != run_id:
+                        raise ValueError("workflow manifest run ID does not match requested run")
                     contract_file = Path(contract_path).resolve()
                     contract_payload = json.loads(contract_file.read_text(encoding="utf-8"))
                     contract = ImplementationTaskContract.from_dict(contract_payload)

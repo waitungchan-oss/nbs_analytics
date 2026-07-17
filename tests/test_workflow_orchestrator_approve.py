@@ -513,3 +513,29 @@ def test_approve_duplicate_returns_running_status_without_second_approval_or_exe
     assert first.status == "completed"
     assert second == first
     assert len(executor.calls) == 6
+
+
+def test_approve_blocks_when_manifest_run_id_does_not_match_requested_run(tmp_path):
+    flow, executor, _, started = started_run(tmp_path)
+    original_manifest = flow.store.load_manifest(started.run_id)
+    manifest_path = flow.store._run_file(started.run_id, "manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["runId"] = "run-different-identity"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    contract_path = contract(tmp_path / "task.json", base=original_manifest.git_head)
+
+    status = flow.approve(
+        started.run_id,
+        contract_path,
+        implementation_agent_command="codex",
+        review_agent_command="claude",
+    )
+
+    assert status.status == "blocked"
+    assert status.error_code == "blocked_authorization"
+    run_dir = tmp_path / ".nbs_agent_runtime" / "runs" / started.run_id
+    persisted = flow.store.load_status(started.run_id)
+    assert persisted.status == status.status == "blocked"
+    assert persisted.error_code == status.error_code == "blocked_authorization"
+    assert not (run_dir / "approval.json").exists()
+    assert len(executor.calls) == 1
