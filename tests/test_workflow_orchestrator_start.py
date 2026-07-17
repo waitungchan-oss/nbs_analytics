@@ -294,7 +294,7 @@ def test_subprocess_executor_drains_oversized_stdout_and_stderr_with_bounded_tai
         raise AssertionError("bounded executor must not use subprocess.run")
 
     monkeypatch.setattr(subprocess, "run", unexpected_run)
-    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[1])
     script = (
         "import sys; "
         f"sys.stdout.write('o' * {OUTPUT_TAIL * 3}); sys.stdout.flush(); "
@@ -317,7 +317,7 @@ def test_subprocess_executor_parses_successful_json_larger_than_tail(monkeypatch
         raise AssertionError("bounded executor must not use subprocess.run")
 
     monkeypatch.setattr(subprocess, "run", unexpected_run)
-    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[1])
     expected_padding = "x" * (OUTPUT_TAIL * 2)
     payload = {"status": "ready", "contextFingerprint": "a" * 64, "padding": expected_padding}
     encoded = json.dumps(payload, ensure_ascii=False)
@@ -335,7 +335,7 @@ def test_subprocess_executor_rejects_stdout_over_stage_cap_without_full_spool(mo
         raise AssertionError("full stdout spool is forbidden")
 
     monkeypatch.setattr("backend.agents.workflow_orchestrator.tempfile.TemporaryFile", forbidden_spool)
-    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[1])
     script = (
         "import sys, time; "
         "sys.stdout.write('x' * (5 * 1024 * 1024 + 1)); sys.stdout.flush(); "
@@ -351,7 +351,7 @@ def test_subprocess_executor_allows_successful_text_output_when_json_is_not_requ
         raise AssertionError("bounded executor must not use subprocess.run")
 
     monkeypatch.setattr(subprocess, "run", unexpected_run)
-    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[1])
     script = "import sys; sys.stdout.write('35 passed in 1.58s\\n')"
 
     result = executor.run_json((str(executor.python), "-c", script), timeout=10, require_json=False)
@@ -388,7 +388,7 @@ def test_subprocess_executor_kills_process_group_on_timeout(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(os, "getpgid", lambda pid: pid + 1)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append(("killpg", pgid, sig)))
-    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[3])
+    executor = SubprocessStageExecutor(Path(__file__).resolve().parents[1])
 
     with pytest.raises(subprocess.TimeoutExpired):
         executor.run_json(("fake-python", "-c", "pass"), timeout=1)
