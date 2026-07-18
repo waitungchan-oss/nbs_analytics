@@ -9,6 +9,7 @@ from backend.agents.documentation_evidence import (
     _MAX_TEXT,
     _bounded_text,
     _collect_commands,
+    _collect_paths,
 )
 from backend.agents.workflow_models import (
     APPROVAL_SCHEMA,
@@ -64,6 +65,43 @@ def test_collector_requires_all_verified_gates(completed_run_fixture):
         collector.collect(completed_run_fixture.run_id)
 
 
+def test_collector_rejects_incomplete_status(completed_run_fixture, monkeypatch):
+    monkeypatch.setattr(
+        completed_run_fixture.store,
+        "load_status",
+        lambda run_id: _status(run_id, "awaiting_authorization"),
+    )
+
+    with pytest.raises(DocumentationEvidenceError, match="completed"):
+        DocumentationEvidenceCollector(
+            completed_run_fixture.project_root, store=completed_run_fixture.store
+        ).collect(
+            completed_run_fixture.run_id
+        )
+
+
+def test_collector_rejects_review_failure(completed_run_fixture):
+    completed_run_fixture.store.write_artifact(
+        completed_run_fixture.run_id, "review.json", {"status": "fail"}
+    )
+
+    with pytest.raises(DocumentationEvidenceError, match="review"):
+        DocumentationEvidenceCollector(completed_run_fixture.project_root).collect(
+            completed_run_fixture.run_id
+        )
+
+
+def test_collector_rejects_full_verification_failure(completed_run_fixture):
+    completed_run_fixture.store.write_artifact(
+        completed_run_fixture.run_id, "full-verification.json", {"status": "fail"}
+    )
+
+    with pytest.raises(DocumentationEvidenceError, match="full-verification"):
+        DocumentationEvidenceCollector(completed_run_fixture.project_root).collect(
+            completed_run_fixture.run_id
+        )
+
+
 def test_collector_never_exposes_raw_outputs(completed_run_fixture):
     evidence = DocumentationEvidenceCollector(
         completed_run_fixture.project_root
@@ -86,6 +124,30 @@ def test_bounded_text_truncates_long_strings():
     value = "x" * (_MAX_TEXT + 17)
 
     assert _bounded_text(value) == value[:_MAX_TEXT]
+
+
+def test_collect_paths_rejects_non_string_dict_path():
+    with pytest.raises(DocumentationEvidenceError, match="path"):
+        _collect_paths({"implementation.json": {"changedPaths": [{"path": 42}]}})
+
+
+def test_collector_bounds_artifact_strings(completed_run_fixture):
+    long_value = "x" * (_MAX_TEXT + 17)
+    completed_run_fixture.store.write_artifact(
+        completed_run_fixture.run_id,
+        "implementation.json",
+        {"status": long_value, "summary": long_value, "changedPaths": [long_value]},
+    )
+
+    evidence = DocumentationEvidenceCollector(completed_run_fixture.project_root).collect(
+        completed_run_fixture.run_id
+    ).to_dict()
+
+    assert len(evidence["taskId"]) <= _MAX_TEXT
+    assert len(evidence["generatedAt"]) <= _MAX_TEXT
+    assert all(len(value) <= _MAX_TEXT for value in evidence["changedPaths"])
+    assert all(len(value) <= _MAX_TEXT for value in evidence["summaries"].values())
+    assert all(len(value) <= _MAX_TEXT for value in evidence["gateResults"].values())
 
 
 def test_collect_commands_redacts_command_and_argv():

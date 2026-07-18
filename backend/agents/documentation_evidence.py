@@ -38,7 +38,7 @@ def _status(payload: dict[str, Any]) -> str:
     for key in ("overallStatus", "status", "result"):
         value = payload.get(key)
         if isinstance(value, str):
-            return value.lower()
+            return _bounded_text(value.lower())
     return ""
 
 
@@ -111,8 +111,8 @@ class DocumentationEvidenceCollector:
                      for name, payload in artifacts.items() if payload.get("summary") or payload.get("message")}
         evidence = {
             "schemaVersion": "documentation-evidence-v1",
-            "taskId": run_id,
-            "generatedAt": status.get("completedAt") or status.get("updatedAt") or datetime.now(timezone.utc).isoformat(),
+            "taskId": _bounded_text(run_id),
+            "generatedAt": _bounded_text(status.get("completedAt") or status.get("updatedAt") or datetime.now(timezone.utc).isoformat()),
             "sources": [{"path": name, "sha256": digest} for name, digest in artifact_hashes.items()],
             "artifactHashes": artifact_hashes,
             "changedPaths": list(changed_paths),
@@ -137,8 +137,15 @@ def _collect_paths(artifacts: dict[str, dict[str, Any]]) -> tuple[str, ...]:
         for key in ("changedPaths", "files", "paths"):
             items = payload.get(key, [])
             if isinstance(items, list):
-                values.extend(item if isinstance(item, str) else item.get("path", "")
-                             for item in items[:_MAX_ITEMS] if isinstance(item, (str, dict)))
+                for item in items[:_MAX_ITEMS]:
+                    if isinstance(item, str):
+                        if item:
+                            values.append(_bounded_text(item))
+                    elif isinstance(item, dict):
+                        path = item.get("path")
+                        if not isinstance(path, str) or not path:
+                            raise DocumentationEvidenceError("changed path must be a non-empty string")
+                        values.append(_bounded_text(path))
     return tuple(sorted({item for item in values if item})[:_MAX_ITEMS])
 
 
