@@ -6,6 +6,9 @@ import pytest
 from backend.agents.documentation_evidence import (
     DocumentationEvidenceCollector,
     DocumentationEvidenceError,
+    _MAX_TEXT,
+    _bounded_text,
+    _collect_commands,
 )
 from backend.agents.workflow_models import (
     APPROVAL_SCHEMA,
@@ -77,3 +80,31 @@ def test_collector_fingerprint_is_stable_and_excludes_self(completed_run_fixture
     second = collector.collect(completed_run_fixture.run_id).to_dict()
     assert first == second
     assert first["documentationFingerprint"]
+
+
+def test_bounded_text_truncates_long_strings():
+    value = "x" * (_MAX_TEXT + 17)
+
+    assert _bounded_text(value) == value[:_MAX_TEXT]
+
+
+def test_collect_commands_redacts_command_and_argv():
+    results = _collect_commands({
+        "verification.json": {
+            "commands": [{
+                "command": "python -m pytest tests/test_secret.py",
+                "argv": ["python", "-m", "pytest", "tests/test_secret.py"],
+                "exitCode": 0,
+                "summary": "passed safely",
+            }],
+        },
+    })
+
+    assert results[0]["commandId"]
+    assert results[0]["exitCode"] == 0
+    assert results[0]["summary"] == "passed safely"
+    assert "command" not in results[0]
+    assert "argv" not in results[0]
+    encoded = json.dumps(results, ensure_ascii=False)
+    assert "python -m pytest tests/test_secret.py" not in encoded
+    assert "test_secret.py" not in encoded

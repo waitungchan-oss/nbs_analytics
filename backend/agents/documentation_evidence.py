@@ -31,7 +31,7 @@ class DocumentationEvidenceError(RuntimeError):
 
 
 def _bounded_text(value: Any) -> str:
-    return value if isinstance(value, str) else str(value)[:_MAX_TEXT]
+    return str(value)[:_MAX_TEXT]
 
 
 def _status(payload: dict[str, Any]) -> str:
@@ -150,7 +150,10 @@ def _collect_commands(artifacts: dict[str, dict[str, Any]]) -> tuple[dict[str, A
             continue
         for item in commands[:_MAX_ITEMS]:
             if isinstance(item, dict) and isinstance(item.get("command"), str):
-                result = {"command": _bounded_text(item["command"])}
+                result = {
+                    "commandId": sha256(item["command"].encode("utf-8")).hexdigest(),
+                    "summary": _bounded_text(item.get("summary", item.get("message", ""))),
+                }
                 if isinstance(item.get("exitCode"), int):
                     result["exitCode"] = item["exitCode"]
                 results.append(result)

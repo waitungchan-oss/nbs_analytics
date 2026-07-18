@@ -40,4 +40,11 @@ class DocumentationImpactClassifier:
     @staticmethod
     def _requires_adr(path: str) -> bool:
         normalized = path.replace("\\", "/").lower()
-        return normalized == "database.py" or any(token in normalized for token in ("/database/", "/migrations/", "schema"))
+        parts = tuple(part for part in normalized.split("/") if part)
+        return (
+            normalized == "database.py"
+            or parts[0:1] == ("database",)
+            or "database" in parts
+            or "migration" in parts
+            or "migrations" in parts
+        )
