@@ -3,5 +3,7 @@
   "context": {"inputTokens": 12000, "outputTokens": 1500},
   "review": {"inputTokens": 16000, "outputTokens": 2000},
   "implementation": {"inputTokens": 12000, "outputTokens": 2000, "maxRepairLoops": 2},
+  "documentationInput": 8000,
+  "documentationOutput": 1500,
   "excerpt": {"maxFileLines": 120, "symbolContextLines": 20, "maxCommandCharacters": 12000}
 }

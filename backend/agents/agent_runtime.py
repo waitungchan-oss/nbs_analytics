@@ -737,6 +737,17 @@ class AgentRuntime:
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return DEFAULT_INPUT_TOKEN_LIMIT, DEFAULT_OUTPUT_TOKEN_LIMIT
 
+    def configured_budget(self, agent_name: str) -> tuple[int, int]:
+        """Return a named agent budget without changing existing agent defaults."""
+        if agent_name != "documentation":
+            return self._load_configured_budgets()
+        config_path = self.runtime_root.parent / "agent_config" / "token_budgets.json"
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            return int(config["documentationInput"]), int(config["documentationOutput"])
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return 8_000, DEFAULT_OUTPUT_TOKEN_LIMIT
+
     def _paths(self, agent_name: str, fingerprint: str) -> tuple[Path, Path]:
         safe_name = _SAFE_AGENT_NAME.sub("-", agent_name).strip(".-") or "agent"
         report = self.runtime_root / "reports" / f"{safe_name}-{fingerprint}.json"
