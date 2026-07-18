@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -10,11 +11,12 @@ import pytest
 from backend.agents.documentation_agent_service import (
     DocumentationAgentService,
     DocumentationRunnerResult,
+    _SubprocessDocumentationRunner,
 )
+from backend.agents.documentation_evidence import DocumentationEvidence
 from backend.agents.documentation_models import (
     DOCUMENTATION_EVIDENCE_SCHEMA,
     DOCUMENTATION_PROPOSAL_SCHEMA,
-    DocumentationEvidence,
 )
 from backend.agents.workflow_models import canonical_sha256
 
@@ -29,13 +31,24 @@ def evidence() -> DocumentationEvidence:
         "taskId": "run-task-3",
         "generatedAt": TIMESTAMP,
         "sources": [{"path": "docs/briefs/task-3.md", "sha256": "a" * 64}],
+        "artifactHashes": {"implementation.json": "b" * 64},
+        "changedPaths": ["backend/agents/documentation_agent_service.py"],
+        "commandResults": [],
+        "requirementCoverage": [],
+        "summaries": {},
+        "gateResults": {"review": "pass", "full-verification": "pass", "hermes": "pass"},
         "guardrails": {
             "revenueScope": "不含掛賬核銷與TT退款轉團款",
             "mayBaseline": "HKD 12,057,968",
         },
     }
-    payload = {**unsigned, "evidenceFingerprint": canonical_sha256(unsigned)}
-    return DocumentationEvidence.from_dict(payload)
+    return DocumentationEvidence(
+        unsigned["schemaVersion"], unsigned["taskId"], unsigned["generatedAt"],
+        tuple(unsigned["sources"]), unsigned["artifactHashes"],
+        tuple(unsigned["changedPaths"]), tuple(unsigned["commandResults"]),
+        tuple(unsigned["requirementCoverage"]), unsigned["summaries"],
+        unsigned["gateResults"], unsigned["guardrails"], canonical_sha256(unsigned),
+    )
 
 
 class FakeRunner:
@@ -56,7 +69,7 @@ class FakeRunner:
             "taskId": payload["taskId"],
             "generatedAt": payload["generatedAt"],
             "evidence": payload,
-            "evidenceFingerprint": payload["evidenceFingerprint"],
+            "evidenceFingerprint": payload["documentationFingerprint"],
             "status": "ready",
             "proposals": [{
                 "targetKind": "brief_backfill",
@@ -148,6 +161,23 @@ def test_unapproved_target_is_rejected(evidence, service):
     proposal = service(fake_runner).draft(evidence, agent_command="codex")
     assert proposal.status == "invalid_agent_output"
     assert proposal.warnings == ("unapproved_target",)
+
+
+def test_required_targets_ignore_caller_classification(evidence, service):
+    instance = service(FakeRunner())
+    assert instance._required_targets({
+        **evidence.to_dict(), "classification": {"requiredTargets": ["adr"]},
+    }) == ("brief_backfill", "system_map")
+
+
+def test_subprocess_runner_caps_stdout_and_stderr_at_boundary(tmp_path):
+    runner = _SubprocessDocumentationRunner(tmp_path)
+    result = runner.run(
+        (sys.executable, "-c", "import sys; sys.stdout.write('x'*70000); sys.stderr.write('e'*10000)"),
+        input_text="{}", timeout_seconds=5, max_output_bytes=64 * 1024,
+    )
+    assert len(result.stdout.encode()) == 64 * 1024 + 1
+    assert len(result.stderr_tail.encode()) <= 4 * 1024
 
 
 def test_output_over_budget_is_context_overflow(evidence, service):

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import selectors
 import shlex
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,10 +14,11 @@ from typing import Any
 from .agent_runtime import AgentRuntime
 from .documentation_models import (
     DOCUMENTATION_PROPOSAL_SCHEMA,
-    DocumentationEvidence,
+    DocumentationEvidence as ContractDocumentationEvidence,
     DocumentationProposal,
     DocumentationSchemaError,
 )
+from .documentation_evidence import DocumentationEvidence as CollectorDocumentationEvidence
 from .documentation_policy import DocumentationImpactClassifier
 from .workflow_models import canonical_sha256
 
@@ -51,25 +54,47 @@ class _SubprocessDocumentationRunner:
             list(argv), cwd=self.project_root, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
         )
-        try:
-            stdout, stderr = process.communicate(
-                input=input_text.encode("utf-8"), timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
-            return DocumentationRunnerResult(
-                -1, "", "", round((time.perf_counter() - started) * 1000),
-            )
+        process.stdin.write(input_text.encode("utf-8"))
+        process.stdin.close()
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        stdout = bytearray()
+        stderr_tail = deque(maxlen=_STDERR_TAIL_BYTES)
+        timed_out = False
+        deadline = time.monotonic() + timeout_seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                process.kill()
+                deadline = time.monotonic() + 1
+                remaining = 1
+            for key, _ in selector.select(min(remaining, 0.1)):
+                chunk = os.read(key.fd, 8192)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stdout":
+                    if len(stdout) <= max_output_bytes:
+                        stdout.extend(chunk[: max_output_bytes + 1 - len(stdout)])
+                    if len(stdout) > max_output_bytes:
+                        process.kill()
+                else:
+                    stderr_tail.extend(chunk[-_STDERR_TAIL_BYTES:])
+            if process.poll() is not None and not selector.get_map():
+                break
+        process.wait()
         duration_ms = round((time.perf_counter() - started) * 1000)
-        if len(stdout) > max_output_bytes:
+        stderr = bytes(stderr_tail).decode("utf-8", errors="replace")
+        if timed_out:
             return DocumentationRunnerResult(
-                process.returncode, "", "", duration_ms,
+                -1, "", stderr, duration_ms,
             )
         return DocumentationRunnerResult(
-            process.returncode,
-            stdout.decode("utf-8", errors="replace"),
-            stderr[-_STDERR_TAIL_BYTES:].decode("utf-8", errors="replace"),
+            0 if len(stdout) > max_output_bytes else process.returncode,
+            bytes(stdout).decode("utf-8", errors="replace"),
+            stderr,
             duration_ms,
         )
 
@@ -81,24 +106,25 @@ def _set_warnings(proposal: DocumentationProposal, warnings: tuple[str, ...]) ->
 
 
 def _proposal(
-    evidence: DocumentationEvidence,
+    evidence: CollectorDocumentationEvidence,
     status: str,
     warnings: tuple[str, ...] = (),
     proposals: tuple[dict[str, Any], ...] = (),
 ) -> DocumentationProposal:
+    contract_evidence = _contract_evidence(evidence)
     unsigned = {
         "schemaVersion": DOCUMENTATION_PROPOSAL_SCHEMA,
         "taskId": evidence.task_id,
         "generatedAt": evidence.generated_at,
-        "evidence": evidence.to_dict(),
-        "evidenceFingerprint": evidence.evidence_fingerprint,
+        "evidence": contract_evidence.to_dict(),
+        "evidenceFingerprint": evidence.documentation_fingerprint,
         "status": status,
         "proposals": [dict(item) for item in proposals],
     }
     fingerprint = canonical_sha256(unsigned)
     result = DocumentationProposal(
         DOCUMENTATION_PROPOSAL_SCHEMA, evidence.task_id, evidence.generated_at,
-        evidence, evidence.evidence_fingerprint, status, proposals, fingerprint,
+        contract_evidence, evidence.documentation_fingerprint, status, proposals, fingerprint,
     )
     return _set_warnings(result, warnings)
 
@@ -114,11 +140,11 @@ class DocumentationAgentService:
 
     def draft(
         self,
-        evidence: DocumentationEvidence,
+        evidence: CollectorDocumentationEvidence,
         *,
         agent_command: str | None,
     ) -> DocumentationProposal:
-        if not isinstance(evidence, DocumentationEvidence):
+        if not isinstance(evidence, CollectorDocumentationEvidence):
             raise TypeError("documentation evidence must be DocumentationEvidence")
         payload = evidence.to_dict()
         required_targets = self._required_targets(payload)
@@ -138,11 +164,11 @@ class DocumentationAgentService:
             self._telemetry(evidence, payload, proposal, cache_hit=False, duration_ms=0)
             return proposal
 
-        cache_path = self.cache_root / f"{evidence.evidence_fingerprint}.json"
+        cache_path = self.cache_root / f"{evidence.documentation_fingerprint}.json"
         if cache_path.is_file():
             try:
                 cached = DocumentationProposal.from_dict(json.loads(cache_path.read_text(encoding="utf-8")))
-                if cached.evidence_fingerprint == evidence.evidence_fingerprint:
+                if cached.evidence_fingerprint == evidence.documentation_fingerprint:
                     _set_warnings(cached, ())
                     self._telemetry(evidence, payload, cached, cache_hit=True, duration_ms=0)
                     return cached
@@ -176,14 +202,14 @@ class DocumentationAgentService:
         return proposal
 
     def _required_targets(self, payload: dict[str, Any]) -> tuple[str, ...]:
-        classification = payload.get("classification")
-        if isinstance(classification, dict) and isinstance(classification.get("requiredTargets"), list):
-            return tuple(str(value) for value in classification["requiredTargets"])
         changed_paths = tuple(payload.get("changedPaths", ()))
-        if changed_paths:
-            result = self.classifier.classify(changed_paths, classification or {})
-            return tuple(result["requiredTargets"])
-        return ("brief_backfill",)
+        classification = payload.get("classification")
+        policy_input = {
+            key: value for key, value in classification.items()
+            if key != "requiredTargets"
+        } if isinstance(classification, dict) else {}
+        result = self.classifier.classify(changed_paths, policy_input)
+        return tuple(result["requiredTargets"])
 
     def _parse_result(
         self,
@@ -197,13 +223,19 @@ class DocumentationAgentService:
             if (
                 isinstance(payload, dict)
                 and payload.get("schemaVersion") == DOCUMENTATION_PROPOSAL_SCHEMA
-                and payload.get("evidenceFingerprint") != evidence.evidence_fingerprint
+                and payload.get("evidenceFingerprint") != evidence.documentation_fingerprint
             ):
                 return _proposal(evidence, "invalid_agent_output", ("fingerprint_mismatch",))
-            proposal = DocumentationProposal.from_dict(payload)
+            normalized_payload = dict(payload)
+            normalized_payload["evidence"] = _contract_evidence(evidence).to_dict()
+            normalized_payload["proposalFingerprint"] = canonical_sha256({
+                key: value for key, value in normalized_payload.items()
+                if key != "proposalFingerprint"
+            })
+            proposal = DocumentationProposal.from_dict(normalized_payload)
             if proposal.schema_version != DOCUMENTATION_PROPOSAL_SCHEMA:
                 raise DocumentationSchemaError("invalid schema")
-            if proposal.evidence_fingerprint != evidence.evidence_fingerprint:
+            if proposal.evidence_fingerprint != evidence.documentation_fingerprint:
                 return _proposal(evidence, "invalid_agent_output", ("fingerprint_mismatch",))
             if any(item["targetKind"] not in required_targets for item in proposal.proposals):
                 return _proposal(evidence, "invalid_agent_output", ("unapproved_target",))
@@ -246,7 +278,7 @@ class DocumentationAgentService:
             "schemaVersion": "documentation-telemetry-v1",
             "runId": getattr(evidence, "run_id", evidence.task_id),
             "documentationFingerprint": getattr(
-                evidence, "documentation_fingerprint", evidence.evidence_fingerprint,
+                evidence, "documentation_fingerprint", evidence.documentation_fingerprint,
             ),
             "inputCharacters": len(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             "estimatedInputTokens": self._estimate(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
@@ -262,3 +294,15 @@ class DocumentationAgentService:
 
 
 __all__ = ["DocumentationAgentService", "DocumentationRunnerResult"]
+
+
+def _contract_evidence(evidence: CollectorDocumentationEvidence) -> ContractDocumentationEvidence:
+    """Adapt collector evidence to the frozen Task3 proposal evidence contract."""
+    return ContractDocumentationEvidence.from_dict({
+        "schemaVersion": "documentation-evidence-v1",
+        "taskId": evidence.task_id,
+        "generatedAt": evidence.generated_at,
+        "sources": [dict(item) for item in evidence.sources],
+        "guardrails": dict(evidence.guardrails),
+        "evidenceFingerprint": evidence.documentation_fingerprint,
+    })
