@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Any, Mapping
 
 from .workflow_models import canonical_sha256
@@ -20,6 +21,26 @@ PROPOSAL_STATUSES = frozenset({
 APPLICATION_STATUSES = frozenset({
     "preview_ready", "awaiting_target_approval", "applied", "partially_applied", "blocked",
 })
+
+_REVENUE_SCOPE = "不含掛賬核銷與TT退款轉團款"
+_MAY_BASELINE = "HKD 12,057,968"
+_TARGET_POLICY_RULES = {
+    "brief_backfill": {
+        "riskTier": "low", "operations": ("update_managed_block",),
+        "repoRoots": ("docs/briefs",), "repoPaths": (),
+        "obsidianSubdirectory": "70_Codex_Briefs", "requiresExplicitTargetApproval": False,
+    },
+    "system_map": {
+        "riskTier": "high", "operations": ("replace_section",),
+        "repoRoots": (), "repoPaths": ("NBS_ANALYTICS_SYSTEM_MAP.md",),
+        "obsidianSubdirectory": "10_System", "requiresExplicitTargetApproval": True,
+    },
+    "adr": {
+        "riskTier": "high", "operations": ("create_file",),
+        "repoRoots": ("Summay",), "repoPaths": (),
+        "obsidianSubdirectory": "20_Decisions", "requiresExplicitTargetApproval": True,
+    },
+}
 
 
 class DocumentationSchemaError(ValueError):
@@ -94,12 +115,16 @@ def _proposal_item(value: Any) -> dict[str, Any]:
     operation = _string(value["operation"], "operation")
     if operation not in OPERATIONS:
         raise DocumentationSchemaError(f"operation must be one of: {', '.join(sorted(OPERATIONS))}")
+    content = _string(value["content"], "content")
+    content_hash = _hash(value["contentSha256"], "contentSha256")
+    if content_hash != sha256(content.encode("utf-8")).hexdigest():
+        raise DocumentationSchemaError("contentSha256 does not match content")
     return {
         "targetKind": target_kind,
         "targetIdentity": _string(value["targetIdentity"], "targetIdentity"),
         "operation": operation,
-        "content": _string(value["content"], "content"),
-        "contentSha256": _hash(value["contentSha256"], "contentSha256"),
+        "content": content,
+        "contentSha256": content_hash,
     }
 
 
@@ -129,6 +154,8 @@ class DocumentationEvidence:
         if not isinstance(guardrails, dict):
             raise DocumentationSchemaError("guardrails must be an object")
         _keys(guardrails, {"revenueScope", "mayBaseline"})
+        if guardrails != {"revenueScope": _REVENUE_SCOPE, "mayBaseline": _MAY_BASELINE}:
+            raise DocumentationSchemaError("guardrails do not match protected governance")
         return cls(
             DOCUMENTATION_EVIDENCE_SCHEMA,
             _string(payload["taskId"], "taskId"),
@@ -184,6 +211,11 @@ class DocumentationProposal:
         identities = [item["targetIdentity"] for item in proposals]
         if len(identities) != len(set(identities)):
             raise DocumentationSchemaError("duplicate targetIdentity in proposals")
+        proposal_fingerprint = _hash(payload["proposalFingerprint"], "proposalFingerprint")
+        fingerprint_payload = dict(payload)
+        fingerprint_payload.pop("proposalFingerprint")
+        if proposal_fingerprint != canonical_sha256(fingerprint_payload):
+            raise DocumentationSchemaError("proposal fingerprint does not match canonical payload")
         return cls(
             DOCUMENTATION_PROPOSAL_SCHEMA,
             _string(payload["taskId"], "taskId"),
@@ -192,7 +224,7 @@ class DocumentationProposal:
             evidence_fingerprint,
             status,
             proposals,
-            _hash(payload["proposalFingerprint"], "proposalFingerprint"),
+            proposal_fingerprint,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -248,6 +280,9 @@ class DocumentationApplication:
                 "result": _string(item["result"], "result"),
                 "appliedSha256": applied_hash,
             })
+        identities = [item["targetIdentity"] for item in applications]
+        if len(identities) != len(set(identities)):
+            raise DocumentationSchemaError("duplicate targetIdentity in applications")
         return cls(
             DOCUMENTATION_APPLICATION_SCHEMA,
             _string(payload["taskId"], "taskId"),
@@ -292,14 +327,24 @@ class DocumentationTargetPolicy:
             raise DocumentationSchemaError("operations contains an invalid operation")
         if not isinstance(payload["requiresExplicitTargetApproval"], bool):
             raise DocumentationSchemaError("requiresExplicitTargetApproval must be a boolean")
+        actual = {
+            "riskTier": _string(payload["riskTier"], "riskTier"),
+            "operations": operations,
+            "repoRoots": _strings(payload["repoRoots"], "repoRoots"),
+            "repoPaths": _strings(payload["repoPaths"], "repoPaths"),
+            "obsidianSubdirectory": _string(payload["obsidianSubdirectory"], "obsidianSubdirectory"),
+            "requiresExplicitTargetApproval": payload["requiresExplicitTargetApproval"],
+        }
+        if actual != _TARGET_POLICY_RULES[target_kind]:
+            raise DocumentationSchemaError(f"policy mapping is invalid for targetKind {target_kind}")
         return cls(
             DOCUMENTATION_POLICY_SCHEMA,
             target_kind,
-            _string(payload["riskTier"], "riskTier"),
+            actual["riskTier"],
             operations,
-            _strings(payload["repoRoots"], "repoRoots"),
-            _strings(payload["repoPaths"], "repoPaths"),
-            _string(payload["obsidianSubdirectory"], "obsidianSubdirectory"),
+            actual["repoRoots"],
+            actual["repoPaths"],
+            actual["obsidianSubdirectory"],
             payload["requiresExplicitTargetApproval"],
         )
 

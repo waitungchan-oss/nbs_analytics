@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from hashlib import sha256
 
 import pytest
 
@@ -15,10 +16,10 @@ from backend.agents.documentation_models import (
     DocumentationSchemaError,
     DocumentationTargetPolicy,
 )
+from backend.agents.workflow_models import canonical_sha256
 
 
 EVIDENCE_HASH = "a" * 64
-PROPOSAL_HASH = "b" * 64
 TIMESTAMP = "2026-07-18T12:00:00+08:00"
 
 
@@ -39,7 +40,7 @@ def valid_evidence_payload() -> dict:
 
 @pytest.fixture
 def valid_proposal_payload(valid_evidence_payload: dict) -> dict:
-    return {
+    payload = {
         "schemaVersion": DOCUMENTATION_PROPOSAL_SCHEMA,
         "taskId": "task-1",
         "generatedAt": TIMESTAMP,
@@ -52,11 +53,15 @@ def valid_proposal_payload(valid_evidence_payload: dict) -> dict:
                 "targetIdentity": "docs/briefs/task-1.md",
                 "operation": "update_managed_block",
                 "content": "# Task 1\n",
-                "contentSha256": PROPOSAL_HASH,
+                "contentSha256": sha256("# Task 1\n".encode("utf-8")).hexdigest(),
             }
         ],
-        "proposalFingerprint": PROPOSAL_HASH,
+        "proposalFingerprint": "0" * 64,
     }
+    fingerprint_payload = deepcopy(payload)
+    fingerprint_payload.pop("proposalFingerprint")
+    payload["proposalFingerprint"] = canonical_sha256(fingerprint_payload)
+    return payload
 
 
 @pytest.fixture
@@ -107,6 +112,102 @@ def test_documentation_target_policy_round_trip() -> None:
         "requiresExplicitTargetApproval": True,
     }
     assert DocumentationTargetPolicy.from_dict(payload).to_dict() == payload
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [("revenueScope", "含掛賬核銷"), ("mayBaseline", "HKD 1")],
+)
+def test_evidence_rejects_non_governed_guardrails(
+    valid_evidence_payload: dict, key: str, value: str,
+) -> None:
+    valid_evidence_payload["guardrails"][key] = value
+    with pytest.raises(DocumentationSchemaError, match="guardrails"):
+        DocumentationEvidence.from_dict(valid_evidence_payload)
+
+
+def test_proposal_rejects_content_hash_mismatch(valid_proposal_payload: dict) -> None:
+    valid_proposal_payload["proposals"][0]["contentSha256"] = "c" * 64
+    with pytest.raises(DocumentationSchemaError, match="contentSha256"):
+        DocumentationProposal.from_dict(valid_proposal_payload)
+
+
+def test_proposal_rejects_fingerprint_mismatch(valid_proposal_payload: dict) -> None:
+    valid_proposal_payload["proposalFingerprint"] = "c" * 64
+    with pytest.raises(DocumentationSchemaError, match="proposal fingerprint"):
+        DocumentationProposal.from_dict(valid_proposal_payload)
+
+
+@pytest.mark.parametrize(
+    "target_kind,expected",
+    [
+        (
+            "brief_backfill",
+            {
+                "riskTier": "low",
+                "operations": ["update_managed_block"],
+                "repoRoots": ["docs/briefs"],
+                "repoPaths": [],
+                "requiresExplicitTargetApproval": False,
+            },
+        ),
+        (
+            "system_map",
+            {
+                "riskTier": "high",
+                "operations": ["replace_section"],
+                "repoRoots": [],
+                "repoPaths": ["NBS_ANALYTICS_SYSTEM_MAP.md"],
+                "requiresExplicitTargetApproval": True,
+            },
+        ),
+        (
+            "adr",
+            {
+                "riskTier": "high",
+                "operations": ["create_file"],
+                "repoRoots": ["Summay"],
+                "repoPaths": [],
+                "requiresExplicitTargetApproval": True,
+            },
+        ),
+    ],
+)
+def test_target_policy_requires_exact_governed_mapping(target_kind: str, expected: dict) -> None:
+    payload = {
+        "schemaVersion": DOCUMENTATION_POLICY_SCHEMA,
+        "targetKind": target_kind,
+        **expected,
+        "obsidianSubdirectory": {
+            "brief_backfill": "70_Codex_Briefs",
+            "system_map": "10_System",
+            "adr": "20_Decisions",
+        }[target_kind],
+    }
+    assert DocumentationTargetPolicy.from_dict(payload).to_dict() == payload
+
+
+def test_target_policy_rejects_wrong_governed_mapping() -> None:
+    payload = {
+        "schemaVersion": DOCUMENTATION_POLICY_SCHEMA,
+        "targetKind": "brief_backfill",
+        "riskTier": "high",
+        "operations": ["replace_section"],
+        "repoRoots": [],
+        "repoPaths": ["NBS_ANALYTICS_SYSTEM_MAP.md"],
+        "obsidianSubdirectory": "10_System",
+        "requiresExplicitTargetApproval": True,
+    }
+    with pytest.raises(DocumentationSchemaError, match="policy"):
+        DocumentationTargetPolicy.from_dict(payload)
+
+
+def test_application_rejects_duplicate_target_identities(valid_application_payload: dict) -> None:
+    valid_application_payload["applications"].append(
+        deepcopy(valid_application_payload["applications"][0])
+    )
+    with pytest.raises(DocumentationSchemaError, match="duplicate targetIdentity"):
+        DocumentationApplication.from_dict(valid_application_payload)
 
 
 @pytest.mark.parametrize(
