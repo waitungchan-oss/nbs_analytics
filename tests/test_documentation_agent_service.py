@@ -106,6 +106,28 @@ def test_runner_receives_only_evidence_json(evidence, service):
     assert "absoluteVaultPath" not in payload
 
 
+def test_external_source_paths_are_redacted_from_runner_and_cache(evidence, service):
+    evidence = replace(evidence, sources=(
+        {"path": "/private/external/secret-brief.md", "sha256": "a" * 64},
+        {"path": "docs/briefs/task-3.md", "sha256": "b" * 64},
+    ))
+    fake_runner = FakeRunner()
+    instance = service(fake_runner)
+
+    proposal = instance.draft(evidence, agent_command="codex")
+
+    runner_payload = json.loads(fake_runner.stdin_text)
+    assert runner_payload["sources"] == [
+        {"path": "secret-brief.md", "sha256": "a" * 64},
+        {"path": "docs/briefs/task-3.md", "sha256": "b" * 64},
+    ]
+    cache_path = instance.cache_root / f"{evidence.documentation_fingerprint}.json"
+    cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    encoded = json.dumps({"runner": runner_payload, "cache": cache_payload})
+    assert "/private/external/secret-brief.md" not in encoded
+    assert proposal.evidence.sources[0]["path"] == "secret-brief.md"
+
+
 def test_nonzero_runner_exit_is_blocked(evidence, service):
     fake_runner = FakeRunner(DocumentationRunnerResult(7, "", "secret stderr", 2))
     proposal = service(fake_runner).draft(evidence, agent_command="codex")

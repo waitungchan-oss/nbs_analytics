@@ -8,7 +8,7 @@ import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .agent_runtime import AgentRuntime
@@ -147,6 +147,7 @@ class DocumentationAgentService:
         if not isinstance(evidence, CollectorDocumentationEvidence):
             raise TypeError("documentation evidence must be DocumentationEvidence")
         payload = evidence.to_dict()
+        payload["sources"] = _safe_sources(evidence.sources)
         required_targets = self._required_targets(payload)
         if not required_targets:
             proposal = _proposal(evidence, "no_documentation_needed")
@@ -168,10 +169,14 @@ class DocumentationAgentService:
         if cache_path.is_file():
             try:
                 cached = DocumentationProposal.from_dict(json.loads(cache_path.read_text(encoding="utf-8")))
-                if cached.evidence_fingerprint == evidence.documentation_fingerprint:
+                if (
+                    cached.evidence_fingerprint == evidence.documentation_fingerprint
+                    and cached.evidence.to_dict() == _contract_evidence(evidence).to_dict()
+                ):
                     _set_warnings(cached, ())
                     self._telemetry(evidence, payload, cached, cache_hit=True, duration_ms=0)
                     return cached
+                cache_path.unlink(missing_ok=True)
             except (OSError, ValueError, DocumentationSchemaError, json.JSONDecodeError):
                 cache_path.unlink(missing_ok=True)
 
@@ -302,7 +307,23 @@ def _contract_evidence(evidence: CollectorDocumentationEvidence) -> ContractDocu
         "schemaVersion": "documentation-evidence-v1",
         "taskId": evidence.task_id,
         "generatedAt": evidence.generated_at,
-        "sources": [dict(item) for item in evidence.sources],
+        "sources": _safe_sources(evidence.sources),
         "guardrails": dict(evidence.guardrails),
         "evidenceFingerprint": evidence.documentation_fingerprint,
     })
+
+
+def _safe_sources(sources: tuple[dict[str, str], ...]) -> list[dict[str, str]]:
+    return [
+        {"path": _safe_source_identity(item["path"]), "sha256": item["sha256"]}
+        for item in sources
+    ]
+
+
+def _safe_source_identity(value: str) -> str:
+    normalized = value.replace("\\", "/").strip()
+    posix_path = PurePosixPath(normalized)
+    windows_path = PureWindowsPath(value.strip())
+    if posix_path.is_absolute() or windows_path.is_absolute() or ".." in posix_path.parts:
+        return posix_path.name or windows_path.name or "source"
+    return posix_path.as_posix()
