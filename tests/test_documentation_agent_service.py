@@ -12,6 +12,7 @@ from backend.agents.documentation_agent_service import (
     DocumentationAgentService,
     DocumentationRunnerResult,
     _SubprocessDocumentationRunner,
+    _safe_source_identity,
 )
 from backend.agents.documentation_evidence import DocumentationEvidence
 from backend.agents.documentation_models import (
@@ -118,14 +119,41 @@ def test_external_source_paths_are_redacted_from_runner_and_cache(evidence, serv
 
     runner_payload = json.loads(fake_runner.stdin_text)
     assert runner_payload["sources"] == [
-        {"path": "secret-brief.md", "sha256": "a" * 64},
+        {"path": "source", "sha256": "a" * 64},
         {"path": "docs/briefs/task-3.md", "sha256": "b" * 64},
     ]
     cache_path = instance.cache_root / f"{evidence.documentation_fingerprint}.json"
     cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
     encoded = json.dumps({"runner": runner_payload, "cache": cache_payload})
     assert "/private/external/secret-brief.md" not in encoded
-    assert proposal.evidence.sources[0]["path"] == "secret-brief.md"
+    assert proposal.evidence.sources[0]["path"] == "source"
+
+
+@pytest.mark.parametrize("value", [
+    "https://example.test/brief.md",
+    "file:///private/brief.md",
+    "docs:brief.md",
+    "~/brief.md",
+    "~\\brief.md",
+    "C:secret.md",
+    "C:/secret.md",
+    "C:\\secret.md",
+    "/private/brief.md",
+    "\\\\server\\share\\brief.md",
+    "../brief.md",
+    "docs/../brief.md",
+    "docs\\..\\brief.md",
+])
+def test_unsafe_source_identities_fall_back_to_source(value):
+    assert _safe_source_identity(value) == "source"
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("docs/briefs/task-3.md", "docs/briefs/task-3.md"),
+    ("docs\\briefs\\task-3.md", "docs/briefs/task-3.md"),
+])
+def test_safe_source_identities_remain_repo_relative(value, expected):
+    assert _safe_source_identity(value) == expected
 
 
 def test_nonzero_runner_exit_is_blocked(evidence, service):

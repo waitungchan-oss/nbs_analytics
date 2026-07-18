@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import selectors
 import shlex
 import subprocess
@@ -27,6 +28,7 @@ _OUTPUT_MAX_BYTES = 64 * 1024
 _STDERR_TAIL_BYTES = 4 * 1024
 _TIMEOUT_SECONDS = 120
 _ALLOWED_EXECUTABLES = frozenset({"codex", "claude"})
+_URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 @dataclass(frozen=True)
@@ -324,6 +326,16 @@ def _safe_source_identity(value: str) -> str:
     normalized = value.replace("\\", "/").strip()
     posix_path = PurePosixPath(normalized)
     windows_path = PureWindowsPath(value.strip())
-    if posix_path.is_absolute() or windows_path.is_absolute() or ".." in posix_path.parts:
-        return posix_path.name or windows_path.name or "source"
+    segments = normalized.split("/")
+    if (
+        not normalized
+        or _URI_SCHEME.match(normalized)
+        or normalized == "~"
+        or normalized.startswith("~/")
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or any(segment in {".", ".."} for segment in segments)
+    ):
+        return "source"
     return posix_path.as_posix()
