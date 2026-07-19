@@ -99,11 +99,17 @@ class DocumentationEvidenceCollector:
         if approval.get("authorizationStatus") != "approved":
             raise DocumentationEvidenceError("approval gate must PASS")
 
+        # artifactBytes is store bookkeeping and changes when this sidecar writes
+        # its own bounded artifacts; it is not implementation evidence.
+        stable_status = {key: value for key, value in status.items() if key != "artifactBytes"}
         artifact_hashes = {
             name: sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
             for name, payload in (("manifest.json", manifest), ("status.json", status),
                                   ("approval.json", approval), *artifacts.items())}
+        artifact_hashes["status.json"] = sha256(
+            json.dumps(stable_status, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         changed_paths = _collect_paths(artifacts)
         command_results = _collect_commands(artifacts)
         coverage = _collect_strings(artifacts, ("requirements", "requirementCoverage", "coveredRequirements"))

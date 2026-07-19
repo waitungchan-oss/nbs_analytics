@@ -20,6 +20,11 @@ STAGE_ARTIFACTS = frozenset(
         "review.json",
         "full-verification.json",
         "hermes.json",
+        "documentation-evidence.json",
+        "documentation-proposal.json",
+        "documentation-preview.json",
+        "documentation-application.json",
+        "documentation-telemetry.json",
     }
 )
 PERMANENT_ARTIFACTS = frozenset({"manifest.json", "status.json", "approval.json", "events.jsonl", ".lock"})
@@ -202,6 +207,15 @@ class WorkflowRetention:
                     "deletedBytes": sum((run_dir / name).stat().st_size for name in existing),
                     "eventSummary": self._compact_events(run_dir / "events.jsonl"),
                 }
+                application_path = run_dir / "documentation-application.json"
+                if application_path in [run_dir / name for name in existing]:
+                    application = _read_object(application_path)
+                    summary["documentationApplication"] = {
+                        "schemaVersion": application.get("schemaVersion"),
+                        "status": application.get("status"),
+                        "proposalFingerprint": application.get("proposalFingerprint"),
+                        "applications": application.get("applications", []),
+                    }
                 self._write_summary(run_dir / "archive-summary.json", summary)
                 for name in existing:
                     (run_dir / name).unlink()

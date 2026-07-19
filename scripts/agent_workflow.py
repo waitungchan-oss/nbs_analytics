@@ -18,6 +18,7 @@ from backend.agents.workflow_notifications import build_notifier
 from backend.agents.workflow_orchestrator import WorkflowOrchestrator
 from backend.agents.workflow_retention import WorkflowRetention
 from backend.agents.workflow_store import WorkflowStore
+from backend.agents.documentation_workflow import DocumentationWorkflow
 
 
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?:[^\s'\"<>]+)")
@@ -57,6 +58,13 @@ def _parser() -> argparse.ArgumentParser:
     mode = prune.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+
+    document = subparsers.add_parser("document")
+    document.add_argument("--run-id", required=True)
+    document.add_argument("--agent-command")
+    document.add_argument("--obsidian-vault")
+    document.add_argument("--apply-brief", action="store_true")
+    document.add_argument("--approve-target", action="append", default=[], choices=("system_map", "adr"))
     return parser
 
 
@@ -165,6 +173,20 @@ def _run(args: argparse.Namespace) -> tuple[dict, int]:
         report = retention.apply(retention.plan(), dry_run=not args.apply)
         payload = asdict(report) if is_dataclass(report) else report
         return {"dryRun": not args.apply, "retention": payload}, 0
+    if args.command == "document":
+        result = DocumentationWorkflow(PROJECT_ROOT).run(
+            _safe_run_id(args.run_id),
+            agent_command=args.agent_command,
+            obsidian_vault=Path(args.obsidian_vault) if args.obsidian_vault else None,
+            apply_brief=args.apply_brief,
+            approved_targets=frozenset(args.approve_target),
+        )
+        documentation_exit_codes = {
+            "applied": 0, "preview_ready": 0, "no_documentation_needed": 0,
+            "awaiting_target_approval": 1, "blocked": 2, "context_overflow": 4,
+            "invalid_agent_output": 5,
+        }
+        return result, documentation_exit_codes.get(result.get("status", "runtime_error"), 5)
     raise ValueError("unknown workflow command")
 
 

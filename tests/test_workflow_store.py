@@ -188,6 +188,16 @@ def test_store_rejects_escape_and_unknown_artifacts(store, manifest):
         store.write_artifact(manifest.run_id, "secret.json", {})
 
 
+def test_store_accepts_documentation_sidecar_artifacts(store, manifest):
+    store.create_run(manifest, _status())
+    for name in (
+        "documentation-evidence.json", "documentation-proposal.json",
+        "documentation-preview.json", "documentation-application.json",
+        "documentation-telemetry.json",
+    ):
+        assert store.write_artifact(manifest.run_id, name, {"status": "ok"}).is_file()
+
+
 def test_store_rejects_symlink_project_root(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

@@ -32,6 +32,11 @@ ALLOWED_ARTIFACTS = frozenset(
         "full-verification.json",
         "hermes.json",
         "archive-summary.json",
+        "documentation-evidence.json",
+        "documentation-proposal.json",
+        "documentation-preview.json",
+        "documentation-application.json",
+        "documentation-telemetry.json",
     }
 )
 DEFAULT_STAGE_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
