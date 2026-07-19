@@ -21,6 +21,10 @@ Codex 建立並批准 implementation Task contract 後，只可分派一個 Task
 
 Documentation Agent 只讀 `documentation-evidence-v1` 並輸出 `documentation-proposal-v1`。它不 apply；`system map` 與 `ADR` 需要明確 target approval，Brief backfill 也只能由 Codex 依既有授權交給 trusted Controller。任何 sidecar、Operations 或 Hermes check 都不得 auto-apply、批准 targets、改變 Hermes/terminal state、寫入 SQLite、baseline、runtime、Git 或 Obsidian。
 
+### Verified documentation backfill
+
+按需 backfill 必須依 `docs/agents/VERIFIED_DOCUMENTATION_BACKFILL.md` 的單一路徑執行：backfill create -> proposal -> preview -> Review PASS -> `--apply-brief --approve-target system_map` -> Hermes。temporary vault 只可 local-only 使用；未提供 `--approve-target system_map` 時，System Map 必須保持 byte-identical。Review Agent 是 findings-first read-only review，Hermes 是最後的 read-only acceptance gate；兩者不可互相取代，且都不得執行 preview/apply、批准 target、寫 vault 或改變 terminal state。serialized application records 必須只含 vault-relative identity，不得含 vault absolute path。
+
 Phase 1 CLI 的 `run`（或 `start`）只執行 Context collection 並回傳 `awaiting_authorization`；沒有任何 implicit approval。`approve` 必須逐次提供 run ID、approved contract、Implementation runner 和 Review runner，這些 command 不會寫入 run artifact。`status` / `list` 僅讀取 artifact；`run` 後的 best-effort housekeeping 及 `prune --apply` 都依既有 retention policy compact 合資格的已完成 run，`prune --dry-run` 只計畫而不寫入。`--no-notify` 可停用通知；通知失敗只記錄 warning。
 
 若環境或使用者明確配置了已批准的 runner，Codex 才可使用 `--agent-command` 將 bundle 交給該 runner。未明確配置時不得自行選擇外部模型或命令。Collector、Context Agent 與 Review Agent 均不得修改 SQLite、baseline、runtime、Git 或程式碼；Hermes 仍負責正式服務、資料庫完整性、baseline、runtime 與整體驗收。
