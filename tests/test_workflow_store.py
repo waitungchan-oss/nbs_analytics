@@ -198,6 +198,29 @@ def test_store_accepts_documentation_sidecar_artifacts(store, manifest):
         assert store.write_artifact(manifest.run_id, name, {"status": "ok"}).is_file()
 
 
+def test_store_accepts_verified_backfill_manifest_artifact(store, manifest):
+    from backend.agents.verified_backfill_models import VerifiedBackfillManifest
+
+    store.create_run(manifest, _status())
+    verified = VerifiedBackfillManifest.from_dict(
+        {
+            "sourceCommit": "a" * 40,
+            "sourceBranch": "main",
+            "dirtyFiles": [],
+            "gateHashes": {
+                "pytest": "b" * 64,
+                "systemAcceptance": "c" * 64,
+                "hermes": "d" * 64,
+            },
+            "reviewHash": "e" * 64,
+        }
+    )
+
+    store.write_artifact(manifest.run_id, "verified-backfill.json", verified.to_dict())
+
+    assert store._read_json(store._run_file(manifest.run_id, "verified-backfill.json"))["sourceBranch"] == "main"
+
+
 def test_store_rejects_symlink_project_root(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

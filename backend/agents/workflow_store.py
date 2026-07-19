@@ -37,6 +37,7 @@ ALLOWED_ARTIFACTS = frozenset(
         "documentation-preview.json",
         "documentation-application.json",
         "documentation-telemetry.json",
+        "verified-backfill.json",
     }
 )
 DEFAULT_STAGE_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
