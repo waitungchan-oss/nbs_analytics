@@ -13,6 +13,7 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
     assert "monthly-baseline-governance" in labels
     assert "implementation-agent-files" in labels
     assert "targeted-tests" in labels
+    assert "documentation-artifact-report" in labels
     targeted = next(step for step in plan if step.label == "targeted-tests")
     assert "tests/test_monthly_baseline_service.py" in targeted.command
     assert "tests/test_monthly_baseline_check_cli.py" in targeted.command
@@ -92,6 +93,41 @@ def test_plan_can_skip_monitor_and_tests_for_fast_dry_run():
     assert "targeted-tests" not in labels
     assert "phase2-baseline" in labels
     assert "monthly-baseline-governance" in labels
+
+
+def test_documentation_hermes_check_is_read_only_and_does_not_dispatch():
+    plan = post_check.build_check_plan(include_monitor=False, include_tests=False)
+    step = next(item for item in plan if item.label == "documentation-artifact-report")
+    command = " ".join(step.command)
+    source = post_check.documentation_artifact_report.__code__.co_consts
+
+    assert any("documentation-application.json" in str(value) for value in source)
+    assert any("documentation-proposal.json" in str(value) for value in source)
+    assert any("documentation-evidence.json" in str(value) for value in source)
+    assert any("documentation-telemetry.json" in str(value) for value in source)
+    assert "agent_workflow.py" not in command
+    assert "documentation_agent.py" not in command
+    assert "write_text" not in command
+    assert "write_artifact" not in command
+    assert "document" not in command.lower().replace("documentation", "")
+
+
+def test_documentation_artifact_report_validates_schema_caps_and_writes_nothing(tmp_path):
+    run = tmp_path / ".nbs_agent_runtime/runs/run-1"
+    run.mkdir(parents=True)
+    (run / "documentation-telemetry.json").write_text(
+        '{"schemaVersion":"documentation-telemetry-v1","proposalCount":1,"result":"applied"}',
+        encoding="utf-8",
+    )
+
+    report = post_check.documentation_artifact_report(tmp_path)
+
+    assert report["schemaVersion"] == "documentation-hermes-report-v1"
+    assert report["artifactCounts"]["documentation-telemetry.json"] == 1
+    assert report["invalidRuns"] == []
+    assert report["policy"] == "read-only"
+    assert report["invocations"] == 0
+    assert report["writes"] == 0
 
 
 def test_overall_status_fails_on_failed_required_step():

@@ -55,6 +55,10 @@ TARGETED_TESTS = [
     "tests/test_workflow_orchestrator_approve.py",
     "tests/test_agent_workflow_cli.py",
     "tests/test_agent_workflow_integration.py",
+    "tests/test_documentation_agent_docs.py",
+    "tests/test_agent_operations_service.py",
+    "tests/test_agent_operations_rendering.py",
+    "tests/test_hermes_post_change_check.py",
 ]
 
 
@@ -69,6 +73,63 @@ class CheckStep:
 def python_bin(project_root: Path = PROJECT_ROOT) -> str:
     venv_python = project_root / ".venv" / "bin" / "python"
     return str(venv_python) if venv_python.exists() else sys.executable
+
+
+def documentation_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
+    """Inspect documentation sidecars without invoking or writing anything."""
+    runs_root = Path(project_root) / ".nbs_agent_runtime" / "runs"
+    artifact_names = (
+        "documentation-evidence.json",
+        "documentation-proposal.json",
+        "documentation-preview.json",
+        "documentation-application.json",
+        "documentation-telemetry.json",
+    )
+    max_bytes = 5 * 1024 * 1024
+    report = {
+        "schemaVersion": "documentation-hermes-report-v1",
+        "runCount": 0,
+        "artifactCounts": {name: 0 for name in artifact_names},
+        "invalidRuns": [],
+        "capWarnings": [],
+        "policy": "read-only",
+        "invocations": 0,
+        "writes": 0,
+    }
+    if not runs_root.is_dir() or runs_root.is_symlink():
+        return report
+    for run_dir in sorted(runs_root.iterdir(), key=lambda path: path.name):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        report["runCount"] += 1
+        invalid = False
+        for name in artifact_names:
+            path = run_dir / name
+            if not path.exists():
+                continue
+            if path.is_symlink() or not path.is_file():
+                invalid = True
+                continue
+            report["artifactCounts"][name] += 1
+            if path.stat().st_size > max_bytes:
+                report["capWarnings"].append({"runId": run_dir.name, "artifact": name})
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                invalid = True
+                continue
+            expected = {
+                "documentation-evidence.json": "documentation-evidence-v1",
+                "documentation-proposal.json": "documentation-proposal-v1",
+                "documentation-application.json": "documentation-application-v1",
+                "documentation-telemetry.json": "documentation-telemetry-v1",
+            }.get(name)
+            if expected and (not isinstance(payload, dict) or payload.get("schemaVersion") != expected):
+                invalid = True
+        if invalid and len(report["invalidRuns"]) < 100:
+            report["invalidRuns"].append(run_dir.name)
+    return report
 
 
 def build_check_plan(
@@ -110,6 +171,11 @@ def build_check_plan(
         "artifacts=('manifest.json','status.json','approval.json','context.json','implementation.json','review.json','full-verification.json','hermes.json','archive-summary.json'); "
         "print(json.dumps({'schemaVersion':'agent-workflow-hermes-report-v1','runCount':len(runs),'artifactCounts':{name:sum((run_dir/name).is_file() and not (run_dir/name).is_symlink() for run_dir in runs) for name in artifacts},'retentionConfig':Path('agent_config/workflow_retention.json').is_file()}, sort_keys=True))"
     )
+    documentation_artifact_report_code = (
+        "from scripts.hermes_post_change_check import documentation_artifact_report; "
+        "import json; "
+        "print(json.dumps(documentation_artifact_report(), sort_keys=True))"
+    )
     plan = [
         CheckStep("git-status", ["git", "status", "--short", "--branch"]),
         CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
@@ -130,6 +196,13 @@ def build_check_plan(
         CheckStep(
             "workflow-artifact-retention-report",
             [py, "-c", workflow_artifact_report_code],
+            required=False,
+        )
+    )
+    plan.append(
+        CheckStep(
+            "documentation-artifact-report",
+            [py, "-c", documentation_artifact_report_code],
             required=False,
         )
     )

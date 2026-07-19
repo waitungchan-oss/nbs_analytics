@@ -57,6 +57,8 @@ Hermes 可以讀取以下來源：
 
 Hermes 只可 read-only 報告 workflow artifact、cap warning 與 retention state，不得寫入 artifact、執行 `prune` 或取代 Review / full verification gate。每個 stage artifact 的 hard cap 是 5 MiB；單一 run 的 stage artifact 合計超過 25 MiB 時 Store 會記錄 warning event，但不會由 Hermes 自動 compact。retention 僅可由既有 policy 的 best-effort housekeeping 或明確 `prune --apply` 處理合資格的 completed run；最新 30 個 terminal run 與非 completed run 均受保護。
 
+Documentation sidecar 由 Store allowlist 的五個 artifact 組成：`documentation-evidence.json`、`documentation-proposal.json`、`documentation-preview.json`、`documentation-application.json`、`documentation-telemetry.json`。Hermes 只檢查 schema presence、status consistency、bounded counts、artifact cap 與 read-only permissions，並回報 `documentation-hermes-report-v1`；不得呼叫 `agent_workflow.py document`、runner、preview、apply、backup、Git 或 Obsidian write。Documentation PASS 不是 runtime acceptance，也不能批准 targets 或改變 Hermes/terminal state。
+
 ### Agent Operations Read-only View
 
 Agent Operations 是現行 Streamlit read-only view，讀取 Phase 1 artifacts 並消費
@@ -137,6 +139,10 @@ Hermes 必須讀取 `system_health` 的 `uploadCoordination`、`dataGeneration` 
 - generation 有 operation ID 但找不到同 operation ID history，必須報 degraded；
 - history 有 `cacheError` 或 generation signature 與目前 DB 不符，必須報 degraded；
 - Hermes 不得取得或顯示 lease owner 的來源檔案名稱。
+
+### Documentation Agent boundary
+
+Codex 只可在 Review PASS、full verification PASS、Hermes PASS 後，對 completed run 呼叫 `agent_workflow.py document`。Documentation Agent 的 input/output 必須分別是 `documentation-evidence-v1` 與 `documentation-proposal-v1`；缺少 runner 時為 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。`system map` 與 `ADR` 需要明確 target approval。Hermes 保持 read-only，不得 auto-apply、批准 targets、寫 SQLite/baseline/runtime/Git，亦不得執行文件回填。
 
 ---
 

@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.context_agent_service import context_bundle_from_payload
+from backend.agents.documentation_models import (
+    DocumentationApplication,
+    DocumentationEvidence,
+    DocumentationProposal,
+)
 from backend.agents.review_agent_service import validate_context_summary
 from backend.agents.workflow_models import WorkflowEvent, WorkflowManifest, WorkflowStatus
 from backend.agents.workflow_retention import RetentionPolicy
@@ -23,6 +28,13 @@ STAGE_FILES = {
     "review": "review.json",
     "full_verification": "full-verification.json",
     "hermes": "hermes.json",
+}
+DOCUMENTATION_FILES = {
+    "evidence": "documentation-evidence.json",
+    "proposal": "documentation-proposal.json",
+    "preview": "documentation-preview.json",
+    "application": "documentation-application.json",
+    "telemetry": "documentation-telemetry.json",
 }
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 MAX_FINDINGS = 50
@@ -201,6 +213,7 @@ class AgentOperationsService:
         started = datetime.fromisoformat(status.started_at)
         ended = datetime.fromisoformat(status.completed_at or status.updated_at)
         stage_payloads = self._read_stage_payloads(run_dir, stage_artifact_max_bytes)
+        documentation = self._read_documentation(run_dir, stage_artifact_max_bytes)
         event_durations = self._event_durations(run_dir, stage_artifact_max_bytes, manifest.run_id)
         archive_summary = self._read_stage(run_dir, "archive-summary.json", stage_artifact_max_bytes)
         archived = self._is_valid_archive_summary(archive_summary, manifest.run_id)
@@ -231,9 +244,89 @@ class AgentOperationsService:
             "verification": self._verification(stage_payloads["full_verification"]),
             "hermes": self._hermes(stage_payloads["hermes"]),
             "tokenUsage": self._token_usage(stage_payloads),
+            "documentation": documentation,
             "retentionState": "archived_summary" if archived else "complete",
         }
         return item
+
+    def _read_documentation(self, run_dir: Path, hard_cap: int) -> dict[str, Any]:
+        payloads = {
+            name: self._read_documentation_stage(run_dir, filename, hard_cap)
+            for name, filename in DOCUMENTATION_FILES.items()
+        }
+        if not any(payload is not None for payload in payloads.values()):
+            return {"status": "not_requested"}
+
+        evidence = payloads["evidence"]
+        proposal = payloads["proposal"]
+        application = payloads["application"]
+        if evidence is not None:
+            DocumentationEvidence.from_dict(evidence)
+        proposal_model = DocumentationProposal.from_dict(proposal) if proposal is not None else None
+        application_model = DocumentationApplication.from_dict(application) if application is not None else None
+        self._validate_documentation_preview(payloads["preview"])
+        telemetry = self._validate_documentation_telemetry(payloads["telemetry"])
+
+        proposal_count = len(proposal_model.proposals) if proposal_model is not None else telemetry.get("proposalCount", 0)
+        applications = application_model.applications if application_model is not None else ()
+        applied_count = sum(item["result"] == "applied" for item in applications)
+        status = application_model.status if application_model is not None else (
+            proposal_model.status if proposal_model is not None else telemetry.get("result", "requested")
+        )
+        updated_at = (
+            application.get("generatedAt") if application is not None else None
+        ) or telemetry.get("updatedAt") or (proposal.get("generatedAt") if proposal is not None else None)
+        compact = {"status": status, "proposalCount": proposal_count}
+        if application_model is not None:
+            compact.update({
+                "appliedTargetCount": applied_count,
+                "pendingApprovalCount": max(proposal_count - applied_count, 0),
+            })
+        if updated_at is not None:
+            compact["updatedAt"] = self._safe_timestamp(updated_at)
+        return compact
+
+    @staticmethod
+    def _read_documentation_stage(run_dir: Path, filename: str, hard_cap: int) -> dict[str, Any] | None:
+        if filename not in DOCUMENTATION_FILES.values():
+            raise _ArtifactError("documentation artifact name is not allowed")
+        return AgentOperationsService._read_json(run_dir / filename, run_dir, hard_cap, optional=True)
+
+    @staticmethod
+    def _validate_documentation_preview(payload: dict[str, Any] | None) -> None:
+        if payload is None:
+            return
+        if set(payload) != {"status", "items", "warnings"}:
+            raise _ArtifactError("documentation preview schema is invalid")
+        if payload["status"] not in {"preview_ready", "blocked"}:
+            raise _ArtifactError("documentation preview schema is invalid")
+        if not isinstance(payload["items"], list) or not isinstance(payload["warnings"], list):
+            raise _ArtifactError("documentation preview schema is invalid")
+
+    @staticmethod
+    def _validate_documentation_telemetry(payload: dict[str, Any] | None) -> dict[str, Any]:
+        if payload is None:
+            return {}
+        allowed = {"schemaVersion", "runId", "documentationFingerprint", "proposalCount", "result", "updatedAt"}
+        if payload.get("schemaVersion") != "documentation-telemetry-v1" or not set(payload) <= allowed:
+            raise _ArtifactError("documentation telemetry schema is invalid")
+        if not isinstance(payload.get("proposalCount"), int) or isinstance(payload["proposalCount"], bool):
+            raise _ArtifactError("documentation telemetry schema is invalid")
+        if not isinstance(payload.get("result"), str):
+            raise _ArtifactError("documentation telemetry schema is invalid")
+        return payload
+
+    @staticmethod
+    def _safe_timestamp(value: Any) -> str:
+        if not isinstance(value, str):
+            raise _ArtifactError("documentation timestamp is invalid")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise _ArtifactError("documentation timestamp is invalid") from exc
+        if parsed.tzinfo is None:
+            raise _ArtifactError("documentation timestamp is invalid")
+        return value
 
     @staticmethod
     def _is_valid_archive_summary(payload: dict[str, Any] | None, run_id: str) -> bool:

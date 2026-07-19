@@ -267,6 +267,69 @@ def test_completed_run_aggregates_review_verification_hermes_and_tokens(tmp_path
     assert item["retentionState"] == "complete"
 
 
+def test_completed_run_compacts_documentation_application_sidecars(tmp_path):
+    run = _valid_run(tmp_path, "run-documentation")
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    status.update({
+        "stage": "hermes",
+        "status": "completed",
+        "completedAt": "2026-07-18T12:00:00+08:00",
+        "updatedAt": "2026-07-18T12:00:00+08:00",
+        "message": "Workflow completed",
+    })
+    _write_json(run / "status.json", status)
+    _write_valid_stage_artifacts(run)
+    _write_json(run / "documentation-application.json", {
+        "schemaVersion": "documentation-application-v1",
+        "taskId": "task-7",
+        "proposalFingerprint": "a" * 64,
+        "status": "applied",
+        "generatedAt": "2026-07-18T12:00:00+08:00",
+        "applications": [{
+            "targetKind": "brief_backfill",
+            "targetIdentity": "docs/briefs/task-7.md",
+            "operation": "update_managed_block",
+            "result": "applied",
+            "appliedSha256": "b" * 64,
+        }],
+    })
+    _write_json(run / "documentation-telemetry.json", {
+        "schemaVersion": "documentation-telemetry-v1",
+        "proposalCount": 2,
+        "result": "applied",
+    })
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["documentation"] == {
+        "status": "applied",
+        "proposalCount": 2,
+        "appliedTargetCount": 1,
+        "pendingApprovalCount": 1,
+        "updatedAt": "2026-07-18T12:00:00+08:00",
+    }
+
+
+def test_missing_documentation_sidecars_are_not_requested(tmp_path):
+    _valid_run(tmp_path)
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["documentation"] == {"status": "not_requested"}
+
+
+def test_invalid_documentation_sidecar_returns_bounded_diagnostic(tmp_path):
+    run = _valid_run(tmp_path)
+    _write_json(run / "documentation-application.json", {"status": "applied"})
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    assert snapshot["runs"] == []
+    assert snapshot["diagnostics"][0]["code"] == "invalid_run"
+    assert len(snapshot["diagnostics"][0]["reason"]) <= 160
+    assert str(tmp_path) not in json.dumps(snapshot["diagnostics"])
+
+
 def test_missing_usage_is_not_estimated(tmp_path):
     _valid_run(tmp_path)
 

@@ -54,6 +54,8 @@ Agent Evidence Pipeline 是 Codex 的 read-only 證據整理與檢查層，用�
 - system acceptance、Vue verify/build 均 passed；Hermes `overallStatus=pass`；2026-05 baseline 維持 `HKD 12,057,968`。
 
 Agent 流程為：`Brief -> collect-only evidence -> Context/Review -> Codex implementation -> full verification -> Hermes final acceptance`。Agent 通過不代表正式系統已驗收，正式 DB 與 baseline 仍以 Hermes 和既有治理 gate 為準。
+- Documentation flow is an active post-acceptance sidecar: `Hermes PASS -> Codex agent_workflow.py document -> documentation-evidence-v1 -> approved runner -> documentation-proposal-v1 -> explicit target approval / trusted Controller`. No-doc changes skip deterministically; missing runner is `blocked_missing_runner`, with no main Codex LLM fallback.
+- Documentation Agent、Agent Operations 與 Hermes documentation checks are read-only at their boundaries. They never auto-apply, approve targets, change Hermes/terminal state, or write SQLite, baseline, runtime, Git or Obsidian. System map and ADR require explicit approval.
 
 ---
 

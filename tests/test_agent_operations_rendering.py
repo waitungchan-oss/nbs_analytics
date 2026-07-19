@@ -1,5 +1,6 @@
 from datetime import date
 
+import agent_operations_rendering
 from agent_operations_rendering import filter_agent_runs, token_usage_label
 
 
@@ -141,6 +142,43 @@ def test_render_non_empty_snapshot_covers_main_ui_contract(monkeypatch):
     assert any(call[0] == "subheader" and call[1][0] == "Selected run" for call in calls)
     assert any(call[0] == "subheader" and call[1][0] == "Retention and diagnostics" for call in calls)
     assert any(call[0] == "warning" and "Diagnostics: 1" in call[1][0] for call in calls)
+
+
+def test_render_run_details_includes_compact_documentation_status(monkeypatch):
+    calls = []
+
+    class FakeStreamlit:
+        def __getattr__(self, name):
+            def method(*args, **kwargs):
+                calls.append((name, args, kwargs))
+                return False if name == "button" else None
+            return method
+
+    monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit())
+    agent_operations_rendering._render_run_details({
+        "runId": "run-1",
+        "briefName": "brief.md",
+        "status": "completed",
+        "stage": "hermes",
+        "updatedAt": "2026-07-18T12:00:00+08:00",
+        "stages": {},
+        "findings": {},
+        "verification": {},
+        "hermes": {},
+        "tokenUsage": None,
+        "documentation": {
+            "status": "applied",
+            "proposalCount": 2,
+            "appliedTargetCount": 1,
+            "pendingApprovalCount": 1,
+            "updatedAt": "2026-07-18T12:00:00+08:00",
+        },
+    })
+
+    rendered = " ".join(str(args) for name, args, _ in calls if name in {"caption", "write", "subheader"})
+    assert "Documentation" in rendered
+    assert "applied" in rendered
+    assert "2" in rendered and "1" in rendered
 
 
 def test_agent_operations_snapshot_is_session_scoped_and_force_refresh_is_manual(monkeypatch):
