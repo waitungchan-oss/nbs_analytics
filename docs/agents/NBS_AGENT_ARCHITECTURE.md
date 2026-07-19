@@ -68,7 +68,7 @@ flowchart TD
     RA -->|"Changes Required"| CP
     RA -->|"Code Review PASS"| FV["Full Verification"]
     FV --> HA["Hermes Acceptance"]
-    HA -->|"PASS"| DA["Future Documentation Agent"]
+    HA -->|"PASS"| DA["Documentation Agent (proposal only)"]
     DA --> OA["Obsidian Backfill"]
     OA --> GA["Future Git Integration Agent"]
     HA -->|"FAIL"| DG["Future Diagnostic Agent"]
@@ -83,8 +83,11 @@ flowchart TD
       RA
     end
 
-    subgraph FUTURE["Future Candidates"]
+    subgraph ACTIVE_DOCS["Active Documentation Pipeline"]
       DA
+      OA
+    end
+    subgraph FUTURE["Future Candidates"]
       DG
       GA
     end
@@ -100,9 +103,16 @@ flowchart TD
 | Codex | 建立/批准 Task contract、分派單一 Task、檢查 report 與 diff、處理 findings、完整驗證、Hermes 與整合 | 把未驗證輸出當成完成證據 |
 | Implementation Agent | 在獨立 worktree 內執行一個已批准 allowlisted Task，提交 final implementation report 與實際 diff | 決定下一 Task、commit、merge、push、正式 SQLite、baseline、rollback、完整驗證或 Hermes |
 | Review Agent | requirement coverage、diff findings、測試缺口、residual risk | 修改檔案、取代 Hermes、正式 baseline 裁決 |
-| Hermes | runtime、SQLite integrity、baseline、服務、Git 與系統驗收 | 功能設計、逐行 code review、未授權修復 |
+| Documentation Agent | 只讀 `documentation-evidence-v1`，輸出 `documentation-proposal-v1` | auto-apply、target approval、repo/Obsidian/SQLite/runtime/Git 寫入、主 Codex fallback |
+| Hermes | runtime、SQLite integrity、baseline、服務、Git 與系統驗收；只 read-only 檢查 documentation sidecar schema/status/cap | 執行 documentation runner、preview/apply、backup、Git 或 Obsidian 寫入 |
 
 Review Agent 的 `pass` 只代表可以進入完整驗證及 Hermes，不代表正式系統已完成驗收。
+
+## 10A. Documentation Dispatch Policy
+
+功能變更在 Review PASS、full verification PASS 與 Hermes PASS 後，Codex 才可針對同一 completed run 呼叫 `agent_workflow.py document`。Documentation Agent 必須是獨立、明確批准的 runner：輸入為 `documentation-evidence-v1`，輸出為 `documentation-proposal-v1`；缺少 runner 時必須 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。
+
+deterministic classifier 判定為 no-doc 的 typo、format-only、generated evidence 或純測試變更可直接 skip，不調用 LLM。按需 backfill 必須指定 completed run ID。`system map` 與 `ADR` proposal 均需要明確 target approval；Documentation Agent 只產生 proposal，永遠不得 auto-apply、批准 targets 或修改 repo、Obsidian、Hermes/terminal state、SQLite、baseline、runtime、Git。Agent Operations 只顯示 sidecar 的 bounded status/counts，Hermes 只 read-only 驗證 artifact schema、status、cap 與 permissions，兩者都不是寫入入口。
 
 ## 7. Evidence Bundle Pipeline
 

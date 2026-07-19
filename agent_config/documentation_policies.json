@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "documentation-policy-v1",
+  "tokenBudget": {"maxInputTokens": 8000, "maxOutputTokens": 1500},
+  "targets": {
+    "brief_backfill": {
+      "riskTier": "low",
+      "operations": ["update_managed_block"],
+      "repoRoots": ["docs/briefs"],
+      "obsidianSubdirectory": "70_Codex_Briefs",
+      "requiresExplicitTargetApproval": false
+    },
+    "system_map": {
+      "riskTier": "high",
+      "operations": ["replace_section"],
+      "repoPaths": ["NBS_ANALYTICS_SYSTEM_MAP.md"],
+      "obsidianSubdirectory": "10_System",
+      "requiresExplicitTargetApproval": true
+    },
+    "adr": {
+      "riskTier": "high",
+      "operations": ["create_file"],
+      "repoRoots": ["Summay"],
+      "obsidianSubdirectory": "20_Decisions",
+      "requiresExplicitTargetApproval": true
+    }
+  },
+  "protectedText": {
+    "revenueScope": "不含掛賬核銷與TT退款轉團款",
+    "mayBaseline": "HKD 12,057,968"
+  }
+}

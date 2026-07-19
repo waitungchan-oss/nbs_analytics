@@ -92,6 +92,15 @@ def _render_run_details(run: dict[str, Any]) -> None:
         f"Hermes: {hermes.get('status', 'unavailable') if isinstance(hermes, dict) else 'unavailable'}"
     )
     st.write(f"Token usage: {token_usage_label(run.get('tokenUsage'))}")
+    documentation = run.get("documentation", {})
+    if isinstance(documentation, dict):
+        st.caption(
+            "Documentation: "
+            f"{documentation.get('status', 'not_requested')} · "
+            f"proposals {documentation.get('proposalCount', 0)} · "
+            f"applied {documentation.get('appliedTargetCount', 0)} · "
+            f"pending approval {documentation.get('pendingApprovalCount', 0)}"
+        )
 
 
 def _render_retention_and_diagnostics(snapshot: dict[str, Any]) -> None:
