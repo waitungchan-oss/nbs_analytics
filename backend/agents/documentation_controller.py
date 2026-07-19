@@ -6,7 +6,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .documentation_models import DocumentationApplication, DOCUMENTATION_APPLICATION_SCHEMA
 from .documentation_validator import DocumentationPreview, DocumentationPreviewItem
@@ -250,7 +250,8 @@ class DocumentationController:
 
     @staticmethod
     def _display_identity(value: str) -> str:
-        return "<absolute-target>" if Path(value).is_absolute() else value
+        is_absolute = Path(value).is_absolute() or PureWindowsPath(value).is_absolute()
+        return "<absolute-target>" if is_absolute else value
 
     def _record(self, item: DocumentationPreviewItem, result: str, applied_hash: str | None) -> dict[str, object]:
         identity = item.vault_relative_path or item.path_identity

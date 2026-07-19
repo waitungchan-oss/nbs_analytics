@@ -245,6 +245,33 @@ def test_blocked_application_never_serializes_absolute_identity(controller, tmp_
     assert "<absolute-target>" in encoded
 
 
+@pytest.mark.parametrize(
+    "absolute_vault_path",
+    [
+        r"C:\Users\analyst\vault\70_Codex_Briefs\task.md",
+        r"\\server\shared\vault\70_Codex_Briefs\task.md",
+    ],
+)
+def test_blocked_application_redacts_windows_absolute_identity_on_posix(controller, absolute_vault_path):
+    preview = DocumentationPreview(
+        "preview_ready",
+        (_preview_item(
+            "brief_backfill",
+            "docs/briefs/task.md",
+            "# Brief\n",
+            "# Brief\nnew\n",
+            vault_relative_path=absolute_vault_path,
+        ),),
+    )
+
+    result = controller.apply(preview, apply_brief=False, approved_targets=frozenset())
+    encoded = json.dumps(result.to_dict(), ensure_ascii=False)
+
+    assert result.status == "awaiting_target_approval"
+    assert absolute_vault_path not in encoded
+    assert "<absolute-target>" in encoded
+
+
 def test_hash_is_rechecked_immediately_before_replace(controller, brief_preview, tmp_path, monkeypatch):
     target = tmp_path / "docs/briefs/task.md"
     target.parent.mkdir(parents=True)
