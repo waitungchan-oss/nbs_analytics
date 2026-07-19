@@ -1,9 +1,24 @@
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from scripts import verified_documentation_backfill as cli
+
+
+def test_direct_script_execution_resolves_project_imports():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "verified_documentation_backfill.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "Create a verified documentation backfill run" in completed.stdout
 
 
 def test_cli_accepts_only_documented_options():
