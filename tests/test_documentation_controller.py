@@ -101,6 +101,61 @@ def test_adr_requires_approval_and_is_create_only(controller, tmp_path):
     assert created[0].read_text(encoding="utf-8") == "# New ADR\n"
 
 
+def test_adr_existing_target_is_never_replaced(controller, tmp_path):
+    target = tmp_path / "Summay/ADR-001-new.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Existing ADR\n", encoding="utf-8")
+    preview = DocumentationPreview(
+        "preview_ready",
+        (_preview_item("adr", "Summay/ADR-new.md", None, "# New ADR\n", required_approval="adr"),),
+    )
+
+    result = controller.apply(preview, apply_brief=True, approved_targets=frozenset({"Summay/ADR-new.md"}))
+
+    assert result.status == "applied"
+    assert target.read_text(encoding="utf-8") == "# Existing ADR\n"
+    created = sorted(tmp_path.joinpath("Summay").glob("ADR-*-new.md"))
+    assert [path.name for path in created] == ["ADR-001-new.md", "ADR-002-new.md"]
+
+
+def test_adr_exclusive_create_blocks_racing_existing_path(controller, tmp_path, monkeypatch):
+    target = tmp_path / "Summay/ADR-001-new.md"
+    target.parent.mkdir(parents=True)
+    preview = DocumentationPreview(
+        "preview_ready",
+        (_preview_item("adr", "Summay/ADR-new.md", None, "# New ADR\n", required_approval="adr"),),
+    )
+    monkeypatch.setattr(controller, "_assign_adr_path", lambda item, path: target)
+
+    def create_race(item, before):
+        target.write_text("# Existing ADR\n", encoding="utf-8")
+        return b"# New ADR\n"
+
+    monkeypatch.setattr(controller, "_after_bytes", create_race)
+
+    result = controller.apply(preview, apply_brief=True, approved_targets=frozenset({"Summay/ADR-new.md"}))
+
+    assert result.status == "blocked"
+    assert result.applications[0]["result"] == "write_failed: FileExistsError"
+    assert target.read_text(encoding="utf-8") == "# Existing ADR\n"
+
+
+def test_adr_reapply_is_idempotent(controller, tmp_path):
+    preview = DocumentationPreview(
+        "preview_ready",
+        (_preview_item("adr", "Summay/ADR-new.md", None, "# New ADR\n", required_approval="adr"),),
+    )
+    approvals = frozenset({"Summay/ADR-new.md"})
+
+    first = controller.apply(preview, apply_brief=True, approved_targets=approvals)
+    second = controller.apply(preview, apply_brief=True, approved_targets=approvals)
+
+    assert first.status == "applied"
+    assert second.status == "applied"
+    assert second.applications[0]["result"].startswith("already_applied")
+    assert len(list((tmp_path / "Summay").glob("ADR-*-new.md"))) == 1
+
+
 def test_stale_target_is_blocked_by_exact_hash(controller, brief_preview, tmp_path):
     target = tmp_path / "docs/briefs/task.md"
     target.parent.mkdir(parents=True)
@@ -167,3 +222,40 @@ def test_application_record_never_contains_absolute_vault_path(controller, brief
     manifest = list((tmp_path / ".nbs_agent_runtime/runs").rglob("documentation-application.json"))
     assert len(manifest) == 1
     assert str(vault_root) not in manifest[0].read_text(encoding="utf-8")
+
+
+def test_blocked_application_never_serializes_absolute_identity(controller, tmp_path):
+    absolute_vault_path = str(tmp_path / "vault/70_Codex_Briefs/task.md")
+    preview = DocumentationPreview(
+        "preview_ready",
+        (_preview_item(
+            "brief_backfill",
+            "docs/briefs/task.md",
+            "# Brief\n",
+            "# Brief\nnew\n",
+            vault_relative_path=absolute_vault_path,
+        ),),
+    )
+
+    result = controller.apply(preview, apply_brief=False, approved_targets=frozenset())
+    encoded = json.dumps(result.to_dict(), ensure_ascii=False)
+
+    assert result.status == "awaiting_target_approval"
+    assert str(tmp_path) not in encoded
+    assert "<absolute-target>" in encoded
+
+
+def test_hash_is_rechecked_immediately_before_replace(controller, brief_preview, tmp_path, monkeypatch):
+    target = tmp_path / "docs/briefs/task.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Brief\n", encoding="utf-8")
+
+    def mutate_after_backup(path, identity, content):
+        path.write_text("# changed during apply\n", encoding="utf-8")
+
+    monkeypatch.setattr(controller, "_backup", mutate_after_backup)
+    result = controller.apply(brief_preview, apply_brief=True, approved_targets=frozenset())
+
+    assert result.status == "blocked"
+    assert "stale_target" in result.applications[0]["result"]
+    assert target.read_text(encoding="utf-8") == "# changed during apply\n"

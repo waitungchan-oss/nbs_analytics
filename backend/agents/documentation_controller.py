@@ -69,19 +69,31 @@ class DocumentationController:
                 return self._record(item, f"already_applied;beforeSha256={current_hash};afterSha256={current_hash}", current_hash), True
             if current_hash != item.before_sha256:
                 actual = current_hash or "missing"
+                if item.target_kind == "adr" and current_exists:
+                    return self._record(item, f"adr_target_exists;actual={actual}", None), False
                 return self._record(item, f"stale_target: expected beforeSha256={item.before_sha256 or 'missing'};actual={actual}", None), False
             after = self._after_bytes(item, current)
             if sha256(after).hexdigest() != item.after_sha256:
                 return self._record(item, "blocked: preview after hash does not match expected bytes", None), False
+            if item.target_kind == "adr":
+                self._atomic_create(path, after)
+                applied_hash = sha256(path.read_bytes()).hexdigest()
+                if applied_hash != item.after_sha256:
+                    return self._record(item, "blocked: post-write hash verification failed", None), False
+                return self._record(item, f"applied;beforeSha256=missing;afterSha256={applied_hash}", applied_hash), True
+            existing_mode = path.stat().st_mode if current_exists else None
             if current_exists:
                 self._backup(path, item.path_identity, current)
-            self._atomic_replace(path, after, existing_mode=path.stat().st_mode if current_exists else None)
+                latest_hash = sha256(path.read_bytes()).hexdigest()
+                if latest_hash != current_hash:
+                    return self._record(item, f"stale_target: expected beforeSha256={current_hash};actual={latest_hash}", None), False
+            self._atomic_replace(path, after, existing_mode=existing_mode)
             applied_hash = sha256(path.read_bytes()).hexdigest()
             if applied_hash != item.after_sha256:
                 return self._record(item, "blocked: post-write hash verification failed", None), False
             return self._record(item, f"applied;beforeSha256={current_hash or 'missing'};afterSha256={applied_hash}", applied_hash), True
         except (OSError, ValueError) as exc:
-            return self._record(item, f"write_failed: {type(exc).__name__}: {exc}", None), False
+            return self._record(item, f"write_failed: {type(exc).__name__}", None), False
 
     def _repo_path(self, identity: str) -> Path:
         relative = identity.split("#", 1)[0].split("::", 1)[0].split("|", 1)[0]
@@ -160,6 +172,12 @@ class DocumentationController:
         suffix = suffix.split("-", 1)[1] if suffix[:1].isdigit() and "-" in suffix else suffix
         numbers = []
         for candidate in path.parent.glob("ADR-*.md"):
+            if candidate.name.endswith(f"-{suffix}.md"):
+                try:
+                    if sha256(candidate.read_bytes()).hexdigest() == item.after_sha256:
+                        return candidate
+                except OSError:
+                    continue
             found = re.match(r"ADR-(\d+)(?:-|\.md)", candidate.name)
             if found:
                 numbers.append(int(found.group(1)))
@@ -203,6 +221,22 @@ class DocumentationController:
                 pass
             raise
 
+    @staticmethod
+    def _atomic_create(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            raise
+
     def _application(self, preview: DocumentationPreview, status: str, items: list[dict[str, object]]) -> DocumentationApplication:
         application = DocumentationApplication(
             schema_version=DOCUMENTATION_APPLICATION_SCHEMA,
@@ -215,10 +249,14 @@ class DocumentationController:
         return application
 
     @staticmethod
-    def _record(item: DocumentationPreviewItem, result: str, applied_hash: str | None) -> dict[str, object]:
+    def _display_identity(value: str) -> str:
+        return "<absolute-target>" if Path(value).is_absolute() else value
+
+    def _record(self, item: DocumentationPreviewItem, result: str, applied_hash: str | None) -> dict[str, object]:
+        identity = item.vault_relative_path or item.path_identity
         return {
             "targetKind": item.target_kind,
-            "targetIdentity": item.vault_relative_path or item.path_identity,
+            "targetIdentity": self._display_identity(identity),
             "operation": "create_file" if item.target_kind == "adr" else "replace_section" if item.target_kind == "system_map" else "update_managed_block",
             "result": result,
             "appliedSha256": applied_hash,
