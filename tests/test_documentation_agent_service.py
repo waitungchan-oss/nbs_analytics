@@ -70,7 +70,7 @@ class FakeRunner:
             "taskId": payload["taskId"],
             "generatedAt": payload["generatedAt"],
             "evidence": payload,
-            "evidenceFingerprint": payload["documentationFingerprint"],
+            "evidenceFingerprint": payload["evidenceFingerprint"],
             "status": "ready",
             "proposals": [{
                 "targetKind": "brief_backfill",
@@ -105,6 +105,17 @@ def test_runner_receives_only_evidence_json(evidence, service):
     assert payload["schemaVersion"] == DOCUMENTATION_EVIDENCE_SCHEMA
     assert "prompt" not in payload
     assert "absoluteVaultPath" not in payload
+
+
+def test_service_accepts_actual_evidence_payload_fingerprint_contract(evidence, service):
+    fake_runner = FakeRunner()
+    proposal = service(fake_runner).draft(evidence, agent_command="codex")
+
+    runner_payload = json.loads(fake_runner.stdin_text)
+    assert runner_payload["evidenceFingerprint"] == evidence.documentation_fingerprint
+    assert "documentationFingerprint" not in runner_payload
+    assert proposal.status == "ready"
+    assert proposal.evidence_fingerprint == evidence.documentation_fingerprint
 
 
 def test_external_source_paths_are_redacted_from_runner_and_cache(evidence, service):
@@ -190,6 +201,37 @@ def test_fingerprint_mismatch_is_rejected(evidence, service):
 
     fake_runner.run = mismatch
     proposal = service(fake_runner).draft(evidence, agent_command="codex")
+    assert proposal.status == "invalid_agent_output"
+    assert proposal.warnings == ("fingerprint_mismatch",)
+
+
+def test_service_runner_proposal_success_uses_canonical_evidence_fingerprint(evidence, service):
+    fake_runner = FakeRunner()
+
+    proposal = service(fake_runner).draft(evidence, agent_command="codex")
+
+    runner_payload = json.loads(fake_runner.stdin_text)
+    assert runner_payload["evidenceFingerprint"] == evidence.documentation_fingerprint
+    assert "documentationFingerprint" not in runner_payload
+    assert proposal.to_dict()["evidenceFingerprint"] == evidence.documentation_fingerprint
+
+
+def test_documentation_fingerprint_only_runner_payload_is_rejected(evidence, service):
+    fake_runner = FakeRunner()
+    original = fake_runner.run
+
+    def legacy_only(*args, **kwargs):
+        result = original(*args, **kwargs)
+        payload = json.loads(result.stdout)
+        payload["documentationFingerprint"] = payload.pop("evidenceFingerprint")
+        payload["proposalFingerprint"] = canonical_sha256({
+            key: value for key, value in payload.items() if key != "proposalFingerprint"
+        })
+        return replace(result, stdout=json.dumps(payload))
+
+    fake_runner.run = legacy_only
+    proposal = service(fake_runner).draft(evidence, agent_command="codex")
+
     assert proposal.status == "invalid_agent_output"
     assert proposal.warnings == ("fingerprint_mismatch",)
 

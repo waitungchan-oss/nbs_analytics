@@ -8,11 +8,11 @@ import shlex
 import subprocess
 import time
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .agent_runtime import AgentRuntime
+from .documentation_codex_runner import CodexDocumentationRunner, DocumentationRunnerResult
 from .documentation_models import (
     DOCUMENTATION_PROPOSAL_SCHEMA,
     DocumentationEvidence as ContractDocumentationEvidence,
@@ -27,16 +27,7 @@ from .workflow_models import canonical_sha256
 _OUTPUT_MAX_BYTES = 64 * 1024
 _STDERR_TAIL_BYTES = 4 * 1024
 _TIMEOUT_SECONDS = 120
-_ALLOWED_EXECUTABLES = frozenset({"codex", "claude"})
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-
-
-@dataclass(frozen=True)
-class DocumentationRunnerResult:
-    exit_code: int
-    stdout: str
-    stderr_tail: str
-    duration_ms: int
 
 
 class _SubprocessDocumentationRunner:
@@ -135,7 +126,7 @@ class DocumentationAgentService:
     def __init__(self, project_root: Path, *, runner=None, runtime=None) -> None:
         self.project_root = Path(project_root).resolve()
         self.runtime = runtime or AgentRuntime(self.project_root / ".nbs_agent_runtime")
-        self.runner = runner or _SubprocessDocumentationRunner(self.project_root)
+        self.runner = runner or CodexDocumentationRunner(project_root=self.project_root)
         self.classifier = DocumentationImpactClassifier()
         self.cache_root = self.project_root / ".nbs_agent_runtime" / "documentation"
         self.telemetry_path = self.project_root / ".nbs_agent_runtime" / "telemetry" / "documentation.jsonl"
@@ -149,6 +140,7 @@ class DocumentationAgentService:
         if not isinstance(evidence, CollectorDocumentationEvidence):
             raise TypeError("documentation evidence must be DocumentationEvidence")
         payload = evidence.to_dict()
+        payload["evidenceFingerprint"] = payload.pop("documentationFingerprint")
         payload["sources"] = _safe_sources(evidence.sources)
         required_targets = self._required_targets(payload)
         if not required_targets:
@@ -227,11 +219,11 @@ class DocumentationAgentService:
     ) -> DocumentationProposal:
         try:
             payload = json.loads(stdout)
-            if (
-                isinstance(payload, dict)
-                and payload.get("schemaVersion") == DOCUMENTATION_PROPOSAL_SCHEMA
-                and payload.get("evidenceFingerprint") != evidence.documentation_fingerprint
-            ):
+            if not isinstance(payload, dict):
+                return _proposal(evidence, "invalid_agent_output", ("invalid_agent_output",))
+            if payload.get("schemaVersion") != DOCUMENTATION_PROPOSAL_SCHEMA:
+                return _proposal(evidence, "invalid_agent_output", ("invalid_agent_output",))
+            if payload.get("evidenceFingerprint") != evidence.documentation_fingerprint:
                 return _proposal(evidence, "invalid_agent_output", ("fingerprint_mismatch",))
             normalized_payload = dict(payload)
             normalized_payload["evidence"] = _contract_evidence(evidence).to_dict()
@@ -257,7 +249,7 @@ class DocumentationAgentService:
         argv = tuple(shlex.split(command))
         if not argv:
             raise ValueError("agent command is required")
-        if Path(argv[0]).name not in _ALLOWED_EXECUTABLES:
+        if Path(argv[0]).name not in {"codex"}:
             raise PermissionError("agent command is not allowlisted")
         return argv
 

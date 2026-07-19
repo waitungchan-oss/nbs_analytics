@@ -60,9 +60,18 @@ def _exit_code(status: str) -> int:
     return DOCUMENTATION_EXIT_CODES.get(status, 5)
 
 
+def _runner_command_is_explicit_codex(command: str | None) -> bool:
+    """Keep the CLI boundary aligned with the constrained Codex adapter."""
+    if not command or not command.strip():
+        return False
+    return Path(command.strip().split()[0]).name == "codex"
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
+        if args.agent_command and not _runner_command_is_explicit_codex(args.agent_command):
+            raise PermissionError("documentation runner must be an explicit codex command")
         result = DocumentationWorkflow(PROJECT_ROOT).run(
             args.run_id,
             agent_command=args.agent_command,

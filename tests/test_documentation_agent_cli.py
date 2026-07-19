@@ -17,6 +17,14 @@ def test_documentation_parser_exposes_contract():
     assert args.approve_target == ["system_map", "adr"]
 
 
+def test_documentation_cli_accepts_explicit_codex_command_without_vault_in_runner_args():
+    from scripts.documentation_agent import _parser
+
+    args = _parser().parse_args(["--run-id", "run-1", "--agent-command", "codex"])
+    assert args.agent_command == "codex"
+    assert args.obsidian_vault is None
+
+
 def test_agent_workflow_parser_exposes_document_sidecar():
     from scripts.agent_workflow import _parser
 

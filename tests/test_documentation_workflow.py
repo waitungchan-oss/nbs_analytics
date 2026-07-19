@@ -51,7 +51,7 @@ class FakeRunner:
             "taskId": evidence["taskId"],
             "generatedAt": evidence["generatedAt"],
             "evidence": evidence,
-            "evidenceFingerprint": evidence["documentationFingerprint"],
+            "evidenceFingerprint": evidence["evidenceFingerprint"],
             "status": "ready",
             "proposals": [{
                 "targetKind": "brief_backfill",
