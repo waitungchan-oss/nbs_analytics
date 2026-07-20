@@ -34,7 +34,7 @@ REVIEW_REPORT_PATH = ".nbs_agent_runtime/reports/verified-backfill-task2-review-
 _GATE_COMMANDS = (
     ("pytest", (PROJECT_PYTHON, "-m", "pytest", "tests/test_documentation_evidence.py", "-q")),
     ("systemAcceptance", (PROJECT_PYTHON, "scripts/system_manager.py", "acceptance")),
-    ("hermes", (PROJECT_PYTHON, "scripts/hermes_post_change_check.py")),
+    ("hermes", (PROJECT_PYTHON, "scripts/hermes_post_change_check.py", "--skip-monitor", "--json")),
     ("baseline", (PROJECT_PYTHON, "-m", "pytest", "tests/test_phase2_precheck_acceptance.py", "-q")),
 )
 

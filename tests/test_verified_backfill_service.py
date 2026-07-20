@@ -258,6 +258,13 @@ def test_fixed_gates_use_current_interpreter_and_fixed_project_relative_commands
     assert all(not Path(argv[0]).is_absolute() or argv[0] == sys.executable for _, argv in verified_backfill_service._GATE_COMMANDS)
 
 
+def test_hermes_gate_is_explicitly_read_only():
+    from backend.agents import verified_backfill_service
+
+    hermes = dict(verified_backfill_service._GATE_COMMANDS)["hermes"]
+    assert hermes[-2:] == ("--skip-monitor", "--json")
+
+
 def test_create_writes_bounded_standard_artifacts_and_hashes(service):
     result = service.create(source_commit=COMMIT, reason="documentation backfill")
     assert result["status"] == "completed"
