@@ -265,6 +265,12 @@ def test_hermes_gate_is_explicitly_read_only():
     assert hermes[-2:] == ("--skip-monitor", "--json")
 
 
+def test_fixed_gate_timeout_allows_the_full_hermes_pack():
+    from backend.agents.verified_backfill_service import GATE_TIMEOUT
+
+    assert GATE_TIMEOUT >= 300
+
+
 def test_create_writes_bounded_standard_artifacts_and_hashes(service):
     result = service.create(source_commit=COMMIT, reason="documentation backfill")
     assert result["status"] == "completed"

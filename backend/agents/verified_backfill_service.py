@@ -27,7 +27,8 @@ from .workflow_store import WorkflowStore
 
 
 PROJECT_PYTHON = sys.executable
-GATE_TIMEOUT = 120
+# Hermes runs its full read-only targeted pack and can exceed two minutes on the local DB.
+GATE_TIMEOUT = 300
 BRIEF_PATH = ".nbs_agent_runtime/reports/verified-backfill-task2-brief.md"
 REVIEW_EVIDENCE_PATH = ".nbs_agent_runtime/reports/verified-backfill-task2-review-evidence.json"
 REVIEW_REPORT_PATH = ".nbs_agent_runtime/reports/verified-backfill-task2-review-local.json"
