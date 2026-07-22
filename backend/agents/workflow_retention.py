@@ -9,6 +9,7 @@ from typing import Any
 
 from .workflow_models import MANIFEST_SCHEMA, STATUS_SCHEMA, TERMINAL_STATUSES, WORKFLOW_STATUSES
 from .workflow_store import WorkflowLockedError, WorkflowStore
+from .workflow_store import PROJECTION_ARTIFACTS
 
 
 RETENTION_SCHEMA = "agent-workflow-retention-v1"
@@ -25,7 +26,7 @@ STAGE_ARTIFACTS = frozenset(
         "documentation-preview.json",
         "documentation-application.json",
         "documentation-telemetry.json",
-    }
+    } | PROJECTION_ARTIFACTS
 )
 PERMANENT_ARTIFACTS = frozenset({"manifest.json", "status.json", "approval.json", "events.jsonl", ".lock"})
 

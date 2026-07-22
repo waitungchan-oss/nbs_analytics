@@ -87,6 +87,37 @@ def test_old_completed_stage_reports_are_compacted_and_summary_precedes_delete(t
     assert summary["deletedFiles"] == ["context.json", "implementation.json", "events.jsonl"]
 
 
+def test_old_completed_governance_projection_is_compacted(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, "old", NOW - timedelta(days=200))
+    (path / "governance-graph.json").write_text("projection")
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+
+    report = WorkflowRetention(tmp_path, policy=_policy()).plan(NOW)
+    candidate = next(candidate for candidate in report.candidates if candidate.run_id == "old")
+
+    assert "governance-graph.json" in candidate.delete_paths
+    WorkflowRetention(tmp_path, policy=_policy()).apply(report)
+    assert not (path / "governance-graph.json").exists()
+
+
+@pytest.mark.parametrize("status", ["blocked", "failed", "changes_required"])
+def test_old_noncompleted_governance_projection_is_preserved(tmp_path, status):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, f"old-{status}", NOW - timedelta(days=200), status)
+    (path / "governance-graph.json").write_text("projection")
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+
+    report = WorkflowRetention(tmp_path, policy=_policy()).plan(NOW)
+
+    assert all(candidate.run_id != f"old-{status}" for candidate in report.candidates)
+    assert (path / "governance-graph.json").exists()
+
+
 def test_unknown_schema_symlink_and_external_path_are_skipped(tmp_path):
     runs = tmp_path / ".nbs_agent_runtime" / "runs"
     runs.mkdir(parents=True)

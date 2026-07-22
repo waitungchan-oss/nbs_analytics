@@ -20,6 +20,7 @@ from .workflow_models import (
     EVENT_SCHEMA,
     legal_transition,
 )
+from .governance_graph_models import GovernanceGraphSnapshot
 
 
 ALLOWED_ARTIFACTS = frozenset(
@@ -38,8 +39,13 @@ ALLOWED_ARTIFACTS = frozenset(
         "documentation-application.json",
         "documentation-telemetry.json",
         "verified-backfill.json",
+        "risk-classification.json",
+        "design-spec-gate.json",
+        "plan-gate.json",
+        "git-integration.json",
     }
 )
+PROJECTION_ARTIFACTS = frozenset({"governance-graph.json"})
 DEFAULT_STAGE_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_RUN_ARTIFACT_SOFT_CAP_BYTES = 25 * 1024 * 1024
 
@@ -79,6 +85,8 @@ class WorkflowStore:
             self._assert_regular_directory(staging, "staging run directory")
             self._atomic_json(staging / "manifest.json", manifest.to_dict())
             self._atomic_json(staging / "status.json", status.to_dict())
+            lock_fd = os.open(staging / ".lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(lock_fd)
             if run_dir.is_symlink():
                 raise PermissionError("run target must not be a symlink")
             if run_dir.exists():
@@ -163,6 +171,34 @@ class WorkflowStore:
                     ),
                 )
         return target
+
+    def write_projection(self, run_id: str, name: str, payload: dict) -> Path:
+        if Path(name).name != name:
+            raise PermissionError("projection path must stay inside the run directory")
+        if name not in PROJECTION_ARTIFACTS:
+            raise ValueError("projection name is not allowed")
+        if not isinstance(payload, dict):
+            raise ValueError("projection payload must be an object")
+        snapshot = GovernanceGraphSnapshot.from_dict(payload)
+        if snapshot.run_id != run_id:
+            raise ValueError("projection run ID does not match run ID")
+        target = self._run_file(run_id, name)
+        canonical = snapshot.to_dict()
+        if len(self._json_bytes(canonical)) > self.stage_artifact_max_bytes:
+            raise ValueError("projection exceeds hard cap")
+        with self.run_lock(run_id):
+            self._atomic_json(target, canonical)
+        return target
+
+    def read_projection(self, run_id: str, name: str) -> dict:
+        if Path(name).name != name:
+            raise PermissionError("projection path must stay inside the run directory")
+        if name not in PROJECTION_ARTIFACTS:
+            raise ValueError("projection name is not allowed")
+        snapshot = GovernanceGraphSnapshot.from_dict(self._read_json(self._run_file(run_id, name)))
+        if snapshot.run_id != run_id:
+            raise ValueError("projection run ID does not match run ID")
+        return snapshot.to_dict()
 
     def append_event(self, run_id: str, event: WorkflowEvent) -> None:
         if event.run_id != run_id:

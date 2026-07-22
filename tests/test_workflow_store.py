@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from backend.agents.workflow_models import (
     WorkflowManifest,
     WorkflowStatus,
 )
+from backend.agents.governance_graph_models import GRAPH_SCHEMA, GovernanceGraphSnapshot
 from backend.agents.workflow_store import WorkflowLockedError, WorkflowStore
 
 
@@ -71,6 +74,40 @@ def _event(run_id: str = "run-123", event_id: str = "event-1") -> WorkflowEvent:
     )
 
 
+def _graph_payload() -> dict:
+    payload = {
+        "schemaVersion": GRAPH_SCHEMA,
+        "runId": "run-123",
+        "generatedAt": "2026-07-22T10:00:00+00:00",
+        "graphFingerprint": "0" * 64,
+        "risk": None,
+        "authorizationMode": "per_task",
+        "overallStatus": "awaiting_authorization",
+        "nodes": [
+            {
+                "nodeId": "risk",
+                "nodeType": "risk",
+                "status": "not_started",
+                "attempt": 0,
+                "maxAttempts": 1,
+                "evidenceRefs": [],
+                "fingerprint": "0" * 64,
+                "reasonCode": None,
+            }
+        ],
+        "allowedNextNodes": ["risk"],
+        "blockers": [],
+        "freshness": {},
+        "diagnostics": [],
+    }
+    canonical = dict(payload)
+    canonical.pop("graphFingerprint")
+    payload["graphFingerprint"] = hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    return payload
+
+
 @pytest.fixture
 def manifest() -> WorkflowManifest:
     return _manifest()
@@ -95,6 +132,92 @@ def test_store_round_trips_manifest_status_approval_and_artifact(store, manifest
     assert store.load_status(manifest.run_id).artifact_bytes == artifact.stat().st_size
     assert store.artifact_bytes(manifest.run_id) == artifact.stat().st_size
     assert (run_dir / "approval.json").is_file()
+
+
+def test_projection_write_does_not_mutate_canonical_status(store, manifest):
+    store.create_run(manifest, _status())
+    before = store.load_status(manifest.run_id).to_dict()
+    payload = _graph_payload()
+    before_files = {
+        path.relative_to(store.runs_root / manifest.run_id): path.read_bytes()
+        for path in (store.runs_root / manifest.run_id).iterdir()
+        if path.is_file()
+    }
+
+    path = store.write_projection(manifest.run_id, "governance-graph.json", payload)
+
+    assert path.name == "governance-graph.json"
+    assert store.load_status(manifest.run_id).to_dict() == before
+    assert store.read_projection(manifest.run_id, "governance-graph.json") == payload
+    assert (store.runs_root / manifest.run_id / ".lock").is_file()
+    after_files = {
+        path.relative_to(store.runs_root / manifest.run_id): path.read_bytes()
+        for path in (store.runs_root / manifest.run_id).iterdir()
+        if path.is_file() and path.name != "governance-graph.json"
+    }
+    assert after_files == before_files
+
+
+def test_projection_storage_rejects_non_projection_names_and_escape(store, manifest):
+    store.create_run(manifest, _status())
+
+    with pytest.raises(ValueError, match="projection name"):
+        store.write_projection(manifest.run_id, "context.json", {})
+    with pytest.raises(PermissionError):
+        store.read_projection(manifest.run_id, "../outside.json")
+    with pytest.raises(PermissionError):
+        store.write_projection(manifest.run_id, "/absolute/governance-graph.json", {})
+    with pytest.raises(PermissionError):
+        store.read_projection(manifest.run_id, "/absolute/governance-graph.json")
+
+
+def test_projection_storage_rejects_cross_run_snapshot_on_write_and_read(store, manifest):
+    store.create_run(manifest, _status())
+    payload = _graph_payload()
+    payload["runId"] = "run-999"
+    canonical = dict(payload)
+    canonical.pop("graphFingerprint")
+    payload["graphFingerprint"] = hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="run ID"):
+        store.write_projection(manifest.run_id, "governance-graph.json", payload)
+
+    payload = _graph_payload()
+    payload["runId"] = "run-999"
+    canonical = dict(payload)
+    canonical.pop("graphFingerprint")
+    payload["graphFingerprint"] = hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    store._atomic_json(store._run_file(manifest.run_id, "governance-graph.json"), payload)
+
+    with pytest.raises(ValueError, match="run ID"):
+        store.read_projection(manifest.run_id, "governance-graph.json")
+
+
+def test_store_creates_lock_file_when_creating_run(store, manifest):
+    run_dir = store.create_run(manifest, _status())
+
+    assert (run_dir / ".lock").is_file()
+
+
+def test_projection_storage_rejects_symlink_and_directory_targets(store, manifest):
+    store.create_run(manifest, _status())
+    run_dir = store.runs_root / manifest.run_id
+    (run_dir / "governance-graph.json").symlink_to(run_dir / "outside.json")
+
+    with pytest.raises(PermissionError):
+        store.write_projection(manifest.run_id, "governance-graph.json", _graph_payload())
+
+    second_run = _manifest("run-456")
+    store.create_run(second_run, _status("run-456"))
+    second_dir = store.runs_root / second_run.run_id
+    (second_dir / "governance-graph.json").mkdir()
+
+    with pytest.raises(PermissionError):
+        store.read_projection(second_run.run_id, "governance-graph.json")
 
 
 def test_write_approval_rejects_duplicate_approval(store, manifest):
