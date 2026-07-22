@@ -16,7 +16,8 @@ CODEX_DOCUMENTATION_INSTRUCTION = (
     "evidenceFingerprint, status, and proposals. Preserve the evidenceFingerprint. "
     "Each proposals item must contain only targetKind and content. Do not emit target paths, "
     "operations, hashes, evidence, proposal fingerprints, vault paths, or any other keys. "
-    "Use only the target kinds required by the evidence. Do not use tools, access files, "
+    "The evidence includes a requiredTargets array; emit exactly those target kinds. "
+    "Do not use tools, access files, "
     "network, Git, SQLite, or a vault. Do not include markdown fences, commentary, or any "
     "other output."
 )

@@ -149,6 +149,7 @@ class DocumentationAgentService:
         payload["evidenceFingerprint"] = payload.pop("documentationFingerprint")
         payload["sources"] = _safe_sources(evidence.sources)
         required_targets = self._required_targets(payload)
+        payload["requiredTargets"] = list(required_targets)
         if not required_targets:
             proposal = _proposal(evidence, "no_documentation_needed")
             self._telemetry(evidence, payload, proposal, cache_hit=False, duration_ms=0)
