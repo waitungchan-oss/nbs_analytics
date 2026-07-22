@@ -75,6 +75,29 @@ def test_low_risk_brief_apply_is_atomic_and_backed_up(controller, brief_preview,
     assert result.applications[0]["appliedSha256"] == sha256(target.read_bytes()).hexdigest()
 
 
+def test_brief_apply_writes_verified_obsidian_target(tmp_path):
+    from backend.agents.documentation_controller import DocumentationController
+
+    vault = tmp_path / "NBS_Analytics_Knowledge"
+    target = vault / "70_Codex_Briefs/task.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Brief\n", encoding="utf-8")
+    before = target.read_text(encoding="utf-8")
+    after = before + "\n<!-- documentation-agent:implementation-evidence:start -->\nnew\n<!-- documentation-agent:implementation-evidence:end -->\n"
+    preview = DocumentationPreview("preview_ready", (_preview_item(
+        "brief_backfill", "docs/briefs/task.md", before, after,
+        vault_relative_path="70_Codex_Briefs/task.md",
+    ),))
+
+    result = DocumentationController(tmp_path, obsidian_vault=vault).apply(
+        preview, apply_brief=True, approved_targets=frozenset(),
+    )
+
+    assert result.status == "applied"
+    assert target.read_text(encoding="utf-8") == after
+    assert not (tmp_path / "docs/briefs/task.md").exists()
+
+
 def test_high_risk_target_requires_explicit_approval(controller, system_map_preview, tmp_path):
     target = tmp_path / "NBS_ANALYTICS_SYSTEM_MAP.md"
     before = target.read_bytes() if target.exists() else b""

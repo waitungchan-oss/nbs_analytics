@@ -15,9 +15,18 @@ from .documentation_validator import DocumentationPreview, DocumentationPreviewI
 class DocumentationController:
     """Apply validated documentation previews inside the trusted write boundary."""
 
-    def __init__(self, project_root: Path, *, runtime_root: Path | None = None):
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        runtime_root: Path | None = None,
+        obsidian_vault: Path | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
         self.runtime_root = Path(runtime_root or self.project_root / ".nbs_agent_runtime").resolve()
+        self.obsidian_vault = Path(obsidian_vault).resolve() if obsidian_vault else None
+        if self.obsidian_vault and self.obsidian_vault.is_symlink():
+            raise PermissionError("symlink Obsidian vault root is not allowed")
 
     def apply(
         self,
@@ -59,7 +68,7 @@ class DocumentationController:
 
     def _apply_item(self, item: DocumentationPreviewItem) -> tuple[dict[str, object], bool]:
         try:
-            path = self._repo_path(item.path_identity)
+            path = self._target_path(item)
             path = self._assign_adr_path(item, path)
             self._assert_no_symlink(path)
             current_exists = path.exists()
@@ -106,6 +115,19 @@ class DocumentationController:
         except ValueError as exc:
             raise ValueError("target escapes project root") from exc
         return resolved
+
+    def _target_path(self, item: DocumentationPreviewItem) -> Path:
+        if item.target_kind == "brief_backfill" and item.vault_relative_path and self.obsidian_vault:
+            relative = Path(item.vault_relative_path)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("unsafe Obsidian target path")
+            resolved = (self.obsidian_vault / relative).resolve(strict=False)
+            try:
+                resolved.relative_to(self.obsidian_vault)
+            except ValueError as exc:
+                raise ValueError("Obsidian target escapes vault") from exc
+            return resolved
+        return self._repo_path(item.path_identity)
 
     @staticmethod
     def _assert_no_symlink(path: Path) -> None:

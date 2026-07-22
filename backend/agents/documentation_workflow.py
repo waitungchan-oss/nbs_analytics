@@ -21,7 +21,6 @@ class DocumentationWorkflow:
         self.collector = DocumentationEvidenceCollector(self.project_root, store=self.store)
         self.service = DocumentationAgentService(self.project_root, runner=runner)
         self.validator = DocumentationProposalValidator(self.project_root)
-        self.controller = DocumentationController(self.project_root)
 
     def run(
         self,
@@ -53,6 +52,10 @@ class DocumentationWorkflow:
         obsidian = ObsidianTargetResolver.from_sources(
             self.project_root, cli_root=obsidian_vault, environ=os.environ,
         )
+        controller = DocumentationController(
+            self.project_root,
+            obsidian_vault=obsidian.vault_root if obsidian else None,
+        )
         try:
             preview = self.validator.build_preview(proposal, obsidian=obsidian)
         except (DocumentationValidationError, FileNotFoundError, PermissionError, ValueError) as exc:
@@ -72,7 +75,7 @@ class DocumentationWorkflow:
                 approvals.add(item.path_identity)
                 if item.vault_relative_path:
                     approvals.add(item.vault_relative_path)
-        application = self.controller.apply(
+        application = controller.apply(
             preview, apply_brief=apply_brief, approved_targets=frozenset(approvals),
         )
         application_payload = application.to_dict()
