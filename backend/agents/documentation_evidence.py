@@ -36,7 +36,7 @@ def _bounded_text(value: Any) -> str:
 
 
 def _status(payload: dict[str, Any]) -> str:
-    for key in ("overallStatus", "status", "result"):
+    for key in ("overallStatus", "status", "result", "verdict"):
         value = payload.get(key)
         if isinstance(value, str):
             return _bounded_text(value.lower())

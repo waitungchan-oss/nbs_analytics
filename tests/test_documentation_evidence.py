@@ -50,8 +50,9 @@ def completed_run_fixture(tmp_path: Path):
     payload = {"status": "pass", "commands": [{"command": "pytest", "exitCode": 0}],
                "changedPaths": ["backend/agents/documentation_evidence.py"],
                "stdoutTail": "runner command transactionRows"}
-    for name in ("implementation.json", "targeted-verification.json", "review.json", "full-verification.json"):
+    for name in ("implementation.json", "targeted-verification.json", "full-verification.json"):
         store.write_artifact(run_id, name, payload)
+    store.write_artifact(run_id, "review.json", {**payload, "verdict": "pass"})
     store.write_artifact(run_id, "hermes.json", {"overallStatus": "pass", "summary": "ok"})
     return type("Fixture", (), {"project_root": tmp_path, "run_id": run_id, "store": store})
 
