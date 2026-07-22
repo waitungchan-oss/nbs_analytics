@@ -8,25 +8,31 @@ import shlex
 import subprocess
 import time
 from collections import deque
+from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .agent_runtime import AgentRuntime
 from .documentation_codex_runner import CodexDocumentationRunner, DocumentationRunnerResult
 from .documentation_models import (
+    DOCUMENTATION_DRAFT_SCHEMA,
     DOCUMENTATION_PROPOSAL_SCHEMA,
     DocumentationEvidence as ContractDocumentationEvidence,
+    DocumentationDraft,
     DocumentationProposal,
     DocumentationSchemaError,
 )
 from .documentation_evidence import DocumentationEvidence as CollectorDocumentationEvidence
 from .documentation_policy import DocumentationImpactClassifier
+from .documentation_validator import DocumentationProposalValidator, DocumentationValidationError
 from .workflow_models import canonical_sha256
 
 
 _OUTPUT_MAX_BYTES = 64 * 1024
 _STDERR_TAIL_BYTES = 4 * 1024
 _TIMEOUT_SECONDS = 120
+_MANAGED_BLOCK_START = "<!-- documentation-agent:implementation-evidence:start -->"
+_MANAGED_BLOCK_END = "<!-- documentation-agent:implementation-evidence:end -->"
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
@@ -212,7 +218,7 @@ class DocumentationAgentService:
 
     def _parse_result(
         self,
-        evidence: DocumentationEvidence,
+        evidence: CollectorDocumentationEvidence,
         stdout: str,
         required_targets: tuple[str, ...],
         output_limit: int,
@@ -221,29 +227,126 @@ class DocumentationAgentService:
             payload = json.loads(stdout)
             if not isinstance(payload, dict):
                 return _proposal(evidence, "invalid_agent_output", ("invalid_agent_output",))
-            if payload.get("schemaVersion") != DOCUMENTATION_PROPOSAL_SCHEMA:
-                return _proposal(evidence, "invalid_agent_output", ("invalid_agent_output",))
             if payload.get("evidenceFingerprint") != evidence.documentation_fingerprint:
                 return _proposal(evidence, "invalid_agent_output", ("fingerprint_mismatch",))
-            normalized_payload = dict(payload)
-            normalized_payload["evidence"] = _contract_evidence(evidence).to_dict()
-            normalized_payload["proposalFingerprint"] = canonical_sha256({
-                key: value for key, value in normalized_payload.items()
-                if key != "proposalFingerprint"
-            })
-            proposal = DocumentationProposal.from_dict(normalized_payload)
-            if proposal.schema_version != DOCUMENTATION_PROPOSAL_SCHEMA:
-                raise DocumentationSchemaError("invalid schema")
-            if proposal.evidence_fingerprint != evidence.documentation_fingerprint:
-                return _proposal(evidence, "invalid_agent_output", ("fingerprint_mismatch",))
-            if any(item["targetKind"] not in required_targets for item in proposal.proposals):
-                return _proposal(evidence, "invalid_agent_output", ("unapproved_target",))
+            if payload.get("schemaVersion") != DOCUMENTATION_DRAFT_SCHEMA:
+                return _proposal(evidence, "invalid_agent_output", ("invalid_agent_output",))
             if self._estimate(json.dumps(payload, ensure_ascii=False)) > output_limit:
                 return _proposal(evidence, "context_overflow", ("output_over_budget",))
-            _set_warnings(proposal, ())
-            return proposal
+            draft = DocumentationDraft.from_dict(payload)
+            return self._normalize_draft(evidence, draft, required_targets)
         except (json.JSONDecodeError, TypeError, ValueError, DocumentationSchemaError):
             return _proposal(evidence, "invalid_agent_output", ("invalid_agent_output",))
+
+    def _normalize_draft(
+        self,
+        evidence: CollectorDocumentationEvidence,
+        draft: DocumentationDraft,
+        required_targets: tuple[str, ...],
+    ) -> DocumentationProposal:
+        if draft.status == "no_documentation_needed":
+            if required_targets:
+                return _proposal(evidence, "invalid_agent_output", ("target_set_mismatch",))
+            return _proposal(evidence, "no_documentation_needed")
+        if draft.status == "blocked":
+            return _proposal(evidence, "blocked", ("agent_blocked",))
+        if draft.status == "context_overflow":
+            return _proposal(evidence, "context_overflow", ("agent_context_overflow",))
+        if "adr" in required_targets:
+            return _proposal(evidence, "blocked", ("adr_draft_normalization_not_implemented",))
+
+        actual_targets = tuple(item["targetKind"] for item in draft.proposals)
+        if len(actual_targets) != len(set(actual_targets)) or set(actual_targets) != set(required_targets):
+            return _proposal(evidence, "invalid_agent_output", ("target_set_mismatch",))
+        try:
+            fragments = {
+                item["targetKind"]: self._validate_draft_fragment(item["content"])
+                for item in draft.proposals
+            }
+            proposal_items = []
+            for target_kind in required_targets:
+                if target_kind == "brief_backfill":
+                    proposal_items.append(self._brief_proposal(evidence, fragments[target_kind]))
+                elif target_kind == "system_map":
+                    proposal_items.append(self._system_map_proposal(evidence, fragments[target_kind]))
+                else:
+                    return _proposal(evidence, "invalid_agent_output", ("unapproved_target",))
+        except DocumentationValidationError:
+            return _proposal(evidence, "invalid_agent_output", ("unsafe_draft_fragment",))
+        except ValueError as exc:
+            if str(exc).startswith("draft fragment"):
+                return _proposal(evidence, "invalid_agent_output", ("unsafe_draft_fragment",))
+            return _proposal(evidence, "blocked", ("target_normalization_failed",))
+        except OSError:
+            return _proposal(evidence, "blocked", ("target_normalization_failed",))
+
+        proposal = _proposal(evidence, "ready", proposals=tuple(proposal_items))
+        try:
+            return DocumentationProposal.from_dict(proposal.to_dict())
+        except DocumentationSchemaError:
+            return _proposal(evidence, "invalid_agent_output", ("normalized_proposal_invalid",))
+
+    def _validate_draft_fragment(self, content: str) -> str:
+        fragment = content.strip()
+        if not fragment or "\r" in content:
+            raise ValueError("draft fragment is empty or malformed")
+        if (
+            _MANAGED_BLOCK_START in fragment
+            or _MANAGED_BLOCK_END in fragment
+            or re.search(r"(?m)^#{1,2}\s", fragment)
+        ):
+            raise ValueError("draft fragment controls document structure")
+        if re.search(r"(?m)(?:^|[\s(`])/(?:private|Users|home|tmp|var)/", fragment):
+            raise ValueError("draft fragment contains an absolute path")
+        DocumentationProposalValidator._check_content(fragment)
+        return fragment
+
+    def _brief_proposal(self, evidence: CollectorDocumentationEvidence, fragment: str) -> dict[str, str]:
+        identity = self._brief_identity(evidence)
+        safe_task = self._safe_task_id(evidence.task_id)
+        content = f"## Documentation Backfill: {safe_task}\n\n{fragment}\n"
+        return self._proposal_item("brief_backfill", identity, "update_managed_block", content)
+
+    def _system_map_proposal(self, evidence: CollectorDocumentationEvidence, fragment: str) -> dict[str, str]:
+        path = self.project_root / "NBS_ANALYTICS_SYSTEM_MAP.md"
+        before = path.read_text(encoding="utf-8")
+        heading = "## 2A. Agent Evidence Pipeline"
+        matches = list(re.finditer(r"^## 2A\. Agent Evidence Pipeline[ \t]*$", before, re.M))
+        if len(matches) != 1:
+            raise ValueError("system map controlled section is missing or duplicated")
+        start = matches[0].start()
+        next_heading = re.search(r"^#{1,2}[ \t]+", before[matches[0].end():], re.M)
+        end = matches[0].end() + next_heading.start() if next_heading else len(before)
+        section = before[start:end].rstrip()
+        safe_task = self._safe_task_id(evidence.task_id)
+        content = f"{section}\n\n### Documentation Backfill: {safe_task}\n\n{fragment}\n"
+        section_hash = sha256(section.encode("utf-8")).hexdigest()
+        identity = f"NBS_ANALYTICS_SYSTEM_MAP.md#2A.%20Agent%20Evidence%20Pipeline|sha256={section_hash}"
+        return self._proposal_item("system_map", identity, "replace_section", content)
+
+    def _brief_identity(self, evidence: CollectorDocumentationEvidence) -> str:
+        candidates = sorted(
+            item["path"] for item in _safe_sources(evidence.sources)
+            if item["path"].startswith("docs/briefs/") and item["path"].endswith(".md")
+        )
+        if len(candidates) != 1:
+            raise ValueError("documentation evidence must identify exactly one Brief")
+        return candidates[0]
+
+    @staticmethod
+    def _safe_task_id(value: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
+        return safe or "documentation-backfill"
+
+    @staticmethod
+    def _proposal_item(target_kind: str, identity: str, operation: str, content: str) -> dict[str, str]:
+        return {
+            "targetKind": target_kind,
+            "targetIdentity": identity,
+            "operation": operation,
+            "content": content,
+            "contentSha256": sha256(content.encode("utf-8")).hexdigest(),
+        }
 
     def _approved_argv(self, command: str) -> tuple[str, ...]:
         argv = tuple(shlex.split(command))

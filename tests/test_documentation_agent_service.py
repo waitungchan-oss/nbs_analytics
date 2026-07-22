@@ -17,7 +17,8 @@ from backend.agents.documentation_agent_service import (
 from backend.agents.documentation_evidence import DocumentationEvidence
 from backend.agents.documentation_models import (
     DOCUMENTATION_EVIDENCE_SCHEMA,
-    DOCUMENTATION_PROPOSAL_SCHEMA,
+    DOCUMENTATION_DRAFT_SCHEMA,
+    DocumentationProposal,
 )
 from backend.agents.workflow_models import canonical_sha256
 
@@ -64,31 +65,29 @@ class FakeRunner:
         if self.result is not None:
             return self.result
         payload = json.loads(input_text)
-        content = "# Task 3\n"
+        content = "Task 3 implementation evidence.\n"
         proposal = {
-            "schemaVersion": DOCUMENTATION_PROPOSAL_SCHEMA,
-            "taskId": payload["taskId"],
-            "generatedAt": payload["generatedAt"],
-            "evidence": payload,
+            "schemaVersion": DOCUMENTATION_DRAFT_SCHEMA,
             "evidenceFingerprint": payload["evidenceFingerprint"],
             "status": "ready",
             "proposals": [{
                 "targetKind": "brief_backfill",
-                "targetIdentity": "docs/briefs/task-3.md",
-                "operation": "update_managed_block",
                 "content": content,
-                "contentSha256": sha256(content.encode()).hexdigest(),
+            }, {
+                "targetKind": "system_map",
+                "content": "受控文件回填摘要。\n",
             }],
-            "proposalFingerprint": "0" * 64,
         }
-        proposal["proposalFingerprint"] = canonical_sha256({
-            key: value for key, value in proposal.items() if key != "proposalFingerprint"
-        })
         return DocumentationRunnerResult(0, json.dumps(proposal), "", 1)
 
 
 @pytest.fixture
 def service(tmp_path: Path):
+    system_map = tmp_path / "NBS_ANALYTICS_SYSTEM_MAP.md"
+    system_map.write_text(
+        "# System Map\n\n## 2A. Agent Evidence Pipeline\n\nExisting pipeline.\n",
+        encoding="utf-8",
+    )
     return lambda runner=None: DocumentationAgentService(tmp_path, runner=runner)
 
 
@@ -116,6 +115,14 @@ def test_service_accepts_actual_evidence_payload_fingerprint_contract(evidence, 
     assert "documentationFingerprint" not in runner_payload
     assert proposal.status == "ready"
     assert proposal.evidence_fingerprint == evidence.documentation_fingerprint
+    parsed = DocumentationProposal.from_dict(proposal.to_dict())
+    items = {item["targetKind"]: item for item in parsed.proposals}
+    assert items["brief_backfill"]["targetIdentity"] == "docs/briefs/task-3.md"
+    assert "## 2A. Agent Evidence Pipeline" in items["system_map"]["content"]
+    assert "### Documentation Backfill: run-task-3" in items["system_map"]["content"]
+    section = "## 2A. Agent Evidence Pipeline\n\nExisting pipeline."
+    expected_hash = sha256(section.encode("utf-8")).hexdigest()
+    assert f"|sha256={expected_hash}" in items["system_map"]["targetIdentity"]
 
 
 def test_external_source_paths_are_redacted_from_runner_and_cache(evidence, service):
@@ -183,7 +190,15 @@ def test_timeout_is_blocked(evidence, service):
 
 
 def test_invalid_schema_is_rejected(evidence, service):
-    fake_runner = FakeRunner(DocumentationRunnerResult(0, json.dumps({"schemaVersion": "wrong"}), "", 1))
+    fake_runner = FakeRunner(DocumentationRunnerResult(
+        0,
+        json.dumps({
+            "schemaVersion": "wrong",
+            "evidenceFingerprint": evidence.documentation_fingerprint,
+        }),
+        "",
+        1,
+    ))
     proposal = service(fake_runner).draft(evidence, agent_command="codex")
     assert proposal.status == "invalid_agent_output"
     assert proposal.warnings == ("invalid_agent_output",)
@@ -224,9 +239,6 @@ def test_documentation_fingerprint_only_runner_payload_is_rejected(evidence, ser
         result = original(*args, **kwargs)
         payload = json.loads(result.stdout)
         payload["documentationFingerprint"] = payload.pop("evidenceFingerprint")
-        payload["proposalFingerprint"] = canonical_sha256({
-            key: value for key, value in payload.items() if key != "proposalFingerprint"
-        })
         return replace(result, stdout=json.dumps(payload))
 
     fake_runner.run = legacy_only
@@ -234,6 +246,54 @@ def test_documentation_fingerprint_only_runner_payload_is_rejected(evidence, ser
 
     assert proposal.status == "invalid_agent_output"
     assert proposal.warnings == ("fingerprint_mismatch",)
+
+
+def test_ready_draft_must_cover_exact_required_targets(evidence, service):
+    fake_runner = FakeRunner()
+    original = fake_runner.run
+
+    def missing_system_map(*args, **kwargs):
+        result = original(*args, **kwargs)
+        payload = json.loads(result.stdout)
+        payload["proposals"] = payload["proposals"][:1]
+        return replace(result, stdout=json.dumps(payload))
+
+    fake_runner.run = missing_system_map
+    proposal = service(fake_runner).draft(evidence, agent_command="codex")
+
+    assert proposal.status == "invalid_agent_output"
+    assert proposal.warnings == ("target_set_mismatch",)
+
+
+@pytest.mark.parametrize("content", [
+    "# injected heading\n",
+    "<!-- documentation-agent:implementation-evidence:start -->\n",
+])
+def test_draft_fragment_cannot_control_document_structure(evidence, service, content):
+    fake_runner = FakeRunner()
+    original = fake_runner.run
+
+    def unsafe_fragment(*args, **kwargs):
+        result = original(*args, **kwargs)
+        payload = json.loads(result.stdout)
+        payload["proposals"][0]["content"] = content
+        return replace(result, stdout=json.dumps(payload))
+
+    fake_runner.run = unsafe_fragment
+    proposal = service(fake_runner).draft(evidence, agent_command="codex")
+
+    assert proposal.status == "invalid_agent_output"
+    assert proposal.warnings == ("unsafe_draft_fragment",)
+
+
+def test_adr_required_target_is_blocked_until_create_policy_exists(evidence, service):
+    instance = service(FakeRunner())
+    evidence = replace(evidence, changed_paths=("database.py",))
+
+    proposal = instance.draft(evidence, agent_command="codex")
+
+    assert proposal.status == "blocked"
+    assert proposal.warnings == ("adr_draft_normalization_not_implemented",)
 
 
 def test_unapproved_target_is_rejected(evidence, service):
@@ -244,15 +304,12 @@ def test_unapproved_target_is_rejected(evidence, service):
         result = original(*args, **kwargs)
         payload = json.loads(result.stdout)
         payload["proposals"][0]["targetKind"] = "adr"
-        payload["proposalFingerprint"] = canonical_sha256({
-            key: value for key, value in payload.items() if key != "proposalFingerprint"
-        })
         return replace(result, stdout=json.dumps(payload))
 
     fake_runner.run = unauthorized
     proposal = service(fake_runner).draft(evidence, agent_command="codex")
     assert proposal.status == "invalid_agent_output"
-    assert proposal.warnings == ("unapproved_target",)
+    assert proposal.warnings == ("target_set_mismatch",)
 
 
 def test_required_targets_ignore_caller_classification(evidence, service):
