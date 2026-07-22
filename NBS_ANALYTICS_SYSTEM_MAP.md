@@ -59,6 +59,10 @@ Agent 流程為：`Brief -> collect-only evidence -> Context/Review -> Codex imp
 
 ---
 
+### Documentation Backfill: run-3b52b9d763c94b1a87f745909feeaf1f
+
+Documentation workflow now reflects updates involving the documentation agent service and documentation Codex runner. The verified flow consumes documentation-evidence-v1, preserves evidence fingerprints, emits documentation proposals for approved required targets, and remains gated by Review, full verification, and Hermes before documentation dispatch. The documented governance boundary remains read-only for documentation sidecar behavior and preserves the fixed revenue scope and May 2026 baseline.
+
 ## 2. 全景流程圖
 
 ```mermaid

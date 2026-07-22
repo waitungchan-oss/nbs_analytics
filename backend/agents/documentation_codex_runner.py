@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -59,9 +60,13 @@ class CodexDocumentationRunner:
             "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
             "--ephemeral", "--ignore-user-config", CODEX_DOCUMENTATION_INSTRUCTION,
         )
+        codex_home = self.project_root / ".nbs_agent_runtime" / "codex_home"
+        codex_home.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(codex_home)
         process = self.subprocess.Popen(
             command, cwd=self.project_root, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, env=env,
         )
         try:
             stdout, stderr = process.communicate(

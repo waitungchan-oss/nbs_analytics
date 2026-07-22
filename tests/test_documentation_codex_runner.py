@@ -60,10 +60,10 @@ def _draft(*, evidence_fingerprint="a" * 64):
     })
 
 
-def test_runner_passes_evidence_only_and_rejects_non_json():
+def test_runner_passes_evidence_only_and_rejects_non_json(tmp_path):
     process = FakeProcess(stdout=b"not-json")
     fake_subprocess = FakeSubprocess(process)
-    result = CodexDocumentationRunner(fake_subprocess, project_root=Path("/repo")).run(
+    result = CodexDocumentationRunner(fake_subprocess, project_root=tmp_path).run(
         ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
     )
 
@@ -81,6 +81,7 @@ def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
     )
 
     assert result.exit_code == 0
+    assert fake_subprocess.kwargs["env"]["CODEX_HOME"].endswith(".nbs_agent_runtime/codex_home")
     assert json.loads(result.stdout) == json.loads(_draft())
 
 
@@ -143,10 +144,10 @@ def test_runner_rejects_wrong_evidence_schema_before_spawn():
     assert fake_subprocess.argv is None
 
 
-def test_runner_caps_stdout_and_stderr_without_persisting_command_or_paths():
+def test_runner_caps_stdout_and_stderr_without_persisting_command_or_paths(tmp_path):
     process = FakeProcess(stdout=b"x" * 100, stderr=b"/private/vault/secret" * 100)
     fake_subprocess = FakeSubprocess(process)
-    result = CodexDocumentationRunner(fake_subprocess, project_root=Path("/repo")).run(
+    result = CodexDocumentationRunner(fake_subprocess, project_root=tmp_path).run(
         ("codex", "exec", "--token", "secret", "/private/vault"),
         input_text=_evidence(), timeout_seconds=120, max_output_bytes=64,
     )
