@@ -282,6 +282,8 @@ def test_create_writes_bounded_standard_artifacts_and_hashes(service):
     manifest = service.store._read_json(run_dir / "verified-backfill.json")
     assert manifest["sourceCommit"] == COMMIT
     assert all(len(value) == 64 for value in manifest["gateHashes"].values())
+    implementation = service.store._read_json(run_dir / "implementation.json")
+    assert implementation["changedPaths"] == ["diff"]
     serialized = "".join(path.read_text(encoding="utf-8") for path in run_dir.glob("*.json"))
     assert str(service.project_root) not in serialized
     assert "system_manager.py acceptance" not in serialized

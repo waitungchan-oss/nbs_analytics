@@ -128,6 +128,17 @@ class VerifiedBackfillService:
             raise _Blocked("diff_collection_failed")
         return hashlib.sha256(str(result.get("stdout", "")).encode("utf-8")).hexdigest()
 
+    def _collect_changed_paths(self, source_commit: str) -> list[str]:
+        result = self._run(("git", "diff", "--name-only", f"{source_commit}^", source_commit))
+        if result.get("returncode") != 0:
+            raise _Blocked("diff_collection_failed")
+        paths = {
+            line.strip().replace("\\", "/")
+            for line in str(result.get("stdout", "")).splitlines()
+            if line.strip()
+        }
+        return sorted(paths)[:64]
+
     def _run_fixed_gates(self) -> dict[str, dict[str, Any]]:
         gates = {}
         for name, argv in _GATE_COMMANDS:
@@ -221,7 +232,11 @@ class VerifiedBackfillService:
             APPROVAL_SCHEMA, run_id, ".nbs_agent_runtime/contracts/verified-backfill-task2.json",
             hashlib.sha256(b"verified-backfill-task2-contract-v1").hexdigest(), identity["sourceCommit"], now, "approved",
         )
-        implementation = {"schemaVersion": "implementation-report-v1", "status": "completed", "changedPaths": []}
+        implementation = {
+            "schemaVersion": "implementation-report-v1",
+            "status": "completed",
+            "changedPaths": self._collect_changed_paths(identity["sourceCommit"]),
+        }
         targeted = {"schemaVersion": "targeted-verification-v1", "status": "passed", "gateCount": len(gates)}
         review_payload = {
             "schemaVersion": "review-evidence-v1", "verdict": review["verdict"],
