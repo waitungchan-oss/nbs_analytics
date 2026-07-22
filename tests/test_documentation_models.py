@@ -7,10 +7,12 @@ import pytest
 
 from backend.agents.documentation_models import (
     DOCUMENTATION_APPLICATION_SCHEMA,
+    DOCUMENTATION_DRAFT_SCHEMA,
     DOCUMENTATION_EVIDENCE_SCHEMA,
     DOCUMENTATION_POLICY_SCHEMA,
     DOCUMENTATION_PROPOSAL_SCHEMA,
     DocumentationApplication,
+    DocumentationDraft,
     DocumentationEvidence,
     DocumentationProposal,
     DocumentationSchemaError,
@@ -88,6 +90,40 @@ def test_documentation_evidence_round_trip(valid_evidence_payload: dict) -> None
     model = DocumentationEvidence.from_dict(valid_evidence_payload)
     assert model.schema_version == DOCUMENTATION_EVIDENCE_SCHEMA
     assert model.to_dict() == valid_evidence_payload
+
+
+def test_documentation_draft_round_trip() -> None:
+    payload = {
+        "schemaVersion": DOCUMENTATION_DRAFT_SCHEMA,
+        "evidenceFingerprint": EVIDENCE_HASH,
+        "status": "ready",
+        "proposals": [{"targetKind": "brief_backfill", "content": "Summary."}],
+    }
+    model = DocumentationDraft.from_dict(payload)
+    assert model.to_dict() == payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schemaVersion": DOCUMENTATION_DRAFT_SCHEMA,
+            "evidenceFingerprint": EVIDENCE_HASH,
+            "status": "ready",
+            "proposals": [],
+            "unexpected": True,
+        },
+        {
+            "schemaVersion": DOCUMENTATION_DRAFT_SCHEMA,
+            "evidenceFingerprint": "A" * 64,
+            "status": "ready",
+            "proposals": [],
+        },
+    ],
+)
+def test_documentation_draft_rejects_unknown_or_invalid_fields(payload: dict) -> None:
+    with pytest.raises(DocumentationSchemaError):
+        DocumentationDraft.from_dict(payload)
 
 
 def test_documentation_proposal_round_trip(valid_proposal_payload: dict) -> None:

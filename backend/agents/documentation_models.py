@@ -9,6 +9,7 @@ from .workflow_models import canonical_sha256
 
 
 DOCUMENTATION_EVIDENCE_SCHEMA = "documentation-evidence-v1"
+DOCUMENTATION_DRAFT_SCHEMA = "documentation-draft-v1"
 DOCUMENTATION_PROPOSAL_SCHEMA = "documentation-proposal-v1"
 DOCUMENTATION_APPLICATION_SCHEMA = "documentation-application-v1"
 DOCUMENTATION_POLICY_SCHEMA = "documentation-policy-v1"
@@ -17,6 +18,9 @@ TARGET_KINDS = frozenset({"brief_backfill", "system_map", "adr"})
 OPERATIONS = frozenset({"update_managed_block", "replace_section", "create_file"})
 PROPOSAL_STATUSES = frozenset({
     "ready", "no_documentation_needed", "blocked", "context_overflow", "invalid_agent_output",
+})
+DRAFT_STATUSES = frozenset({
+    "ready", "no_documentation_needed", "blocked", "context_overflow",
 })
 APPLICATION_STATUSES = frozenset({
     "preview_ready", "awaiting_target_approval", "applied", "partially_applied", "blocked",
@@ -126,6 +130,54 @@ def _proposal_item(value: Any) -> dict[str, Any]:
         "content": content,
         "contentSha256": content_hash,
     }
+
+
+def _draft_item(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise DocumentationSchemaError("draft proposals entries must be objects")
+    _keys(value, {"targetKind", "content"})
+    target_kind = _string(value["targetKind"], "targetKind")
+    if target_kind not in TARGET_KINDS:
+        raise DocumentationSchemaError(
+            f"targetKind must be one of: {', '.join(sorted(TARGET_KINDS))}"
+        )
+    return {"targetKind": target_kind, "content": _string(value["content"], "content")}
+
+
+@dataclass(frozen=True)
+class DocumentationDraft:
+    schema_version: str
+    evidence_fingerprint: str
+    status: str
+    proposals: tuple[dict[str, str], ...]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DocumentationDraft":
+        fields = {"schemaVersion", "evidenceFingerprint", "status", "proposals"}
+        _keys(payload, fields)
+        _schema(payload, DOCUMENTATION_DRAFT_SCHEMA)
+        status = _string(payload["status"], "status")
+        if status not in DRAFT_STATUSES:
+            raise DocumentationSchemaError("status is not a valid draft status")
+        if not isinstance(payload["proposals"], list):
+            raise DocumentationSchemaError("proposals must be a list")
+        proposals = tuple(_draft_item(item) for item in payload["proposals"])
+        if status != "ready" and proposals:
+            raise DocumentationSchemaError("non-ready draft must not contain proposals")
+        return cls(
+            DOCUMENTATION_DRAFT_SCHEMA,
+            _hash(payload["evidenceFingerprint"], "evidenceFingerprint"),
+            status,
+            proposals,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": self.schema_version,
+            "evidenceFingerprint": self.evidence_fingerprint,
+            "status": self.status,
+            "proposals": [dict(item) for item in self.proposals],
+        }
 
 
 @dataclass(frozen=True)

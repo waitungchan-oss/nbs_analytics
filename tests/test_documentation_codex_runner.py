@@ -51,12 +51,12 @@ def _evidence(**updates):
     return json.dumps(payload)
 
 
-def _proposal(*, evidence_fingerprint="a" * 64):
+def _draft(*, evidence_fingerprint="a" * 64):
     return json.dumps({
-        "schemaVersion": "documentation-proposal-v1",
+        "schemaVersion": "documentation-draft-v1",
         "evidenceFingerprint": evidence_fingerprint,
         "status": "ready",
-        "proposals": [],
+        "proposals": [{"targetKind": "brief_backfill", "content": "Summary."}],
     })
 
 
@@ -73,19 +73,19 @@ def test_runner_passes_evidence_only_and_rejects_non_json():
     assert CODEX_DOCUMENTATION_INSTRUCTION in fake_subprocess.argv
 
 
-def test_runner_accepts_exact_proposal_with_matching_evidence_fingerprint():
-    process = FakeProcess(stdout=_proposal().encode())
+def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
+    process = FakeProcess(stdout=_draft().encode())
     fake_subprocess = FakeSubprocess(process)
     result = CodexDocumentationRunner(fake_subprocess).run(
         ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == json.loads(_proposal())
+    assert json.loads(result.stdout) == json.loads(_draft())
 
 
-def test_runner_rejects_proposal_with_mismatched_evidence_fingerprint():
-    process = FakeProcess(stdout=_proposal(evidence_fingerprint="b" * 64).encode())
+def test_runner_rejects_draft_with_mismatched_evidence_fingerprint():
+    process = FakeProcess(stdout=_draft(evidence_fingerprint="b" * 64).encode())
     fake_subprocess = FakeSubprocess(process)
     result = CodexDocumentationRunner(fake_subprocess).run(
         ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
@@ -94,13 +94,25 @@ def test_runner_rejects_proposal_with_mismatched_evidence_fingerprint():
     assert result.exit_code == -2
 
 
-def test_runner_rejects_documentation_fingerprint_only_payload():
+def test_runner_rejects_final_proposal_payload():
     process = FakeProcess(stdout=json.dumps({
         "schemaVersion": "documentation-proposal-v1",
-        "documentationFingerprint": "a" * 64,
+        "evidenceFingerprint": "a" * 64,
         "status": "ready",
         "proposals": [],
     }).encode())
+    fake_subprocess = FakeSubprocess(process)
+    result = CodexDocumentationRunner(fake_subprocess).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
+    )
+
+    assert result.exit_code == -2
+
+
+def test_runner_rejects_draft_with_unknown_key():
+    payload = json.loads(_draft())
+    payload["targetIdentity"] = "docs/briefs/task-3.md"
+    process = FakeProcess(stdout=json.dumps(payload).encode())
     fake_subprocess = FakeSubprocess(process)
     result = CodexDocumentationRunner(fake_subprocess).run(
         ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,

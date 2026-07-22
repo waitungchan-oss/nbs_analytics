@@ -7,12 +7,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .documentation_models import DocumentationDraft, DocumentationSchemaError
+
 
 CODEX_DOCUMENTATION_INSTRUCTION = (
     "Read the documentation-evidence-v1 JSON from stdin. Produce exactly one JSON object "
-    "with schemaVersion documentation-proposal-v1, preserving the evidenceFingerprint. "
-    "Do not use tools, access files, network, Git, SQLite, or a vault. Do not include markdown "
-    "fences, commentary, or any other output."
+    "with schemaVersion documentation-draft-v1 and the exact keys schemaVersion, "
+    "evidenceFingerprint, status, and proposals. Preserve the evidenceFingerprint. "
+    "Each proposals item must contain only targetKind and content. Do not emit target paths, "
+    "operations, hashes, evidence, proposal fingerprints, vault paths, or any other keys. "
+    "Use only the target kinds required by the evidence. Do not use tools, access files, "
+    "network, Git, SQLite, or a vault. Do not include markdown fences, commentary, or any "
+    "other output."
 )
 _STDERR_TAIL_BYTES = 4 * 1024
 
@@ -72,7 +78,7 @@ class CodexDocumentationRunner:
         stderr = bytes(stderr or b"")[-_STDERR_TAIL_BYTES:]
         bounded_stdout = stdout[: max_output_bytes + 1]
         output = bounded_stdout.decode("utf-8", errors="replace")
-        if len(bounded_stdout) > max_output_bytes or not self._valid_proposal(output, evidence):
+        if len(bounded_stdout) > max_output_bytes or not self._valid_draft(output, evidence):
             return DocumentationRunnerResult(
                 -2, output, stderr.decode("utf-8", errors="replace"), self._duration(started),
             )
@@ -91,17 +97,12 @@ class CodexDocumentationRunner:
         )
 
     @staticmethod
-    def _valid_proposal(output: str, evidence: dict[str, Any]) -> bool:
+    def _valid_draft(output: str, evidence: dict[str, Any]) -> bool:
         try:
-            payload = json.loads(output)
-        except (TypeError, json.JSONDecodeError):
+            draft = DocumentationDraft.from_dict(json.loads(output))
+        except (TypeError, json.JSONDecodeError, DocumentationSchemaError):
             return False
-        return (
-            isinstance(payload, dict)
-            and payload.get("schemaVersion") == "documentation-proposal-v1"
-            and payload.get("evidenceFingerprint") == evidence["evidenceFingerprint"]
-            and "documentationFingerprint" not in payload
-        )
+        return draft.evidence_fingerprint == evidence["evidenceFingerprint"]
 
     @staticmethod
     def _duration(started: float) -> int:
