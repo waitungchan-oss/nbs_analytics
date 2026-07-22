@@ -84,6 +84,16 @@ def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
     assert json.loads(result.stdout) == json.loads(_draft())
 
 
+def test_runner_accepts_valid_draft_when_cli_has_nonzero_exit():
+    process = FakeProcess(stdout=_draft().encode(), returncode=1)
+    fake_subprocess = FakeSubprocess(process)
+    result = CodexDocumentationRunner(fake_subprocess).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
+    )
+
+    assert result.exit_code == 0
+
+
 def test_runner_rejects_draft_with_mismatched_evidence_fingerprint():
     process = FakeProcess(stdout=_draft(evidence_fingerprint="b" * 64).encode())
     fake_subprocess = FakeSubprocess(process)

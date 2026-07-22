@@ -83,8 +83,10 @@ class CodexDocumentationRunner:
             return DocumentationRunnerResult(
                 -2, output, stderr.decode("utf-8", errors="replace"), self._duration(started),
             )
+        # A valid, fingerprint-bound draft is the contract boundary; CLI warnings
+        # must not discard an otherwise safe structured result.
         return DocumentationRunnerResult(
-            process.returncode, output, stderr.decode("utf-8", errors="replace"), self._duration(started),
+            0, output, stderr.decode("utf-8", errors="replace"), self._duration(started),
         )
 
     @staticmethod
