@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-from hashlib import sha256
 from pathlib import Path
 
 from backend.agents.documentation_agent_service import DocumentationRunnerResult
-from backend.agents.documentation_models import DOCUMENTATION_PROPOSAL_SCHEMA
+from backend.agents.documentation_models import DOCUMENTATION_DRAFT_SCHEMA
 from backend.agents.documentation_workflow import DocumentationWorkflow
 from backend.agents.workflow_models import (
     APPROVAL_SCHEMA,
@@ -14,7 +13,6 @@ from backend.agents.workflow_models import (
     WorkflowApproval,
     WorkflowManifest,
     WorkflowStatus,
-    canonical_sha256,
 )
 from backend.agents.workflow_store import WorkflowStore
 
@@ -24,32 +22,15 @@ class BackfillRunner:
 
     def run(self, argv, *, input_text, timeout_seconds, max_output_bytes):
         evidence = json.loads(input_text)
-        proposals = [
-            {
-                "targetKind": "brief_backfill",
-                "targetIdentity": "docs/briefs/verified.md",
-                "operation": "update_managed_block",
-                "content": "verified evidence\n",
-            },
-            {
-                "targetKind": "system_map",
-                "targetIdentity": "NBS_ANALYTICS_SYSTEM_MAP.md##Agents",
-                "operation": "replace_section",
-                "content": "## Agents\nverified documentation\n",
-            },
-        ]
-        for proposal in proposals:
-            proposal["contentSha256"] = sha256(proposal["content"].encode()).hexdigest()
         payload = {
-            "schemaVersion": DOCUMENTATION_PROPOSAL_SCHEMA,
-            "taskId": evidence["taskId"],
-            "generatedAt": evidence["generatedAt"],
-            "evidence": evidence,
+            "schemaVersion": DOCUMENTATION_DRAFT_SCHEMA,
             "evidenceFingerprint": evidence["evidenceFingerprint"],
             "status": "ready",
-            "proposals": proposals,
+            "proposals": [
+                {"targetKind": "brief_backfill", "content": "verified evidence\n"},
+                {"targetKind": "system_map", "content": "verified documentation\n"},
+            ],
         }
-        payload["proposalFingerprint"] = canonical_sha256(payload)
         return DocumentationRunnerResult(0, json.dumps(payload), "", 1)
 
 
@@ -78,7 +59,10 @@ def create_verified_run(tmp_path: Path) -> dict[str, object]:
     brief.parent.mkdir(parents=True)
     brief.write_text("# Verified\n", encoding="utf-8")
     system_map = tmp_path / "NBS_ANALYTICS_SYSTEM_MAP.md"
-    system_map.write_text("# Root\n\n## Agents\noriginal\n\n## Other\nkeep\n", encoding="utf-8")
+    system_map.write_text(
+        "# Root\n\n## 2A. Agent Evidence Pipeline\noriginal\n\n## Other\nkeep\n",
+        encoding="utf-8",
+    )
     vault = tmp_path / "temporary-vault"
     (vault / "70_Codex_Briefs").mkdir(parents=True)
     (vault / "10_System").mkdir(parents=True)

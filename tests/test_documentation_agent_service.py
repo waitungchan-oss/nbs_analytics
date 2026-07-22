@@ -147,6 +147,17 @@ def test_external_source_paths_are_redacted_from_runner_and_cache(evidence, serv
     assert proposal.evidence.sources[0]["path"] == "source"
 
 
+def test_runtime_brief_source_maps_to_controlled_brief_root(evidence, service):
+    evidence = replace(evidence, sources=(
+        {"path": ".nbs_agent_runtime/reports/verified-backfill-task2-brief.md", "sha256": "a" * 64},
+    ))
+    proposal = service(FakeRunner()).draft(evidence, agent_command="codex")
+
+    assert proposal.status == "ready"
+    brief = next(item for item in proposal.proposals if item["targetKind"] == "brief_backfill")
+    assert brief["targetIdentity"] == "docs/briefs/verified-backfill-task2-brief.md"
+
+
 @pytest.mark.parametrize("value", [
     "https://example.test/brief.md",
     "file:///private/brief.md",
