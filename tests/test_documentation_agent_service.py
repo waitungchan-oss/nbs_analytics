@@ -120,7 +120,7 @@ def test_service_accepts_actual_evidence_payload_fingerprint_contract(evidence, 
     assert items["brief_backfill"]["targetIdentity"] == "docs/briefs/task-3.md"
     assert "## 2A. Agent Evidence Pipeline" in items["system_map"]["content"]
     assert "### Documentation Backfill: run-task-3" in items["system_map"]["content"]
-    section = "## 2A. Agent Evidence Pipeline\n\nExisting pipeline."
+    section = "## 2A. Agent Evidence Pipeline\n\nExisting pipeline.\n"
     expected_hash = sha256(section.encode("utf-8")).hexdigest()
     assert f"|sha256={expected_hash}" in items["system_map"]["targetIdentity"]
 

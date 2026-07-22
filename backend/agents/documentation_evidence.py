@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .workflow_models import canonical_sha256
@@ -115,11 +116,15 @@ class DocumentationEvidenceCollector:
         coverage = _collect_strings(artifacts, ("requirements", "requirementCoverage", "coveredRequirements"))
         summaries = {name[:-5]: _bounded_text(payload.get("summary", payload.get("message", "")))
                      for name, payload in artifacts.items() if payload.get("summary") or payload.get("message")}
+        sources = [{"path": name, "sha256": digest} for name, digest in artifact_hashes.items()]
+        brief_source = _manifest_brief_source(manifest)
+        if brief_source is not None and brief_source not in sources:
+            sources.append(brief_source)
         evidence = {
             "schemaVersion": "documentation-evidence-v1",
             "taskId": _bounded_text(run_id),
             "generatedAt": _bounded_text(status.get("completedAt") or status.get("updatedAt") or datetime.now(timezone.utc).isoformat()),
-            "sources": [{"path": name, "sha256": digest} for name, digest in artifact_hashes.items()],
+            "sources": sources,
             "artifactHashes": artifact_hashes,
             "changedPaths": list(changed_paths),
             "commandResults": list(command_results),
@@ -153,6 +158,28 @@ def _collect_paths(artifacts: dict[str, dict[str, Any]]) -> tuple[str, ...]:
                             raise DocumentationEvidenceError("changed path must be a non-empty string")
                         values.append(_bounded_text(path))
     return tuple(sorted({item for item in values if item})[:_MAX_ITEMS])
+
+
+def _manifest_brief_source(manifest: dict[str, Any]) -> dict[str, str] | None:
+    value = manifest.get("briefPath")
+    digest = manifest.get("briefSha256")
+    if not isinstance(value, str) or not isinstance(digest, str):
+        return None
+    normalized = value.replace("\\", "/").strip()
+    posix = PurePosixPath(normalized)
+    windows = PureWindowsPath(value.strip())
+    segments = normalized.split("/")
+    if (
+        not normalized
+        or posix.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or any(segment in {".", ".."} for segment in segments)
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        return None
+    return {"path": posix.as_posix(), "sha256": digest}
 
 
 def _collect_commands(artifacts: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], ...]:

@@ -83,13 +83,16 @@ Markdown fragment，不得自行帶入一級或二級 heading、managed marker�
 `DocumentationAgentService` 在接受 draft 後，以現有 evidence 與本地受控內容建立最終
 proposal：
 
-- `brief_backfill`：產生固定 repo-relative Brief identity，operation 固定為
-  `update_managed_block`。內容由 trusted wrapper 加上 task/run identity，再置入 draft
-  fragment。
+- `brief_backfill`：從 evidence 中已核准的 manifest Brief source 取得唯一 Markdown
+  basename，並映射到 validator 允許的固定 `docs/briefs/<basename>.md` repo-relative
+  identity；operation 固定為 `update_managed_block`。即使來源原本位於 local runtime，
+  runtime path 也不會直接進入 final target identity。內容由 trusted wrapper 加上
+  task/run identity，再置入 draft fragment。
 - `system_map`：只允許 `NBS_ANALYTICS_SYSTEM_MAP.md` 的既有
   `## 2A. Agent Evidence Pipeline` section。normalizer 先讀取該完整 section、以目前
   section SHA-256 建立 identity，保留原文字，並在末端追加一個 task/run-specific 的三級
-  小節及 draft fragment；operation 固定為 `replace_section`。
+  小節及 draft fragment；operation 固定為 `replace_section`。identity 使用既有 validator
+  可解析的完整 `## 2A. Agent Evidence Pipeline` heading 與目前 section hash。
 - `adr`：本次不為一般 documentation code change 自動產生。若 classifier 將來要求 ADR，
   draft 仍只能表達內容；normalizer 必須走明確的 create-only identity policy，未實作該
   policy 前回傳 `blocked`，不能猜測路徑。

@@ -8,7 +8,12 @@
 
 ## Boundary
 
-Documentation Agent 只讀取已提供的 context/evidence，產生嚴格 JSON proposal。Runner 不提供 tools，不能寫入 repo、Obsidian vault、SQLite、runtime、baseline、Git index 或 Git history；不得執行 upload、upsert、rollback、promotion 或服務控制。Agent 不得使用主 Codex LLM fallback。
+Documentation Agent 只讀取已提供的 context/evidence，先產生受限的
+`documentation-draft-v1`，再由 trusted `DocumentationAgentService` 正規化為嚴格的
+`documentation-proposal-v1`。外部 sidecar 的最終輸出仍是
+`documentation-proposal-v1`；Runner 不提供 tools，不能寫入 repo、Obsidian vault、SQLite、
+runtime、baseline、Git index 或 Git history；不得執行 upload、upsert、rollback、promotion
+或服務控制。Agent 不得使用主 Codex LLM fallback。
 
 Agent 只可使用 `brief_backfill`、`system_map`、`adr` 三種 target kind，以及 policy 中列明的 operation。實際檔案更新由 Controller 在 proposal 通過 target approval、scope 與 fingerprint checks 後執行；Agent 永遠不直接 apply。
 
@@ -36,7 +41,28 @@ Agent 只可使用 `brief_backfill`、`system_map`、`adr` 三種 target kind，
 
 ## Required Output
 
-Output must be `documentation-proposal-v1` and validate with `DocumentationProposal.from_dict()`. Each proposal has a unique `targetIdentity`, an allowed `targetKind`, an allowed `operation`, and a lowercase SHA-256 `contentSha256`.
+The read-only Codex runner output is an internal `documentation-draft-v1` object. Each draft
+item contains only `targetKind` and Markdown `content`; it must not choose paths, operations,
+hashes, vault identities, or proposal fingerprints. The trusted service verifies the draft
+against classifier-required targets, derives safe identities and hashes, and emits the final
+`documentation-proposal-v1`, which must validate with `DocumentationProposal.from_dict()`.
+Each final proposal has a unique `targetIdentity`, an allowed `targetKind`, an allowed
+`operation`, and a lowercase SHA-256 `contentSha256`.
+
+```json
+{
+  "schemaVersion": "documentation-draft-v1",
+  "evidenceFingerprint": "lowercase-sha256",
+  "status": "ready",
+  "proposals": [{"targetKind": "brief_backfill", "content": "Markdown fragment"}]
+}
+```
+
+When documentation is required, the ready draft target kinds must exactly match the
+classifier-required set. The service maps an evidence-approved Brief source to the validator's
+`docs/briefs/<basename>.md` root and limits System Map normalization to the existing
+`## 2A. Agent Evidence Pipeline` section. ADR normalization remains blocked until its
+create-only identity policy is implemented.
 
 ```json
 {

@@ -30,11 +30,18 @@
      --obsidian-vault "<vault-root>"
    ```
 
-   此步只建立 evidence/proposal/preview sidecars。預期 `status=preview_ready`；runner 缺失、不受批准、輸入或輸出超限時，停止於 blocked outcome。
+   此步只建立 evidence、normalized proposal、preview sidecars。Codex runner 內部輸出
+   `documentation-draft-v1`，trusted service 會補齊受控 target identity、operation、hash
+   與 proposal fingerprint，最後才產生 `documentation-proposal-v1`。預期
+   `status=preview_ready`；runner 缺失、不受批准、輸入或輸出超限、draft target 不完整或
+   fragment 不安全時，停止於 blocked/invalid outcome。
 
 3. **Preview inspection**
 
-   檢查 `.nbs_agent_runtime/runs/<run-id>/documentation-preview.json`：確認 Brief 是預期 managed-block 更新、System Map 是預期 section、hash 與 target identity 正確，且沒有 ADR 自動套用。此步不得改變 Brief、System Map 或 vault bytes。
+   檢查 `.nbs_agent_runtime/runs/<run-id>/documentation-proposal.json` 和
+   `documentation-preview.json`：確認 proposal 已是嚴格 `documentation-proposal-v1`，Brief
+   target 位於受控 `docs/briefs/` identity、System Map 是預期 section、hash 與 target
+   identity 正確，且沒有 ADR 自動套用。此步不得改變 Brief、System Map 或 vault bytes。
 
 4. **Review**
 

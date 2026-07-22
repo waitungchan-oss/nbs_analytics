@@ -317,20 +317,27 @@ class DocumentationAgentService:
         start = matches[0].start()
         next_heading = re.search(r"^#{1,2}[ \t]+", before[matches[0].end():], re.M)
         end = matches[0].end() + next_heading.start() if next_heading else len(before)
-        section = before[start:end].rstrip()
+        section = before[start:end]
         safe_task = self._safe_task_id(evidence.task_id)
-        content = f"{section}\n\n### Documentation Backfill: {safe_task}\n\n{fragment}\n"
+        content = f"{section.rstrip()}\n\n### Documentation Backfill: {safe_task}\n\n{fragment}\n"
         section_hash = sha256(section.encode("utf-8")).hexdigest()
-        identity = f"NBS_ANALYTICS_SYSTEM_MAP.md#2A.%20Agent%20Evidence%20Pipeline|sha256={section_hash}"
+        identity = f"NBS_ANALYTICS_SYSTEM_MAP.md###%202A.%20Agent%20Evidence%20Pipeline|sha256={section_hash}"
         return self._proposal_item("system_map", identity, "replace_section", content)
 
     def _brief_identity(self, evidence: CollectorDocumentationEvidence) -> str:
+        safe_sources = _safe_sources(evidence.sources)
         candidates = sorted(
-            item["path"] for item in _safe_sources(evidence.sources)
+            item["path"] for item in safe_sources
             if item["path"].startswith("docs/briefs/") and item["path"].endswith(".md")
         )
         if len(candidates) != 1:
-            raise ValueError("documentation evidence must identify exactly one Brief")
+            candidates = sorted(
+                PurePosixPath(item["path"]).name for item in safe_sources
+                if item["path"].endswith(".md") and PurePosixPath(item["path"]).name
+            )
+            if len(candidates) != 1:
+                raise ValueError("documentation evidence must identify exactly one Brief")
+            return f"docs/briefs/{candidates[0]}"
         return candidates[0]
 
     @staticmethod

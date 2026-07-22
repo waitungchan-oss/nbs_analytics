@@ -15,7 +15,7 @@
 - Documentation Agent remains stdin-only, `codex`-allowlisted, read-only, tool-free, 8,000 estimated input tokens, 1,500 estimated output tokens, 120-second timeout, and 64 KiB stdout cap.
 - Raw LLM output must never contain or decide repo/vault absolute paths, operations, target identities, hashes, fingerprints, or final proposal evidence.
 - A `ready` draft must contain exactly the classifier-required target kinds once each. Unknown, missing, extra, or duplicate targets fail closed.
-- `brief_backfill` identity is selected only from an evidence source matching `docs/briefs/*.md`; `system_map` is limited to `NBS_ANALYTICS_SYSTEM_MAP.md#2A. Agent Evidence Pipeline`; ADR normalization remains explicitly blocked.
+- `brief_backfill` identity is selected from one safe evidence Markdown source and mapped to `docs/briefs/<basename>.md`; `system_map` is limited to the existing `## 2A. Agent Evidence Pipeline` section; ADR normalization remains explicitly blocked.
 - Every implementation Task uses TDD, findings-first Review Agent review, targeted tests, and an independent commit. Implementation Agent must not write formal SQLite, baseline, runtime evidence, Git history, or documents outside its approved code/test/doc allowlist.
 
 ---
@@ -28,6 +28,8 @@
   - Replace the final-proposal prompt/check with the bounded draft prompt/check.
 - Modify: `backend/agents/documentation_agent_service.py`
   - Parse drafts, fail closed, derive target identities/hashes/content, and build the existing final proposal.
+- Modify: `backend/agents/documentation_evidence.py`
+  - Carry the approved manifest Brief source into bounded evidence without exposing absolute paths.
 - Modify: `backend/agents/documentation_workflow.py`
   - No new write capability; ensure normalized proposal continues through unchanged preview/apply behavior if focused tests expose integration assumptions.
 - Modify: `docs/agents/DOCUMENTATION_AGENT_CONTRACT.md`
@@ -42,6 +44,8 @@
   - Exercise normalization, target-set checks, content safety, and blocked ADR behavior.
 - Modify: `tests/test_documentation_workflow.py`
   - Verify a normalized Brief + System Map proposal previews without writes and only applies with existing explicit approvals.
+- Modify: `tests/test_documentation_evidence.py`
+  - Verify the manifest Brief source is carried into bounded evidence.
 
 ## Task 1: Define the Strict Untrusted Draft Boundary
 
@@ -181,8 +185,9 @@ Rules to implement exactly:
 - Parse `DocumentationDraft`; any parser/fingerprint/target-set/fragment failure returns `_proposal(..., "invalid_agent_output", ...)`.
 - `ready` requires `set(targetKinds) == set(required_targets)` and equal list lengths. `no_documentation_needed` is invalid when `required_targets` is non-empty.
 - If `adr` is required, return `_proposal(..., "blocked", ("adr_draft_normalization_not_implemented",))`; do not derive an ADR path.
-- `_brief_identity()` selects the one safe evidence source starting `docs/briefs/` and ending `.md`; otherwise returns invalid output. Build `update_managed_block` content with a trusted task heading plus the safe fragment.
-- `_system_map_proposal()` reads only `NBS_ANALYTICS_SYSTEM_MAP.md`, finds exactly `## 2A. Agent Evidence Pipeline`, hashes the full existing section, and creates `NBS_ANALYTICS_SYSTEM_MAP.md#2A.%20Agent%20Evidence%20Pipeline|sha256=<hash>`. Its replacement content preserves the original section unchanged then appends exactly one trusted `### Documentation Backfill: <safe-task-id>` subsection.
+- `_brief_identity()` selects one safe evidence Markdown source; if it is a local runtime Brief, map only its basename to `docs/briefs/<basename>.md`. Build `update_managed_block` content with a trusted task heading plus the safe fragment.
+- `DocumentationEvidenceCollector` adds the validated relative `manifest.briefPath` and `briefSha256` to bounded evidence sources; it never adds an absolute or traversal path.
+- `_system_map_proposal()` reads only `NBS_ANALYTICS_SYSTEM_MAP.md`, finds exactly `## 2A. Agent Evidence Pipeline`, hashes the full existing section, and creates the validator-compatible identity containing the full heading and `|sha256=<hash>`. Its replacement content preserves the original section unchanged then appends exactly one trusted `### Documentation Backfill: <safe-task-id>` subsection.
 - `_validate_draft_fragment()` rejects blank content, managed markers, `^#{1,2}\\s`, absolute-path patterns, and anything rejected by `DocumentationProposalValidator._check_content`.
 - Construct each final item with fixed operation and `sha256(content.encode("utf-8")).hexdigest()`. Finish by serializing through `_proposal()` and `DocumentationProposal.from_dict()`.
 

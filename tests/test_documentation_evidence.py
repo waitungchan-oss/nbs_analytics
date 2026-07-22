@@ -24,7 +24,7 @@ from backend.agents.workflow_store import WorkflowStore
 
 def _manifest(run_id: str) -> WorkflowManifest:
     return WorkflowManifest(
-        MANIFEST_SCHEMA, run_id, "briefs/task.md", "a" * 64,
+        MANIFEST_SCHEMA, run_id, "docs/briefs/task.md", "a" * 64,
         "codex/task-2", "b" * 40, (), "2026-07-18T10:00:00+00:00", "c" * 64,
     )
 
@@ -118,6 +118,14 @@ def test_collector_fingerprint_is_stable_and_excludes_self(completed_run_fixture
     second = collector.collect(completed_run_fixture.run_id).to_dict()
     assert first == second
     assert first["documentationFingerprint"]
+
+
+def test_collector_exposes_manifest_brief_as_safe_source(completed_run_fixture):
+    evidence = DocumentationEvidenceCollector(
+        completed_run_fixture.project_root, store=completed_run_fixture.store,
+    ).collect(completed_run_fixture.run_id).to_dict()
+
+    assert {item["path"]: item["sha256"] for item in evidence["sources"]}["docs/briefs/task.md"] == "a" * 64
 
 
 def test_bounded_text_truncates_long_strings():
