@@ -220,6 +220,28 @@ def test_governance_disables_confirm_for_stale_selection_or_revision(monkeypatch
     assert rendering.GOVERNANCE_PREVIEW_STATE_KEY not in fake.session_state
 
 
+def test_governance_clears_preview_when_active_snapshot_is_empty(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.session_state[rendering.GOVERNANCE_PREVIEW_STATE_KEY] = {
+        "ruleId": 4,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+    }
+    confirm_calls = []
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        {"registryRevision": "revision-a", "active": [], "revoked": []},
+        preview_revoke=lambda rule_id: {},
+        confirm_revoke=lambda rule_id, fingerprint: confirm_calls.append((rule_id, fingerprint)),
+    )
+
+    assert rendering.GOVERNANCE_PREVIEW_STATE_KEY not in fake.session_state
+    assert confirm_calls == []
+    assert "確認撤銷所選規則" not in fake.buttons
+
+
 def test_governance_fails_closed_when_selected_rule_is_missing_from_active_snapshot(monkeypatch):
     fake = _FakeStreamlit()
     fake.data_editor_result = pd.DataFrame([{

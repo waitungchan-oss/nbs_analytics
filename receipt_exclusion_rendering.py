@@ -145,6 +145,7 @@ def render_receipt_exclusion_governance(
     st.caption("永久排除規則只影響精確 identity；撤銷前必須在暫存資料庫重播並通過口徑驗收。")
 
     if not active:
+        st.session_state.pop(GOVERNANCE_PREVIEW_STATE_KEY, None)
         st.info("目前沒有生效中的永久排除規則。")
     else:
         edited = st.data_editor(
