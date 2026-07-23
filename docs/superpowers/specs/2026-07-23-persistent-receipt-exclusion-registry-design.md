@@ -1,7 +1,7 @@
 # Persistent Receipt Exclusion Registry Design
 
-狀態：待使用者審閱  
-日期：2026-07-23  
+狀態：待使用者審閱
+日期：2026-07-23
 適用系統：NBS Analytics Streamlit / FastAPI upload pipeline
 
 ## 1. 背景
