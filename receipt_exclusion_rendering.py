@@ -57,7 +57,7 @@ def _matching_governance_preview(
     preview: dict,
     *,
     rule_id: int | None,
-    registry_revision: str,
+    registry_revision: str | None,
 ) -> dict:
     if not isinstance(preview, dict):
         return {}
@@ -139,10 +139,19 @@ def render_receipt_exclusion_governance(
 ) -> None:
     active = list(snapshot.get("active") or [])
     revoked = list(snapshot.get("revoked") or [])
-    registry_revision = str(snapshot.get("registryRevision") or "unknown")
-    revision_token = registry_revision[:20]
+    raw_registry_revision = snapshot.get("registryRevision")
+    registry_revision = (
+        raw_registry_revision
+        if isinstance(raw_registry_revision, str) and raw_registry_revision.strip()
+        else None
+    )
+    revision_token = registry_revision[:20] if registry_revision is not None else "invalid"
     st.markdown("### Receipt Exclusion Governance")
     st.caption("永久排除規則只影響精確 identity；撤銷前必須在暫存資料庫重播並通過口徑驗收。")
+
+    if registry_revision is None:
+        st.session_state.pop(GOVERNANCE_PREVIEW_STATE_KEY, None)
+        st.error("治理畫面暫時無法操作：registry revision 無效。")
 
     if not active:
         st.session_state.pop(GOVERNANCE_PREVIEW_STATE_KEY, None)
@@ -166,6 +175,8 @@ def render_receipt_exclusion_governance(
         selected_rule_id = selected_rule_ids[0] if len(selected_rule_ids) == 1 else None
         if len(selected_rule_ids) > 1:
             st.error("一次只能選取一條永久排除規則。")
+        if registry_revision is None:
+            selected_rule_id = None
         active_rule_ids = {int(rule["id"]) for rule in active}
         if selected_rule_id is not None and selected_rule_id not in active_rule_ids:
             st.session_state.pop(GOVERNANCE_PREVIEW_STATE_KEY, None)

@@ -242,6 +242,41 @@ def test_governance_clears_preview_when_active_snapshot_is_empty(monkeypatch):
     assert "確認撤銷所選規則" not in fake.buttons
 
 
+@pytest.mark.parametrize("registry_revision", [None, "", 123, True])
+def test_governance_fails_closed_for_invalid_registry_revision_and_unknown_preview(
+    monkeypatch, registry_revision,
+):
+    fake = _FakeStreamlit()
+    fake.data_editor_result = pd.DataFrame([{
+        "選取": True, "規則 ID": 4, "收款單號": "SK2607007622",
+        "來源單據號": "225YTLAU6227154715", "排除類型": "receipt_type:掛賬核銷",
+        "建立時間": "", "建立者": "streamlit-local", "稽核事件數": 2,
+    }])
+    fake.session_state[rendering.GOVERNANCE_PREVIEW_STATE_KEY] = {
+        "ruleId": 4, "registryRevision": "unknown",
+        "status": "revocation_ready", "previewFingerprint": "preview-a",
+    }
+    preview_calls = []
+    confirm_calls = []
+    snapshot = _snapshot(revision=registry_revision)
+    if registry_revision is None:
+        snapshot.pop("registryRevision")
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        snapshot,
+        preview_revoke=lambda rule_id: preview_calls.append(rule_id) or {},
+        confirm_revoke=lambda rule_id, fingerprint: confirm_calls.append((rule_id, fingerprint)),
+    )
+
+    assert fake.errors == ["治理畫面暫時無法操作：registry revision 無效。"]
+    assert fake.buttons["預覽撤銷所選規則"]["disabled"] is True
+    assert fake.buttons["確認撤銷所選規則"]["disabled"] is True
+    assert rendering.GOVERNANCE_PREVIEW_STATE_KEY not in fake.session_state
+    assert preview_calls == []
+    assert confirm_calls == []
+
+
 def test_governance_fails_closed_when_selected_rule_is_missing_from_active_snapshot(monkeypatch):
     fake = _FakeStreamlit()
     fake.data_editor_result = pd.DataFrame([{
