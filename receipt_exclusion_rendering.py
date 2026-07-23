@@ -7,6 +7,67 @@ import streamlit as st
 
 
 CONFIRMATION_COPY = "我確認永久排除此精確收款單；日後相同 identity 將自動排除。"
+GOVERNANCE_TABLE_HEIGHT: int = 320
+GOVERNANCE_PREVIEW_STATE_KEY: str = "RECEIPT_EXCLUSION_GOVERNANCE_PREVIEW"
+
+ACTIVE_GOVERNANCE_COLUMNS = [
+    "選取", "規則 ID", "收款單號", "來源單據號", "排除類型",
+    "建立時間", "建立者", "稽核事件數",
+]
+REVOKED_GOVERNANCE_COLUMNS = [
+    "規則 ID", "收款單號", "來源單據號", "排除類型",
+    "撤銷時間", "撤銷者", "稽核事件數",
+]
+
+
+def _governance_rows(rules: list[dict], *, revoked: bool = False) -> pd.DataFrame:
+    rows = []
+    for rule in rules:
+        row = {
+            "規則 ID": int(rule["id"]),
+            "收款單號": str(rule.get("receiptNo") or ""),
+            "來源單據號": str(rule.get("sourceOrderNo") or ""),
+            "排除類型": str(rule.get("exclusionKind") or ""),
+            "稽核事件數": int(rule.get("eventCount") or 0),
+        }
+        if revoked:
+            row.update({
+                "撤銷時間": str(rule.get("revokedAt") or ""),
+                "撤銷者": str(rule.get("revokedBy") or ""),
+            })
+        else:
+            row = {"選取": False, **row}
+            row.update({
+                "建立時間": str(rule.get("createdAt") or ""),
+                "建立者": str(rule.get("createdBy") or ""),
+            })
+        rows.append(row)
+    columns = REVOKED_GOVERNANCE_COLUMNS if revoked else ACTIVE_GOVERNANCE_COLUMNS
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _selected_rule_ids(edited: pd.DataFrame) -> list[int]:
+    if edited.empty or "選取" not in edited.columns or "規則 ID" not in edited.columns:
+        return []
+    selected = edited.loc[edited["選取"].astype(bool), "規則 ID"].tolist()
+    return [int(rule_id) for rule_id in selected]
+
+
+def _matching_governance_preview(
+    preview: dict,
+    *,
+    rule_id: int | None,
+    registry_revision: str,
+) -> dict:
+    if (
+        rule_id is None
+        or preview.get("status") != "revocation_ready"
+        or int(preview.get("ruleId") or -1) != int(rule_id)
+        or str(preview.get("registryRevision") or "") != str(registry_revision)
+        or not str(preview.get("previewFingerprint") or "")
+    ):
+        return {}
+    return preview
 
 
 def render_receipt_exclusion_confirmation(

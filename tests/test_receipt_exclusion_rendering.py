@@ -1,6 +1,20 @@
 from types import SimpleNamespace
 
+import pandas as pd
+
 import receipt_exclusion_rendering as rendering
+
+
+class _FakeExpander:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _FakeSpinner(_FakeExpander):
+    pass
 
 
 class _FakeStreamlit:
@@ -8,11 +22,34 @@ class _FakeStreamlit:
         self.checkbox_value = False
         self.checkbox_labels = []
         self.buttons = {}
+        self.multiselect_kwargs = {}
+        self.data_editor_result = None
+        self.data_editor_kwargs = {}
+        self.data_editor_value = None
+        self.errors = []
+        self.expanders = []
+        self.spinners = []
         self.rendered_text = ""
         self.session_state = {}
 
     def dataframe(self, value, **kwargs):
         self.rendered_text += value.to_string()
+
+    def data_editor(self, value, **kwargs):
+        self.data_editor_value = value.copy()
+        self.data_editor_kwargs = kwargs
+        return self.data_editor_result.copy() if self.data_editor_result is not None else value.copy()
+
+    def error(self, value):
+        self.errors.append(value)
+
+    def expander(self, label, **kwargs):
+        self.expanders.append((label, kwargs))
+        return _FakeExpander()
+
+    def spinner(self, value):
+        self.spinners.append(value)
+        return _FakeSpinner()
 
     def checkbox(self, label, **kwargs):
         self.checkbox_labels.append(label)
@@ -58,3 +95,52 @@ def test_governance_panel_never_exposes_quarantine_payload(monkeypatch):
         preview_revoke=lambda rule_id: {}, confirm_revoke=lambda rule_id, fingerprint: {},
     )
     assert "must-not-render" not in fake.rendered_text
+
+
+def test_governance_rows_allowlist_identity_and_hide_sensitive_fields():
+    rows = rendering._governance_rows([{
+        "id": 4,
+        "receiptNo": "SK2607007622",
+        "sourceOrderNo": "225YTLAU6227154715",
+        "exclusionKind": "receipt_type:掛賬核銷",
+        "createdAt": "2026-07-23T00:00:00+08:00",
+        "createdBy": "streamlit-local",
+        "eventCount": 2,
+        "evidenceHash": "must-not-render",
+        "proposalFingerprint": "must-not-render",
+        "createdOperationId": "must-not-render",
+    }])
+
+    assert rows.columns.tolist() == [
+        "選取", "規則 ID", "收款單號", "來源單據號", "排除類型",
+        "建立時間", "建立者", "稽核事件數",
+    ]
+    assert rows.loc[0, "選取"] == False
+    assert "must-not-render" not in rows.to_string()
+
+
+def test_selected_rule_ids_preserves_no_selection_one_selection_and_multi_selection():
+    edited = pd.DataFrame({"選取": [False, True, True], "規則 ID": [1, 2, 3]})
+
+    assert rendering._selected_rule_ids(edited.iloc[0:0]) == []
+    assert rendering._selected_rule_ids(edited.iloc[[1]]) == [2]
+    assert rendering._selected_rule_ids(edited) == [2, 3]
+
+
+def test_matching_preview_requires_same_rule_and_registry_revision():
+    preview = {
+        "ruleId": 4,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+    }
+
+    assert rendering._matching_governance_preview(
+        preview, rule_id=4, registry_revision="revision-a",
+    ) == preview
+    assert rendering._matching_governance_preview(
+        preview, rule_id=5, registry_revision="revision-a",
+    ) == {}
+    assert rendering._matching_governance_preview(
+        preview, rule_id=4, registry_revision="revision-b",
+    ) == {}
