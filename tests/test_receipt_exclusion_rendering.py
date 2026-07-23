@@ -166,7 +166,10 @@ def test_matching_preview_fails_closed_for_missing_or_empty_required_fields(fiel
     ) == {}
 
 
-@pytest.mark.parametrize("malformed_rule_id", ["not-an-int", object()])
+@pytest.mark.parametrize(
+    "malformed_rule_id",
+    ["not-an-int", object(), True, False, 4.0, 0, -1],
+)
 def test_matching_preview_fails_closed_for_malformed_rule_id(malformed_rule_id):
     preview = {
         "ruleId": malformed_rule_id,
@@ -193,4 +196,36 @@ def test_matching_preview_fails_closed_for_invalid_selected_rule_id_and_empty_re
     ) == {}
     assert rendering._matching_governance_preview(
         preview, rule_id=4, registry_revision="",
+    ) == {}
+
+
+@pytest.mark.parametrize("selected_rule_id", [0, -1, True, False, 4.0, "4"])
+def test_matching_preview_fails_closed_for_non_positive_or_non_integer_selected_rule_id(
+    selected_rule_id,
+):
+    preview = {
+        "ruleId": 4,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+    }
+
+    assert rendering._matching_governance_preview(
+        preview, rule_id=selected_rule_id, registry_revision="revision-a",
+    ) == {}
+
+
+@pytest.mark.parametrize("field", ["registryRevision", "status", "previewFingerprint"])
+@pytest.mark.parametrize("value", [0, True, False, 4, [], {}, " "])
+def test_matching_preview_requires_non_empty_strings_for_governance_fields(field, value):
+    preview = {
+        "ruleId": 4,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+    }
+    preview[field] = value
+
+    assert rendering._matching_governance_preview(
+        preview, rule_id=4, registry_revision="revision-a",
     ) == {}

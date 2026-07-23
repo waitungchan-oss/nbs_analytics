@@ -59,25 +59,30 @@ def _matching_governance_preview(
     rule_id: int | None,
     registry_revision: str,
 ) -> dict:
-    required_fields = ("ruleId", "registryRevision", "status", "previewFingerprint")
-    if (
-        not isinstance(preview, dict)
-        or rule_id is None
-        or not registry_revision
-        or any(field not in preview or preview[field] in (None, "") for field in required_fields)
-        or preview["status"] != "revocation_ready"
-    ):
+    if not isinstance(preview, dict):
         return {}
-
-    try:
-        preview_rule_id = int(preview["ruleId"])
-        selected_rule_id = int(rule_id)
-    except (TypeError, ValueError):
-        return {}
-
+    preview_rule_id = preview.get("ruleId")
+    preview_revision = preview.get("registryRevision")
+    preview_status = preview.get("status")
+    preview_fingerprint = preview.get("previewFingerprint")
     if (
-        preview_rule_id != selected_rule_id
-        or preview["registryRevision"] != registry_revision
+        not isinstance(preview_rule_id, int)
+        or isinstance(preview_rule_id, bool)
+        or preview_rule_id <= 0
+        or not isinstance(rule_id, int)
+        or isinstance(rule_id, bool)
+        or rule_id <= 0
+        or not isinstance(registry_revision, str)
+        or not registry_revision.strip()
+        or not isinstance(preview_revision, str)
+        or not preview_revision.strip()
+        or not isinstance(preview_status, str)
+        or not preview_status.strip()
+        or not isinstance(preview_fingerprint, str)
+        or not preview_fingerprint.strip()
+        or preview_status != "revocation_ready"
+        or preview_rule_id != rule_id
+        or preview_revision != registry_revision
     ):
         return {}
     return preview
