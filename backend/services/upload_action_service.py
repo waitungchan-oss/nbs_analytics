@@ -47,6 +47,7 @@ async def run_vue_upload_action(
     main_file,
     tour_file=None,
     other_files=None,
+    receipt_exclusion_confirmation: dict | None = None,
 ) -> dict[str, Any]:
     other_files = list(other_files or [])
     main_name = main_file.filename or "main.xlsx"
@@ -65,6 +66,7 @@ async def run_vue_upload_action(
             tour_file=_wrap_named_bytes(tour_bytes, tour_name) if tour_bytes is not None else None,
             other_files=[_wrap_named_bytes(payload, name) for name, payload in other_payloads],
             live_db_path=database.DB_FILE,
+            receipt_exclusion_confirmation=receipt_exclusion_confirmation,
         )
         latest_health = build_system_health(
             db_path=Path(database.DB_FILE),
@@ -77,4 +79,5 @@ async def run_vue_upload_action(
             "entityAudit": _compact_entity_audit(execution.entity_audit),
             "anmRowCount": int(len(execution.anomaly_frame)),
             "environment": default_environment_payload(),
+            "receiptExclusion": execution.response.get("receiptExclusion") or {},
         }

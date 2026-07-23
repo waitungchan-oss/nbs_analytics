@@ -258,3 +258,4 @@ class UploadActionResponse(BaseModel):
     entityAudit: dict | None = None
     anmRowCount: int | None = None
     environment: dict | None = None
+    receiptExclusion: dict = Field(default_factory=dict)

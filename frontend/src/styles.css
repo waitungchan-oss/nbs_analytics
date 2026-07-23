@@ -1234,6 +1234,25 @@ button {
   color: #bae6fd;
 }
 
+.receipt-exclusion-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+}
+
+.receipt-candidate,
+.receipt-confirm-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.receipt-candidate strong { margin-left: auto; }
+
 @keyframes shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }

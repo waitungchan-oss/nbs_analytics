@@ -70,6 +70,10 @@ def _ensure_table(conn) -> None:
         "cache_state": "TEXT",
         "cache_error": "TEXT",
         "data_generation_json": "TEXT",
+        "receipt_exclusion_revision": "TEXT",
+        "receipt_exclusion_rule_ids_json": "TEXT",
+        "receipt_exclusion_match_count": "INTEGER NOT NULL DEFAULT 0",
+        "receipt_exclusion_proposal_fingerprint": "TEXT",
     }
     for column, sqlite_type in migrations.items():
         if column not in existing_columns:
@@ -101,8 +105,10 @@ def record_stability_history(
                 freshness_update_count, latest_data_date, batch_summary_json,
                 upsert_summary_json, drift_diagnosis_json, gate_json, rollback_status,
                 monthly_baseline_json, backup_path, quarantine_path, post_rollback_gate_json, rollback_error,
-                operation_id, entry_point, stage_timings_json, cache_state, cache_error, data_generation_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                operation_id, entry_point, stage_timings_json, cache_state, cache_error, data_generation_json,
+                receipt_exclusion_revision, receipt_exclusion_rule_ids_json,
+                receipt_exclusion_match_count, receipt_exclusion_proposal_fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 created_at,
@@ -136,6 +142,10 @@ def record_stability_history(
                 context.get("cache_state"),
                 context.get("cache_error"),
                 _json_dump(context.get("data_generation") or {}),
+                context.get("receipt_exclusion_revision"),
+                _json_dump(context.get("receipt_exclusion_rule_ids") or []),
+                int(context.get("receipt_exclusion_match_count") or 0),
+                context.get("receipt_exclusion_proposal_fingerprint"),
             ),
         )
         conn.commit()
@@ -196,6 +206,10 @@ def list_stability_history(
             "cacheState": row["cache_state"],
             "cacheError": row["cache_error"],
             "dataGeneration": _json_load(row["data_generation_json"], {}),
+            "receiptExclusionRevision": row["receipt_exclusion_revision"],
+            "receiptExclusionRuleIds": _json_load(row["receipt_exclusion_rule_ids_json"], []),
+            "receiptExclusionMatchCount": int(row["receipt_exclusion_match_count"] or 0),
+            "receiptExclusionProposalFingerprint": row["receipt_exclusion_proposal_fingerprint"],
         }
         for row in rows
     ]

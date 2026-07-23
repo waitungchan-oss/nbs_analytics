@@ -103,8 +103,17 @@ from app_workflows import (
 )
 from backend.services.upload_lock_service import UploadBusyError, acquire_upload_lease
 from backend.services.upload_orchestrator_service import execute_upload_operation
+from backend.services.receipt_exclusion_governance_service import (
+    confirm_receipt_exclusion_revocation,
+    preview_receipt_exclusion_revocation,
+)
+from backend.services.receipt_exclusion_read_model_service import build_receipt_exclusion_read_model
 from agent_operations_rendering import render_agent_operations
 from backend.services.agent_operations_service import AgentOperationsService
+from receipt_exclusion_rendering import (
+    render_receipt_exclusion_confirmation,
+    render_receipt_exclusion_governance,
+)
 from streamlit_rendering import *
 
 
@@ -702,6 +711,7 @@ def _render_monthly_baseline_governance() -> None:
 
 def _render_config_tab() -> None:
     _render_monthly_baseline_governance()
+    _render_receipt_exclusion_governance_panel()
     c1, c2 = st.columns(2)
     with c1:
         st.write("**1. 銷售點代碼與分社名稱對應表**")
@@ -744,6 +754,28 @@ def _render_config_tab() -> None:
         st.success("資料庫已完全清空，請重新上傳基礎數據。")
         st.rerun()
 
+
+def _render_receipt_exclusion_governance_panel() -> None:
+    snapshot = build_receipt_exclusion_read_model(db_path=database_module.DB_FILE)
+
+    def preview(rule_id: int) -> dict:
+        with acquire_upload_lease(entry_point="receipt_exclusion_revocation", source_files=[]) as lease:
+            return preview_receipt_exclusion_revocation(
+                rule_id, operation=lease.operation, live_db_path=database_module.DB_FILE,
+            )
+
+    def confirm(rule_id: int, fingerprint: str) -> dict:
+        with acquire_upload_lease(entry_point="receipt_exclusion_revocation", source_files=[]) as lease:
+            result = confirm_receipt_exclusion_revocation(
+                rule_id, operation=lease.operation, submitted_preview_fingerprint=fingerprint,
+                revoked_by="streamlit-local", live_db_path=database_module.DB_FILE,
+            )
+        st.success(f"收款單永久排除規則已撤銷：#{result.get('ruleId')}。")
+        st.rerun()
+        return result
+
+    render_receipt_exclusion_governance(snapshot, preview_revoke=preview, confirm_revoke=confirm)
+
 def _streamlit_named_bytes(upload) -> io.BytesIO:
     payload = io.BytesIO(upload.getvalue())
     payload.name = getattr(upload, "name", "upload.xlsx")
@@ -763,8 +795,34 @@ def _render_upload_area(has_db_data: bool) -> None:
                 _ = st.success("✅ AI 預測環境就緒")
             else:
                 _ = st.warning("⚠️ 缺 matplotlib/statsmodels，AI 預測會降級或跳過")
-            if not st.button("🔥 上傳並合併至資料庫", type="primary", width="stretch"):
-                return
+            upload_requested = st.button("🔥 上傳並合併至資料庫", type="primary", width="stretch")
+        proposal = ((st.session_state.get("LAST_UPLOAD_AUDIT") or {}).get("preflight_report") or {}).get("receiptExclusionProposal") or {}
+        if main_up and proposal.get("status") == "confirmation_required":
+            def confirm_exclusion(payload: dict) -> dict:
+                source_files = [item.name for item in [main_up, tour_up, *(oth_up or [])] if item is not None]
+                with acquire_upload_lease(entry_point="streamlit", source_files=source_files) as lease:
+                    execution = execute_upload_operation(
+                        lease.operation,
+                        main_file=_streamlit_named_bytes(main_up),
+                        tour_file=_streamlit_named_bytes(tour_up) if tour_up else None,
+                        other_files=[_streamlit_named_bytes(item) for item in (oth_up or [])],
+                        live_db_path=database_module.DB_FILE,
+                        receipt_exclusion_confirmation=payload,
+                        accepted_cache_rebuilder=lambda: _load_and_compute_cache(include_ai=False),
+                    )
+                st.session_state["LAST_UPLOAD_AUDIT"] = {
+                    "status": execution.response.get("status"),
+                    "message": execution.response.get("message"),
+                    "preflight_report": execution.response.get("preflightReport") or {},
+                    "stability_gate": execution.response.get("stabilityGate"),
+                    "stage_timings": execution.response.get("stageTimings") or [],
+                }
+                st.rerun()
+                return execution.response
+
+            render_receipt_exclusion_confirmation(proposal, confirm_action=confirm_exclusion)
+        if not upload_requested:
+            return
         if not main_up:
             st.error("需上傳主表。")
             return

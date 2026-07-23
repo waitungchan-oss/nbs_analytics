@@ -38,13 +38,16 @@ from config import (
 COL_SUBTABLE_BRANCH = "副表_銷售點"
 
 
-def _read_excel_source(source) -> tuple[pd.DataFrame, str]:
+def read_excel_source(source) -> tuple[pd.DataFrame, str]:
     if isinstance(source, tuple) and len(source) == 2 and isinstance(source[1], pd.DataFrame):
         name, frame = source
         return frame.copy(), str(name)
     if isinstance(source, pd.DataFrame):
         return source.copy(), str(getattr(source, "name", ""))
     return pd.read_excel(source, dtype=str), str(getattr(source, "name", ""))
+
+
+_read_excel_source = read_excel_source
 
 
 def clean_invoice_number(series: pd.Series) -> pd.Series:

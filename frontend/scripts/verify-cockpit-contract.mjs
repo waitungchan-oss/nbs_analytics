@@ -5,6 +5,14 @@ const root = resolve(import.meta.dirname, '..')
 const app = readFileSync(resolve(root, 'src/App.vue'), 'utf8')
 const api = readFileSync(resolve(root, 'src/lib/api.js'), 'utf8')
 
+function assertContains(source, token, label) {
+  if (!source.includes(token)) throw new Error(`${label} is missing: ${token}`)
+}
+
+function assertNotContains(source, token, label) {
+  if (source.includes(token)) throw new Error(`${label}: ${token}`)
+}
+
 const requiredAppContracts = [
   'summary.value?.revenueTotals',
   'summary.value?.dataFreshness',
@@ -151,3 +159,11 @@ if (scrollBody.includes('getDashboardSummary')) {
 }
 
 console.log('Vue cockpit contract verified.')
+
+assertContains(api, 'confirmReceiptExclusions', 'receipt exclusion confirm API')
+assertContains(api, 'getReceiptExclusions', 'receipt exclusion list API')
+assertContains(api, 'previewReceiptExclusionRevocation', 'revocation preview API')
+assertContains(api, 'confirmReceiptExclusionRevocation', 'revocation confirm API')
+assertContains(app, '永久排除並重新預演', 'explicit receipt exclusion confirmation')
+assertContains(app, '預演撤銷', 'revocation preview command')
+assertNotContains(app, 'affectedRevenue =', 'Vue must not recompute affected revenue')

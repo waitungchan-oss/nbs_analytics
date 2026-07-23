@@ -59,6 +59,10 @@ def test_record_and_list_stability_history_uses_dedicated_audit_table(tmp_path, 
             "cache_state": "streamlit_rebuilt",
             "cache_error": None,
             "data_generation": {"generation": 4, "operationId": "op-1"},
+            "receipt_exclusion_revision": "registry-r2",
+            "receipt_exclusion_rule_ids": [7],
+            "receipt_exclusion_match_count": 1,
+            "receipt_exclusion_proposal_fingerprint": "proposal-1",
         },
     )
     rows = history_service.list_stability_history(limit=10)
@@ -90,6 +94,10 @@ def test_record_and_list_stability_history_uses_dedicated_audit_table(tmp_path, 
     assert rows[0]["cacheState"] == "streamlit_rebuilt"
     assert rows[0]["cacheError"] is None
     assert rows[0]["dataGeneration"]["generation"] == 4
+    assert rows[0]["receiptExclusionRevision"] == "registry-r2"
+    assert rows[0]["receiptExclusionRuleIds"] == [7]
+    assert rows[0]["receiptExclusionMatchCount"] == 1
+    assert rows[0]["receiptExclusionProposalFingerprint"] == "proposal-1"
 
 
 def test_stability_history_uses_explicit_database_path_without_touching_default(tmp_path, monkeypatch):
@@ -174,6 +182,10 @@ def test_legacy_history_rows_deserialize_new_evidence_fields_with_defaults(tmp_p
     assert row["operationId"] is None
     assert row["stageTimings"] == []
     assert row["dataGeneration"] == {}
+    assert row["receiptExclusionRevision"] is None
+    assert row["receiptExclusionRuleIds"] == []
+    assert row["receiptExclusionMatchCount"] == 0
+    assert row["receiptExclusionProposalFingerprint"] is None
 
 
 def test_stability_history_limit_is_bounded(tmp_path, monkeypatch):

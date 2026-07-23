@@ -1,5 +1,6 @@
 import pandas as pd
 
+from backend.services.receipt_exclusion_models import ReceiptExclusionIdentity, ReceiptExclusionRule
 from backend.services.upload_lock_service import UploadOperation
 
 
@@ -76,3 +77,116 @@ def test_generation_or_history_failure_is_degraded(tmp_path):
     assert generation_failed.response["cacheState"] == "refresh_required"
     assert history_failed.response["status"] == "degraded"
     assert "history failed" in history_failed.response["historyError"]
+
+
+def _blocked_proposal_report():
+    return {
+        "status": "drift",
+        "message": "blocked",
+        "receiptExclusion": {"registryRevision": "r1", "matchedRules": [], "autoApplyAudit": []},
+        "receiptExclusionProposal": {
+            "proposalFingerprint": "proposal-1",
+            "candidates": [{
+                "candidateId": "candidate-1",
+                "receiptNo": "SK2606005393",
+                "sourceOrderNo": "31NZY6629115617",
+                "exclusionKind": "payment_method:TT 退款轉團款",
+            }],
+        },
+        "prepared": {
+            "receipt_exclusion_evidence": {
+                "candidate-1": {
+                    "rawPayload": {"收款單號": "SK2606005393"},
+                    "preparedPayload": {"收款單號": "SK2606005393"},
+                }
+            }
+        },
+    }
+
+
+def _matched_overlay_report():
+    prepared = {
+        "tour": pd.DataFrame([{"來源單據號": "31NZY6629115617", "統一日期": "2026-06-29"}]),
+        "others": pd.DataFrame(),
+        "anm": pd.DataFrame(),
+        "entity_audit": {},
+    }
+    return {
+        "status": "matched",
+        "prepared": prepared,
+        "receiptExclusion": {"registryRevision": "r1", "matchedRules": [], "autoApplyAudit": []},
+        "receiptExclusionProposal": {},
+    }
+
+
+def _confirmation():
+    return {
+        "proposalFingerprint": "proposal-1",
+        "selectedCandidateIds": ["candidate-1"],
+        "confirmedBy": "streamlit-local",
+    }
+
+
+def test_confirmed_upload_reruns_preflight_with_overlay_before_activation(tmp_path):
+    preflight_calls, activation_calls = [], []
+
+    def preflight(*args, **kwargs):
+        preflight_calls.append(kwargs.get("receipt_exclusion_overlay"))
+        return _blocked_proposal_report() if len(preflight_calls) == 1 else _matched_overlay_report()
+
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=preflight,
+        receipt_exclusion_confirmation=_confirmation(),
+        registry_activator=lambda *args, **kwargs: activation_calls.append(kwargs) or {
+            "status": "activated", "ruleIds": [7], "revision": "r2",
+        },
+        registry_loader=lambda **kwargs: {"revision": "r2", "rules": ()},
+    )
+
+    assert preflight_calls[0] in (None, ())
+    assert preflight_calls[1][0].identity.receipt_no == "SK2606005393"
+    assert len(activation_calls) == 1
+    assert execution.response["writeCommitted"] is True
+
+
+def test_overlay_drift_does_not_activate_or_upsert(tmp_path):
+    writes = []
+    reports = [_blocked_proposal_report(), _blocked_proposal_report()]
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: reports.pop(0),
+        receipt_exclusion_confirmation=_confirmation(),
+        registry_activator=lambda *args, **kwargs: writes.append("activate"),
+        upsert_runner=lambda *args, **kwargs: writes.append("upsert"),
+    )
+
+    assert execution.response["status"] == "blocked"
+    assert writes == []
+
+
+def test_registry_revision_change_before_upsert_blocks_operation(tmp_path):
+    revisions = iter(["r1", "changed"])
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: _matched_overlay_report(),
+        registry_loader=lambda **kwargs: {"revision": next(revisions), "rules": ()},
+    )
+
+    assert execution.response["status"] == "blocked"
+    assert execution.response["message"] == "收款單永久排除規則已更新，請重新預演。"
+
+
+def test_auto_event_failure_blocks_before_formal_upsert(tmp_path):
+    writes = []
+    report = _matched_overlay_report()
+    report["receiptExclusion"]["autoApplyAudit"] = [{"registryId": 7, "proposalFingerprint": "r1", "payload": {}}]
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: report,
+        auto_event_recorder=lambda *args, **kwargs: (_ for _ in ()).throw(OSError("audit failed")),
+        upsert_runner=lambda *args, **kwargs: writes.append("upsert"),
+    )
+
+    assert execution.response["status"] == "blocked"
+    assert writes == []
