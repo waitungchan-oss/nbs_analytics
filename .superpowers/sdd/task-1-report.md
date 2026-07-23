@@ -1,97 +1,60 @@
 # Task 1 Implementation Report
 
-## 修改檔案
+## Status
 
-- `backend/services/agent_operations_service.py`
-- `tests/test_agent_operations_service.py`
+PASS. Task 1 僅建立 Receipt Exclusion Governance Table UI 所需的純資料 helper、單選 ID helper、preview state matching helper 及 TDD tests。
 
-另外依要求建立本報告：`.superpowers/sdd/task-1-report.md`。
-
-## RED
-
-命令：
-
-```bash
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py -q
-```
-
-結果：正確失敗。pytest collection 因尚未存在的
-`backend.services.agent_operations_service` 而回報
-`ModuleNotFoundError`，exit code `2`。
-
-## GREEN
-
-命令：
-
-```bash
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py tests/test_workflow_models.py -q
-```
-
-結果：`15 passed in 0.07s`，exit code `0`。
-
-另行執行：
-
-```bash
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/services/agent_operations_service.py
-git diff --check
-```
-
-兩者均成功，exit code `0`。
-
-## Self-review
-
-- 使用既有 `WorkflowManifest.from_dict`、`WorkflowStatus.from_dict` 與 `RetentionPolicy.from_path`，沒有重複 schema 驗證。
-- snapshot reader 維持 read-only；缺失 runtime 不建立目錄。
-- `_safe_root` 拒絕既有 symlink，並拒絕 resolved path 位於 `project_root` 外的 runtime root。
-- run manifest/status 檔案拒絕 symlink 與非 regular file；無效 run 只進入 bounded diagnostics，不中斷其他 valid runs。
-- snapshot 只輸出 project-relative diagnostics path，避免絕對路徑洩漏。
-- 既有 `.nbs_agent_runtime/` 為 worktree 原有且 ignored 的目錄，本 Task 未建立或修改。
-- 未修改正式 DB、baseline、runtime、服務或其他 workflow artifacts。
-
-## Commit
-
-`d001e0a` (`feat: build agent operations snapshot`)
-
-## 未完成項
-
-無。Task 2 未開始。
-
-## Task 1 Hardening Fix
-
-### Findings Fixed
-
-- Medium: run 與 retention diagnostics 不再回傳 `str(exc)`；固定 safe reason allowlist 阻止 `OSError`、`PermissionError` 或 schema error 將絕對 artifact path 或未界限內容帶到 UI。
-- Low: empty runtime 明確驗證不建立 `.nbs_agent_runtime`；runtime root 的 dangling symlink 與 project root 外 resolved path 都 fail closed。
-- Low: malformed schema 與 symlink artifact 都只產生 project-relative、bounded diagnostics；`completedAt` 存在時 duration 優先於 `updatedAt`。
-
-### TDD Evidence
+## RED / GREEN Evidence
 
 RED command:
 
 ```bash
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py -q
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py -q
 ```
 
-Result: `3 failed, 3 passed in 0.09s`, exit code `1`. The failures reproduced the dangling runtime-root symlink gap, unbounded malformed-artifact diagnostic, and `PermissionError` absolute path leak.
+RED output: `3 failed, 3 passed`。三個失敗均為預期的 `AttributeError`，分別指向尚未存在的 `_governance_rows`、`_selected_rule_ids`、`_matching_governance_preview`。中途補上測試遺漏的 `import pandas as pd` 後重跑，確認沒有測試自身的 `NameError`。
 
 GREEN command:
 
 ```bash
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py -q
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py -q
 ```
 
-Result: `6 passed in 0.05s`, exit code `0`.
+GREEN output: `6 passed`。
 
-### Final Verification
+Focused regression command:
 
 ```bash
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m pytest tests/test_agent_operations_service.py tests/test_workflow_models.py -q
-/Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/services/agent_operations_service.py
-git diff --check
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py tests/test_receipt_exclusion_matcher.py tests/test_receipt_exclusion_proposal_service.py -q
 ```
 
-Result: `19 passed in 0.05s`; compile and diff check both exit code `0`.
+Output: `18 passed`。
 
-### Commit
+## Files
 
-`5007d1b` (`fix: harden agent operations diagnostics`)
+- `receipt_exclusion_rendering.py`
+  - Added `GOVERNANCE_TABLE_HEIGHT`, `GOVERNANCE_PREVIEW_STATE_KEY`.
+  - Added active/revoked governance column allowlists.
+  - Added `_governance_rows`, `_selected_rule_ids`, `_matching_governance_preview`.
+- `tests/test_receipt_exclusion_rendering.py`
+  - Added the minimum fake Streamlit data editor/error/expander/spinner APIs.
+  - Added allowlist, selection, and preview matching tests.
+
+未修改 `app_pages.py`、SQLite、upload、baseline、rollback 或 registry service。
+
+## Commit
+
+- Implementation: `4d9764b feat: add receipt exclusion governance selection state`
+
+## Self-review
+
+- Helper 僅接收記憶體中的 dict/DataFrame，不讀寫 SQLite 或 runtime state。
+- Governance table 只投影核准欄位，未帶出 `evidenceHash`、`proposalFingerprint`、`createdOperationId` 等敏感欄位。
+- `eventCount` 使用 `or 0`，保留有效的 `0` 語意；選取 helper 對空表及缺欄位安全回傳空清單。
+- Preview 必須同時符合 rule ID、registry revision、`revocation_ready` 與非空 fingerprint，否則回傳空 dict。
+- `git diff --check` 通過；前輪未提交變更仍保留在 unstaged worktree，未被本 Task commit 帶入。
+
+## Concerns
+
+- Task 1 只提供 pure helpers；治理表格 wiring、preview/revoke 互動與 `app_pages.py` 整合留給 Task 2。
+- 尚未執行完整 repo acceptance 或 Hermes，因本 Task brief 明確限制範圍為 focused helper/test 實作，且不得執行 Task 2。
