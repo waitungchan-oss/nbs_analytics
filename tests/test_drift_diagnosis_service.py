@@ -113,6 +113,104 @@ def test_drift_diagnosis_reports_new_excluded_receipt_as_driver():
     assert diagnosis["excludedReceiptDiffs"][0]["receiptNo"] == "R-002"
 
 
+def test_drift_diagnosis_uses_blocking_monthly_check_and_reports_exact_driver():
+    live_tour = pd.DataFrame(
+        [
+            {
+                "來源單據號": "31NZY6629115617",
+                "收款單號": "SK2606005395",
+                "收款類型": "旅費",
+                "收款方式": "現金",
+                "收款原幣金額": 1270.0,
+                "統一日期": "2026-06-29",
+            },
+            {
+                "來源單據號": "OTHER-MAY-ORDER",
+                "收款單號": "OTHER-CASH",
+                "收款類型": "旅費",
+                "收款方式": "現金",
+                "收款原幣金額": 70000.0,
+                "統一日期": "2026-05-15",
+            },
+            {
+                "來源單據號": "UNCHANGED-EXCLUDED",
+                "收款單號": "UNCHANGED-TT",
+                "收款類型": "旅費",
+                "收款方式": "TT 退款轉團款",
+                "收款原幣金額": 900.0,
+                "統一日期": "2026-06-20",
+            },
+        ]
+    )
+    temp_tour = pd.concat(
+        [
+            live_tour,
+            pd.DataFrame(
+                [
+                    {
+                        "來源單據號": "31NZY6629115617",
+                        "收款單號": "SK2606005393",
+                        "收款類型": "旅費",
+                        "收款方式": "TT 退款轉團款",
+                        "收款原幣金額": 1630.0,
+                        "統一日期": "2026-06-29",
+                    },
+                    {
+                        "來源單據號": "OTHER-MAY-ORDER",
+                        "收款單號": "OTHER-TT",
+                        "收款類型": "旅費",
+                        "收款方式": "TT 退款轉團款",
+                        "收款原幣金額": 100.0,
+                        "統一日期": "2026-05-15",
+                    },
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    diagnosis = build_upload_drift_diagnosis(
+        live_tour,
+        pd.DataFrame(),
+        temp_tour,
+        pd.DataFrame(),
+        stability_gate={
+            "status": "drift",
+            "baselineMonth": "2026-05",
+            "expectedTotal": 12057968.0,
+            "actualTotal": 12057967.92,
+            "deltaAmount": -0.08,
+            "driftChecks": [
+                {
+                    "key": "monthlyRevenue:2026-06",
+                    "status": "drift",
+                    "delta": -1270.0,
+                }
+            ],
+            "monthlyBaseline": {
+                "checks": [
+                    {
+                        "key": "monthlyRevenue:2026-06",
+                        "month": "2026-06",
+                        "expectedTotal": 9083241.0,
+                        "actualTotal": 9081971.0,
+                        "deltaAmount": -1270.0,
+                        "status": "drift",
+                    }
+                ]
+            },
+        },
+    )
+
+    assert diagnosis["status"] == "drift"
+    assert diagnosis["baselineMonth"] == "2026-06"
+    assert diagnosis["deltaAmount"] == -1270.0
+    assert diagnosis["topDrivers"][0]["sourceOrderNo"] == "31NZY6629115617"
+    assert diagnosis["topDrivers"][0]["receiptNo"] == "SK2606005393"
+    assert [row["sourceOrderNo"] for row in diagnosis["topDrivers"]] == ["31NZY6629115617"]
+    assert "31NZY6629115617 / 收款單號 SK2606005393" in diagnosis["summaryMessage"]
+
+
 def test_drift_diagnosis_limits_receipt_detail_diff_to_candidate_orders(monkeypatch):
     from backend.services import drift_diagnosis_service
 

@@ -24,6 +24,44 @@ def _safe_text(value) -> str:
     return text if text and text.lower() != "nan" else ""
 
 
+def _float_value(value, default: float) -> float:
+    parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return default if pd.isna(parsed) else float(parsed)
+
+
+def _select_drift_context(gate: dict) -> dict:
+    drift_keys = {
+        str(check.get("key") or "")
+        for check in gate.get("driftChecks", [])
+        if str(check.get("status") or "") == "drift"
+    }
+    for check in (gate.get("monthlyBaseline") or {}).get("checks", []):
+        key = str(check.get("key") or "")
+        if key in drift_keys and key.startswith("monthlyRevenue:"):
+            month = str(check.get("month") or key.partition(":")[2])
+            expected = _float_value(check.get("expectedTotal"), PHASE2B_EXPECTED_TOTAL)
+            actual = _float_value(check.get("actualTotal"), 0.0)
+            return {
+                "status": str(check.get("status") or "drift"),
+                "baselineMonth": month,
+                "expectedTotal": expected,
+                "actualTotal": actual,
+                "deltaAmount": _float_value(check.get("deltaAmount"), actual - expected),
+                "checkKey": key,
+            }
+
+    expected = _float_value(gate.get("expectedTotal"), PHASE2B_EXPECTED_TOTAL)
+    actual = _float_value(gate.get("actualTotal"), 0.0)
+    return {
+        "status": str(gate.get("status") or "drift"),
+        "baselineMonth": str(gate.get("baselineMonth") or PHASE2B_BASELINE_MONTH),
+        "expectedTotal": expected,
+        "actualTotal": actual,
+        "deltaAmount": _float_value(gate.get("deltaAmount"), actual - expected),
+        "checkKey": "",
+    }
+
+
 def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
     required_columns = [
         "收款單號",
@@ -142,6 +180,13 @@ def _order_contribution_map(frame: pd.DataFrame, excluded_order_ids: set[str]) -
     }
 
 
+def _filter_month(frame: pd.DataFrame, month: str) -> pd.DataFrame:
+    if frame.empty or "統一日期" not in frame.columns:
+        return frame.iloc[0:0].copy()
+    dates = pd.to_datetime(frame["統一日期"], errors="coerce")
+    return frame.loc[dates.dt.strftime("%Y-%m") == month].copy()
+
+
 def _select_driver_row(order_rows: pd.DataFrame, order_id: str) -> pd.Series | None:
     if order_rows.empty:
         return None
@@ -183,11 +228,13 @@ def build_upload_drift_diagnosis(
     row_limit: int = DRIFT_ROW_LIMIT,
 ) -> dict:
     gate = stability_gate or {}
-    status = str(gate.get("status") or "drift")
-    baseline_month = str(gate.get("baselineMonth") or PHASE2B_BASELINE_MONTH)
-    expected_total = float(gate.get("expectedTotal") or PHASE2B_EXPECTED_TOTAL)
-    actual_total = float(gate.get("actualTotal") or 0)
-    delta_amount = float(gate.get("deltaAmount") or (actual_total - expected_total))
+    drift_context = _select_drift_context(gate)
+    status = drift_context["status"]
+    baseline_month = drift_context["baselineMonth"]
+    expected_total = drift_context["expectedTotal"]
+    actual_total = drift_context["actualTotal"]
+    delta_amount = drift_context["deltaAmount"]
+    check_key = drift_context["checkKey"]
 
     live_tour = _prepare_frame(live_tour)
     live_others = _prepare_frame(live_others)
@@ -251,10 +298,29 @@ def build_upload_drift_diagnosis(
         if str(value).strip()
     }
 
-    live_order_map = _order_contribution_map(pd.concat([live_analysis_tour, live_analysis_others], ignore_index=True, sort=False), live_excluded_ids)
-    temp_order_map = _order_contribution_map(pd.concat([temp_analysis_tour, temp_analysis_others], ignore_index=True, sort=False), temp_excluded_ids)
+    live_analysis = pd.concat([live_analysis_tour, live_analysis_others], ignore_index=True, sort=False)
+    temp_analysis = pd.concat([temp_analysis_tour, temp_analysis_others], ignore_index=True, sort=False)
+    if check_key.startswith("monthlyRevenue:"):
+        live_analysis = _filter_month(live_analysis, baseline_month)
+        temp_analysis = _filter_month(temp_analysis, baseline_month)
+        scoped_raw = pd.concat(
+            [_filter_month(live_raw, baseline_month), _filter_month(temp_raw, baseline_month)],
+            ignore_index=True,
+            sort=False,
+        )
+        scoped_order_ids = {
+            _safe_text(value)
+            for value in scoped_raw.get(COL_ORDER_ID, pd.Series(dtype=str))
+            if _safe_text(value)
+        }
+    else:
+        scoped_order_ids = live_excluded_ids | temp_excluded_ids
 
-    order_ids = sorted(set(live_order_map) | set(temp_order_map) | set(live_excluded_ids) | set(temp_excluded_ids))
+    live_order_map = _order_contribution_map(live_analysis, live_excluded_ids)
+    temp_order_map = _order_contribution_map(temp_analysis, temp_excluded_ids)
+
+    scoped_excluded_ids = (live_excluded_ids | temp_excluded_ids) & scoped_order_ids
+    order_ids = sorted(set(live_order_map) | set(temp_order_map) | scoped_excluded_ids)
     order_diffs: list[dict] = []
     for order_id in order_ids:
         live_rows = _rows_for_order(live_raw_clean, order_id)
@@ -262,11 +328,11 @@ def build_upload_drift_diagnosis(
         live_total = float(live_order_map.get(order_id, 0.0))
         temp_total = float(temp_order_map.get(order_id, 0.0))
         delta = round(temp_total - live_total, 2)
-        if abs(delta) < 1.0 and order_id not in live_excluded_ids and order_id not in temp_excluded_ids:
-            continue
-
         live_excluded = order_id in live_excluded_ids
         temp_excluded = order_id in temp_excluded_ids
+        if abs(delta) < 1.0 and live_excluded == temp_excluded:
+            continue
+
         reason = "來源單據號明細變動"
         trigger_receipt = ""
         if temp_excluded and not live_excluded:
@@ -295,7 +361,12 @@ def build_upload_drift_diagnosis(
             }
         )
 
-    order_diffs.sort(key=lambda item: abs(float(item.get("deltaAmount") or 0)), reverse=True)
+    order_diffs.sort(
+        key=lambda item: (
+            abs(float(item.get("deltaAmount") or 0) - delta_amount) >= 1.0,
+            -abs(float(item.get("deltaAmount") or 0)),
+        )
+    )
     candidate_order_ids = {str(item.get("sourceOrderNo") or "") for item in order_diffs if str(item.get("sourceOrderNo") or "")}
 
     live_rows = _frame_with_keys(_candidate_rows(live_raw_clean, candidate_order_ids), "live")
@@ -408,6 +479,7 @@ def build_upload_drift_diagnosis(
         "expectedTotal": expected_total,
         "actualTotal": actual_total,
         "deltaAmount": delta_amount,
+        "diagnosedCheckKey": check_key,
         "summaryMessage": summary_message,
         "rowLimit": row_limit,
         "liveAudit": live_audit,
