@@ -107,3 +107,54 @@ compile 與 diff check 通過。
 ### Concerns
 
 - 本次未執行完整 repo acceptance 或 Hermes，因 reviewer fix scope 僅限指定 rendering helper/tests。
+
+## Reviewer High Finding Fix Round 2: strict fail-closed preview validation
+
+### RED / GREEN Evidence
+
+RED command:
+
+```bash
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py -q
+```
+
+RED output: `10 failed, 39 passed`。新增案例確認既有 `int()` coercion 會接受
+`ruleId=4.0`、selected `rule_id=4.0`/`"4"`，且既有 truthiness gate 會接受
+`previewFingerprint=0`、`True`、容器值與空白字串。
+
+GREEN commands:
+
+```bash
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py -q
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py tests/test_receipt_exclusion_matcher.py tests/test_receipt_exclusion_proposal_service.py -q
+.venv/bin/python -m py_compile receipt_exclusion_rendering.py tests/test_receipt_exclusion_rendering.py
+git diff --check
+git diff --cached --check
+```
+
+GREEN output: rendering `49 passed`；focused regression `61 passed`；compile、working-tree
+diff check 與 staged diff check 均通過。
+
+### Change and Commit
+
+- `_matching_governance_preview` 現在要求 preview `ruleId` 與 selected `rule_id` 都是非-bool 的正整數；`registryRevision`、`status`、`previewFingerprint` 與輸入 `registry_revision` 都必須是 strip 後非空字串。缺欄位、`0`、`True`、浮點數、字串或其他 malformed 值一律回傳 `{}`。
+- Regression tests 覆蓋 bool、float、字串、零值、負值、空白及非字串 governance fields。
+- Commit: `4514b79 fix: strictly validate governance preview state`
+
+### Self-review
+
+- 只 stage 本輪 `_matching_governance_preview` implementation 與 strict regression test hunks；前輪 confirmation 變更及其他未提交檔案保持 unstaged。
+- Helper 仍為 pure function，不讀寫 SQLite、baseline、runtime 或 Git state；合法 preview、rule mismatch、revision mismatch 既有 tests 均維持通過。
+- commit 後未重新修改已提交的兩個 code/test 檔案；report 本身依要求追加且保持 unstaged。
+
+### Concerns
+
+- 未執行完整 repo acceptance 或 Hermes；本輪僅修復指定 High finding，且 brief 限制修改範圍。
+
+## Controller Reconciliation
+
+本報告的 Task 1 scope 記錄是在 Task 1 review 時建立，當時 Task 2 尚未開始，
+因此其中「治理表格 wiring 留給 Task 2」是當時的時間點狀態，不是本輪最終狀態。
+Task 2 後續已由 `receipt_exclusion_rendering.py` 與
+`tests/test_receipt_exclusion_rendering.py` 完成，實作與驗證證據記錄於
+`.superpowers/sdd/task-2-rendering-report.md`。
