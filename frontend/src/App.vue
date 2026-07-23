@@ -13,9 +13,13 @@ import {
   getDecisionTargets,
   getForecastInsights,
   getHealth,
+  getReceiptExclusions,
   getStabilityHistory,
   saveDecisionTargets,
-  uploadMonthlyData
+  uploadMonthlyData,
+  confirmReceiptExclusions,
+  previewReceiptExclusionRevocation,
+  confirmReceiptExclusionRevocation
 } from './lib/api'
 import SvgBarChart from './components/SvgBarChart.vue'
 import SvgDonutChart from './components/SvgDonutChart.vue'
@@ -54,6 +58,10 @@ const uploadError = ref('')
 const uploadRefreshError = ref('')
 const uploadResult = ref(null)
 const uploadFormKey = ref(0)
+const receiptExclusionSnapshot = ref({ active: [], revoked: [], counts: {} })
+const selectedReceiptCandidateIds = ref([])
+const receiptExclusionConfirmed = ref(false)
+const revocationPreview = ref(null)
 const reportBusy = ref('')
 const activeSection = ref('overview')
 const showFullRankings = ref(false)
@@ -132,6 +140,7 @@ const uploadGateLabel = computed(() => {
     ? 'Monthly baseline matched'
     : result?.stabilityGate?.status || result?.preflightReport?.status || 'Pending'
 })
+const receiptExclusionProposal = computed(() => uploadResult.value?.preflightReport?.receiptExclusionProposal || null)
 const acceptanceStatusCards = computed(() => [
   {
     label: 'Latest Upload',
@@ -486,6 +495,9 @@ function resetUploadForm() {
   uploadError.value = ''
   uploadRefreshError.value = ''
   uploadResult.value = null
+  selectedReceiptCandidateIds.value = []
+  receiptExclusionConfirmed.value = false
+  revocationPreview.value = null
   uploadFormKey.value += 1
 }
 
@@ -555,6 +567,56 @@ async function submitVueUpload() {
   }
 }
 
+function buildUploadFormData() {
+  const formData = new FormData()
+  formData.append('main_file', uploadMainFile.value)
+  if (uploadTourFile.value) formData.append('tour_file', uploadTourFile.value)
+  for (const file of uploadOtherFiles.value) formData.append('other_files', file)
+  return formData
+}
+
+async function submitReceiptExclusionConfirmation() {
+  const proposal = receiptExclusionProposal.value
+  if (!proposal || !uploadMainFile.value) return
+  try {
+    uploadBusy.value = true
+    uploadError.value = ''
+    const formData = buildUploadFormData()
+    formData.append('proposal_fingerprint', proposal.proposalFingerprint)
+    formData.append('selected_candidate_ids', JSON.stringify(selectedReceiptCandidateIds.value))
+    uploadResult.value = await confirmReceiptExclusions(formData)
+    receiptExclusionConfirmed.value = false
+    selectedReceiptCandidateIds.value = []
+    await loadAll(false)
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    uploadBusy.value = false
+  }
+}
+
+async function previewReceiptExclusionRevoke(ruleId) {
+  try {
+    revocationPreview.value = await previewReceiptExclusionRevocation(ruleId)
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function revokeReceiptExclusion(ruleId) {
+  if (!revocationPreview.value?.previewFingerprint) return
+  try {
+    await confirmReceiptExclusionRevocation(ruleId, {
+      previewFingerprint: revocationPreview.value.previewFingerprint,
+      confirmedBy: 'vue-local'
+    })
+    revocationPreview.value = null
+    receiptExclusionSnapshot.value = await getReceiptExclusions()
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
 function setDefaultFilters(ctx) {
   const hasBaselineMonth = (ctx.months || []).includes(BASELINE_MONTH)
   const defaultStart = hasBaselineMonth ? `${BASELINE_MONTH}-01` : ctx.minDate || ''
@@ -575,7 +637,7 @@ async function loadAll(initial = false) {
     if (initial) loading.value = true
     else refreshing.value = true
     errorMessage.value = ''
-    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload, factsResult, decisionResult, targetResult] = await Promise.all([
+    const [healthPayload, contextPayload, historyPayload, qualityPayload, forecastPayload, factsResult, decisionResult, targetResult, receiptResult] = await Promise.all([
       getHealth(),
       getDashboardContext(),
       getStabilityHistory(20),
@@ -588,6 +650,9 @@ async function loadAll(initial = false) {
         .then(payload => ({ payload }))
         .catch(error => ({ error })),
       getDecisionTargets()
+        .then(payload => ({ payload }))
+        .catch(error => ({ error })),
+      getReceiptExclusions()
         .then(payload => ({ payload }))
         .catch(error => ({ error }))
     ])
@@ -616,6 +681,7 @@ async function loadAll(initial = false) {
       targetConfigError.value = ''
       applyTargetConfig(targetResult.payload)
     }
+    if (!receiptResult.error) receiptExclusionSnapshot.value = receiptResult.payload
     if (initial) setDefaultFilters(contextPayload)
     ;[summary.value, analytics.value] = await Promise.all([
       getDashboardSummary(filters.value),
@@ -1535,6 +1601,23 @@ onMounted(() => {
             <div>本次上傳回應已保留，但 dashboard / Facts 重新載入失敗：{{ uploadRefreshError }}</div>
           </div>
 
+          <div v-if="receiptExclusionProposal?.status === 'confirmation_required'" class="receipt-exclusion-panel">
+            <strong>永久排除收款單</strong>
+            <div class="panel-note">只可確認 API 回傳的精確 identity；正式收入影響由服務端診斷結果提供。</div>
+            <label v-for="candidate in receiptExclusionProposal.candidates" :key="candidate.candidateId" class="receipt-candidate">
+              <input v-model="selectedReceiptCandidateIds" type="checkbox" :value="candidate.candidateId" />
+              <span>{{ candidate.receiptNo }} / {{ candidate.sourceOrderNo }} · {{ candidate.exclusionKind }}</span>
+              <strong>{{ moneyText(candidate.affectedRevenue) }}</strong>
+            </label>
+            <label class="receipt-confirm-copy">
+              <input v-model="receiptExclusionConfirmed" type="checkbox" />
+              我確認永久排除此精確收款單；日後相同 identity 將自動排除。
+            </label>
+            <button class="action-button primary" :disabled="uploadBusy || !receiptExclusionConfirmed || !selectedReceiptCandidateIds.length" @click="submitReceiptExclusionConfirmation">
+              永久排除並重新預演
+            </button>
+          </div>
+
           <div v-if="uploadResult" class="acceptance-status-grid upload-summary-grid">
             <article class="panel stat-panel acceptance-stat-panel">
               <div class="panel-title">Acceptance</div>
@@ -1597,6 +1680,16 @@ onMounted(() => {
                 </tr>
               </tbody>
             </table>
+          </div>
+
+          <div class="receipt-exclusion-panel">
+            <strong>Receipt Exclusion Registry</strong>
+            <div class="panel-note">Active {{ receiptExclusionSnapshot.counts?.active || 0 }} · Revoked {{ receiptExclusionSnapshot.counts?.revoked || 0 }}</div>
+            <div v-for="rule in receiptExclusionSnapshot.active" :key="rule.id" class="receipt-candidate">
+              <span>#{{ rule.id }} · {{ rule.receiptNo }} / {{ rule.sourceOrderNo }}</span>
+              <button class="action-button secondary" @click="previewReceiptExclusionRevoke(rule.id)">預演撤銷</button>
+              <button v-if="revocationPreview?.ruleId === rule.id && revocationPreview?.status === 'revocation_ready'" class="action-button primary" @click="revokeReceiptExclusion(rule.id)">確認撤銷</button>
+            </div>
           </div>
         </div>
       </section>

@@ -138,3 +138,28 @@ export async function uploadMonthlyData(formData) {
 
   return response.json()
 }
+
+export function getReceiptExclusions() {
+  return requestJson('/api/upload/receipt-exclusions')
+}
+
+export async function confirmReceiptExclusions(formData) {
+  const response = await fetch('/api/upload/receipt-exclusions/confirm', {
+    method: 'POST',
+    body: formData
+  })
+  if (!response.ok) throw new Error(await readApiError(response))
+  return response.json()
+}
+
+export function previewReceiptExclusionRevocation(ruleId) {
+  return requestJson(`/api/upload/receipt-exclusions/${ruleId}/revocation-preview`, {
+    method: 'POST', body: JSON.stringify({})
+  })
+}
+
+export function confirmReceiptExclusionRevocation(ruleId, payload) {
+  return requestJson(`/api/upload/receipt-exclusions/${ruleId}/revoke`, {
+    method: 'POST', body: JSON.stringify(payload)
+  })
+}
