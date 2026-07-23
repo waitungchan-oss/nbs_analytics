@@ -88,6 +88,16 @@ def _matching_governance_preview(
     return preview
 
 
+def _gate_preview_summary(gate: object) -> dict:
+    if not isinstance(gate, dict):
+        return {}
+    return {
+        key: gate[key]
+        for key in ("status", "matchedChecks", "deltaAmount")
+        if key in gate and isinstance(gate[key], (str, int, float, bool))
+    }
+
+
 def render_receipt_exclusion_confirmation(
     proposal: dict,
     *,
@@ -191,7 +201,7 @@ def render_receipt_exclusion_governance(
                 "來源單據號": selected_rule.get("sourceOrderNo"),
                 "排除類型": selected_rule.get("exclusionKind"),
                 "預演狀態": preview.get("status"),
-                "Gate": preview.get("gate"),
+                "Gate": _gate_preview_summary(preview.get("gate")),
             })
         if st.button(
             "確認撤銷所選規則",

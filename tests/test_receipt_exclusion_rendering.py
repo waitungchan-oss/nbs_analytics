@@ -162,6 +162,43 @@ def test_governance_previews_only_the_single_selected_rule(monkeypatch):
     assert fake.session_state[rendering.GOVERNANCE_PREVIEW_STATE_KEY]["ruleId"] == 4
 
 
+def test_governance_preview_renders_only_scalar_gate_summary(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.data_editor_result = pd.DataFrame([{
+        "選取": True, "規則 ID": 4, "收款單號": "SK2607007622",
+        "來源單據號": "225YTLAU6227154715", "排除類型": "receipt_type:掛賬核銷",
+        "建立時間": "", "建立者": "streamlit-local", "稽核事件數": 2,
+    }])
+    fake.session_state[rendering.GOVERNANCE_PREVIEW_STATE_KEY] = {
+        "ruleId": 4,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+        "gate": {
+            "status": "matched",
+            "matchedChecks": 3,
+            "deltaAmount": 0.0,
+            "quarantine": {"receiptNo": "SECRET-QUARANTINE-RECEIPT"},
+            "evidence": {"fingerprint": "SECRET-EVIDENCE-FINGERPRINT"},
+            "operation": {"operationId": "SECRET-OPERATION-ID"},
+        },
+    }
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        _snapshot(), preview_revoke=lambda rule_id: {}, confirm_revoke=lambda rule_id, fingerprint: {},
+    )
+
+    assert "matched" in fake.rendered_text
+    assert "3" in fake.rendered_text
+    assert "0.0" in fake.rendered_text
+    for sensitive_value in (
+        "quarantine", "SECRET-QUARANTINE-RECEIPT", "evidence",
+        "SECRET-EVIDENCE-FINGERPRINT", "operation", "SECRET-OPERATION-ID",
+    ):
+        assert sensitive_value not in fake.rendered_text
+
+
 def test_governance_disables_confirm_for_stale_selection_or_revision(monkeypatch):
     fake = _FakeStreamlit()
     fake.data_editor_result = pd.DataFrame([{
