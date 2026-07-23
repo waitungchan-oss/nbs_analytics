@@ -165,6 +165,10 @@ def render_receipt_exclusion_governance(
         selected_rule_id = selected_rule_ids[0] if len(selected_rule_ids) == 1 else None
         if len(selected_rule_ids) > 1:
             st.error("一次只能選取一條永久排除規則。")
+        active_rule_ids = {int(rule["id"]) for rule in active}
+        if selected_rule_id is not None and selected_rule_id not in active_rule_ids:
+            st.session_state.pop(GOVERNANCE_PREVIEW_STATE_KEY, None)
+            selected_rule_id = None
 
         stored_preview = st.session_state.get(GOVERNANCE_PREVIEW_STATE_KEY) or {}
         preview = _matching_governance_preview(

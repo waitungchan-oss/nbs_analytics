@@ -220,6 +220,29 @@ def test_governance_disables_confirm_for_stale_selection_or_revision(monkeypatch
     assert rendering.GOVERNANCE_PREVIEW_STATE_KEY not in fake.session_state
 
 
+def test_governance_fails_closed_when_selected_rule_is_missing_from_active_snapshot(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.data_editor_result = pd.DataFrame([{
+        "選取": True, "規則 ID": 4, "收款單號": "SK2607007622",
+        "來源單據號": "225YTLAU6227154715", "排除類型": "receipt_type:掛賬核銷",
+        "建立時間": "", "建立者": "streamlit-local", "稽核事件數": 2,
+    }])
+    fake.session_state[rendering.GOVERNANCE_PREVIEW_STATE_KEY] = {
+        "ruleId": 4, "registryRevision": "revision-a",
+        "status": "revocation_ready", "previewFingerprint": "preview-a",
+    }
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        _snapshot(active=[{"id": 5, "receiptNo": "SK2607007623"}]),
+        preview_revoke=lambda rule_id: {}, confirm_revoke=lambda rule_id, fingerprint: {},
+    )
+
+    assert rendering.GOVERNANCE_PREVIEW_STATE_KEY not in fake.session_state
+    assert "SK2607007622" not in fake.rendered_text
+    assert fake.buttons["確認撤銷所選規則"]["disabled"] is True
+
+
 def test_governance_rejects_multi_selection_and_shows_revoked_rules_in_expander(monkeypatch):
     fake = _FakeStreamlit()
     fake.data_editor_result = pd.DataFrame([
