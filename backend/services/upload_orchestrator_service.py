@@ -77,6 +77,7 @@ def _response_base(operation: UploadOperation, preflight: dict) -> dict[str, Any
         "historyRecordId": None, "historyError": None, "writeCommitted": False,
         "cacheState": "unchanged", "cacheError": None, "dataGeneration": {},
         "stageTimings": list(preflight.get("stageTimings") or []),
+        "receiptExclusion": preflight.get("receiptExclusion") or {},
     }
 
 
@@ -199,6 +200,12 @@ def _commit_matched_upload(
         "rollbackResult": rollback, "historyRecordId": history_id, "historyError": history_error,
         "writeCommitted": final_status == "accepted", "cacheState": cache_state,
         "cacheError": cache_error, "dataGeneration": generation, "stageTimings": all_timings,
+        "receiptExclusion": {
+            **(preflight.get("receiptExclusion") or {}),
+            "registryRevision": receipt_exclusion_revision,
+            "activatedRuleIds": receipt_exclusion_rule_ids,
+            "proposalFingerprint": receipt_exclusion_proposal_fingerprint,
+        },
     }
     return UploadExecution(response, anomaly, entity_audit)
 
