@@ -126,14 +126,20 @@ history 保證；也不建立第二個可自行改口徑的規則引擎。
 | `operation_id` | 首次確認 operation |
 | `source_file_name` | basename，不保存絕對路徑 |
 | `source_file_sha256` | 原始檔案 fingerprint |
-| `row_payload_json` | allowlisted canonical row payload |
-| `row_hash` | payload SHA-256 |
+| `raw_payload_json` | allowlisted 主表 raw row payload |
+| `raw_row_hash` | raw payload SHA-256 |
+| `prepared_payload_json` | 同次 matched overlay preflight 的 allowlisted canonical prepared row |
+| `prepared_row_hash` | prepared payload SHA-256 |
 | `observed_amount` | 當次原幣金額 |
 | `observed_at` | 保存時間 |
 
-`row_payload_json` 只允許撤銷模擬所需欄位，例如來源單據號、收款單號、收款類型、
-收款方式、金額、收款日期、銷售點與銷售員。不得保存整份 Excel、密碼、絕對路徑
-或任意額外欄位。
+`raw_payload_json` 只允許 identity、收款語義、金額、日期與來源欄位。
+`prepared_payload_json` 保存同一次 preflight 已完成 Entity Resolution 後、足以在
+temporary DB 重播的正式 schema 欄位；欄位集合必須等於既有 facts table schema
+allowlist。不得保存整份 Excel、密碼、絕對路徑或任意額外欄位。
+
+撤銷預演使用 `prepared_payload_json`，避免只靠 raw row 重新推斷已不存在的副表
+上下文；`raw_payload_json` 只作來源證據與 collision 診斷。
 
 ### 6.3 `receipt_exclusion_events`
 
@@ -277,7 +283,7 @@ flowchart TD
     R["Select active rule"] --> L["Acquire governance/upload lease"]
     L --> S["Snapshot formal DB and registry revision"]
     S --> Q["Load allowlisted quarantine row"]
-    Q --> T["Insert row into temporary DB candidate only"]
+    Q --> T["Insert canonical prepared row into temporary DB candidate only"]
     T --> P["Run canonical preprocessing and full monthly gates"]
     P --> M{"All blocking baselines matched?"}
     M -->|"No"| F["Keep rule active; record preview_failed"]
@@ -293,8 +299,9 @@ flowchart TD
 1. `預演撤銷`
 2. `確認撤銷`
 
-Preview fingerprint 必須涵蓋 rule identity、quarantine row hash、formal DB snapshot
-identity、registry revision 與所有 blocking gate 結果。任何一項改變都使確認失效。
+Preview fingerprint 必須涵蓋 rule identity、raw/prepared row hashes、formal DB
+snapshot identity、registry revision 與所有 blocking gate 結果。任何一項改變
+都使確認失效。
 
 若 quarantine evidence 不完整、row hash 不符、baseline drift、DB path 不明確或
 另一 upload 正在執行，撤銷停止並保持 rule active。
@@ -399,7 +406,7 @@ frames 後繼續 upsert、post-write gate、rollback、history 與 cache generat
 
 ## 15. Security 與資料保留
 
-- Quarantine payload 使用固定欄位 allowlist 與 canonical JSON。
+- Raw 與 prepared quarantine payload 分別使用固定欄位 allowlist 與 canonical JSON。
 - UI/API 不回傳絕對路徑或完整 workbook bytes。
 - Proposal、preview 與 event payload 設定 row/count/character cap。
 - Quarantine evidence 在 active 或 revoked rule 存續期間保留，因為撤銷及 audit
