@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -9,7 +10,11 @@ import pandas as pd
 import database
 from backend.services.drift_diagnosis_service import build_upload_drift_diagnosis
 from backend.services.monthly_baseline_service import build_governed_stability_gate
-from pipeline import process_raw_files
+from backend.services.receipt_exclusion_matcher import match_receipt_exclusions
+from backend.services.receipt_exclusion_models import ReceiptExclusionRule, canonical_json_hash
+from backend.services.receipt_exclusion_proposal_service import build_receipt_exclusion_proposal
+from backend.services.receipt_exclusion_registry_service import load_active_registry_snapshot
+from pipeline import process_raw_files, read_excel_source
 
 # Backward-compatible dependency hook used by profiling and tests.
 build_phase2c_stability_gate = build_governed_stability_gate
@@ -104,6 +109,9 @@ def run_upload_preflight(
     *,
     source_files: list[str] | None = None,
     live_db_path: str | Path | None = None,
+    receipt_exclusion_overlay: tuple[ReceiptExclusionRule, ...] = (),
+    operation_id: str = "",
+    registry_loader: Callable = load_active_registry_snapshot,
 ) -> dict:
     stage_timings: list[dict] = []
     preflight_started = time.perf_counter()
@@ -116,6 +124,35 @@ def run_upload_preflight(
     live_path = database.resolve_db_path(live_db_path)
     if live_db_path is not None and not live_path.exists():
         raise FileNotFoundError(f"explicit live database not found: {live_path}")
+    snapshot = registry_loader(db_path=live_path)
+    rules = tuple(snapshot.get("rules") or ()) + tuple(receipt_exclusion_overlay or ())
+    main_frame: pd.DataFrame | None = None
+    main_source_name = str(source_files[0]) if source_files else ""
+    main_input = main_file
+    if rules:
+        main_frame, main_source_name = read_excel_source(main_file)
+        if not main_source_name and source_files:
+            main_source_name = str(source_files[0])
+        match_result = match_receipt_exclusions(main_frame, rules)
+        main_input = (main_source_name, match_result.filtered_frame)
+    else:
+        match_result = match_receipt_exclusions(pd.DataFrame(), ())
+    receipt_exclusion = {
+        "registryRevision": str(snapshot.get("revision") or canonical_json_hash([])),
+        "matchedRules": list(match_result.matches),
+        "collisions": list(match_result.collisions),
+        "autoApplyAudit": [],
+    }
+    if match_result.collisions:
+        return {
+            "status": "receipt_exclusion_collision",
+            "message": "收款單永久排除 identity 與本次來源資料衝突，正式 SQLite 不會寫入。",
+            "sourceFiles": source_files,
+            "receiptExclusion": receipt_exclusion,
+            "receiptExclusionProposal": {},
+            "prepared": {},
+            "liveDbUnchanged": True,
+        }
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_db_path = Path(tmpdir) / "preflight.db"
         stage_started = time.perf_counter()
@@ -132,7 +169,7 @@ def run_upload_preflight(
         _record_stage(stage_timings, "統計正式 DB 行數", stage_started)
         stage_started = time.perf_counter()
         new_t_df, new_o_df, anm_df, entity_audit = process_raw_files(
-            main_file,
+            main_input,
             tour_file,
             other_files or [],
             branch_mapping,
@@ -158,6 +195,26 @@ def run_upload_preflight(
             temp_others_after,
             stability_gate=stability_gate,
         )
+        receipt_exclusion_proposal, receipt_exclusion_evidence = {}, {}
+        if drift_diagnosis.get("status") == "drift":
+            if main_frame is None:
+                if hasattr(main_file, "seek"):
+                    main_file.seek(0)
+                main_frame, main_source_name = read_excel_source(main_file)
+            source_batch_fingerprint = canonical_json_hash({
+                "sourceFiles": source_files,
+                "mainRows": main_frame.to_dict(orient="records"),
+            })
+            receipt_exclusion_proposal, receipt_exclusion_evidence = build_receipt_exclusion_proposal(
+                diagnosis=drift_diagnosis,
+                raw_main_frame=main_frame,
+                prepared_frames=[new_t_df, new_o_df],
+                operation_id=operation_id,
+                source_files=source_files,
+                source_batch_fingerprint=source_batch_fingerprint,
+                registry_revision=receipt_exclusion["registryRevision"],
+                live_db_identity=str(live_path.resolve()),
+            )
         _record_stage(stage_timings, "Drift diagnosis", stage_started)
         stage_started = time.perf_counter()
         latest_data_date = _combined_max_date(temp_tour_after, temp_others_after)
@@ -196,6 +253,8 @@ def run_upload_preflight(
         "deltaAmount": stability_gate.get("deltaAmount"),
         "driftChecks": drift_checks,
         "driftDiagnosis": drift_diagnosis,
+        "receiptExclusion": receipt_exclusion,
+        "receiptExclusionProposal": receipt_exclusion_proposal,
         "batchSummary": batch_summary,
         "stageTimings": stage_timings,
         "upsertSummary": upsert_summary,
@@ -205,6 +264,7 @@ def run_upload_preflight(
             "others": new_o_df,
             "anm": anm_df,
             "entity_audit": entity_audit,
+            "receipt_exclusion_evidence": receipt_exclusion_evidence,
         },
         "liveDbUnchanged": live_before == live_after,
     }
