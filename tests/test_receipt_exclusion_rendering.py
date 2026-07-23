@@ -32,6 +32,8 @@ class _FakeStreamlit:
         self.spinners = []
         self.rendered_text = ""
         self.session_state = {}
+        self.button_clicks = set()
+        self.column_config = SimpleNamespace(CheckboxColumn=lambda *args, **kwargs: kwargs)
 
     def dataframe(self, value, **kwargs):
         self.rendered_text += value.to_string()
@@ -43,6 +45,9 @@ class _FakeStreamlit:
 
     def error(self, value):
         self.errors.append(value)
+
+    def info(self, value):
+        self.rendered_text += value
 
     def expander(self, label, **kwargs):
         self.expanders.append((label, kwargs))
@@ -61,7 +66,7 @@ class _FakeStreamlit:
 
     def button(self, label, **kwargs):
         self.buttons[label] = kwargs
-        return False
+        return label in getattr(self, "button_clicks", set())
 
     def markdown(self, value):
         self.rendered_text += value
@@ -71,6 +76,22 @@ class _FakeStreamlit:
 
     def write(self, value):
         self.rendered_text += str(value)
+
+
+def _snapshot(*, revision="revision-a", active=None, revoked=None):
+    return {
+        "registryRevision": revision,
+        "active": active or [{
+            "id": 4,
+            "receiptNo": "SK2607007622",
+            "sourceOrderNo": "225YTLAU6227154715",
+            "exclusionKind": "receipt_type:掛賬核銷",
+            "createdAt": "2026-07-23T00:00:00+08:00",
+            "createdBy": "streamlit-local",
+            "eventCount": 2,
+        }],
+        "revoked": revoked or [],
+    }
 
 
 def test_confirmation_requires_checkbox_before_primary_action(monkeypatch):
@@ -96,6 +117,91 @@ def test_governance_panel_never_exposes_quarantine_payload(monkeypatch):
         preview_revoke=lambda rule_id: {}, confirm_revoke=lambda rule_id, fingerprint: {},
     )
     assert "must-not-render" not in fake.rendered_text
+
+
+def test_governance_renders_scrollable_single_selection_table(monkeypatch):
+    fake = _FakeStreamlit()
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        _snapshot(), preview_revoke=lambda rule_id: {}, confirm_revoke=lambda rule_id, fingerprint: {},
+    )
+
+    assert fake.data_editor_kwargs["height"] == rendering.GOVERNANCE_TABLE_HEIGHT
+    assert fake.data_editor_kwargs["num_rows"] == "fixed"
+    assert fake.data_editor_kwargs["disabled"] == [
+        "規則 ID", "收款單號", "來源單據號", "排除類型",
+        "建立時間", "建立者", "稽核事件數",
+    ]
+    assert fake.data_editor_kwargs["key"].endswith("revision-a")
+    assert "預覽撤銷 #4" not in fake.buttons
+    assert fake.buttons["預覽撤銷所選規則"]["disabled"] is True
+
+
+def test_governance_previews_only_the_single_selected_rule(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.data_editor_result = pd.DataFrame([{
+        "選取": True, "規則 ID": 4, "收款單號": "SK2607007622",
+        "來源單據號": "225YTLAU6227154715", "排除類型": "receipt_type:掛賬核銷",
+        "建立時間": "", "建立者": "streamlit-local", "稽核事件數": 2,
+    }])
+    fake.button_clicks = {"預覽撤銷所選規則"}
+    calls = []
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        _snapshot(),
+        preview_revoke=lambda rule_id: calls.append(rule_id) or {
+            "ruleId": rule_id, "registryRevision": "revision-a",
+            "status": "revocation_ready", "previewFingerprint": "preview-a", "gate": {"status": "matched"},
+        },
+        confirm_revoke=lambda rule_id, fingerprint: {},
+    )
+
+    assert calls == [4]
+    assert fake.session_state[rendering.GOVERNANCE_PREVIEW_STATE_KEY]["ruleId"] == 4
+
+
+def test_governance_disables_confirm_for_stale_selection_or_revision(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.data_editor_result = pd.DataFrame([{
+        "選取": True, "規則 ID": 4, "收款單號": "SK2607007622",
+        "來源單據號": "225YTLAU6227154715", "排除類型": "receipt_type:掛賬核銷",
+        "建立時間": "", "建立者": "streamlit-local", "稽核事件數": 2,
+    }])
+    fake.session_state[rendering.GOVERNANCE_PREVIEW_STATE_KEY] = {
+        "ruleId": 4, "registryRevision": "old-revision",
+        "status": "revocation_ready", "previewFingerprint": "preview-a",
+    }
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        _snapshot(revision="revision-a"), preview_revoke=lambda rule_id: {}, confirm_revoke=lambda rule_id, fingerprint: {},
+    )
+
+    assert fake.buttons["確認撤銷所選規則"]["disabled"] is True
+    assert rendering.GOVERNANCE_PREVIEW_STATE_KEY not in fake.session_state
+
+
+def test_governance_rejects_multi_selection_and_shows_revoked_rules_in_expander(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.data_editor_result = pd.DataFrame([
+        {"選取": True, "規則 ID": 4},
+        {"選取": True, "規則 ID": 5},
+    ])
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_receipt_exclusion_governance(
+        _snapshot(revoked=[{
+            "id": 1, "receiptNo": "SK2606005393", "sourceOrderNo": "31NZY6629115617",
+            "exclusionKind": "payment_method:TT 退款轉團款", "revokedAt": "", "revokedBy": "", "eventCount": 3,
+        }]),
+        preview_revoke=lambda rule_id: {}, confirm_revoke=lambda rule_id, fingerprint: {},
+    )
+
+    assert fake.errors == ["一次只能選取一條永久排除規則。"]
+    assert fake.buttons["預覽撤銷所選規則"]["disabled"] is True
+    assert fake.expanders == [("查看已撤銷規則", {"expanded": False})]
 
 
 def test_governance_rows_allowlist_identity_and_hide_sensitive_fields():

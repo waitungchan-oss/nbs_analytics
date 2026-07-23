@@ -129,22 +129,84 @@ def render_receipt_exclusion_governance(
 ) -> None:
     active = list(snapshot.get("active") or [])
     revoked = list(snapshot.get("revoked") or [])
+    registry_revision = str(snapshot.get("registryRevision") or "unknown")
+    revision_token = registry_revision[:20]
     st.markdown("### Receipt Exclusion Governance")
     st.caption("永久排除規則只影響精確 identity；撤銷前必須在暫存資料庫重播並通過口徑驗收。")
-    st.dataframe(pd.DataFrame(active), hide_index=True, width="stretch")
-    if revoked:
-        st.dataframe(pd.DataFrame(revoked), hide_index=True, width="stretch")
-    for rule in active:
-        rule_id = int(rule["id"])
-        if st.button(f"預覽撤銷 #{rule_id}", key=f"RECEIPT_EXCLUSION_PREVIEW_{rule_id}"):
-            preview = preview_revoke(rule_id)
-            st.session_state[f"RECEIPT_EXCLUSION_PREVIEW_{rule_id}"] = preview
-        preview = st.session_state.get(f"RECEIPT_EXCLUSION_PREVIEW_{rule_id}") or {}
+
+    if not active:
+        st.info("目前沒有生效中的永久排除規則。")
+    else:
+        edited = st.data_editor(
+            _governance_rows(active),
+            key=f"RECEIPT_EXCLUSION_GOVERNANCE_EDITOR_{revision_token}",
+            hide_index=True,
+            width="stretch",
+            height=GOVERNANCE_TABLE_HEIGHT,
+            num_rows="fixed",
+            disabled=[column for column in ACTIVE_GOVERNANCE_COLUMNS if column != "選取"],
+            column_config={
+                "選取": st.column_config.CheckboxColumn(
+                    "選取", help="一次只能預覽與撤銷一條規則。",
+                ),
+            },
+        )
+        selected_rule_ids = _selected_rule_ids(edited)
+        selected_rule_id = selected_rule_ids[0] if len(selected_rule_ids) == 1 else None
+        if len(selected_rule_ids) > 1:
+            st.error("一次只能選取一條永久排除規則。")
+
+        stored_preview = st.session_state.get(GOVERNANCE_PREVIEW_STATE_KEY) or {}
+        preview = _matching_governance_preview(
+            stored_preview,
+            rule_id=selected_rule_id,
+            registry_revision=registry_revision,
+        )
+        if stored_preview and not preview:
+            st.session_state.pop(GOVERNANCE_PREVIEW_STATE_KEY, None)
+
+        if st.button(
+            "預覽撤銷所選規則",
+            disabled=selected_rule_id is None,
+            key=f"RECEIPT_EXCLUSION_GOVERNANCE_PREVIEW_{revision_token}",
+        ):
+            with st.spinner("正在預演撤銷"):
+                candidate_preview = preview_revoke(selected_rule_id)
+            preview = _matching_governance_preview(
+                candidate_preview,
+                rule_id=selected_rule_id,
+                registry_revision=registry_revision,
+            )
+            if preview:
+                st.session_state[GOVERNANCE_PREVIEW_STATE_KEY] = preview
+            else:
+                st.session_state.pop(GOVERNANCE_PREVIEW_STATE_KEY, None)
+                st.error("撤銷預演結果已失效或未通過口徑驗收。")
+
         if preview:
-            st.write({key: value for key, value in preview.items() if key != "gate"})
-            ready = preview.get("status") == "revocation_ready"
-            if st.button(
-                f"確認撤銷 #{rule_id}", disabled=not ready,
-                key=f"RECEIPT_EXCLUSION_REVOKE_{rule_id}",
-            ):
-                confirm_revoke(rule_id, str(preview.get("previewFingerprint") or ""))
+            selected_rule = next(rule for rule in active if int(rule["id"]) == selected_rule_id)
+            st.write({
+                "規則 ID": selected_rule_id,
+                "收款單號": selected_rule.get("receiptNo"),
+                "來源單據號": selected_rule.get("sourceOrderNo"),
+                "排除類型": selected_rule.get("exclusionKind"),
+                "預演狀態": preview.get("status"),
+                "Gate": preview.get("gate"),
+            })
+        if st.button(
+            "確認撤銷所選規則",
+            type="primary",
+            disabled=not bool(preview),
+            key=f"RECEIPT_EXCLUSION_GOVERNANCE_CONFIRM_{revision_token}",
+        ) and preview:
+            with st.spinner("正在確認撤銷"):
+                confirm_revoke(selected_rule_id, str(preview["previewFingerprint"]))
+
+    if revoked:
+        with st.expander("查看已撤銷規則", expanded=False):
+            st.dataframe(
+                _governance_rows(revoked, revoked=True),
+                hide_index=True,
+                width="stretch",
+                height=GOVERNANCE_TABLE_HEIGHT,
+            )
