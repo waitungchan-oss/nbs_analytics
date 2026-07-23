@@ -93,14 +93,15 @@ def _resolve_candidate_evidence(
             return [], {}
         raw_matches = _matching_rows(raw_main_frame, identity)
         prepared_matches = [
-            row
-            for frame in prepared_frames
+            ("tour_data" if index == 0 else "others_data", row)
+            for index, frame in enumerate(prepared_frames)
             for row in _matching_rows(frame, identity)
         ]
         if len(raw_matches) != 1 or len(prepared_matches) != 1:
             return [], {}
         raw_payload = _project_row(raw_matches[0], RAW_EVIDENCE_FIELDS)
-        prepared_payload = _project_row(prepared_matches[0], PREPARED_EVIDENCE_FIELDS)
+        table_name, prepared_row = prepared_matches[0]
+        prepared_payload = _project_row(prepared_row, PREPARED_EVIDENCE_FIELDS)
         raw_row_hash = canonical_json_hash(raw_payload)
         prepared_row_hash = canonical_json_hash(prepared_payload)
         candidate_id = identity.candidate_id
@@ -131,6 +132,7 @@ def _resolve_candidate_evidence(
             "sourceFileName": source_name,
             "sourceFileSha256": source_batch_fingerprint,
             "observedAmount": observed_amount,
+            "tableName": table_name,
         }
     return candidates, private_evidence
 

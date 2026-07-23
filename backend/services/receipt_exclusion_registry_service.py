@@ -82,6 +82,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             prepared_row_hash TEXT NOT NULL,
             observed_amount REAL NOT NULL,
             observed_at TEXT NOT NULL,
+            target_table TEXT NOT NULL DEFAULT 'others_data',
             FOREIGN KEY(registry_id) REFERENCES {REGISTRY_TABLE}(id)
         );
         CREATE TABLE IF NOT EXISTS {EVENTS_TABLE} (
@@ -102,6 +103,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON {EVENTS_TABLE}(operation_id, registry_id, event_type, proposal_fingerprint);
         """
     )
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({QUARANTINE_TABLE})")}
+    if "target_table" not in columns:
+        conn.execute(f"ALTER TABLE {QUARANTINE_TABLE} ADD COLUMN target_table TEXT NOT NULL DEFAULT 'others_data'")
 
 
 def _identity_from_candidate(candidate: dict) -> ReceiptExclusionIdentity:
@@ -135,6 +139,7 @@ def _candidate_evidence(candidate: dict) -> dict:
         "sourceFileName": source_name,
         "sourceFileSha256": str(candidate.get("sourceFileSha256") or ""),
         "observedAmount": float(candidate.get("observedAmount") or 0),
+        "tableName": str(candidate.get("tableName") or "others_data"),
     }
 
 
@@ -150,8 +155,8 @@ def _insert_quarantine(
         INSERT INTO {QUARANTINE_TABLE} (
             registry_id, operation_id, source_file_name, source_file_sha256,
             raw_payload_json, raw_row_hash, prepared_payload_json, prepared_row_hash,
-            observed_amount, observed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            observed_amount, observed_at, target_table
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             registry_id,
@@ -164,6 +169,7 @@ def _insert_quarantine(
             evidence["preparedRowHash"],
             evidence["observedAmount"],
             _now(),
+            evidence["tableName"],
         ),
     )
 
@@ -438,7 +444,7 @@ def load_quarantine_evidence(rule_id: int, *, db_path) -> dict:
             f"""
             SELECT q.registry_id, q.operation_id, q.source_file_name, q.source_file_sha256,
                    q.raw_payload_json, q.raw_row_hash, q.prepared_payload_json, q.prepared_row_hash,
-                   q.observed_amount, q.observed_at, r.evidence_hash
+                   q.observed_amount, q.observed_at, q.target_table, r.evidence_hash
             FROM {QUARANTINE_TABLE} q
             JOIN {REGISTRY_TABLE} r ON r.id = q.registry_id
             WHERE q.registry_id = ?
@@ -459,6 +465,7 @@ def load_quarantine_evidence(rule_id: int, *, db_path) -> dict:
             "preparedRowHash": row["prepared_row_hash"],
             "observedAmount": float(row["observed_amount"]),
             "observedAt": row["observed_at"],
+            "tableName": row["target_table"],
             "evidenceHash": row["evidence_hash"],
         }
     finally:
