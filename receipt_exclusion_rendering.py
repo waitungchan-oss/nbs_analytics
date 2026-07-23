@@ -59,12 +59,25 @@ def _matching_governance_preview(
     rule_id: int | None,
     registry_revision: str,
 ) -> dict:
+    required_fields = ("ruleId", "registryRevision", "status", "previewFingerprint")
     if (
-        rule_id is None
-        or preview.get("status") != "revocation_ready"
-        or int(preview.get("ruleId") or -1) != int(rule_id)
-        or str(preview.get("registryRevision") or "") != str(registry_revision)
-        or not str(preview.get("previewFingerprint") or "")
+        not isinstance(preview, dict)
+        or rule_id is None
+        or not registry_revision
+        or any(field not in preview or preview[field] in (None, "") for field in required_fields)
+        or preview["status"] != "revocation_ready"
+    ):
+        return {}
+
+    try:
+        preview_rule_id = int(preview["ruleId"])
+        selected_rule_id = int(rule_id)
+    except (TypeError, ValueError):
+        return {}
+
+    if (
+        preview_rule_id != selected_rule_id
+        or preview["registryRevision"] != registry_revision
     ):
         return {}
     return preview

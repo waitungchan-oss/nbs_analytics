@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import receipt_exclusion_rendering as rendering
 
@@ -143,4 +144,53 @@ def test_matching_preview_requires_same_rule_and_registry_revision():
     ) == {}
     assert rendering._matching_governance_preview(
         preview, rule_id=4, registry_revision="revision-b",
+    ) == {}
+
+
+@pytest.mark.parametrize("field", ["ruleId", "registryRevision", "status", "previewFingerprint"])
+@pytest.mark.parametrize("value", [None, ""])
+def test_matching_preview_fails_closed_for_missing_or_empty_required_fields(field, value):
+    preview = {
+        "ruleId": 4,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+    }
+    if value is None:
+        preview.pop(field)
+    else:
+        preview[field] = value
+
+    assert rendering._matching_governance_preview(
+        preview, rule_id=4, registry_revision="revision-a",
+    ) == {}
+
+
+@pytest.mark.parametrize("malformed_rule_id", ["not-an-int", object()])
+def test_matching_preview_fails_closed_for_malformed_rule_id(malformed_rule_id):
+    preview = {
+        "ruleId": malformed_rule_id,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+    }
+
+    assert rendering._matching_governance_preview(
+        preview, rule_id=4, registry_revision="revision-a",
+    ) == {}
+
+
+def test_matching_preview_fails_closed_for_invalid_selected_rule_id_and_empty_registry_revision():
+    preview = {
+        "ruleId": 4,
+        "registryRevision": "revision-a",
+        "status": "revocation_ready",
+        "previewFingerprint": "preview-a",
+    }
+
+    assert rendering._matching_governance_preview(
+        preview, rule_id="not-an-int", registry_revision="revision-a",
+    ) == {}
+    assert rendering._matching_governance_preview(
+        preview, rule_id=4, registry_revision="",
     ) == {}
