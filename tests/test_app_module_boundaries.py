@@ -25,6 +25,12 @@ def test_pages_module_hosts_page_orchestration():
     assert "def _render_upload_area" in pages_source
 
 
+def test_app_pages_delegates_receipt_exclusion_rendering():
+    source = PAGES_PATH.read_text(encoding="utf-8")
+    assert "render_receipt_exclusion_confirmation(" in source
+    assert "render_receipt_exclusion_governance(" in source
+
+
 def test_agent_operations_is_the_fourth_top_level_tab():
     source = PAGES_PATH.read_text(encoding="utf-8")
 
