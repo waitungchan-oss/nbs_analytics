@@ -132,6 +132,9 @@ class WorkflowRetention:
         for info in run_infos:
             if info.status != "completed" or info.created_at >= cutoff or info.run_id in latest_ids:
                 continue
+            if self._blocked_graph_projection(info.path):
+                skipped.append({"path": str(info.path), "reason": "blocked governance graph projection"})
+                continue
             delete_paths = []
             for name in sorted(STAGE_ARTIFACTS):
                 path = info.path / name
@@ -168,6 +171,29 @@ class WorkflowRetention:
                     )
                 )
         return RetentionReport(generated_at=now.isoformat(), candidates=tuple(candidates), skipped=tuple(skipped))
+
+    def _blocked_graph_projection(self, run_dir: Path) -> bool:
+        path = run_dir / "governance-graph.json"
+        if path.is_symlink() or not path.exists() or not path.is_file():
+            return False
+        if path.stat().st_size > self.policy.stage_artifact_max_bytes:
+            return False
+        try:
+            payload = _read_object(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        if (
+            payload.get("schemaVersion") != "nbs-governance-graph-v1"
+            or payload.get("runId") != run_dir.name
+        ):
+            return False
+        return payload.get("overallStatus") in {
+            "blocked",
+            "blocked_missing_runner",
+            "blocked_user_decision",
+            "protected_incident",
+            "diagnosis_required",
+        }
 
     def apply(self, report: RetentionReport, *, dry_run: bool = False) -> RetentionReport:
         if dry_run:

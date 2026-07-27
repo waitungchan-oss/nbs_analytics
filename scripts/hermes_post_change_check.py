@@ -11,6 +11,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TIMEOUT_SECONDS = 180
 TARGETED_TESTS = [
+    "tests/test_governance_graph_models.py",
+    "tests/test_governance_graph_policy.py",
+    "tests/test_governance_graph_service.py",
+    "tests/test_governance_graph_cli.py",
     "tests/test_phase2_precheck_acceptance.py",
     "tests/test_dashboard_service.py",
     "tests/test_dashboard_api.py",
@@ -132,6 +136,60 @@ def documentation_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
     return report
 
 
+def governance_graph_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
+    """Inspect persisted Graph projections without rebuilding or writing them."""
+    runs_root = Path(project_root) / ".nbs_agent_runtime" / "runs"
+    max_bytes = 5 * 1024 * 1024
+    report = {
+        "schemaVersion": "governance-graph-hermes-report-v1",
+        "runCount": 0,
+        "artifactCount": 0,
+        "statusCounts": {},
+        "invalidRuns": [],
+        "capWarnings": [],
+        "policy": "read-only",
+        "invocations": 0,
+        "writes": 0,
+    }
+    if not runs_root.is_dir() or runs_root.is_symlink():
+        return report
+    for run_dir in sorted(runs_root.iterdir(), key=lambda path: path.name):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        report["runCount"] += 1
+        path = run_dir / "governance-graph.json"
+        if path.is_symlink() or not path.exists():
+            if path.is_symlink() and len(report["invalidRuns"]) < 100:
+                report["invalidRuns"].append(run_dir.name)
+            continue
+        if not path.is_file():
+            if len(report["invalidRuns"]) < 100:
+                report["invalidRuns"].append(run_dir.name)
+            continue
+        report["artifactCount"] += 1
+        if path.stat().st_size > max_bytes:
+            report["capWarnings"].append({"runId": run_dir.name, "artifact": path.name})
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            if len(report["invalidRuns"]) < 100:
+                report["invalidRuns"].append(run_dir.name)
+            continue
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schemaVersion") != "nbs-governance-graph-v1"
+            or payload.get("runId") != run_dir.name
+        ):
+            if len(report["invalidRuns"]) < 100:
+                report["invalidRuns"].append(run_dir.name)
+            continue
+        status = payload.get("overallStatus")
+        if isinstance(status, str):
+            report["statusCounts"][status] = report["statusCounts"].get(status, 0) + 1
+    return report
+
+
 def build_check_plan(
     *,
     include_monitor: bool = True,
@@ -176,6 +234,11 @@ def build_check_plan(
         "import json; "
         "print(json.dumps(documentation_artifact_report(), sort_keys=True))"
     )
+    governance_graph_artifact_report_code = (
+        "from scripts.hermes_post_change_check import governance_graph_artifact_report; "
+        "import json; "
+        "print(json.dumps(governance_graph_artifact_report(), sort_keys=True))"
+    )
     plan = [
         CheckStep("git-status", ["git", "status", "--short", "--branch"]),
         CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
@@ -203,6 +266,13 @@ def build_check_plan(
         CheckStep(
             "documentation-artifact-report",
             [py, "-c", documentation_artifact_report_code],
+            required=False,
+        )
+    )
+    plan.append(
+        CheckStep(
+            "governance-graph-artifact-report",
+            [py, "-c", governance_graph_artifact_report_code],
             required=False,
         )
     )

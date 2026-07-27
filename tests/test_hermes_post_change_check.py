@@ -130,6 +130,53 @@ def test_documentation_artifact_report_validates_schema_caps_and_writes_nothing(
     assert report["writes"] == 0
 
 
+def test_governance_graph_report_is_read_only_and_bounded(tmp_path):
+    report = post_check.governance_graph_artifact_report(tmp_path)
+
+    assert report["schemaVersion"] == "governance-graph-hermes-report-v1"
+    assert report["policy"] == "read-only"
+    assert report["invocations"] == 0
+    assert report["writes"] == 0
+    assert report["runCount"] == 0
+
+
+def test_hermes_targeted_tests_include_graph_pack():
+    targeted = next(
+        step for step in post_check.build_check_plan(include_monitor=False)
+        if step.label == "targeted-tests"
+    )
+    for name in (
+        "tests/test_governance_graph_models.py",
+        "tests/test_governance_graph_policy.py",
+        "tests/test_governance_graph_service.py",
+        "tests/test_governance_graph_cli.py",
+    ):
+        assert name in targeted.command
+
+
+def test_governance_graph_report_validates_schema_caps_and_symlinks(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    valid = runs / "run-valid"
+    valid.mkdir(parents=True)
+    (valid / "governance-graph.json").write_text(
+        '{"schemaVersion":"nbs-governance-graph-v1","runId":"run-valid","overallStatus":"blocked"}',
+        encoding="utf-8",
+    )
+    malformed = runs / "run-malformed"
+    malformed.mkdir()
+    (malformed / "governance-graph.json").write_text("not-json", encoding="utf-8")
+    dangling = runs / "run-dangling"
+    dangling.mkdir()
+    (dangling / "governance-graph.json").symlink_to(tmp_path / "missing.json")
+
+    report = post_check.governance_graph_artifact_report(tmp_path)
+
+    assert report["runCount"] == 3
+    assert report["artifactCount"] == 2
+    assert set(report["invalidRuns"]) == {"run-malformed", "run-dangling"}
+    assert report["statusCounts"] == {"blocked": 1}
+
+
 def test_overall_status_fails_on_failed_required_step():
     results = [
         {"label": "git-status", "required": True, "exitCode": 0},

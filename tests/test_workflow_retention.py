@@ -103,6 +103,26 @@ def test_old_completed_governance_projection_is_compacted(tmp_path):
     assert not (path / "governance-graph.json").exists()
 
 
+def test_old_completed_blocked_governance_projection_is_preserved(tmp_path):
+    runs = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs.mkdir(parents=True)
+    path = _run(runs, "blocked-graph", NOW - timedelta(days=200), "completed")
+    (path / "governance-graph.json").write_text(
+        json.dumps({
+            "schemaVersion": "nbs-governance-graph-v1",
+            "runId": "blocked-graph",
+            "overallStatus": "blocked",
+        })
+    )
+    for index in range(30):
+        _run(runs, f"new-{index:02d}", NOW - timedelta(days=199 - index))
+
+    report = WorkflowRetention(tmp_path, policy=_policy()).plan(NOW)
+
+    assert all(candidate.run_id != "blocked-graph" for candidate in report.candidates)
+    assert (path / "governance-graph.json").exists()
+
+
 @pytest.mark.parametrize("status", ["blocked", "failed", "changes_required"])
 def test_old_noncompleted_governance_projection_is_preserved(tmp_path, status):
     runs = tmp_path / ".nbs_agent_runtime" / "runs"
