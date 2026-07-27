@@ -21,6 +21,27 @@
 - 正式口徑固定為「不含掛賬核銷與TT退款轉團款」；2026-05 frozen baseline 固定為 `HKD 12,057,968`。
 - 每個 Task 依序完成 TDD、focused tests、`git diff --check` 與 findings-first Review；Implementation Agent 不得 commit、merge 或自行進下一個 Task。Codex 只在使用者明確授權後處理 Git integration。
 
+## Plan Reconciliation（2026-07-27）
+
+狀態：Phase B implementation completed；Task 1 與 Task 2 均已完成並通過各自的 strict Review。
+
+| Scope | Status | Evidence |
+|---|---|---|
+| Task 1 — compact Governance Graph read model | completed | `7032d81`；114 focused tests；strict Review PASS |
+| Task 2 — Agent Operations Graph rendering | completed | `5d52c5c`；22 focused UI/boundary tests；strict Review PASS |
+| Full verification | completed | `1079 passed`；compile PASS；system acceptance PASS |
+| Hermes post-change acceptance | completed | `overallStatus: pass`；baseline matched；SQLite SHA-256 unchanged |
+| Documentation dispatch | skipped | deterministic change scope is code/test only; no documentation proposal required |
+
+Immutable implementation review scopes were:
+
+- Task 1: `196d278..7032d81`
+- Task 2: `ac5852f..5d52c5c`（working-tree review before commit）
+
+No remaining implementation Task exists in this Phase B plan. Future graph query、version
+comparison、dependency/impact analysis and risk summary belong to a separately approved
+follow-up plan.
+
 ---
 
 ## File Structure
@@ -407,9 +428,9 @@ After both Task Reviews PASS, Codex performs the following in order:
 - Scope: no new API, database, application process, Graph build path or control-plane
   surface is included. `app_pages.py` remains unchanged unless a later approved
   contract explicitly proves it necessary.
-- Interface consistency: Task 1 produces `governanceGraph`; Task 2 consumes exactly
-  `status`, `overallStatus`, `freshness`, `nodes`, `blockers`, `diagnostics` and
-  `evidence`. `available`, `unavailable`, `invalid` and `blocked` have explicit
-  rendering semantics.
+- Interface consistency: Task 1 produces `governanceGraph`; Task 2 consumes
+  `status`, `overallStatus`, `freshness`, `nodeStatuses` (with a compatibility fallback
+  for the existing `nodes` projection), `blockers`, `diagnostics` and `evidence`.
+  `available`, `unavailable`, `invalid` and `blocked` have explicit rendering semantics.
 - Placeholder scan: no unresolved marker, deferred implementation instruction or
   unspecified test behavior remains.
