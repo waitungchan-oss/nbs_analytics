@@ -93,6 +93,15 @@ def test_review_cli_collect_only_outputs_review_bundle():
     assert set(payload) == {"schemaVersion", "taskContract", "contextSummary", "gitDiff", "verification", "bundleFingerprint"}
 
 
+def test_review_cli_accepts_working_tree_alias_for_dirty_review():
+    result = subprocess.run(
+        [str(PYTHON), "scripts/review_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md", "--base", "HEAD", "--head", "working-tree", "--collect-only"],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["gitDiff"]["head"] == "WORKTREE"
+
+
 def test_review_cli_strict_without_verification_exits_two(tmp_path):
     context = runtime_fixture("context", valid_context_summary())
     result = subprocess.run(

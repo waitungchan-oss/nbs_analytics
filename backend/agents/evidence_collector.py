@@ -16,6 +16,17 @@ from backend.agents.evidence_models import (
 )
 
 
+_WORKTREE_HEAD_ALIASES = frozenset({"WORKTREE", "WORKING-TREE"})
+
+
+def normalize_review_head_ref(head_ref: str) -> str:
+    """Normalize human-friendly dirty-worktree aliases to the canonical sentinel."""
+    if not isinstance(head_ref, str):
+        return head_ref
+    normalized = head_ref.strip().upper().replace("_", "-")
+    return "WORKTREE" if normalized in _WORKTREE_HEAD_ALIASES else head_ref
+
+
 @dataclass(frozen=True)
 class EvidencePolicy:
     _REVIEW_ROOT_SOURCE_EXTENSIONS = frozenset({".py"})
@@ -338,6 +349,7 @@ class EvidenceCollector:
     def collect_review(
         self, brief_path: Path, base_ref: str = "main", head_ref: str = "WORKTREE"
     ) -> EvidenceBundle:
+        head_ref = normalize_review_head_ref(head_ref)
         repository, commands = self._repository()
         base_sha, base_command = self._resolve_ref("git-base", base_ref)
         head_command = None

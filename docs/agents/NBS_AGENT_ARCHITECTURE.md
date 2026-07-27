@@ -248,7 +248,7 @@ Token budget 是上限，不是必須用完的配額。超出上限時回傳 `co
 .venv/bin/python scripts/review_agent.py \
   --brief docs/briefs/<brief>.md \
   --base main \
-  --head HEAD \
+  --head WORKTREE \
   --context .nbs_agent_runtime/reports/context.json \
   --strict \
   --output .nbs_agent_runtime/reports/review.json
@@ -257,6 +257,10 @@ Token budget 是上限，不是必須用完的配額。超出上限時回傳 `co
   --contract .nbs_agent_runtime/contracts/<task>.json \
   --agent-command <approved-offline-worker-command>
 ```
+
+`--head WORKTREE` 是未提交變更的 canonical review mode；CLI 也接受
+`worktree`、`working-tree` 與 `working_tree` aliases。若要 review 已提交的
+immutable commit，才傳入該 commit ref；不要用 `HEAD` 對 `HEAD` 期待取得 dirty diff。
 
 ### Phase 1 Workflow CLI
 

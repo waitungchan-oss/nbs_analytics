@@ -39,7 +39,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect or run read-only Review Agent evidence")
     parser.add_argument("--brief", required=True)
     parser.add_argument("--base", default="main")
-    parser.add_argument("--head", default="WORKTREE")
+    parser.add_argument(
+        "--head",
+        default="WORKTREE",
+        help="Review head ref; use WORKTREE (or working-tree) for uncommitted changes.",
+    )
     parser.add_argument("--context")
     parser.add_argument("--task-contract")
     parser.add_argument("--verification")

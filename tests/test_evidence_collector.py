@@ -227,6 +227,25 @@ def test_review_collection_uses_argv_and_captures_changed_files(tmp_path):
     assert len(bundle.repository["baseSha"]) == 40
 
 
+@pytest.mark.parametrize("head_ref", ["worktree", "working-tree", "working_tree", "WORKTREE"])
+def test_review_collection_accepts_worktree_head_aliases(tmp_path, head_ref):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    brief.write_text("objective changed", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief, base_ref="HEAD", head_ref=head_ref,
+    )
+
+    assert bundle.repository["headRef"] == "WORKTREE"
+    assert any(item.source == "docs/brief.md" for item in bundle.evidence)
+
+
 def test_review_collection_includes_allowlisted_untracked_files_but_not_denied_data(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)
