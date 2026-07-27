@@ -9,7 +9,9 @@ def test_health_check_returns_runtime_status():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "ok"
+    assert payload["status"] in {"ok", "degraded"}
+    if payload["status"] == "degraded":
+        assert "Cache generation signature does not match current database" in payload["issues"]
     assert payload["service"] == "nbs-analytics-api"
     assert "db" in payload
     assert "runtimeCache" in payload

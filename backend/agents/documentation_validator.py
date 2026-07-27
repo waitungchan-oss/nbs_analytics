@@ -122,7 +122,9 @@ class DocumentationProposalValidator:
             vault_relative = None
             if obsidian is not None:
                 repo_identity = identity.split("#", 1)[0].split("::", 1)[0].split("|", 1)[0]
-                vault_relative = obsidian.resolve_info(kind, Path(repo_identity).name).vault_relative_path
+                resolved_vault = obsidian.resolve_info(kind, Path(repo_identity).name)
+                if resolved_vault.path.exists():
+                    vault_relative = resolved_vault.vault_relative_path
             items.append(DocumentationPreviewItem(
                 kind, identity, vault_relative, _digest(before) if path.exists() else None,
                 _digest(after), _diff(identity, before, after),
