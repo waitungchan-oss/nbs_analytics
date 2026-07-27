@@ -18,7 +18,7 @@
 | Task 2 — Deterministic Risk, Gate, Transition, Retry and Freshness Policy | completed | commit `63564c6`; `backend/agents/governance_graph_policy.py`；policy/model/storage/retention focused tests included in `96 passed` |
 | Task 3 — Canonical Artifact Reader and Derived Snapshot Builder | completed | implementation commit `1186993`; focused service/store suite 31 passed |
 | Task 4 — JSON-Only Governance Graph CLI | completed | commit `34d6035`; focused Graph CLI suite 4 passed |
-| Task 5 — Hermes Read-Only Coverage and Retention Regression | pending | Graph-specific Hermes coverage is not present |
+| Task 5 — Hermes Read-Only Coverage and Retention Regression | completed | commit `d8a5a57`; focused Graph/Hermes/retention suite 121 passed |
 | Task 6 — Governance Contract Documentation and Final Acceptance | pending | operator contract and documentation tests are not present |
 
 Reconciliation boundary：Task 1–2 的 commit 與測試 evidence 已核對；Task 3–6 不因 plan 文字或預期架構而預設完成。Phase B Agent Operations Graph view 與 Phase C telemetry 仍不在 Phase A scope。正式口徑與 2026-05 frozen baseline 維持不變。
@@ -395,7 +395,7 @@ git commit -m "feat: add governance graph cli"
 **Consumes:** persisted Graph projection and existing Hermes check plan.
 **Produces:** `governance-graph-hermes-report-v1` and focused coverage.
 
-- [ ] **Step 1: Write failing Hermes report tests.**
+- [x] **Step 1: Write failing Hermes report tests.**
 
 ```python
 def test_governance_graph_report_is_read_only_and_bounded(tmp_path):
@@ -411,13 +411,21 @@ def test_hermes_targeted_tests_include_graph_pack():
         assert name in targeted.command
 ```
 
-- [ ] **Step 2: Implement only a bounded read-only report.**
+- [x] **Step 2: Implement only a bounded read-only report.**
 
 `governance_graph_artifact_report(project_root=PROJECT_ROOT)` scans only safe run dirs and `governance-graph.json`; checks regular file, cap, JSON object and schema. It returns counts, invalid runs, cap warnings, `policy: "read-only"`, `invocations: 0`, `writes: 0`. It must not instantiate the builder, rebuild snapshots, call CLI, execute a runner or invoke Documentation.
 
 Add the Graph focused tests to `TARGETED_TESTS`. Keep Agent Operations unchanged; Graph UI belongs to Phase B.
 
-- [ ] **Step 3: Prove projection retention behavior, verify and commit.**
+- [x] **Step 3: Prove projection retention behavior, verify and commit.**
+
+Task 5 evidence: `d8a5a57` (`test: cover governance graph acceptance`). Focused
+Graph/Hermes/retention suite: 121 passed; Hermes targeted pack: 665 passed,
+`overallStatus=PASS`, system acceptance passed, baseline matched. Graph Hermes
+report observed `runCount=45`, `artifactCount=0`, `policy=read-only`,
+`invocations=0`, `writes=0`. Full pytest: 1064 passed with the same two
+unrelated failures (`/api/health` degraded and verified backfill
+`partially_applied`).
 
 ```python
 def test_old_completed_projection_is_compacted_but_blocked_projection_is_preserved(tmp_path):
