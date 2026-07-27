@@ -1,0 +1,57 @@
+name: Hermes Governance Graph
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  hermes-governance-graph:
+    name: Hermes Governance Graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install focused test dependency
+        run: python -m pip install "pytest>=8,<9"
+
+      - name: Run Governance Graph focused tests
+        run: >-
+          python -m pytest
+          tests/test_governance_graph_models.py
+          tests/test_governance_graph_policy.py
+          tests/test_governance_graph_service.py
+          tests/test_governance_graph_cli.py
+          tests/test_hermes_post_change_check.py
+          tests/test_workflow_retention.py -q
+
+      - name: Run Hermes read-only Graph inspection
+        run: |
+          mkdir -p artifacts
+          python - <<'PY' > artifacts/governance-graph-hermes-report.json
+          import json
+          from pathlib import Path
+          from scripts.hermes_post_change_check import governance_graph_artifact_report
+
+          report = governance_graph_artifact_report(Path.cwd())
+          if report["policy"] != "read-only" or report["invocations"] != 0 or report["writes"] != 0:
+              raise SystemExit("Hermes Graph inspection violated read-only policy")
+          print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+          PY
+          cat artifacts/governance-graph-hermes-report.json
+
+      - name: Upload Hermes evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-graph-hermes-report
+          path: artifacts/governance-graph-hermes-report.json
+          if-no-files-found: error
