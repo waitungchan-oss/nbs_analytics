@@ -7,6 +7,8 @@ import pytest
 
 from backend.agents.context_agent_service import build_context_evidence_payload
 from backend.agents.evidence_models import EvidenceBundle
+from backend.agents.governance_graph_service import GovernanceGraphBuilder
+from backend.agents.workflow_store import WorkflowStore
 from backend.services.agent_operations_service import (
     DEFAULT_STAGE_ARTIFACT_MAX_BYTES,
     AgentOperationsService,
@@ -152,6 +154,107 @@ def _write_valid_stage_artifacts(run: Path) -> None:
     })
     _write_json(run / "full-verification.json", _full_verification_payload())
     _write_json(run / "hermes.json", {"overallStatus": "pass"})
+
+
+def _write_graph_projection(root: Path, run_id: str, *, stale: bool = False) -> Path:
+    store = WorkflowStore(root)
+    if stale:
+        stale_run = root / ".nbs_agent_runtime" / "runs" / run_id
+        _write_valid_stage_artifacts(stale_run)
+        hermes_path = stale_run / "hermes.json"
+        hermes = json.loads(hermes_path.read_text(encoding="utf-8"))
+        hermes["gitHead"] = "b" * 40
+        _write_json(hermes_path, hermes)
+        manifest_path = root / ".nbs_agent_runtime" / "runs" / run_id / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["gitHead"] = "d" * 40
+        _write_json(manifest_path, manifest)
+    else:
+        store.write_artifact(run_id, "risk-classification.json", {
+            "schemaVersion": "nbs-governance-risk-v1",
+            "level": "R1",
+            "surfaces": [],
+            "evidenceRefs": [],
+        })
+    GovernanceGraphBuilder(root, store=store).persist(run_id)
+    return root / ".nbs_agent_runtime" / "runs" / run_id / "governance-graph.json"
+
+
+def _make_invalid_graph_artifact(path: Path, root: Path, mode: str) -> None:
+    if mode == "malformed_json":
+        path.write_text("{bad json", encoding="utf-8")
+    elif mode == "unknown_schema":
+        _write_json(path, {"schemaVersion": "unknown-v1"})
+    elif mode == "symlink":
+        outside = root / "outside-graph.json"
+        _write_json(outside, {})
+        path.symlink_to(outside)
+    elif mode == "oversize":
+        path.write_text("x" * (DEFAULT_STAGE_ARTIFACT_MAX_BYTES + 1), encoding="utf-8")
+    else:
+        raise AssertionError(f"unknown invalid graph fixture: {mode}")
+
+
+def test_existing_graph_projection_is_compacted_without_rebuilding(tmp_path, monkeypatch):
+    run = _valid_run(tmp_path, "graph-ready")
+    graph_path = _write_graph_projection(tmp_path, run.name)
+    before = graph_path.read_bytes()
+    called = []
+    monkeypatch.setattr(
+        GovernanceGraphBuilder,
+        "persist",
+        lambda *args, **kwargs: called.append("persist"),
+    )
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert called == []
+    assert item["governanceGraph"]["status"] == "available"
+    assert item["governanceGraph"]["overallStatus"] == "awaiting_authorization"
+    assert item["governanceGraph"]["nodes"][0] == {
+        "nodeId": "risk", "status": "passed", "reasonCode": None,
+    }
+    assert graph_path.read_bytes() == before
+
+
+def test_missing_graph_projection_is_unavailable_not_inferred(tmp_path):
+    _valid_run(tmp_path, "graph-missing")
+
+    item = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]
+
+    assert item["governanceGraph"] == {"status": "unavailable"}
+
+
+@pytest.mark.parametrize("mode", ["malformed_json", "unknown_schema", "symlink", "oversize"])
+def test_invalid_graph_projection_is_isolated_and_never_leaks_paths(tmp_path, mode):
+    good = _valid_run(tmp_path, "good")
+    bad = _valid_run(tmp_path, "bad")
+    _write_graph_projection(tmp_path, good.name)
+    graph_path = bad / "governance-graph.json"
+    _make_invalid_graph_artifact(graph_path, tmp_path, mode)
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    by_id = {item["runId"]: item for item in snapshot["runs"]}
+    assert set(by_id) == {"good", "bad"}
+    assert by_id["good"]["governanceGraph"]["status"] == "available"
+    assert by_id["bad"]["governanceGraph"]["status"] == "invalid"
+    assert by_id["bad"]["governanceGraph"]["diagnostics"] in (
+        [{"code": "invalid_projection"}], [{"code": "unsafe_projection"}],
+    )
+    assert str(tmp_path) not in json.dumps(snapshot)
+
+
+def test_persisted_stale_graph_is_exposed_as_non_pass_state(tmp_path):
+    run = _valid_run(tmp_path, "graph-stale")
+    graph_path = _write_graph_projection(tmp_path, run.name, stale=True)
+
+    graph = AgentOperationsService(tmp_path).build_snapshot()["runs"][0]["governanceGraph"]
+
+    assert graph_path.is_file()
+    assert graph["status"] == "available"
+    assert graph["freshness"] == "stale"
+    assert graph["overallStatus"] == "blocked"
 
 
 def test_empty_runtime_returns_valid_snapshot(tmp_path):
