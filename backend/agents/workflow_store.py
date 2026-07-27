@@ -103,6 +103,17 @@ class WorkflowStore:
     def load_status(self, run_id: str) -> WorkflowStatus:
         return WorkflowStatus.from_dict(self._read_json(self._run_file(run_id, "status.json")))
 
+    def read_artifact(self, run_id: str, name: str) -> dict:
+        if Path(name).name != name:
+            raise PermissionError("artifact path must stay inside the run directory")
+        if name not in ALLOWED_ARTIFACTS:
+            raise ValueError("artifact name is not allowed")
+        path = self._run_file(run_id, name)
+        self._assert_regular_file(path, "workflow artifact")
+        if path.stat().st_size > self.stage_artifact_max_bytes:
+            raise ValueError("stage artifact exceeds hard cap")
+        return self._read_json(path)
+
     def write_approval(self, run_id: str, approval: WorkflowApproval) -> None:
         if approval.run_id != run_id:
             raise ValueError("approval run ID does not match run ID")

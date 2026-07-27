@@ -134,6 +134,17 @@ def test_store_round_trips_manifest_status_approval_and_artifact(store, manifest
     assert (run_dir / "approval.json").is_file()
 
 
+def test_read_artifact_is_bounded_and_read_only(store, manifest):
+    store.create_run(manifest, _status())
+    store.write_artifact(manifest.run_id, "context.json", {"ready": True})
+
+    assert store.read_artifact(manifest.run_id, "context.json") == {"ready": True}
+    with pytest.raises(PermissionError):
+        store.read_artifact(manifest.run_id, "../context.json")
+    with pytest.raises(ValueError):
+        store.read_artifact(manifest.run_id, "governance-graph.json")
+
+
 def test_projection_write_does_not_mutate_canonical_status(store, manifest):
     store.create_run(manifest, _status())
     before = store.load_status(manifest.run_id).to_dict()
