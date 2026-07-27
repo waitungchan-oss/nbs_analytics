@@ -74,6 +74,12 @@ Agent Operations 只讀 Phase 1 artifacts，不是第二個 source of truth。UI
 
 ## 執行邊界
 
+Governance Graph 的 scope、R0/R1/R2、Task ownership、CLI、freshness、retention
+與 `blocked_missing_runner` 邊界，統一見
+[NBS Governance Graph Contract](NBS_GOVERNANCE_GRAPH_CONTRACT.md)。Graph 是
+canonical artifacts 的 read-only projection，不是 dispatch 或 approval input；
+Phase B Agent Operations Graph view 仍不得寫入正式狀態。
+
 - `--collect-only` 不調用 LLM，只產生受白名單限制的 bundle。
 - `--agent-command` 只可使用使用者或環境明確批准的 runner。
 - Agent 輸出不能取代 Codex 的規劃、使用者授權、完整驗證或 Hermes acceptance。

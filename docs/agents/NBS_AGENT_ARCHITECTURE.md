@@ -434,6 +434,11 @@ Agent Operations 是現行的 Streamlit read-only view，讀取 Phase 1 artifact
 
 ## 21. 治理與正式流程
 
+Governance Graph Phase A 的 operator contract 見
+[NBS Governance Graph Contract](NBS_GOVERNANCE_GRAPH_CONTRACT.md)。Graph 只由
+canonical artifacts 衍生 read-only snapshot；`validate` 與 `status` zero-write，
+不得成為 approval、dispatch、runtime、SQLite 或 Git 的 control-plane 入口。
+
 ```text
 Brief
   -> Context Collector / Context Agent

@@ -219,6 +219,12 @@ Hermes 不得自行要求或執行以下操作：
 
 若需要修復，Hermes 必須先輸出規劃、影響範圍、風險與驗收方式，等待使用者授權。
 
+Governance Graph Hermes report 的 read-only contract 見
+[NBS Governance Graph Contract](docs/agents/NBS_GOVERNANCE_GRAPH_CONTRACT.md)。
+Hermes 只檢查 bounded `governance-graph.json` projection、schema、cap、identity
+與 status counts；不 rebuild snapshot、不呼叫 runner、不 approve/dispatch/apply，
+也不把 Hermes PASS 當成 Review PASS。
+
 ---
 
 ## 6. Change Detection
