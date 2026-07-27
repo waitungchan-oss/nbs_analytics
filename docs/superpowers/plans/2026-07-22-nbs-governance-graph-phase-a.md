@@ -16,7 +16,7 @@
 |---|---|---|
 | Task 1 — Strict Models and Projection Storage | completed | commit `176c7e6`; `backend/agents/governance_graph_models.py`、projection storage/retention changes；models、workflow store、workflow retention focused tests included in `96 passed` |
 | Task 2 — Deterministic Risk, Gate, Transition, Retry and Freshness Policy | completed | commit `63564c6`; `backend/agents/governance_graph_policy.py`；policy/model/storage/retention focused tests included in `96 passed` |
-| Task 3 — Canonical Artifact Reader and Derived Snapshot Builder | pending | service module and service tests are not present |
+| Task 3 — Canonical Artifact Reader and Derived Snapshot Builder | completed | implementation commit `1186993`; focused service/store suite 31 passed |
 | Task 4 — JSON-Only Governance Graph CLI | pending | CLI module and CLI tests are not present |
 | Task 5 — Hermes Read-Only Coverage and Retention Regression | pending | Graph-specific Hermes coverage is not present |
 | Task 6 — Governance Contract Documentation and Final Acceptance | pending | operator contract and documentation tests are not present |
@@ -241,7 +241,7 @@ git commit -m "feat: add governance graph policy"
 **Consumes:** Tasks 1-2, `WorkflowStore.load_manifest()`, `load_status()` and safe artifact reads.
 **Produces:** `GovernanceGraphBuilder.build()`, `persist()`, `validate()`, `status()`.
 
-- [ ] **Step 1: Write failing mapping and zero-write tests.**
+- [x] **Step 1: Write failing mapping and zero-write tests.**
 
 ```python
 def test_existing_run_without_risk_is_not_auto_classified(tmp_path):
@@ -263,12 +263,12 @@ def test_persist_writes_only_projection_and_validate_is_zero_write(tmp_path):
     assert _projection_path(tmp_path, run_id).read_bytes() == projection_before
 ```
 
-- [ ] **Step 2: Prove RED.**
+- [x] **Step 2: Prove RED.**
 
 Run: `.venv/bin/python -m pytest tests/test_governance_graph_service.py -q`
 Expected: missing service module.
 
-- [ ] **Step 3: Implement allowlisted artifact mapping.**
+- [x] **Step 3: Implement allowlisted artifact mapping.**
 
 ```python
 CANONICAL_GRAPH_ARTIFACTS = {
@@ -295,11 +295,17 @@ Builder rules:
 - Task 2 freshness invalidates stale descendants;
 - no orchestrator, notifier, subprocess, runner, Controller or service manager invocation.
 
-- [ ] **Step 4: Implement completion semantics.**
+- [x] **Step 4: Implement completion semantics.**
 
 A full verification / Hermes failure prevents documentation and completion. Explicit canonical `blocked_missing_runner` maps only to that status; a valid Hermes pass without documentation outcome is `awaiting_documentation`. Git outcome is only `committed`, `merged` or `kept_branch_by_user`; absent outcome is `ready_for_integration`. `completed` requires final Gate, documentation application or deterministic no-doc artifact, and Git evidence.
 
-- [ ] **Step 5: Add stale / security tests, verify and commit.**
+- [x] **Step 5: Add stale / security tests, verify and commit.**
+
+Task 3 evidence: `1186993` (`feat: build governance graph snapshots`). Focused
+Governance Graph / WorkflowStore tests: 31 passed; Hermes post-change check:
+`overallStatus=PASS`, system acceptance passed, baseline matched. Full pytest
+仍有兩項既有 unrelated failures：runtime health 回傳 `degraded` 與 verified
+backfill 回傳 `partially_applied`；本 Task 未修改其相關路徑。
 
 ```python
 def test_changed_git_identity_invalidates_review_and_hermes(tmp_path):
