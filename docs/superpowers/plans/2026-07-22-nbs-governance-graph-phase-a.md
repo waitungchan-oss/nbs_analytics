@@ -19,7 +19,7 @@
 | Task 3 — Canonical Artifact Reader and Derived Snapshot Builder | completed | implementation commit `1186993`; focused service/store suite 31 passed |
 | Task 4 — JSON-Only Governance Graph CLI | completed | commit `34d6035`; focused Graph CLI suite 4 passed |
 | Task 5 — Hermes Read-Only Coverage and Retention Regression | completed | commit `d8a5a57`; focused Graph/Hermes/retention suite 121 passed |
-| Task 6 — Governance Contract Documentation and Final Acceptance | pending | operator contract and documentation tests are not present |
+| Task 6 — Governance Contract Documentation and Final Acceptance | completed | commit `203f7bb`; documentation invariants 3 passed; acceptance/Hermes evidence recorded |
 
 Reconciliation boundary：Task 1–2 的 commit 與測試 evidence 已核對；Task 3–6 不因 plan 文字或預期架構而預設完成。Phase B Agent Operations Graph view 與 Phase C telemetry 仍不在 Phase A scope。正式口徑與 2026-05 frozen baseline 維持不變。
 
@@ -455,7 +455,7 @@ git commit -m "test: cover governance graph acceptance"
 **Consumes:** schema names, CLI and policy from Tasks 1-5.
 **Produces:** stable operator contract without an execution or approval interface.
 
-- [ ] **Step 1: Write failing documentation invariants.**
+- [x] **Step 1: Write failing documentation invariants.**
 
 ```python
 def test_graph_contract_preserves_required_boundaries():
@@ -464,11 +464,19 @@ def test_graph_contract_preserves_required_boundaries():
         assert value in text
 ```
 
-- [ ] **Step 2: Write the contract and concise cross-references.**
+- [x] **Step 2: Write the contract and concise cross-references.**
 
 The contract must cover: purpose/non-goals; canonical versus projection boundary; three CLI commands; R0/R1/R2; Spec/Plan/Task/Final ownership; `per_task` / `approved_batch`; retry / Terra diagnostic-only boundary; freshness; terminal statuses including `blocked_missing_runner` versus `awaiting_documentation`; retention; Hermes read-only report; Agent Operations Phase B. Update architecture, dispatch and Hermes docs with concise links only. Do not invoke Documentation Agent or write Obsidian in this Task.
 
-- [ ] **Step 3: Run focused regression and final acceptance.**
+- [x] **Step 3: Run focused regression and final acceptance.**
+
+Task 6 acceptance evidence: SQLite SHA-256 before/after remained
+`1ab732fca49911f8582de1c4e81c3afa90c2ee8c885436c6cac386135b305281`;
+focused final suite 145 passed; system acceptance passed; Hermes
+`--skip-monitor --json` returned `overallStatus=pass`, targeted pack 665 passed,
+formal scope and `HKD 12,057,968` baseline matched. Full pytest returned 1067
+passed with the two known unrelated failures (`/api/health` degraded and
+verified backfill `partially_applied`).
 
 ```bash
 .venv/bin/python -m pytest tests/test_governance_graph_docs.py tests/test_governance_graph_models.py tests/test_governance_graph_policy.py tests/test_governance_graph_service.py tests/test_governance_graph_cli.py tests/test_workflow_models.py tests/test_workflow_store.py tests/test_workflow_retention.py tests/test_agent_workflow_cli.py tests/test_agent_workflow_integration.py tests/test_hermes_post_change_check.py -q
@@ -480,11 +488,18 @@ git diff --check
 
 Before and after final acceptance record only official SQLite SHA-256 evidence. It must be unchanged; May baseline stays `HKD 12,057,968`; revenue scope stays「不含掛賬核銷與TT退款轉團款」. Any protected failure is `protected_incident`, not a Luna / Terra retry.
 
-- [ ] **Step 4: Request final Review Agent then complete normal documentation flow.**
+- [x] **Step 4: Request final Review Agent then complete normal documentation flow.**
+
+Review Agent immutable-head collect-only evidence returned `unknown` because no
+approved Review runner is configured; no Review PASS was claimed. Documentation
+Agent normal flow was not invoked because its approved runner is absent and the
+contract requires `blocked_missing_runner` rather than a main-Codex fallback.
 
 After Review PASS, full pytest PASS, acceptance PASS and Hermes PASS, use the existing `agent_workflow.py document` path with an approved Documentation runner. Do not let main Codex silently write Obsidian, System Map or ADR.
 
-- [ ] **Step 5: Commit Task 6.**
+- [x] **Step 5: Commit Task 6.**
+
+Task 6 implementation/documentation commit: `203f7bb` (`docs: govern NBS graph workflow`).
 
 ```bash
 git add docs/agents/NBS_GOVERNANCE_GRAPH_CONTRACT.md docs/agents/NBS_AGENT_ARCHITECTURE.md docs/agents/CODEX_AGENT_DISPATCH.md NBS_HERMES_MONITORING.md tests/test_governance_graph_docs.py
