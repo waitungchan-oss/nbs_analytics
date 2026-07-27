@@ -15,6 +15,10 @@ from backend.agents.documentation_models import (
     DocumentationEvidence,
     DocumentationProposal,
 )
+from backend.agents.governance_graph_models import (
+    GovernanceGraphSchemaError,
+    GovernanceGraphSnapshot,
+)
 from backend.agents.review_agent_service import validate_context_summary
 from backend.agents.workflow_models import WorkflowEvent, WorkflowManifest, WorkflowStatus
 from backend.agents.workflow_retention import RetentionPolicy
@@ -29,6 +33,7 @@ STAGE_FILES = {
     "full_verification": "full-verification.json",
     "hermes": "hermes.json",
 }
+GOVERNANCE_GRAPH_FILE = "governance-graph.json"
 DOCUMENTATION_FILES = {
     "evidence": "documentation-evidence.json",
     "proposal": "documentation-proposal.json",
@@ -245,9 +250,55 @@ class AgentOperationsService:
             "hermes": self._hermes(stage_payloads["hermes"]),
             "tokenUsage": self._token_usage(stage_payloads),
             "documentation": documentation,
+            "governanceGraph": self._governance_graph(run_dir, stage_artifact_max_bytes),
             "retentionState": "archived_summary" if archived else "complete",
         }
         return item
+
+    def _governance_graph(self, run_dir: Path, hard_cap: int) -> dict[str, Any]:
+        try:
+            payload = self._read_json(
+                run_dir / GOVERNANCE_GRAPH_FILE,
+                run_dir,
+                hard_cap,
+                optional=True,
+            )
+            if payload is None:
+                return {"status": "unavailable"}
+            snapshot = GovernanceGraphSnapshot.from_dict(payload)
+        except _UnsafeArtifactError:
+            return {"status": "invalid", "diagnostics": [{"code": "unsafe_projection"}]}
+        except (GovernanceGraphSchemaError, _ArtifactError, OSError, ValueError, json.JSONDecodeError):
+            return {"status": "invalid", "diagnostics": [{"code": "invalid_projection"}]}
+        return self._compact_governance_graph(snapshot)
+
+    @staticmethod
+    def _compact_governance_graph(snapshot: GovernanceGraphSnapshot) -> dict[str, Any]:
+        evidence = []
+        for node in snapshot.nodes:
+            for reference in node.evidence_refs[:1]:
+                evidence.append({
+                    "nodeId": node.node_id,
+                    "artifact": Path(reference.path).name,
+                    "sha256": reference.sha256,
+                    "status": reference.status,
+                })
+        return {
+            "status": "available",
+            "overallStatus": snapshot.overall_status,
+            "freshness": snapshot.freshness["status"],
+            "nodes": [
+                {
+                    "nodeId": node.node_id,
+                    "status": node.status,
+                    "reasonCode": node.reason_code,
+                }
+                for node in snapshot.nodes
+            ],
+            "blockers": [dict(item) for item in snapshot.blockers],
+            "diagnostics": [dict(item) for item in snapshot.diagnostics],
+            "evidence": evidence,
+        }
 
     def _read_documentation(self, run_dir: Path, hard_cap: int) -> dict[str, Any]:
         payloads = {
