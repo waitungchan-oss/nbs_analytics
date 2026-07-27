@@ -181,6 +181,77 @@ def test_render_run_details_includes_compact_documentation_status(monkeypatch):
     assert "2" in rendered and "1" in rendered
 
 
+def _render_details_with_graph(graph, monkeypatch):
+    calls = []
+    monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit(calls=calls))
+    agent_operations_rendering._render_run_details({
+        "runId": "graph-ready",
+        "briefName": "phase-b.md",
+        "status": "completed",
+        "stage": "hermes",
+        "updatedAt": "2026-07-27T10:00:00+00:00",
+        "stages": {},
+        "findings": {},
+        "verification": {},
+        "hermes": {},
+        "tokenUsage": None,
+        "documentation": {"status": "not_requested"},
+        "governanceGraph": graph,
+    })
+    return calls
+
+
+def test_render_run_details_includes_compact_governance_graph(monkeypatch):
+    calls = _render_details_with_graph({
+        "status": "available",
+        "overallStatus": "blocked",
+        "freshness": "stale",
+        "nodeStatuses": [{"nodeId": "hermes", "status": "blocked", "reasonCode": "stale_artifact"}],
+        "blockers": [{"code": "stale_artifact", "nodeId": "hermes"}],
+        "diagnostics": [],
+        "evidence": [{
+            "nodeId": "hermes", "artifact": "hermes.json", "sha256": "a" * 64,
+            "status": "blocked",
+        }],
+    }, monkeypatch)
+
+    text = " ".join(
+        str(args) for name, args, _ in calls
+        if name in {"subheader", "caption", "write", "warning"}
+    )
+    assert "Governance Graph" in text
+    assert "stale" in text and "stale_artifact" in text
+    assert any(
+        name == "dataframe" and "hermes.json" in str(args)
+        for name, args, _ in calls
+    )
+    assert not any(
+        name in {"button", "download_button"} and "Graph" in str(args)
+        for name, args, _ in calls
+    )
+
+
+def test_render_run_details_marks_missing_graph_as_unavailable(monkeypatch):
+    calls = _render_details_with_graph({"status": "unavailable"}, monkeypatch)
+
+    assert any(
+        name == "info" and "尚無已建 Graph snapshot" in args[0]
+        for name, args, _ in calls
+    )
+
+
+def test_invalid_graph_state_is_bounded_and_does_not_render_raw_payload(monkeypatch):
+    calls = _render_details_with_graph({
+        "status": "invalid",
+        "unexpected": {"prompt": "secret", "absolutePath": "/private/tmp/x"},
+    }, monkeypatch)
+
+    rendered = " ".join(str(args) for _, args, _ in calls)
+    assert "invalid" in rendered
+    assert "secret" not in rendered and "/private/tmp/x" not in rendered
+    assert not any(name == "json" for name, _, _ in calls)
+
+
 def test_agent_operations_snapshot_is_session_scoped_and_force_refresh_is_manual(monkeypatch):
     import app_pages
 

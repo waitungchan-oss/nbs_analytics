@@ -62,6 +62,102 @@ def _run_table(runs: list[dict]) -> list[dict[str, Any]]:
     ]
 
 
+def _graph_evidence_rows(graph: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    evidence = graph.get("evidence", [])
+    if not isinstance(evidence, list):
+        return rows
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        artifact = item.get("artifact")
+        sha256 = item.get("sha256")
+        status = item.get("status")
+        node_id = item.get("nodeId")
+        if all(isinstance(value, str) and value for value in (artifact, sha256, status, node_id)):
+            rows.append({
+                "Node": node_id,
+                "Artifact": artifact,
+                "SHA-256": sha256[:8],
+                "Status": status,
+            })
+    return rows
+
+
+def _graph_node_rows(graph: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    nodes = graph.get("nodeStatuses", graph.get("nodes", []))
+    if not isinstance(nodes, list):
+        return rows
+    for item in nodes:
+        if not isinstance(item, dict):
+            continue
+        node_id = item.get("nodeId")
+        status = item.get("status")
+        reason = item.get("reasonCode")
+        if isinstance(node_id, str) and node_id and isinstance(status, str) and status:
+            rows.append({
+                "Node": node_id,
+                "Status": status,
+                "Reason": reason if isinstance(reason, str) else "",
+            })
+    return rows
+
+
+def _graph_issue_rows(graph: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for field, label in (("blockers", "Blocker"), ("diagnostics", "Diagnostic")):
+        values = graph.get(field, [])
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            code = item.get("code")
+            node_id = item.get("nodeId")
+            if isinstance(code, str) and code:
+                rows.append({
+                    "Type": label,
+                    "Code": code,
+                    "Node": node_id if isinstance(node_id, str) else "",
+                })
+    return rows
+
+
+def _render_governance_graph(graph: Any) -> None:
+    st.subheader("Governance Graph")
+    if not isinstance(graph, dict) or graph.get("status") == "unavailable":
+        st.info("尚無已建 Graph snapshot；此頁不會自行建立或更新 snapshot。")
+        return
+
+    status = graph.get("status")
+    if status != "available":
+        safe_status = status if isinstance(status, str) and status else "unknown"
+        st.warning(f"Governance Graph 狀態：{safe_status}")
+        return
+
+    overall_status = graph.get("overallStatus")
+    freshness = graph.get("freshness")
+    overall_label = overall_status if isinstance(overall_status, str) and overall_status else "unknown"
+    freshness_label = freshness if isinstance(freshness, str) and freshness else "unknown"
+    st.write(f"Overall status: {overall_label} · Freshness: {freshness_label}")
+
+    node_rows = _graph_node_rows(graph)
+    if node_rows:
+        st.dataframe(node_rows, use_container_width=True, hide_index=True)
+
+    issue_rows = _graph_issue_rows(graph)
+    if issue_rows:
+        codes = ", ".join(row["Code"] for row in issue_rows if row.get("Code"))
+        if codes:
+            st.caption(f"Graph blockers/diagnostics: {codes}")
+        st.dataframe(issue_rows, use_container_width=True, hide_index=True)
+
+    evidence_rows = _graph_evidence_rows(graph)
+    if evidence_rows:
+        st.dataframe(evidence_rows, use_container_width=True, hide_index=True)
+
+
 def _render_run_details(run: dict[str, Any]) -> None:
     st.subheader("Selected run")
     st.write(f"**{run.get('briefName', '未提供')}** · {run.get('runId', '未提供')}")
@@ -101,6 +197,7 @@ def _render_run_details(run: dict[str, Any]) -> None:
             f"applied {documentation.get('appliedTargetCount', 0)} · "
             f"pending approval {documentation.get('pendingApprovalCount', 0)}"
         )
+    _render_governance_graph(run.get("governanceGraph"))
 
 
 def _render_retention_and_diagnostics(snapshot: dict[str, Any]) -> None:
