@@ -238,6 +238,74 @@ Result: `40 passed in 0.42s`.
 
 Result: `89 passed in 0.93s`.
 
+---
+
+# Receipt Exclusion Governance Table - Task 2
+
+## STATUS
+
+PASS. Task 2 已完成並提交；既有報告內容保留，以下為本 Task 的追加紀錄。
+
+## RED / GREEN
+
+新增 renderer tests 後執行：
+
+```bash
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py -q
+```
+
+RED：`4 failed, 49 passed`。失敗均為預期的缺少 `data_editor`、單選 preview、stale confirm fail-closed 與 revoked expander 行為。
+
+實作後同一 focused suite：`53 passed`。
+
+## Implementation
+
+- active rules 改為固定高度、可捲動、`num_rows="fixed"` 的 `st.data_editor`；只有「選取」欄可編輯。
+- preview/confirm 使用共用按鈕，透過 `registryRevision` key 與 `_matching_governance_preview` 綁定 selection/revision。
+- multi-select fail closed；selection 或 revision mismatch 會清除 preview，confirm 明確傳入 `rule_id` 與 `previewFingerprint`。
+- revoked rules 放入唯讀「查看已撤銷規則」expander。
+- 未修改 SQLite、upload、baseline、rollback、registry、`app_pages.py` 或 confirmation proposal UI。
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest tests/test_receipt_exclusion_rendering.py -q
+# 53 passed
+
+.venv/bin/python -m pytest \
+  tests/test_receipt_exclusion_rendering.py \
+  tests/test_receipt_exclusion_read_model_service.py \
+  tests/test_receipt_exclusion_governance_service.py -q
+# 59 passed
+
+.venv/bin/python -m py_compile receipt_exclusion_rendering.py app_pages.py
+# exit 0
+
+git diff --check
+git diff --cached --check
+# exit 0
+```
+
+Hermes read-only check（`--skip-monitor --skip-tests --json`）：exit `0`、`overallStatus=pass`；system acceptance passed，2026-05 baseline matched `HKD 12,057,968`，正式口徑 matched，documentation report `writes=0`。完整 Hermes test pack 已啟動並完成，但執行器未回傳其 JSON stdout，故不將其當作額外測試數字宣稱。
+
+## Commit
+
+`efa6fca feat: render receipt exclusion governance table`
+
+使用 `git add -p` 精確 stage Task 2 hunks；Task 1 confirmation hunks 與其他 dirty files 未納入 commit。
+
+## Self-review
+
+- active table 只投影 allowlisted fields，未輸出 quarantine payload、sensitive hash 或 proposal fingerprint。
+- preview/confirm callbacks contract 保持不變；confirm 僅傳 selected rule ID 與 matching fingerprint。
+- revoked table 沒有 re-enable/delete 操作，且使用 `st.dataframe` 唯讀呈現。
+- commit stat 僅為 `receipt_exclusion_rendering.py` 與 `tests/test_receipt_exclusion_rendering.py`。
+
+## Concerns
+
+- 未進行瀏覽器/Streamlit 手動驗收；本次以 renderer focused tests、regression、compile 與 Hermes read-only evidence 驗證。
+- working tree 仍有使用者既有 dirty changes；本 Task 沒有覆蓋、撤銷或 stage 它們。
+
 ```bash
 /Users/chanwaitung2025/Downloads/nbs_analytics/.venv/bin/python -m py_compile backend/services/agent_operations_service.py tests/test_agent_operations_service.py
 git diff --check

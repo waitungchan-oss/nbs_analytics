@@ -112,17 +112,26 @@ def render_receipt_exclusion_confirmation(
         "正式收入影響": row.get("affectedRevenue"),
     } for row in candidates]
     labels = {row["candidateId"]: f"{row.get('receiptNo')} / {row.get('sourceOrderNo')}" for row in candidates}
+    candidate_ids = [row["candidateId"] for row in candidates]
+    proposal_key = str(proposal.get("proposalFingerprint") or "unknown")[:20]
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-    confirmed = st.checkbox(CONFIRMATION_COPY, value=False, key="RECEIPT_EXCLUSION_CONFIRM")
+    confirmed = st.checkbox(
+        CONFIRMATION_COPY,
+        value=False,
+        key=f"RECEIPT_EXCLUSION_CONFIRM_{proposal_key}",
+    )
     selected = st.multiselect(
         "選擇要永久排除的精確收款單",
-        options=[row["candidateId"] for row in candidates],
+        options=candidate_ids,
+        default=candidate_ids,
         format_func=lambda value: labels[value],
-        key="RECEIPT_EXCLUSION_SELECTED",
+        key=f"RECEIPT_EXCLUSION_SELECTED_{proposal_key}",
     )
     if st.button(
-        "永久排除並重新預演", type="primary", disabled=not confirmed or not selected,
-        key="RECEIPT_EXCLUSION_APPLY",
+        "永久排除並重新預演",
+        type="primary",
+        disabled=not confirmed or set(selected) != set(candidate_ids),
+        key=f"RECEIPT_EXCLUSION_APPLY_{proposal_key}",
     ):
         confirm_action({
             "proposalFingerprint": proposal.get("proposalFingerprint"),

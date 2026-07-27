@@ -12,3 +12,10 @@ Task 7: complete (commit a4c97ac, API shared-writer contract tests passed)
 Task 8: complete (commit 2de4817, Streamlit shared-writer/cache token tests passed)
 Task 9: complete (commit 948cce8, health/Hermes integration tests passed)
 Task 10: complete (commit 3f97aa3; services, Hermes, baseline, dry-run, and all 159 tests verified)
+
+# Receipt Exclusion Governance Table SDD Progress
+
+Base: a378f10
+
+Task 1: complete (commits 4d9764b..4514b79, review clean after two fail-closed fix rounds)
+Task 2: complete (commits efa6fca..a8790af, review clean after four stale/sensitive-state fix rounds)

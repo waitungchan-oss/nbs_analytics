@@ -20,6 +20,34 @@ def normalize_identity_text(value: object) -> str:
     return text.replace("\u3000", " ").replace("\xa0", " ").strip().upper()
 
 
+def is_shifted_receipt_export_row(row: Mapping[str, object]) -> bool:
+    original_currency = row.get("原幣幣種")
+    currency_in_rate = normalize_identity_text(row.get("匯率"))
+    tail_value = row.get("Unnamed: 19")
+    original_currency_missing = (
+        original_currency is None
+        or bool(pd.isna(original_currency))
+        or not normalize_identity_text(original_currency)
+    )
+    tail_value_present = (
+        tail_value is not None
+        and not bool(pd.isna(tail_value))
+        and bool(normalize_identity_text(tail_value))
+    )
+    return (
+        original_currency_missing
+        and bool(currency_in_rate)
+        and ("幣" in currency_in_rate or any(char.isalpha() for char in currency_in_rate))
+        and tail_value_present
+    )
+
+
+def receipt_exclusion_observed_amount(row: Mapping[str, object]) -> float:
+    amount_column = "收款本幣金額" if is_shifted_receipt_export_row(row) else "收款原幣金額"
+    amount = pd.to_numeric(pd.Series([row.get(amount_column)]), errors="coerce").fillna(0).iloc[0]
+    return float(amount)
+
+
 def classify_exclusion_kind(row: Mapping[str, object]) -> str:
     receipt_type = normalize_identity_text(row.get("收款類型"))
     payment_method = normalize_identity_text(row.get("收款方式"))
@@ -27,6 +55,13 @@ def classify_exclusion_kind(row: Mapping[str, object]) -> str:
         return f"receipt_type:{receipt_type}"
     if payment_method in EXCLUDED_PAYMENT_METHODS:
         return f"payment_method:{payment_method}"
+    if is_shifted_receipt_export_row(row):
+        shifted_receipt_type = normalize_identity_text(row.get("收款方式"))
+        shifted_payment_method = normalize_identity_text(row.get("收款流水號"))
+        if shifted_receipt_type in EXCLUDED_RECEIPT_TYPES:
+            return f"receipt_type:{shifted_receipt_type}"
+        if shifted_payment_method in EXCLUDED_PAYMENT_METHODS:
+            return f"payment_method:{shifted_payment_method}"
     return ""
 
 
@@ -65,15 +100,12 @@ def match_receipt_exclusions(
             })
             continue
         drop_indexes.append(index)
-        amount = pd.to_numeric(
-            pd.Series([row.get("收款原幣金額")]), errors="coerce"
-        ).fillna(0).iloc[0]
         payload = {
             "registryId": rule.id,
             "receiptNo": identity.receipt_no,
             "sourceOrderNo": identity.source_order_no,
             "exclusionKind": identity.exclusion_kind,
-            "observedAmount": float(amount),
+            "observedAmount": receipt_exclusion_observed_amount(row),
         }
         matches.append({**payload, "rowHash": canonical_json_hash(payload)})
     return ReceiptExclusionMatchResult(

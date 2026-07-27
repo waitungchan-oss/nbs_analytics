@@ -56,6 +56,13 @@ def test_upload_audit_details_are_collapsed_by_default():
     assert 'st.expander("查看本次上傳詳細反饋", expanded=False)' in source
 
 
+def test_upload_audit_notice_preserves_confirmation_proposal_for_upload_area():
+    source = _pages_function_source("_render_upload_audit_notice")
+
+    assert 'st.session_state.get("LAST_UPLOAD_AUDIT")' in source
+    assert 'st.session_state.pop("LAST_UPLOAD_AUDIT"' not in source
+
+
 def test_upload_audit_tables_use_safe_renderer():
     source = _pages_function_source("_render_upload_audit_notice")
 

@@ -62,7 +62,8 @@ class _FakeStreamlit:
         return self.checkbox_value
 
     def multiselect(self, *args, **kwargs):
-        return []
+        self.multiselect_kwargs = kwargs
+        return list(kwargs.get("default") or [])
 
     def button(self, label, **kwargs):
         self.buttons[label] = kwargs
@@ -107,6 +108,38 @@ def test_confirmation_requires_checkbox_before_primary_action(monkeypatch):
     )
     assert fake.checkbox_labels == [rendering.CONFIRMATION_COPY]
     assert fake.buttons["永久排除並重新預演"]["disabled"] is True
+
+
+def test_confirmation_defaults_to_all_candidates_and_scopes_widget_state_to_proposal(monkeypatch):
+    fake = _FakeStreamlit()
+    monkeypatch.setattr(rendering, "st", fake)
+    rendering.render_receipt_exclusion_confirmation(
+        {
+            "proposalFingerprint": "proposal-fingerprint-123456",
+            "candidates": [
+                {
+                    "candidateId": candidate_id,
+                    "sourceOrderNo": "225YTLAU6227154715",
+                    "receiptNo": receipt_no,
+                    "exclusionKind": "receipt_type:掛賬核銷",
+                }
+                for candidate_id, receipt_no in (
+                    ("candidate-1", "SK2607007619"),
+                    ("candidate-2", "SK2607007621"),
+                    ("candidate-3", "SK2607007622"),
+                )
+            ],
+        },
+        confirm_action=lambda payload: payload,
+    )
+
+    assert fake.multiselect_kwargs["default"] == [
+        "candidate-1",
+        "candidate-2",
+        "candidate-3",
+    ]
+    assert fake.multiselect_kwargs["key"].endswith("proposal-fingerprint")
+    assert fake.buttons["永久排除並重新預演"]["key"].endswith("proposal-fingerprint")
 
 
 def test_governance_panel_never_exposes_quarantine_payload(monkeypatch):

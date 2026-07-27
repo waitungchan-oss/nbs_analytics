@@ -6,7 +6,9 @@ import pandas as pd
 
 from backend.services.receipt_exclusion_matcher import (
     classify_exclusion_kind,
+    is_shifted_receipt_export_row,
     normalize_identity_text,
+    receipt_exclusion_observed_amount,
 )
 from backend.services.receipt_exclusion_models import (
     ReceiptExclusionIdentity,
@@ -75,6 +77,48 @@ def _matching_rows(frame: pd.DataFrame, identity: ReceiptExclusionIdentity) -> l
     return matches
 
 
+def _excluded_identities_for_source_order(
+    prepared_frames: list[pd.DataFrame],
+    source_order_no: str,
+) -> list[ReceiptExclusionIdentity]:
+    identities: dict[str, ReceiptExclusionIdentity] = {}
+    for frame in prepared_frames:
+        if frame is None or frame.empty:
+            continue
+        for _, row in frame.iterrows():
+            row_source_order = normalize_identity_text(row.get("來源單據號"))
+            exclusion_kind = classify_exclusion_kind(row)
+            receipt_no = normalize_identity_text(row.get("收款單號"))
+            if row_source_order != source_order_no or not exclusion_kind or not receipt_no:
+                continue
+            identity = ReceiptExclusionIdentity(
+                receipt_no=receipt_no,
+                source_order_no=row_source_order,
+                exclusion_kind=exclusion_kind,
+            )
+            identities[identity.candidate_id] = identity
+    return sorted(
+        identities.values(),
+        key=lambda item: (item.source_order_no, item.receipt_no, item.exclusion_kind),
+    )
+
+
+def _select_unambiguous_evidence_row(matches: list[pd.Series]) -> pd.Series | None:
+    if len(matches) == 1:
+        return matches[0]
+    aligned = [row for row in matches if not is_shifted_receipt_export_row(row)]
+    shifted = [row for row in matches if is_shifted_receipt_export_row(row)]
+    if len(aligned) != 1 or not shifted:
+        return None
+    expected_amount = receipt_exclusion_observed_amount(aligned[0])
+    if any(
+        abs(receipt_exclusion_observed_amount(row) - expected_amount) > 0.005
+        for row in shifted
+    ):
+        return None
+    return aligned[0]
+
+
 def _resolve_candidate_evidence(
     drivers: list[dict],
     raw_main_frame: pd.DataFrame,
@@ -87,53 +131,71 @@ def _resolve_candidate_evidence(
         return [], {}
     candidates: list[dict] = []
     private_evidence: dict = {}
+    resolved_candidate_ids: set[str] = set()
     for driver in drivers:
-        identity = _eligible_identity(driver)
-        if identity is None:
+        driver_identity = _eligible_identity(driver)
+        if driver_identity is None:
             return [], {}
-        raw_matches = _matching_rows(raw_main_frame, identity)
-        prepared_matches = [
-            ("tour_data" if index == 0 else "others_data", row)
-            for index, frame in enumerate(prepared_frames)
-            for row in _matching_rows(frame, identity)
-        ]
-        if len(raw_matches) != 1 or len(prepared_matches) != 1:
-            return [], {}
-        raw_payload = _project_row(raw_matches[0], RAW_EVIDENCE_FIELDS)
-        table_name, prepared_row = prepared_matches[0]
-        prepared_payload = _project_row(prepared_row, PREPARED_EVIDENCE_FIELDS)
-        raw_row_hash = canonical_json_hash(raw_payload)
-        prepared_row_hash = canonical_json_hash(prepared_payload)
-        candidate_id = identity.candidate_id
-        row_hash = canonical_json_hash({
-            "candidateId": candidate_id,
-            "rawRowHash": raw_row_hash,
-            "preparedRowHash": prepared_row_hash,
-        })
-        observed_amount = float(
-            pd.to_numeric(
-                pd.Series([raw_payload.get("收款原幣金額")]), errors="coerce"
-            ).fillna(0).iloc[0]
+        identities = _excluded_identities_for_source_order(
+            prepared_frames,
+            driver_identity.source_order_no,
         )
-        candidates.append({
-            "candidateId": candidate_id,
-            "sourceOrderNo": identity.source_order_no,
-            "receiptNo": identity.receipt_no,
-            "exclusionKind": identity.exclusion_kind,
-            "observedAmount": observed_amount,
-            "affectedRevenue": float(driver.get("deltaAmount") or 0),
-            "rowHash": row_hash,
-        })
-        private_evidence[candidate_id] = {
-            "rawPayload": raw_payload,
-            "rawRowHash": raw_row_hash,
-            "preparedPayload": prepared_payload,
-            "preparedRowHash": prepared_row_hash,
-            "sourceFileName": source_name,
-            "sourceFileSha256": source_batch_fingerprint,
-            "observedAmount": observed_amount,
-            "tableName": table_name,
-        }
+        if driver_identity.candidate_id not in {
+            identity.candidate_id for identity in identities
+        }:
+            return [], {}
+        for identity in identities:
+            candidate_id = identity.candidate_id
+            if candidate_id in resolved_candidate_ids:
+                continue
+            raw_matches = _matching_rows(raw_main_frame, identity)
+            raw_evidence_row = _select_unambiguous_evidence_row(raw_matches)
+            prepared_matches = [
+                ("tour_data" if index == 0 else "others_data", row)
+                for index, frame in enumerate(prepared_frames)
+                for row in _matching_rows(frame, identity)
+            ]
+            prepared_tables = {table_name for table_name, _ in prepared_matches}
+            prepared_evidence_row = _select_unambiguous_evidence_row(
+                [row for _, row in prepared_matches]
+            )
+            if (
+                raw_evidence_row is None
+                or prepared_evidence_row is None
+                or len(prepared_tables) != 1
+            ):
+                return [], {}
+            raw_payload = _project_row(raw_evidence_row, RAW_EVIDENCE_FIELDS)
+            table_name = next(iter(prepared_tables))
+            prepared_payload = _project_row(prepared_evidence_row, PREPARED_EVIDENCE_FIELDS)
+            raw_row_hash = canonical_json_hash(raw_payload)
+            prepared_row_hash = canonical_json_hash(prepared_payload)
+            row_hash = canonical_json_hash({
+                "candidateId": candidate_id,
+                "rawRowHash": raw_row_hash,
+                "preparedRowHash": prepared_row_hash,
+            })
+            observed_amount = receipt_exclusion_observed_amount(raw_evidence_row)
+            candidates.append({
+                "candidateId": candidate_id,
+                "sourceOrderNo": identity.source_order_no,
+                "receiptNo": identity.receipt_no,
+                "exclusionKind": identity.exclusion_kind,
+                "observedAmount": observed_amount,
+                "affectedRevenue": float(driver.get("deltaAmount") or 0),
+                "rowHash": row_hash,
+            })
+            private_evidence[candidate_id] = {
+                "rawPayload": raw_payload,
+                "rawRowHash": raw_row_hash,
+                "preparedPayload": prepared_payload,
+                "preparedRowHash": prepared_row_hash,
+                "sourceFileName": source_name,
+                "sourceFileSha256": source_batch_fingerprint,
+                "observedAmount": observed_amount,
+                "tableName": table_name,
+            }
+            resolved_candidate_ids.add(candidate_id)
     return candidates, private_evidence
 
 
@@ -165,7 +227,6 @@ def build_receipt_exclusion_proposal(
     if not candidates:
         return {}, {}
     fingerprint_payload = {
-        "operationId": operation_id,
         "sourceBatchFingerprint": source_batch_fingerprint,
         "diagnosedCheckKey": diagnosis.get("diagnosedCheckKey"),
         "expectedTotal": diagnosis.get("expectedTotal"),

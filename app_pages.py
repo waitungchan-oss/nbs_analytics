@@ -244,7 +244,8 @@ def _render_upload_stability_gate(gate: dict) -> None:
         )
 
 def _render_upload_audit_notice() -> None:
-    audit = st.session_state.pop("LAST_UPLOAD_AUDIT", None)
+    # Keep the audit through the rerun so a pending exclusion proposal can be confirmed.
+    audit = st.session_state.get("LAST_UPLOAD_AUDIT")
     if not audit:
         return
     if audit.get("status") == "success":

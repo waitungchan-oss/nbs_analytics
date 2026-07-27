@@ -72,3 +72,37 @@ def test_corrected_normal_payment_is_collision_and_not_filtered():
 
     assert len(result.filtered_frame) == 1
     assert result.collisions[0]["reason"] == "exclusion_kind_mismatch"
+
+
+def test_shifted_export_duplicate_matches_the_same_exact_exclusion_identity():
+    frame = pd.DataFrame([
+        {
+            "收款單號": "SK2606005393",
+            "來源單據號": "31NZY6629115617",
+            "原幣幣種": pd.NA,
+            "匯率": "HKD 港幣",
+            "收款原幣金額": "1",
+            "收款本幣金額": "1630.00",
+            "收款類型": "1630.00",
+            "收款方式": "旅費",
+            "收款流水號": "TT 退款轉團款",
+            "Unnamed: 19": "中國簽證(2026年6月)",
+        },
+        {
+            "收款單號": "SK2606005393",
+            "來源單據號": "31NZY6629115617",
+            "原幣幣種": "HKD 港幣",
+            "匯率": "1",
+            "收款原幣金額": "1630.00",
+            "收款本幣金額": "1630.00",
+            "收款類型": "旅費",
+            "收款方式": "TT 退款轉團款",
+        },
+    ])
+
+    result = match_receipt_exclusions(frame, [_rule()])
+
+    assert result.filtered_frame.empty
+    assert result.collisions == ()
+    assert len(result.matches) == 2
+    assert {item["observedAmount"] for item in result.matches} == {1630.0}
