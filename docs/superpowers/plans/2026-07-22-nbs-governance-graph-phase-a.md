@@ -17,7 +17,7 @@
 | Task 1 — Strict Models and Projection Storage | completed | commit `176c7e6`; `backend/agents/governance_graph_models.py`、projection storage/retention changes；models、workflow store、workflow retention focused tests included in `96 passed` |
 | Task 2 — Deterministic Risk, Gate, Transition, Retry and Freshness Policy | completed | commit `63564c6`; `backend/agents/governance_graph_policy.py`；policy/model/storage/retention focused tests included in `96 passed` |
 | Task 3 — Canonical Artifact Reader and Derived Snapshot Builder | completed | implementation commit `1186993`; focused service/store suite 31 passed |
-| Task 4 — JSON-Only Governance Graph CLI | pending | CLI module and CLI tests are not present |
+| Task 4 — JSON-Only Governance Graph CLI | completed | commit `34d6035`; focused Graph CLI suite 4 passed |
 | Task 5 — Hermes Read-Only Coverage and Retention Regression | pending | Graph-specific Hermes coverage is not present |
 | Task 6 — Governance Contract Documentation and Final Acceptance | pending | operator contract and documentation tests are not present |
 
@@ -332,7 +332,7 @@ git commit -m "feat: build governance graph snapshots"
 **Consumes:** Task 3 builder.
 **Produces:** JSON-only `build` / `validate` / `status`.
 
-- [ ] **Step 1: Write failing parser and zero-write tests.**
+- [x] **Step 1: Write failing parser and zero-write tests.**
 
 ```python
 def test_parser_exposes_only_projection_commands():
@@ -349,12 +349,12 @@ def test_validate_and_status_do_not_write(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["schemaVersion"] == "nbs-governance-graph-cli-v1"
 ```
 
-- [ ] **Step 2: Prove RED.**
+- [x] **Step 2: Prove RED.**
 
 Run: `.venv/bin/python -m pytest tests/test_governance_graph_cli.py -q`
 Expected: missing CLI module.
 
-- [ ] **Step 3: Implement the separate narrow CLI.**
+- [x] **Step 3: Implement the separate narrow CLI.**
 
 Commands:
 
@@ -368,7 +368,14 @@ Commands:
 
 Exit status rules: `completed`, `ready_for_integration`, `awaiting_authorization` return 0; `awaiting_documentation`, `blocked_user_decision`, `diagnosis_required` return 1; `blocked_missing_runner`, `protected_incident`, `blocked` return 2; runtime error returns 5.
 
-- [ ] **Step 4: Verify and commit.**
+- [x] **Step 4: Verify and commit.**
+
+Task 4 evidence: `34d6035` (`feat: add governance graph cli`). Focused
+Graph models/policy/service/CLI tests: 59 passed; Hermes post-change check:
+`overallStatus=PASS`, system acceptance passed, baseline matched. Full pytest
+結果為 1060 passed、2 個既有 unrelated failures：runtime health 回傳
+`degraded` 與 verified backfill 回傳 `partially_applied`；本 Task 未修改
+其相關路徑。
 
 ```bash
 .venv/bin/python -m pytest tests/test_governance_graph_models.py tests/test_governance_graph_policy.py tests/test_governance_graph_service.py tests/test_governance_graph_cli.py -q
