@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from backend.agents.canonical_evidence_registry import CanonicalEvidenceRegistry
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
 from backend.agents.workflow_store import WorkflowStore
 from backend.services.governance_telemetry_service import GovernanceTelemetryService
 from backend.services.governance_telemetry_service import MAX_DURATION_MS, MAX_REPAIR_LOOPS, MAX_TOKEN_COUNT
+from backend.services.governance_telemetry_aggregation import TelemetryAggregator
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -50,6 +52,15 @@ def _valid_run(root: Path, run_id: str = "run-123") -> Path:
         "message": "Workflow completed",
         "errorCode": None,
         "artifactBytes": 128,
+    })
+    _write_json(run / "approval.json", {
+        "schemaVersion": "agent-workflow-approval-v1",
+        "runId": run_id,
+        "contractPath": "task-telemetry.json",
+        "contractFingerprint": CanonicalEvidenceRegistry().for_kind("task_gate").contract_fingerprint,
+        "approvedBaseSha": "d" * 40,
+        "approvedAt": "2026-07-28T09:01:00+08:00",
+        "authorizationStatus": "approved",
     })
     return run
 
@@ -193,3 +204,22 @@ def test_unsupported_task_gate_has_per_run_unknown_coverage(tmp_path):
     assert telemetry["gateFailures"]["taskGate"]["unknownCount"] == 1
     assert telemetry["status"] == "partial"
 
+
+def test_canonical_evidence_metrics_are_exact_and_exclude_deleted_runs():
+    compact = {
+        "runId": "retained", "briefName": "brief.md", "updatedAt": "2026-07-28T09:03:00+08:00",
+        "status": "completed", "retentionState": "complete", "stages": {}, "governanceGraph": {"status": "unavailable"},
+        "canonicalEvidence": {
+            "task_gate": {"status": "available", "state": "failed"},
+            "terra_diagnosis": {"status": "available", "state": "completed"},
+            "protected_incident": {"status": "available", "state": "detected"},
+        },
+    }
+    deleted = {**compact, "runId": "deleted", "retentionState": "deleted"}
+
+    telemetry = TelemetryAggregator(reader=None).build([compact, deleted], [], 1)
+
+    assert telemetry["coverage"]["eligibleRunCount"] == 1
+    assert telemetry["gateFailures"]["taskGate"]["failed"] == 1
+    assert telemetry["agentActivity"]["terraDiagnosis"]["completedCount"] == 1
+    assert telemetry["protectedIncidents"]["observedCount"] == 1

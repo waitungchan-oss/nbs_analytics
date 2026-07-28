@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.context_agent_service import context_bundle_from_payload
+from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
 from backend.agents.documentation_models import (
     DocumentationApplication,
     DocumentationEvidence,
@@ -99,6 +100,7 @@ class AgentOperationsService:
         self.runtime_root = self._safe_root(candidate)
         self.runs_root = self.runtime_root / "runs"
         self.retention_path = self.project_root / "agent_config" / "workflow_retention.json"
+        self.canonical_evidence_reader = CanonicalEvidenceReader(self.project_root, self.runtime_root)
 
     def build_snapshot(self) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()
@@ -258,11 +260,18 @@ class AgentOperationsService:
             "verification": self._verification(stage_payloads["full_verification"]),
             "hermes": self._hermes(stage_payloads["hermes"]),
             "tokenUsage": self._token_usage(stage_payloads),
+            "lunaRepairLoops": self._luna_repair_loops(stage_payloads["implementation"]),
             "documentation": documentation,
             "governanceGraph": self._governance_graph(run_dir, stage_artifact_max_bytes),
+            "canonicalEvidence": self.canonical_evidence_reader.read(run_dir, stage_artifact_max_bytes),
             "retentionState": "archived_summary" if archived else "complete",
         }
         return item
+
+    @staticmethod
+    def _luna_repair_loops(payload: dict[str, Any] | None) -> int | None:
+        value = payload.get("repairLoopsUsed") if isinstance(payload, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100 else None
 
     def _governance_graph(self, run_dir: Path, hard_cap: int) -> dict[str, Any]:
         try:
