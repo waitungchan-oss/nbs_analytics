@@ -231,6 +231,51 @@ def test_render_run_details_includes_compact_governance_graph(monkeypatch):
     )
 
 
+def test_graph_filters_use_read_only_query_callback(monkeypatch):
+    calls = []
+    query_calls = []
+    graph = {
+        "status": "available",
+        "overallStatus": "not_started",
+        "freshness": "fresh",
+        "nodes": [{"nodeId": "risk", "status": "not_started", "reasonCode": None}],
+        "blockers": [],
+        "diagnostics": [],
+        "evidence": [],
+    }
+    query_result = {
+        "schemaVersion": "governance-graph-query-v1",
+        "status": "available",
+        "snapshotIdentity": {"runId": "graph-ready", "graphFingerprint": "a" * 64, "generatedAt": "2026-07-27T10:00:00+00:00", "freshness": "fresh"},
+        "queryFingerprint": "b" * 64,
+        "matchedNodes": [], "matchedEdges": [], "evidenceRefs": [],
+        "unknownCount": 0, "invalidCount": 0, "blockedCount": 0, "diagnostics": [],
+    }
+    monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit(calls=calls))
+
+    def query_graph(run_id, filters):
+        query_calls.append((run_id, filters))
+        return query_result
+
+    agent_operations_rendering._render_run_details({
+        "runId": "graph-ready", "briefName": "phase-b.md", "status": "completed",
+        "stage": "hermes", "updatedAt": "2026-07-27T10:00:00+00:00", "stages": {},
+        "findings": {}, "verification": {}, "hermes": {}, "tokenUsage": None,
+        "documentation": {"status": "not_requested"}, "governanceGraph": graph,
+    }, query_graph=query_graph)
+
+    assert query_calls and query_calls[0][0] == "graph-ready"
+    assert query_calls[0][1]["nodeType"] is None
+    assert any(name == "subheader" and args[0] == "Graph Query" for name, args, _ in calls)
+    assert any(name == "selectbox" and args[0] == "Edge type" for name, args, _ in calls)
+    assert any(name == "text_input" and args[0] == "Node ID" for name, args, _ in calls)
+
+
+def test_graph_query_callback_is_not_required_for_existing_snapshot_render(monkeypatch):
+    calls = _render_details_with_graph({"status": "available", "overallStatus": "not_started", "freshness": "fresh", "nodes": [], "blockers": [], "diagnostics": [], "evidence": []}, monkeypatch)
+    assert any(name == "subheader" and args[0] == "Governance Graph" for name, args, _ in calls)
+
+
 def _telemetry(status="available"):
     return {
         "schemaVersion": "governance-telemetry-snapshot-v1",
@@ -324,3 +369,38 @@ def test_agent_operations_snapshot_is_session_scoped_and_force_refresh_is_manual
     assert len(build_calls) == 2
     for key, value in unrelated.items():
         assert session_state[key] is value
+
+
+def test_agent_operations_refresh_preserves_selection_until_filtered_runs_validate_it(monkeypatch):
+    import app_pages
+
+    session_state = {"AGENT_OPERATIONS_SELECTED_RUN_ID": "stale-run"}
+    rendered = {}
+
+    class FakeService:
+        def __init__(self, project_root):
+            self.project_root = project_root
+
+        def build_snapshot(self):
+            return {"schemaVersion": "agent-operations-snapshot-v1", "runs": []}
+
+    class FakeQueryService:
+        def __init__(self, project_root):
+            self.project_root = project_root
+
+        def query(self, **kwargs):
+            return type("Result", (), {"to_dict": lambda self: {"status": "unavailable"}})()
+
+    monkeypatch.setattr(app_pages.st, "session_state", session_state)
+    monkeypatch.setattr(app_pages, "AgentOperationsService", FakeService)
+    monkeypatch.setattr(app_pages, "GovernanceGraphQueryService", FakeQueryService)
+    monkeypatch.setattr(
+        app_pages,
+        "render_agent_operations",
+        lambda snapshot, *, on_refresh, query_graph: rendered.update(refresh=on_refresh, query=query_graph),
+    )
+
+    app_pages._render_agent_operations_tab()
+    rendered["refresh"]()
+
+    assert session_state["AGENT_OPERATIONS_SELECTED_RUN_ID"] == "stale-run"

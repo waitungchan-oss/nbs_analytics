@@ -110,6 +110,7 @@ from backend.services.receipt_exclusion_governance_service import (
 from backend.services.receipt_exclusion_read_model_service import build_receipt_exclusion_read_model
 from agent_operations_rendering import render_agent_operations
 from backend.services.agent_operations_service import AgentOperationsService
+from backend.agents.governance_graph_query_service import GovernanceGraphQueryService
 from receipt_exclusion_rendering import (
     render_receipt_exclusion_confirmation,
     render_receipt_exclusion_governance,
@@ -133,7 +134,10 @@ def _render_agent_operations_tab() -> None:
     def refresh() -> None:
         _load_agent_operations_snapshot(force=True)
 
-    render_agent_operations(snapshot, on_refresh=refresh)
+    def query_graph(run_id: str, filters: dict[str, str | None]) -> dict:
+        return GovernanceGraphQueryService(PROJECT_ROOT).query(run_id=run_id, **filters).to_dict()
+
+    render_agent_operations(snapshot, on_refresh=refresh, query_graph=query_graph)
 
 
 def _coerce_entity_audit_dataframe(value: object) -> pd.DataFrame:
