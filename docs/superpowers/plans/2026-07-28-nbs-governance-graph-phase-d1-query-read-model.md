@@ -4,7 +4,7 @@
 
 **Goal:** 建立 deterministic、read-only 的 Governance Graph Query Service，供 CLI、Streamlit Graph tab 與後續版本比較／風險／變更影響分析共用。
 
-**Architecture:** Query Service 只讀取既有且通過 `GovernanceGraphSnapshot` validation 的 per-run snapshot；CLI 與 Streamlit 都消費同一個 bounded query result，不自行解析 raw artifacts。Query 不建立、更新或修復 snapshot，並保留 `available`、`unavailable`、`unknown`、`invalid`、`blocked` 語意。
+**Architecture:** Query Service 只讀取既有且通過 `GovernanceGraphSnapshot` validation 的 per-run snapshot；CLI 與 Streamlit 都透過同一個 bounded Query Service contract，不自行解析 raw artifacts。Streamlit 以 read-only callback 呼叫 Query Service，不把動態 query result寫入 Agent Operations snapshot。Query 不建立、更新或修復 snapshot，並保留 `available`、`unavailable`、`unknown`、`invalid`、`blocked` 語意。
 
 **Tech Stack:** Python 3、dataclasses、JSON canonical serialization、pathlib、既有 `GovernanceGraphSnapshot`／`WorkflowStore`、Streamlit、pytest、Hermes。
 
@@ -291,7 +291,7 @@ class GovernanceGraphQueryService:
 - Modify: `tests/test_agent_operations_rendering.py`
 - Modify: `tests/test_app_module_boundaries.py`
 
-**Consumes:** Task 2 Query Service result contract；existing Agent Operations snapshot and selected run UI.
+**Consumes:** Task 2 Query Service result contract；existing Agent Operations snapshot and selected run UI。Streamlit 透過 read-only callback 直接呼叫 Query Service，不假設 Agent Operations snapshot 已內嵌動態 query result。
 
 **Produces:** Read-only Graph filters for node type/status/id, edge type, artifact kind and evidence status; a refresh path that invalidates stale Agent Operations snapshot／selected-run state without building a Graph snapshot.
 
@@ -327,7 +327,7 @@ class GovernanceGraphQueryService:
 
 - [ ] **Step 3: Implement read-only UI integration.**
 
-  Render exact-match controls from bounded option sets, pass filters to the shared Query Service result already present in the Agent Operations snapshot, display snapshot identity and status counts, preserve `unknown`／`invalid`／`blocked`, and reset selected run only when it is not in the filtered list. The Refresh callback may clear session state and reload Agent Operations, but must not invoke `GovernanceGraphBuilder.persist()` or any canonical writer.
+  Render exact-match controls from bounded option sets, pass filters through the read-only Query Service callback for the selected run, display snapshot identity and status counts, preserve `unknown`／`invalid`／`blocked`, and reset selected run only when it is not in the filtered list. The Refresh callback may clear session state and reload Agent Operations, but must not invoke `GovernanceGraphBuilder.persist()` or any canonical writer. Dynamic query results must remain in-memory render state and must not be written into Agent Operations snapshot or runtime artifacts.
 
 - [ ] **Step 4: Run GREEN and UI boundary verification.**
 
