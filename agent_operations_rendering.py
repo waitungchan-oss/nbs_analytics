@@ -158,6 +158,43 @@ def _render_governance_graph(graph: Any) -> None:
         st.dataframe(evidence_rows, use_container_width=True, hide_index=True)
 
 
+def _render_graph_query(run_id: str, query_graph: Callable[[str, dict[str, str | None]], dict[str, Any]]) -> None:
+    st.subheader("Graph Query")
+    options = {
+        "nodeType": ["", "risk", "spec_gate", "plan_gate", "implementation", "targeted_verification", "review", "full_verification", "hermes", "documentation", "git_integration", "task_gate", "terra_diagnosis", "protected_incident"],
+        "nodeStatus": ["", "not_started", "ready", "passed", "failed", "blocked", "skipped", "available", "unknown", "invalid"],
+        "artifactKind": ["", "risk", "spec_gate", "plan_gate", "implementation", "targeted_verification", "review", "full_verification", "hermes", "documentation", "git_integration", "task_gate", "terra_diagnosis", "protected_incident"],
+        "evidenceStatus": ["", "available", "unknown", "invalid", "blocked"],
+    }
+    filters = {
+        key: (st.selectbox(label, values, key=f"AGENT_GRAPH_QUERY_{key}") or None)
+        for key, (label, values) in {
+            "nodeType": ("Node type", options["nodeType"]),
+            "nodeStatus": ("Node status", options["nodeStatus"]),
+            "artifactKind": ("Artifact kind", options["artifactKind"]),
+            "evidenceStatus": ("Evidence status", options["evidenceStatus"]),
+        }.items()
+    }
+    result = query_graph(run_id, filters)
+    if not isinstance(result, dict):
+        st.warning("Graph Query 狀態：invalid")
+        return
+    status = result.get("status") if isinstance(result.get("status"), str) else "unknown"
+    if status != "available":
+        st.warning(f"Graph Query 狀態：{status}")
+    identity = result.get("snapshotIdentity")
+    if isinstance(identity, dict):
+        st.caption(
+            f"Snapshot: {identity.get('runId', 'unknown')} · "
+            f"Fingerprint: {str(identity.get('graphFingerprint', 'unknown'))[:12]}"
+        )
+    st.write(
+        f"Matched nodes: {len(result.get('matchedNodes', [])) if isinstance(result.get('matchedNodes'), list) else 0} · "
+        f"Matched edges: {len(result.get('matchedEdges', [])) if isinstance(result.get('matchedEdges'), list) else 0} · "
+        f"Unknown: {result.get('unknownCount', 0)} · Invalid: {result.get('invalidCount', 0)} · Blocked: {result.get('blockedCount', 0)}"
+    )
+
+
 def _safe_count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
@@ -218,7 +255,11 @@ def _render_governance_telemetry(telemetry: Any) -> None:
             st.caption("Terra diagnosis: unknown（缺少可驗證 evidence）")
 
 
-def _render_run_details(run: dict[str, Any]) -> None:
+def _render_run_details(
+    run: dict[str, Any],
+    *,
+    query_graph: Callable[[str, dict[str, str | None]], dict[str, Any]] | None = None,
+) -> None:
     st.subheader("Selected run")
     st.write(f"**{run.get('briefName', '未提供')}** · {run.get('runId', '未提供')}")
     st.write(
@@ -258,6 +299,8 @@ def _render_run_details(run: dict[str, Any]) -> None:
             f"pending approval {documentation.get('pendingApprovalCount', 0)}"
         )
     _render_governance_graph(run.get("governanceGraph"))
+    if query_graph is not None and isinstance(run.get("runId"), str):
+        _render_graph_query(run["runId"], query_graph)
 
 
 def _render_retention_and_diagnostics(snapshot: dict[str, Any]) -> None:
@@ -279,7 +322,12 @@ def _render_retention_and_diagnostics(snapshot: dict[str, Any]) -> None:
         st.caption("Diagnostics: 0")
 
 
-def render_agent_operations(snapshot: dict, *, on_refresh: Callable[[], None]) -> None:
+def render_agent_operations(
+    snapshot: dict,
+    *,
+    on_refresh: Callable[[], None],
+    query_graph: Callable[[str, dict[str, str | None]], dict[str, Any]] | None = None,
+) -> None:
     if snapshot.get("schemaVersion") != SNAPSHOT_SCHEMA:
         st.warning("Agent operations snapshot schema unavailable")
         return
@@ -337,7 +385,7 @@ def render_agent_operations(snapshot: dict, *, on_refresh: Callable[[], None]) -
             key=SELECTED_RUN_KEY,
         )
         selected = next((item for item in filtered if item.get("runId") == selected_id), filtered[0])
-        _render_run_details(selected)
+        _render_run_details(selected, query_graph=query_graph)
     else:
         st.info("目前篩選條件沒有 Agent runs")
 
