@@ -231,6 +231,46 @@ def test_render_run_details_includes_compact_governance_graph(monkeypatch):
     )
 
 
+def _telemetry(status="available"):
+    return {
+        "schemaVersion": "governance-telemetry-snapshot-v1",
+        "status": status,
+        "latestRunUpdatedAt": "2026-07-28T09:03:00+08:00",
+        "coverage": {"eligibleRunCount": 2, "includedRunCount": 1, "unknownRunCount": 1, "diagnosticCount": 1},
+        "cycleTimes": {"implementation": {"status": "available", "averageMs": 1200, "observedCount": 1, "unknownCount": 1}},
+        "gateFailures": {"specGate": {"status": "available", "failed": 0, "blocked": 0, "unknownCount": 0}, "planGate": {"status": "partial", "failed": 1, "blocked": 0, "unknownCount": 1}, "taskGate": {"status": "unknown", "failed": 0, "blocked": 0, "unknownCount": 2}},
+        "agentActivity": {"lunaRepair": {"status": "available", "total": 2, "observedCount": 1, "unknownCount": 1}, "terraDiagnosis": {"status": "unknown", "observedCount": 0, "unknownCount": 2}},
+        "evidenceHealth": {"stale": {"status": "available", "total": 1, "observedCount": 2, "unknownCount": 0}},
+        "protectedIncidents": {"status": "unknown", "observedCount": 0, "unknownCount": 2},
+        "tokenUsage": {"totalTokens": 150, "runsWithUsage": 1, "runsWithoutUsage": 1},
+    }
+
+
+def test_render_governance_telemetry_available_uses_only_snapshot_payload(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit(calls=calls))
+    snapshot = _empty_snapshot()
+    snapshot["governanceTelemetry"] = _telemetry()
+
+    agent_operations_rendering.render_agent_operations(snapshot, on_refresh=lambda: None)
+
+    assert any(name == "subheader" and args[0] == "Governance telemetry" for name, args, _ in calls)
+    assert any(name == "metric" and args[0] == "Eligible runs" and args[1] == 2 for name, args, _ in calls)
+    assert any(name == "dataframe" and "Plan gate" in str(args) for name, args, _ in calls)
+    assert any(name == "caption" and "latest run" in str(args).lower() for name, args, _ in calls)
+
+
+def test_render_governance_telemetry_partial_and_unavailable_are_explicit(monkeypatch):
+    for status, expected in (("partial", "partial"), ("unavailable", "尚無可用")):
+        calls = []
+        monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit(calls=calls))
+        snapshot = _empty_snapshot()
+        snapshot["governanceTelemetry"] = _telemetry(status) if status == "partial" else None
+        agent_operations_rendering.render_agent_operations(snapshot, on_refresh=lambda: None)
+        rendered = " ".join(str(args) for name, args, _ in calls if name in {"caption", "info", "warning", "subheader"})
+        assert expected in rendered
+
+
 def test_render_run_details_marks_missing_graph_as_unavailable(monkeypatch):
     calls = _render_details_with_graph({"status": "unavailable"}, monkeypatch)
 

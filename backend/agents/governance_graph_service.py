@@ -5,8 +5,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .canonical_evidence_reader import CanonicalEvidenceReader
 from .governance_graph_models import (
     GRAPH_SCHEMA,
+    GovernanceCanonicalEvidenceRef,
     GovernanceEvidenceRef,
     GovernanceGate,
     GovernanceGraphNode,
@@ -30,6 +32,7 @@ CANONICAL_GRAPH_ARTIFACTS = {
     "git_integration": "git-integration.json",
 }
 NODE_ORDER = tuple(CANONICAL_GRAPH_ARTIFACTS)
+EVIDENCE_NODE_ORDER = ("task_gate", "terra_diagnosis", "protected_incident")
 _PASS_STATUSES = frozenset({"pass", "passed", "completed", "applied", "committed", "merged", "kept_branch_by_user"})
 _FAIL_STATUSES = frozenset({"failed", "changes_required", "fail", "rejected"})
 _BLOCKED_STATUSES = frozenset({"blocked", "blocked_missing_runner", "awaiting_target_approval"})
@@ -84,6 +87,7 @@ class GovernanceGraphBuilder:
             nodes.append(node)
 
         nodes = self._invalidate_descendants(nodes, blockers, diagnostics)
+        nodes.extend(self._evidence_nodes(run_id))
         overall_status = self._overall_status(nodes)
         if overall_status == "blocked_missing_runner":
             blockers.append({"code": "blocked_missing_runner", "nodeId": "documentation"})
@@ -164,6 +168,46 @@ class GovernanceGraphBuilder:
                 "nbs-governance-evidence-ref-v1", CANONICAL_GRAPH_ARTIFACTS[node_id],
                 self._artifact_sha(raw), status, generated_at,
             ),), fingerprint=self._artifact_sha(raw), reason_code=reason,
+        )
+
+    def _evidence_nodes(self, run_id: str) -> list[GovernanceGraphNode]:
+        compact = CanonicalEvidenceReader(self.project_root).read(self.store.runs_root / run_id)
+        return [self._evidence_node(node_id, compact.get(node_id)) for node_id in EVIDENCE_NODE_ORDER]
+
+    def _evidence_node(self, node_id: str, compact: Any) -> GovernanceGraphNode:
+        expected_keys = {"state", "status", "reason", "finalizedAt", "artifact", "sha256"}
+        if not isinstance(compact, dict) or set(compact) != expected_keys:
+            return self._evidence_state_node(node_id, "invalid", "invalid_evidence")
+        status = compact["status"]
+        reason = compact["reason"]
+        if status not in {"available", "blocked", "unknown", "invalid"} or (reason is not None and not isinstance(reason, str)):
+            return self._evidence_state_node(node_id, "invalid", "invalid_evidence")
+        if status in {"unknown", "invalid"}:
+            return self._evidence_state_node(node_id, status, reason)
+        artifact = compact["artifact"]
+        sha256 = compact["sha256"]
+        finalized_at = compact["finalizedAt"]
+        if not isinstance(artifact, str) or not isinstance(sha256, str) or not isinstance(finalized_at, str):
+            return self._evidence_state_node(node_id, "invalid", "invalid_evidence")
+        try:
+            evidence_ref = GovernanceCanonicalEvidenceRef(
+                "nbs-governance-evidence-ref-v1", artifact, sha256, status,
+                finalized_at.replace("Z", "+00:00"),
+            )
+        except GovernanceGraphSchemaError:
+            return self._evidence_state_node(node_id, "invalid", "invalid_evidence")
+        return GovernanceGraphNode(
+            node_id=node_id, node_type=node_id, status=status, attempt=1, max_attempts=1,
+            evidence_refs=(evidence_ref,), fingerprint=sha256, reason_code=reason,
+        )
+
+    @staticmethod
+    def _evidence_state_node(node_id: str, status: str, reason: str | None) -> GovernanceGraphNode:
+        seed = hashlib.sha256(f"{node_id}:{status}:{reason or ''}".encode()).hexdigest()
+        return GovernanceGraphNode(
+            node_id=node_id, node_type=node_id, status=status,
+            attempt=0 if status == "unknown" else 1, max_attempts=1,
+            evidence_refs=(), fingerprint=seed, reason_code=reason,
         )
 
     @staticmethod
@@ -254,13 +298,14 @@ class GovernanceGraphBuilder:
 
     @staticmethod
     def _overall_status(nodes: list[GovernanceGraphNode]) -> str:
-        if any(node.reason_code == "blocked_missing_runner" for node in nodes):
+        canonical_nodes = [node for node in nodes if node.node_id in NODE_ORDER]
+        if any(node.reason_code == "blocked_missing_runner" for node in canonical_nodes):
             return "blocked_missing_runner"
-        if any(node.status == "blocked" for node in nodes):
+        if any(node.status == "blocked" for node in canonical_nodes):
             return "blocked"
-        if any(node.status == "failed" for node in nodes):
+        if any(node.status == "failed" for node in canonical_nodes):
             return "blocked"
-        statuses = {node.node_id: node.status for node in nodes}
+        statuses = {node.node_id: node.status for node in canonical_nodes}
         if all(statuses[node_id] == "passed" for node_id in NODE_ORDER):
             return "completed"
         if statuses["hermes"] == "passed" and statuses["documentation"] == "not_started":
@@ -275,7 +320,9 @@ class GovernanceGraphBuilder:
     def _allowed_next(nodes: list[GovernanceGraphNode], overall_status: str) -> tuple[str, ...]:
         if overall_status in {"blocked", "blocked_missing_runner", "completed"}:
             return ()
-        for index, node in enumerate(nodes):
+        node_by_id = {node.node_id: node for node in nodes}
+        for node_id in NODE_ORDER:
+            node = node_by_id[node_id]
             if node.status != "passed":
                 return (node.node_id,)
         return ()

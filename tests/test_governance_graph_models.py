@@ -10,6 +10,7 @@ from backend.agents.governance_graph_models import (
     GRAPH_SCHEMA,
     RISK_SCHEMA,
     GovernanceGraphSchemaError,
+    GovernanceCanonicalEvidenceRef,
     GovernanceEvidenceRef,
     GovernanceGraphNode,
     GovernanceGraphSnapshot,
@@ -120,6 +121,73 @@ def test_evidence_ref_rejects_governance_graph_projection_artifact():
                 "status": "passed",
                 "generatedAt": "2026-07-22T10:00:00+00:00",
             }
+        )
+
+
+@pytest.mark.parametrize("status", ("available", "unknown", "invalid"))
+def test_graph_node_accepts_only_additive_compact_evidence_statuses(status):
+    evidence_refs = ()
+    if status == "available":
+        evidence_refs = (GovernanceCanonicalEvidenceRef(
+            "nbs-governance-evidence-ref-v1", "task-gate.json", "0" * 64,
+            "available", "2026-07-28T00:00:03+00:00",
+        ),)
+
+    node = GovernanceGraphNode(
+        node_id="task_gate", node_type="task_gate", status=status,
+        attempt=0 if status == "unknown" else 1, max_attempts=1,
+        evidence_refs=evidence_refs, fingerprint="0" * 64,
+        reason_code="missing" if status == "unknown" else None,
+    )
+
+    assert node.status == status
+
+
+def test_canonical_gate_does_not_accept_compact_evidence_statuses():
+    with pytest.raises(GovernanceGraphSchemaError):
+        GovernanceGate(
+            schema_version=GATE_SCHEMA,
+            gate_id="spec_gate",
+            status="available",
+            fingerprint="0" * 64,
+            evidence_refs=(),
+            reason_code=None,
+        )
+
+
+@pytest.mark.parametrize("node_id", ("risk", "plan_gate"))
+@pytest.mark.parametrize("status", ("available", "unknown", "invalid"))
+def test_existing_canonical_nodes_reject_compact_evidence_statuses(node_id, status):
+    with pytest.raises(GovernanceGraphSchemaError):
+        GovernanceGraphNode(
+            node_id=node_id,
+            node_type=node_id,
+            status=status,
+            attempt=0 if status == "unknown" else 1,
+            max_attempts=1,
+            evidence_refs=(),
+            fingerprint="0" * 64,
+            reason_code=None,
+        )
+
+
+@pytest.mark.parametrize("node_id", ("risk", "plan_gate"))
+def test_existing_canonical_nodes_reject_canonical_evidence_references(node_id):
+    canonical_ref = GovernanceCanonicalEvidenceRef(
+        "nbs-governance-evidence-ref-v1", "task-gate.json", "0" * 64,
+        "available", "2026-07-28T00:00:03+00:00",
+    )
+
+    with pytest.raises(GovernanceGraphSchemaError):
+        GovernanceGraphNode(
+            node_id=node_id,
+            node_type=node_id,
+            status="not_started",
+            attempt=0,
+            max_attempts=1,
+            evidence_refs=(canonical_ref,),
+            fingerprint="0" * 64,
+            reason_code=None,
         )
 
 

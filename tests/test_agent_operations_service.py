@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from backend.agents.canonical_evidence_models import CanonicalEvidenceEnvelope
+from backend.agents.canonical_evidence_registry import CanonicalEvidenceRegistry
+from backend.agents.canonical_evidence_writer import CanonicalEvidenceWriter
 from backend.agents.context_agent_service import build_context_evidence_payload
 from backend.agents.evidence_models import EvidenceBundle
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
@@ -13,6 +16,42 @@ from backend.services.agent_operations_service import (
     DEFAULT_STAGE_ARTIFACT_MAX_BYTES,
     AgentOperationsService,
 )
+
+
+def _canonical_task_gate(run_id: str) -> CanonicalEvidenceEnvelope:
+    entry = CanonicalEvidenceRegistry().for_kind("task_gate")
+    unsigned = {
+        "schemaVersion": entry.schema_version, "artifactKind": "task_gate", "runId": run_id,
+        "writer": entry.writer, "writerVersion": "1.0.0", "contractFingerprint": "a" * 64,
+        "status": "failed", "reasonCode": "gate_failed",
+        "lifecycle": {"createdAt": "2026-07-28T00:00:00Z", "startedAt": "2026-07-28T00:00:01Z", "decidedAt": "2026-07-28T00:00:02Z", "finalizedAt": "2026-07-28T00:00:03Z"},
+        "payload": {"taskId": "task-1", "decision": "failed", "requiredEvidenceKinds": ["implementation"], "missingEvidenceKinds": []},
+    }
+    from backend.agents.workflow_models import canonical_sha256
+    return CanonicalEvidenceEnvelope.from_dict({**unsigned, "evidenceFingerprint": canonical_sha256(unsigned)})
+
+
+def _write_approved_task_gate(root: Path, run: Path) -> CanonicalEvidenceEnvelope:
+    envelope = _canonical_task_gate(run.name)
+    _write_json(run / "approval.json", {
+        "schemaVersion": "agent-workflow-approval-v1", "runId": run.name,
+        "contractPath": "task-1.json", "contractFingerprint": envelope.contract_fingerprint,
+        "approvedBaseSha": "d" * 40, "approvedAt": "2026-07-28T00:01:00+00:00",
+        "authorizationStatus": "approved",
+    })
+    CanonicalEvidenceWriter(root).write_final(run.name, envelope)
+    return envelope
+
+
+def _write_governance_gate(run: Path, *, filename: str, gate_id: str, status: str, reason: str | None) -> None:
+    _write_json(run / filename, {
+        "schemaVersion": "nbs-governance-gate-v1",
+        "gateId": gate_id,
+        "status": status,
+        "fingerprint": "a" * 64,
+        "evidenceRefs": [],
+        "reasonCode": reason,
+    })
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -462,7 +501,7 @@ def test_stage_artifact_schema_or_fake_pass_fails_closed_without_token_usage(tmp
     assert snapshot["runs"] == []
     assert snapshot["summary"]["runCount"] == 0
     assert snapshot["diagnostics"][0]["code"] == "invalid_run"
-    assert "tokenUsage" not in json.dumps(snapshot)
+    assert "tokenUsage" not in json.dumps(snapshot["runs"])
 
 
 def test_legacy_full_verification_and_hermes_payloads_without_schema_remain_available(tmp_path):
@@ -1068,3 +1107,39 @@ def test_event_reader_stops_at_fixed_scan_budget_for_invalid_or_other_run_events
     assert item["stages"]["implementation"]["durationMs"] is None
     assert readers
     assert readers[0].bytes_read == event_scan_budget
+
+
+def test_agent_operations_exposes_compact_canonical_evidence_without_writing(tmp_path):
+    run = _valid_run(tmp_path, "canonical-evidence")
+    envelope = _write_approved_task_gate(tmp_path, run)
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+
+    evidence = snapshot["runs"][0]["canonicalEvidence"]["task_gate"]
+    assert evidence["status"] == "available"
+    assert evidence["state"] == "failed"
+    assert evidence["sha256"] == envelope.evidence_fingerprint
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    serialized = json.dumps(snapshot)
+    assert str(tmp_path) not in serialized
+    assert "taskId" not in serialized
+
+
+def test_agent_operations_compacts_verified_spec_plan_gates_without_graph(tmp_path):
+    run = _valid_run(tmp_path, "compact-gates")
+    _write_governance_gate(
+        run, filename="design-spec-gate.json", gate_id="spec-gate", status="passed", reason=None,
+    )
+    _write_governance_gate(
+        run, filename="plan-gate.json", gate_id="plan-gate", status="failed", reason="gate_failed",
+    )
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+    gates = snapshot["runs"][0]["governanceGates"]
+
+    assert gates["specGate"]["status"] == "available"
+    assert gates["specGate"]["state"] == "passed"
+    assert gates["planGate"]["status"] == "available"
+    assert gates["planGate"]["state"] == "failed"
+    assert str(tmp_path) not in json.dumps(gates)

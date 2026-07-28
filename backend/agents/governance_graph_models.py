@@ -21,6 +21,8 @@ RISK_SCHEMA = "nbs-governance-risk-v1"
 GATE_SCHEMA = "nbs-governance-gate-v1"
 RISK_LEVELS = frozenset({"R0", "R1", "R2"})
 NODE_STATUSES = frozenset({"not_started", "ready", "passed", "failed", "blocked", "skipped"})
+EVIDENCE_NODE_TYPES = frozenset({"task_gate", "terra_diagnosis", "protected_incident"})
+COMPACT_EVIDENCE_NODE_STATUSES = frozenset({"available", "unknown", "invalid"})
 AUTHORIZATION_MODES = frozenset({"per_task", "approved_batch"})
 OVERALL_STATUSES = frozenset(
     {
@@ -36,7 +38,7 @@ OVERALL_STATUSES = frozenset(
         "blocked",
     }
 )
-MAX_GRAPH_NODES = 12
+MAX_GRAPH_NODES = 15
 MAX_GRAPH_EVIDENCE_REFS = 12
 MAX_GRAPH_METADATA_ITEMS = 12
 
@@ -98,6 +100,12 @@ def _safe_identifier(value: Any, key: str) -> str:
     return value
 
 
+def _graph_node_status(node_type: str, status: str) -> bool:
+    return isinstance(node_type, str) and (status in NODE_STATUSES or (
+        node_type in EVIDENCE_NODE_TYPES and status in COMPACT_EVIDENCE_NODE_STATUSES
+    ))
+
+
 def _safe_metadata_tree(value: Any, key: str, *, depth: int = 0) -> Any:
     if depth > 3:
         raise GovernanceGraphSchemaError(f"{key} is too deeply nested")
@@ -125,6 +133,12 @@ def _allowed_evidence_artifacts() -> frozenset[str]:
     from .workflow_store import ALLOWED_ARTIFACTS
 
     return frozenset(set(ALLOWED_ARTIFACTS) | {"manifest.json", "status.json", "approval.json", "events.jsonl"})
+
+
+def _canonical_evidence_artifacts() -> dict[str, str]:
+    from .canonical_evidence_registry import CanonicalEvidenceRegistry
+
+    return {entry.artifact_kind: entry.filename for entry in CanonicalEvidenceRegistry().entries()}
 
 
 def _metadata_tuple(value: Any, key: str) -> tuple[dict[str, str], ...]:
@@ -201,12 +215,15 @@ def _validate_node_instances(value: tuple[Any, ...], key: str) -> tuple["Governa
     return tuple(nodes)
 
 
-def _evidence_ref_tuple(value: Any, key: str) -> tuple["GovernanceEvidenceRef", ...]:
+def _evidence_ref_tuple(
+    value: Any, key: str, *, canonical_evidence: bool = False,
+) -> tuple["GovernanceEvidenceRef", ...]:
     if not isinstance(value, list):
         raise GovernanceGraphSchemaError(f"{key} must be a list")
     if len(value) > MAX_GRAPH_EVIDENCE_REFS:
         raise GovernanceGraphSchemaError(f"{key} contains too many entries")
-    return tuple(GovernanceEvidenceRef.from_dict(item) for item in value)
+    ref_type = GovernanceCanonicalEvidenceRef if canonical_evidence else GovernanceEvidenceRef
+    return tuple(ref_type.from_dict(item) for item in value)
 
 
 @dataclass(frozen=True)
@@ -259,6 +276,44 @@ class GovernanceEvidenceRef:
 
 
 @dataclass(frozen=True)
+class GovernanceCanonicalEvidenceRef(GovernanceEvidenceRef):
+    """A canonical-evidence reference permitted only on matching evidence nodes."""
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "nbs-governance-evidence-ref-v1":
+            raise GovernanceGraphSchemaError("schemaVersion must be nbs-governance-evidence-ref-v1")
+        _safe_identifier(self.status, "status")
+        if self.path not in _canonical_evidence_artifacts().values():
+            raise GovernanceGraphSchemaError("evidence path is not a canonical evidence artifact")
+        _sha256_value(self.sha256, "sha256")
+        _timestamp_value(self.generated_at, "generatedAt")
+
+
+def _validate_standard_evidence_ref_instances(
+    value: tuple[Any, ...], key: str,
+) -> tuple["GovernanceEvidenceRef", ...]:
+    refs = _validate_evidence_ref_instances(value, key)
+    if any(isinstance(item, GovernanceCanonicalEvidenceRef) for item in refs):
+        raise GovernanceGraphSchemaError(f"{key} cannot reference canonical evidence")
+    return refs
+
+
+def _validate_node_evidence_ref_instances(
+    node_type: str, value: tuple[Any, ...], key: str,
+) -> tuple["GovernanceEvidenceRef", ...]:
+    refs = _validate_evidence_ref_instances(value, key)
+    if node_type not in EVIDENCE_NODE_TYPES:
+        return _validate_standard_evidence_ref_instances(refs, key)
+    expected_path = _canonical_evidence_artifacts()[node_type]
+    if any(
+        not isinstance(item, GovernanceCanonicalEvidenceRef) or item.path != expected_path
+        for item in refs
+    ):
+        raise GovernanceGraphSchemaError(f"{key} must match the evidence node canonical artifact")
+    return refs
+
+
+@dataclass(frozen=True)
 class GovernanceRisk:
     schema_version: str
     level: str
@@ -271,7 +326,7 @@ class GovernanceRisk:
         if self.level not in RISK_LEVELS:
             raise GovernanceGraphSchemaError("risk level is invalid")
         _string_tuple(list(self.surfaces), "surfaces")
-        _validate_evidence_ref_instances(self.evidence_refs, "evidenceRefs")
+        _validate_standard_evidence_ref_instances(self.evidence_refs, "evidenceRefs")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "GovernanceRisk":
@@ -315,7 +370,7 @@ class GovernanceGate:
         if self.status not in NODE_STATUSES:
             raise GovernanceGraphSchemaError("gate status is invalid")
         _sha256_value(self.fingerprint, "fingerprint")
-        _validate_evidence_ref_instances(self.evidence_refs, "evidenceRefs")
+        _validate_standard_evidence_ref_instances(self.evidence_refs, "evidenceRefs")
         if self.reason_code is not None:
             _safe_metadata_text(self.reason_code, "reasonCode")
 
@@ -370,13 +425,13 @@ class GovernanceGraphNode:
     def __post_init__(self) -> None:
         _safe_identifier(self.node_id, "nodeId")
         _safe_identifier(self.node_type, "nodeType")
-        if self.status not in NODE_STATUSES:
+        if not _graph_node_status(self.node_type, self.status):
             raise GovernanceGraphSchemaError("node status is invalid")
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (self.attempt, self.max_attempts)):
             raise GovernanceGraphSchemaError("node attempts must be non-negative integers")
         if self.attempt > self.max_attempts:
             raise GovernanceGraphSchemaError("attempt cannot exceed maxAttempts")
-        _validate_evidence_ref_instances(self.evidence_refs, "evidenceRefs")
+        _validate_node_evidence_ref_instances(self.node_type, self.evidence_refs, "evidenceRefs")
         _sha256_value(self.fingerprint, "fingerprint")
         if self.reason_code is not None:
             _safe_metadata_text(self.reason_code, "reasonCode")
@@ -386,8 +441,9 @@ class GovernanceGraphNode:
         try:
             required = {"nodeId", "nodeType", "status", "attempt", "maxAttempts", "evidenceRefs", "fingerprint", "reasonCode"}
             _keys(payload, required)
+            node_type = _safe_identifier(payload["nodeType"], "nodeType")
             status = _string(payload, "status")
-            if status not in NODE_STATUSES:
+            if not _graph_node_status(node_type, status):
                 raise GovernanceGraphSchemaError("node status is invalid")
             attempt = payload["attempt"]
             max_attempts = payload["maxAttempts"]
@@ -400,11 +456,14 @@ class GovernanceGraphNode:
                 reason = _safe_metadata_text(reason, "reasonCode")
             return cls(
                 _safe_identifier(payload["nodeId"], "nodeId"),
-                _safe_identifier(payload["nodeType"], "nodeType"),
+                node_type,
                 status,
                 attempt,
                 max_attempts,
-                _evidence_ref_tuple(payload["evidenceRefs"], "evidenceRefs"),
+                _evidence_ref_tuple(
+                    payload["evidenceRefs"], "evidenceRefs",
+                    canonical_evidence=node_type in EVIDENCE_NODE_TYPES,
+                ),
                 _sha256(payload, "fingerprint"),
                 reason,
             )

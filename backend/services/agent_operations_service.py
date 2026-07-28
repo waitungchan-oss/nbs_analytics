@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.context_agent_service import context_bundle_from_payload
+from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
 from backend.agents.documentation_models import (
     DocumentationApplication,
     DocumentationEvidence,
     DocumentationProposal,
 )
 from backend.agents.governance_graph_models import (
+    GovernanceGate,
     GovernanceGraphSchemaError,
     GovernanceGraphSnapshot,
 )
@@ -34,6 +36,10 @@ STAGE_FILES = {
     "hermes": "hermes.json",
 }
 GOVERNANCE_GRAPH_FILE = "governance-graph.json"
+GOVERNANCE_GATE_FILES = {
+    "specGate": ("design-spec-gate.json", "spec-gate"),
+    "planGate": ("plan-gate.json", "plan-gate"),
+}
 DOCUMENTATION_FILES = {
     "evidence": "documentation-evidence.json",
     "proposal": "documentation-proposal.json",
@@ -99,6 +105,7 @@ class AgentOperationsService:
         self.runtime_root = self._safe_root(candidate)
         self.runs_root = self.runtime_root / "runs"
         self.retention_path = self.project_root / "agent_config" / "workflow_retention.json"
+        self.canonical_evidence_reader = CanonicalEvidenceReader(self.project_root, self.runtime_root)
 
     def build_snapshot(self) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()
@@ -109,11 +116,20 @@ class AgentOperationsService:
         )
         runs = self._load_runs(diagnostics, stage_artifact_max_bytes)
         runs.sort(key=lambda item: (item["updatedAt"], item["runId"]), reverse=True)
+        from backend.services.governance_telemetry_service import GovernanceTelemetryService
+
         return {
             "schemaVersion": SNAPSHOT_SCHEMA,
             "generatedAt": generated_at,
             "summary": self._summary(runs),
             "runs": runs,
+            "governanceTelemetry": GovernanceTelemetryService(
+                self.project_root, runtime_root=self.runtime_root
+            ).build_snapshot(
+                runs=runs,
+                diagnostics=diagnostics,
+                hard_cap=stage_artifact_max_bytes,
+            ),
             "retention": retention,
             "diagnostics": diagnostics,
         }
@@ -249,11 +265,19 @@ class AgentOperationsService:
             "verification": self._verification(stage_payloads["full_verification"]),
             "hermes": self._hermes(stage_payloads["hermes"]),
             "tokenUsage": self._token_usage(stage_payloads),
+            "lunaRepairLoops": self._luna_repair_loops(stage_payloads["implementation"]),
             "documentation": documentation,
             "governanceGraph": self._governance_graph(run_dir, stage_artifact_max_bytes),
+            "governanceGates": self._governance_gates(run_dir, stage_artifact_max_bytes),
+            "canonicalEvidence": self.canonical_evidence_reader.read(run_dir, stage_artifact_max_bytes),
             "retentionState": "archived_summary" if archived else "complete",
         }
         return item
+
+    @staticmethod
+    def _luna_repair_loops(payload: dict[str, Any] | None) -> int | None:
+        value = payload.get("repairLoopsUsed") if isinstance(payload, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100 else None
 
     def _governance_graph(self, run_dir: Path, hard_cap: int) -> dict[str, Any]:
         try:
@@ -271,6 +295,42 @@ class AgentOperationsService:
         except (GovernanceGraphSchemaError, _ArtifactError, OSError, ValueError, json.JSONDecodeError):
             return {"status": "invalid", "diagnostics": [{"code": "invalid_projection"}]}
         return self._compact_governance_graph(snapshot)
+
+    def _governance_gates(self, run_dir: Path, hard_cap: int) -> dict[str, dict[str, str | None]]:
+        return {
+            name: self._governance_gate(run_dir, hard_cap, filename, gate_id)
+            for name, (filename, gate_id) in GOVERNANCE_GATE_FILES.items()
+        }
+
+    def _governance_gate(
+        self, run_dir: Path, hard_cap: int, filename: str, expected_gate_id: str,
+    ) -> dict[str, str | None]:
+        try:
+            payload = self._read_json(run_dir / filename, run_dir, hard_cap, optional=True)
+            if payload is None:
+                return self._compact_gate("unknown", "unknown", "missing", filename, None)
+            gate = GovernanceGate.from_dict(payload)
+            if gate.gate_id != expected_gate_id:
+                raise GovernanceGraphSchemaError("gate ID is invalid")
+            if gate.status in {"passed", "failed"}:
+                return self._compact_gate(gate.status, "available", gate.reason_code, filename, gate.fingerprint)
+            if gate.status == "blocked":
+                return self._compact_gate(gate.status, "blocked", gate.reason_code, filename, gate.fingerprint)
+            return self._compact_gate("unknown", "unknown", "not_finalized", filename, None)
+        except (GovernanceGraphSchemaError, _ArtifactError, OSError, ValueError, json.JSONDecodeError):
+            return self._compact_gate("invalid", "invalid", "invalid_gate", filename, None)
+
+    @staticmethod
+    def _compact_gate(
+        state: str, status: str, reason: str | None, artifact: str, sha256: str | None,
+    ) -> dict[str, str | None]:
+        return {
+            "state": state,
+            "status": status,
+            "reason": reason,
+            "artifact": artifact,
+            "sha256": sha256,
+        }
 
     @staticmethod
     def _compact_governance_graph(snapshot: GovernanceGraphSnapshot) -> dict[str, Any]:
