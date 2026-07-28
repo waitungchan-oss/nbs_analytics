@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -33,7 +32,7 @@ def _envelope(kind: str, run_id: str = "run-1", *, status: str | None = None) ->
         reason = None
     unsigned = {
         "schemaVersion": entry.schema_version, "artifactKind": kind, "runId": run_id,
-        "writer": entry.writer, "writerVersion": "1.0.0", "contractFingerprint": entry.contract_fingerprint,
+        "writer": entry.writer, "writerVersion": "1.0.0", "contractFingerprint": "a" * 64,
         "status": evidence_status, "reasonCode": reason,
         "lifecycle": {"createdAt": "2026-07-28T00:00:00Z", "startedAt": "2026-07-28T00:00:01Z", "decidedAt": "2026-07-28T00:00:02Z", "finalizedAt": "2026-07-28T00:00:03Z"},
         "payload": payload,
@@ -47,8 +46,7 @@ def _approved_run(root: Path, run_id: str = "run-1") -> Path:
         WorkflowManifest(MANIFEST_SCHEMA, run_id, "brief.md", "a" * 64, "codex/test", "b" * 40, (), "2026-07-28T00:00:00+00:00", "c" * 64),
         WorkflowStatus(STATUS_SCHEMA, run_id, "hermes", "completed", "2026-07-28T00:00:00+00:00", "2026-07-28T00:00:00+00:00", "2026-07-28T00:00:00+00:00", "completed", None, 0),
     )
-    entry = CanonicalEvidenceRegistry().for_kind("task_gate")
-    store.write_approval(run_id, WorkflowApproval(APPROVAL_SCHEMA, run_id, "task-1.json", entry.contract_fingerprint, "d" * 40, "2026-07-28T00:01:00+00:00", "approved"))
+    store.write_approval(run_id, WorkflowApproval(APPROVAL_SCHEMA, run_id, "task-1.json", "a" * 64, "d" * 40, "2026-07-28T00:01:00+00:00", "approved"))
     return store.runs_root / run_id
 
 
@@ -127,24 +125,26 @@ def test_reader_rejects_artifact_when_approval_contract_does_not_bind_it(tmp_pat
     assert CanonicalEvidenceReader(tmp_path).read(approval_path.parent)["task_gate"]["status"] == "invalid"
 
 
-def test_reader_rejects_matching_unregistered_approval_and_envelope_contract(tmp_path, monkeypatch):
-    from backend.agents import canonical_evidence_reader
+def test_reader_accepts_matching_approval_owned_contract(tmp_path):
+    from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
 
-    envelope = _write(tmp_path, "task_gate")
+    _write(tmp_path, "task_gate")
     run = tmp_path / ".nbs_agent_runtime" / "runs" / "run-1"
     approval_path = run / "approval.json"
     approval = json.loads(approval_path.read_text(encoding="utf-8"))
-    approval["contractFingerprint"] = "0" * 64
+    approval["contractFingerprint"] = "e" * 64
     approval_path.write_text(json.dumps(approval), encoding="utf-8")
-    monkeypatch.setattr(
-        canonical_evidence_reader.CanonicalEvidenceEnvelope,
-        "from_dict",
-        classmethod(lambda cls, payload, expected_kind=None: replace(envelope, contract_fingerprint="0" * 64)),
-    )
+    target = run / "task-gate.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["contractFingerprint"] = "e" * 64
+    unsigned = dict(payload)
+    unsigned.pop("evidenceFingerprint")
+    payload["evidenceFingerprint"] = canonical_sha256(unsigned)
+    target.write_text(json.dumps(payload), encoding="utf-8")
 
-    evidence = canonical_evidence_reader.CanonicalEvidenceReader(tmp_path).read(run)["task_gate"]
+    evidence = CanonicalEvidenceReader(tmp_path).read(run)["task_gate"]
 
-    assert evidence["status"] == "invalid"
+    assert evidence["status"] == "available"
 
 
 def test_reader_invalid_approval_precedes_missing_artifact_unknown(tmp_path):
@@ -179,3 +179,83 @@ def test_reader_rejects_traversal_run_path_fail_closed(tmp_path):
     evidence = CanonicalEvidenceReader(tmp_path).read(run / ".." / run.name)["task_gate"]
 
     assert evidence["status"] == "invalid"
+
+
+def test_reader_rejects_symlinked_runs_root_before_reading_evidence(tmp_path):
+    from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
+
+    _write(tmp_path, "task_gate")
+    run = tmp_path / ".nbs_agent_runtime" / "runs" / "run-1"
+    runs_root = run.parent
+    target = tmp_path / "runs-target"
+    runs_root.rename(target)
+    runs_root.symlink_to(target, target_is_directory=True)
+
+    evidence = CanonicalEvidenceReader(tmp_path).read(runs_root / run.name)["task_gate"]
+
+    assert evidence["status"] == "invalid"
+
+
+def test_reader_rejects_non_directory_runs_root_before_reading_evidence(tmp_path):
+    from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
+
+    runs_root = tmp_path / ".nbs_agent_runtime" / "runs"
+    runs_root.parent.mkdir()
+    runs_root.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        CanonicalEvidenceReader(tmp_path)._safe_runs_root()
+
+
+def test_reader_rejects_manifest_run_id_mismatch_before_evidence_projection(tmp_path):
+    from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
+
+    _write(tmp_path, "task_gate")
+    run = tmp_path / ".nbs_agent_runtime" / "runs" / "run-1"
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["runId"] = "other-run"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    evidence = CanonicalEvidenceReader(tmp_path).read(run)["task_gate"]
+
+    assert evidence["status"] == "invalid"
+
+
+def test_reader_marks_incomplete_lifecycle_unknown_before_blocked_classification(tmp_path):
+    from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
+
+    _write(tmp_path, "task_gate")
+    run = tmp_path / ".nbs_agent_runtime" / "runs" / "run-1"
+    target = run / "task-gate.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["status"] = "blocked"
+    payload["reasonCode"] = "missing_evidence"
+    payload["payload"]["decision"] = "blocked"
+    payload["lifecycle"].pop("finalizedAt")
+    unsigned = dict(payload)
+    unsigned.pop("evidenceFingerprint")
+    payload["evidenceFingerprint"] = canonical_sha256(unsigned)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    evidence = CanonicalEvidenceReader(tmp_path).read(run)["task_gate"]
+
+    assert evidence["status"] == "unknown"
+    assert evidence["state"] == "unknown"
+
+
+def test_reader_marks_incomplete_lifecycle_invalid_when_fingerprint_is_tampered(tmp_path):
+    from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
+
+    _write(tmp_path, "task_gate")
+    run = tmp_path / ".nbs_agent_runtime" / "runs" / "run-1"
+    target = run / "task-gate.json"
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["lifecycle"].pop("finalizedAt")
+    payload["evidenceFingerprint"] = "0" * 64
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    evidence = CanonicalEvidenceReader(tmp_path).read(run)["task_gate"]
+
+    assert evidence["status"] == "invalid"
+    assert evidence["state"] == "invalid"

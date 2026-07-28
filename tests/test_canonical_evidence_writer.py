@@ -16,7 +16,12 @@ from backend.agents.workflow_models import (
 from backend.agents.workflow_store import WorkflowStore
 
 
-def _envelope(kind: str, run_id: str = "run-1") -> CanonicalEvidenceEnvelope:
+def _envelope(
+    kind: str,
+    run_id: str = "run-1",
+    *,
+    contract_fingerprint: str | None = None,
+) -> CanonicalEvidenceEnvelope:
     entry = CanonicalEvidenceRegistry().for_kind(kind)
     payloads = {
         "task_gate": {
@@ -35,7 +40,7 @@ def _envelope(kind: str, run_id: str = "run-1") -> CanonicalEvidenceEnvelope:
     unsigned = {
         "schemaVersion": entry.schema_version, "artifactKind": kind, "runId": run_id,
         "writer": entry.writer, "writerVersion": "1.0.0",
-        "contractFingerprint": entry.contract_fingerprint,
+        "contractFingerprint": contract_fingerprint or "a" * 64,
         "lifecycle": {"createdAt": "2026-07-28T00:00:00Z", "startedAt": "2026-07-28T00:00:01Z", "decidedAt": "2026-07-28T00:00:02Z", "finalizedAt": "2026-07-28T00:00:02Z"},
         **payloads[kind],
     }
@@ -86,6 +91,23 @@ def test_writer_creates_one_final_artifact_and_rejects_duplicate(tmp_path):
         writer.write_final("run-1", envelope)
 
     assert first.read_bytes() == before
+
+
+def test_writer_allows_all_registered_kinds_under_one_approved_contract(tmp_path):
+    from backend.agents.canonical_evidence_writer import CanonicalEvidenceWriter
+
+    fingerprint = "e" * 64
+    envelopes = [_envelope(kind, contract_fingerprint=fingerprint) for kind in (
+        "task_gate", "terra_diagnosis", "protected_incident",
+    )]
+    _write_approved_run(tmp_path, fingerprint=fingerprint)
+
+    writer = CanonicalEvidenceWriter(tmp_path)
+    paths = [writer.write_final("run-1", envelope) for envelope in envelopes]
+
+    assert {path.name for path in paths} == {
+        "task-gate.json", "terra-diagnosis.json", "protected-incident.json",
+    }
 
 
 @pytest.mark.parametrize("setup", ["missing", "unapproved", "mismatched"])

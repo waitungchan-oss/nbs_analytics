@@ -1,8 +1,8 @@
 # NBS Governance Graph Phase C Telemetry Design
 
-狀態：approved for implementation planning  
-日期：2026-07-28  
-風險：R1 standard engineering  
+狀態：approved for implementation planning
+日期：2026-07-28
+風險：R1 standard engineering
 範圍：建立 Governance Graph 的跨 run、read-only telemetry read model，並在既有 Streamlit `Agent Operations` tab 顯示治理運作指標。
 
 ## 1. 目的

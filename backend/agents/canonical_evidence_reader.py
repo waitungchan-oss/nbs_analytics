@@ -9,7 +9,7 @@ from typing import Any
 
 from .canonical_evidence_models import CanonicalEvidenceEnvelope, CanonicalEvidenceSchemaError
 from .canonical_evidence_registry import CanonicalEvidenceRegistry, CanonicalEvidenceRegistryEntry
-from .workflow_models import WorkflowApproval, WorkflowSchemaError
+from .workflow_models import WorkflowApproval, WorkflowManifest, WorkflowSchemaError
 
 
 DEFAULT_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
@@ -35,7 +35,9 @@ class CanonicalEvidenceReader:
         if not isinstance(hard_cap, int) or isinstance(hard_cap, bool) or hard_cap <= 0:
             return {entry.artifact_kind: self._invalid(entry) for entry in entries}
         try:
+            self._safe_runs_root()
             safe_run_dir = self._safe_run_dir(Path(run_dir))
+            self._load_manifest(safe_run_dir, hard_cap)
         except (OSError, ValueError):
             return {entry.artifact_kind: self._invalid(entry) for entry in entries}
         try:
@@ -52,13 +54,28 @@ class CanonicalEvidenceReader:
         return resolved
 
     def _safe_run_dir(self, candidate: Path) -> Path:
+        runs_root = self._safe_runs_root()
         if ".." in candidate.parts or candidate.is_symlink() or not candidate.is_dir():
             raise ValueError("run directory is unsafe")
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(self.runs_root.resolve(strict=False))
-        if resolved.parent != self.runs_root.resolve(strict=False) or resolved.name in {"", ".", ".."}:
+        resolved.relative_to(runs_root)
+        if resolved.parent != runs_root or resolved.name in {"", ".", ".."}:
             raise ValueError("run directory is not a direct child")
         return resolved
+
+    def _safe_runs_root(self) -> Path:
+        if self.runs_root.is_symlink() or self.runs_root.exists() and not self.runs_root.is_dir():
+            raise ValueError("runs root is unsafe")
+        resolved = self.runs_root.resolve(strict=False)
+        resolved.relative_to(self.runtime_root)
+        return resolved
+
+    def _load_manifest(self, run_dir: Path, hard_cap: int) -> WorkflowManifest:
+        payload = self._load_json(run_dir / "manifest.json", run_dir, hard_cap, optional=False)
+        manifest = WorkflowManifest.from_dict(payload)
+        if manifest.run_id != run_dir.name:
+            raise ValueError("manifest run binding is invalid")
+        return manifest
 
     def _load_approval(self, run_dir: Path, hard_cap: int) -> WorkflowApproval:
         payload = self._load_json(run_dir / "approval.json", run_dir, hard_cap, optional=False)
@@ -81,11 +98,11 @@ class CanonicalEvidenceReader:
             envelope = CanonicalEvidenceEnvelope.from_dict(payload, expected_kind=entry.artifact_kind)
             if (
                 envelope.run_id != run_dir.name
-                or approval.contract_fingerprint != entry.contract_fingerprint
-                or envelope.contract_fingerprint != entry.contract_fingerprint
                 or envelope.contract_fingerprint != approval.contract_fingerprint
             ):
                 return self._invalid(entry)
+            if not envelope.is_finalized:
+                return self._unknown(entry, reason="not_finalized")
             status = "blocked" if envelope.status == "blocked" else "available"
             return self._compact(
                 state=envelope.status,
@@ -134,8 +151,8 @@ class CanonicalEvidenceReader:
         return dict(zip(_COMPACT_KEYS, (state, status, reason, finalized_at, artifact, sha256), strict=True))
 
     @classmethod
-    def _unknown(cls, entry: CanonicalEvidenceRegistryEntry) -> dict[str, Any]:
-        return cls._compact(state="unknown", status="unknown", reason="missing", finalized_at=None, artifact=entry.filename, sha256=None)
+    def _unknown(cls, entry: CanonicalEvidenceRegistryEntry, *, reason: str = "missing") -> dict[str, Any]:
+        return cls._compact(state="unknown", status="unknown", reason=reason, finalized_at=None, artifact=entry.filename, sha256=None)
 
     @classmethod
     def _invalid(cls, entry: CanonicalEvidenceRegistryEntry) -> dict[str, Any]:

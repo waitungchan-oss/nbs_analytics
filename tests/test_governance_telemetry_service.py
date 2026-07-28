@@ -57,7 +57,7 @@ def _valid_run(root: Path, run_id: str = "run-123") -> Path:
         "schemaVersion": "agent-workflow-approval-v1",
         "runId": run_id,
         "contractPath": "task-telemetry.json",
-        "contractFingerprint": CanonicalEvidenceRegistry().for_kind("task_gate").contract_fingerprint,
+        "contractFingerprint": "a" * 64,
         "approvedBaseSha": "d" * 40,
         "approvedAt": "2026-07-28T09:01:00+08:00",
         "authorizationStatus": "approved",

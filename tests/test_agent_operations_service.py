@@ -22,7 +22,7 @@ def _canonical_task_gate(run_id: str) -> CanonicalEvidenceEnvelope:
     entry = CanonicalEvidenceRegistry().for_kind("task_gate")
     unsigned = {
         "schemaVersion": entry.schema_version, "artifactKind": "task_gate", "runId": run_id,
-        "writer": entry.writer, "writerVersion": "1.0.0", "contractFingerprint": entry.contract_fingerprint,
+        "writer": entry.writer, "writerVersion": "1.0.0", "contractFingerprint": "a" * 64,
         "status": "failed", "reasonCode": "gate_failed",
         "lifecycle": {"createdAt": "2026-07-28T00:00:00Z", "startedAt": "2026-07-28T00:00:01Z", "decidedAt": "2026-07-28T00:00:02Z", "finalizedAt": "2026-07-28T00:00:03Z"},
         "payload": {"taskId": "task-1", "decision": "failed", "requiredEvidenceKinds": ["implementation"], "missingEvidenceKinds": []},
@@ -41,6 +41,17 @@ def _write_approved_task_gate(root: Path, run: Path) -> CanonicalEvidenceEnvelop
     })
     CanonicalEvidenceWriter(root).write_final(run.name, envelope)
     return envelope
+
+
+def _write_governance_gate(run: Path, *, filename: str, gate_id: str, status: str, reason: str | None) -> None:
+    _write_json(run / filename, {
+        "schemaVersion": "nbs-governance-gate-v1",
+        "gateId": gate_id,
+        "status": status,
+        "fingerprint": "a" * 64,
+        "evidenceRefs": [],
+        "reasonCode": reason,
+    })
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -1113,3 +1124,22 @@ def test_agent_operations_exposes_compact_canonical_evidence_without_writing(tmp
     serialized = json.dumps(snapshot)
     assert str(tmp_path) not in serialized
     assert "taskId" not in serialized
+
+
+def test_agent_operations_compacts_verified_spec_plan_gates_without_graph(tmp_path):
+    run = _valid_run(tmp_path, "compact-gates")
+    _write_governance_gate(
+        run, filename="design-spec-gate.json", gate_id="spec-gate", status="passed", reason=None,
+    )
+    _write_governance_gate(
+        run, filename="plan-gate.json", gate_id="plan-gate", status="failed", reason="gate_failed",
+    )
+
+    snapshot = AgentOperationsService(tmp_path).build_snapshot()
+    gates = snapshot["runs"][0]["governanceGates"]
+
+    assert gates["specGate"]["status"] == "available"
+    assert gates["specGate"]["state"] == "passed"
+    assert gates["planGate"]["status"] == "available"
+    assert gates["planGate"]["state"] == "failed"
+    assert str(tmp_path) not in json.dumps(gates)

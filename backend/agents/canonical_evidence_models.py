@@ -22,7 +22,9 @@ _FIELDS = frozenset({
     "contractFingerprint", "status", "reasonCode", "lifecycle",
     "evidenceFingerprint", "payload",
 })
-_LIFECYCLE_FIELDS = frozenset({"createdAt", "startedAt", "decidedAt", "finalizedAt"})
+_LIFECYCLE_REQUIRED_FIELDS = frozenset({"createdAt", "startedAt"})
+_LIFECYCLE_OPTIONAL_FIELDS = frozenset({"decidedAt", "finalizedAt"})
+_LIFECYCLE_ORDER = ("createdAt", "startedAt", "decidedAt", "finalizedAt")
 _TASK_EVIDENCE_KINDS = frozenset({
     "risk", "spec_gate", "plan_gate", "implementation", "targeted_verification",
     "review", "full_verification", "hermes", "documentation", "git_integration",
@@ -85,7 +87,7 @@ def _utc_timestamp(value: Any, key: str) -> tuple[str, datetime]:
 
 def _reference(value: Any, key: str) -> str:
     value = _string(value, key, 128)
-    if Path(value).name != value:
+    if Path(value).name != value or value in {".", ".."}:
         raise CanonicalEvidenceSchemaError(f"{key} must be a basename")
     return value
 
@@ -203,10 +205,19 @@ class CanonicalEvidenceEnvelope:
                 raise CanonicalEvidenceSchemaError("successful status must have a null reasonCode")
         elif not isinstance(reason, str) or reason not in allowed_reasons:
             raise CanonicalEvidenceSchemaError("reasonCode is invalid for status")
-        lifecycle = _exact_keys(payload["lifecycle"], "lifecycle", _LIFECYCLE_FIELDS)
+        lifecycle = _object(payload["lifecycle"], "lifecycle")
+        lifecycle_keys = set(lifecycle)
+        if (
+            not _LIFECYCLE_REQUIRED_FIELDS <= lifecycle_keys
+            or not lifecycle_keys <= _LIFECYCLE_REQUIRED_FIELDS | _LIFECYCLE_OPTIONAL_FIELDS
+            or "finalizedAt" in lifecycle_keys and "decidedAt" not in lifecycle_keys
+        ):
+            raise CanonicalEvidenceSchemaError("lifecycle keys are invalid")
         normalized_lifecycle: dict[str, str] = {}
         ordered = []
-        for key in ("createdAt", "startedAt", "decidedAt", "finalizedAt"):
+        for key in _LIFECYCLE_ORDER:
+            if key not in lifecycle:
+                continue
             raw, parsed = _utc_timestamp(lifecycle[key], key)
             normalized_lifecycle[key] = raw
             ordered.append(parsed)
@@ -226,8 +237,6 @@ class CanonicalEvidenceEnvelope:
         if evidence_fingerprint != canonical_sha256(fingerprint_payload):
             raise CanonicalEvidenceSchemaError("evidenceFingerprint does not match canonical payload")
         contract_fingerprint = _sha256(payload["contractFingerprint"], "contractFingerprint")
-        if contract_fingerprint != entry.contract_fingerprint:
-            raise CanonicalEvidenceSchemaError("contractFingerprint does not match registry authority")
         return cls(
             schema_version=CANONICAL_EVIDENCE_SCHEMA,
             artifact_kind=kind,
@@ -255,3 +264,7 @@ class CanonicalEvidenceEnvelope:
         payload = self.to_dict()
         payload.pop("evidenceFingerprint")
         return canonical_sha256(payload)
+
+    @property
+    def is_finalized(self) -> bool:
+        return "decidedAt" in self.lifecycle and "finalizedAt" in self.lifecycle

@@ -97,7 +97,7 @@ def _canonical_evidence(kind: str, run_id: str, *, status: str | None = None) ->
         reason = "missing_evidence" if kind == "task_gate" else "blocked_missing_evidence"
     unsigned = {
         "schemaVersion": entry.schema_version, "artifactKind": kind, "runId": run_id,
-        "writer": entry.writer, "writerVersion": "1.0.0", "contractFingerprint": entry.contract_fingerprint,
+        "writer": entry.writer, "writerVersion": "1.0.0", "contractFingerprint": "a" * 64,
         "status": evidence_status, "reasonCode": reason,
         "lifecycle": {
             "createdAt": "2026-07-28T00:00:00Z", "startedAt": "2026-07-28T00:00:01Z",
@@ -255,7 +255,7 @@ def test_graph_preserves_missing_invalid_and_blocked_evidence_without_cross_kind
     if mode == "missing":
         entry = CanonicalEvidenceRegistry().for_kind(kind)
         store.write_approval(run_id, WorkflowApproval(
-            APPROVAL_SCHEMA, run_id, "task-1.json", entry.contract_fingerprint,
+            APPROVAL_SCHEMA, run_id, "task-1.json", "a" * 64,
             "d" * 40, "2026-07-28T00:01:00+00:00", "approved",
         ))
     elif mode == "invalid":

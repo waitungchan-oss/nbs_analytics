@@ -1,8 +1,8 @@
 # NBS Governance Graph Phase C Task 3 Canonical Evidence Design
 
 狀態：approved for implementation planning
-日期：2026-07-28  
-風險：R1 standard engineering  
+日期：2026-07-28
+風險：R1 standard engineering
 範圍：為 Task Gate、Terra diagnosis 與 protected incident 建立可驗證、run-scoped 的 canonical evidence contract，使後續 Telemetry 能如實計數並讓 Governance Graph 安全投影狀態。
 
 ## 1. 目的與決策

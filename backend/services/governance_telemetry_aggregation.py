@@ -9,9 +9,6 @@ _STAGES = ("context", "implementation", "targeted_verification", "review", "full
 MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000
 MAX_REPAIR_LOOPS = 100
 MAX_TOKEN_COUNT = 100_000_000
-_PASS_STATUSES = frozenset({"pass", "passed", "completed", "applied", "committed", "merged"})
-_FAIL_STATUSES = frozenset({"failed", "changes_required", "fail", "rejected"})
-_BLOCKED_STATUSES = frozenset({"blocked", "blocked_missing_runner", "awaiting_target_approval"})
 
 
 def _bounded_int(value: Any, maximum: int) -> bool:
@@ -27,6 +24,20 @@ def _canonical_state(item: dict[str, Any], kind: str) -> tuple[str, str | None]:
     value = evidence.get(kind) if isinstance(evidence, dict) else None
     if not isinstance(value, dict):
         return _UNKNOWN, None
+    status = value.get("status")
+    state = value.get("state")
+    if status not in {"available", "blocked", "unknown", "invalid"} or not isinstance(state, str):
+        return "invalid", None
+    return status, state
+
+
+def _governance_gate_state(item: dict[str, Any], kind: str) -> tuple[str, str | None]:
+    gates = item.get("governanceGates")
+    value = gates.get(kind) if isinstance(gates, dict) else None
+    if not isinstance(value, dict):
+        return _UNKNOWN, None
+    if set(value) != {"state", "status", "reason", "artifact", "sha256"}:
+        return "invalid", None
     status = value.get("status")
     state = value.get("state")
     if status not in {"available", "blocked", "unknown", "invalid"} or not isinstance(state, str):
@@ -64,26 +75,24 @@ class TelemetryAggregator:
                 if _bounded_int(duration, MAX_DURATION_MS):
                     metric = cycle_times[stage]; metric["status"] = "available"; metric["observedCount"] += 1; metric["totalMs"] += duration
                 else: cycle_times[stage]["unknownCount"] += 1
-            gate_files = {"specGate": "design-spec-gate.json", "planGate": "plan-gate.json"}
             graph = item.get("governanceGraph")
             if not isinstance(graph, dict) or graph.get("status") != "available":
                 stale_unknown += 1; run_unknown = True
-                for key in gate_files:
-                    gate_failures[key]["unknownCount"] += 1
             else:
                 graph_observed += 1
                 if graph.get("freshness") == "stale": stale_count += 1
-                nodes = graph.get("nodes") or graph.get("nodeStatuses")
-                nodes = nodes if isinstance(nodes, list) else []
-                node_map = {node.get("nodeId"): node for node in nodes if isinstance(node, dict) and isinstance(node.get("nodeId"), str)}
-                for key, node_id in (("specGate", "spec_gate"), ("planGate", "plan_gate")):
-                    node = node_map.get(node_id)
-                    status = node.get("status") if isinstance(node, dict) else None
-                    reason = node.get("reasonCode") if isinstance(node, dict) else None
-                    if status in _FAIL_STATUSES or reason == "gate_failed": gate_failures[key]["failed"] += 1; gate_failures[key]["status"] = "available"
-                    elif status in _BLOCKED_STATUSES or reason == "blocked": gate_failures[key]["blocked"] += 1; gate_failures[key]["status"] = "available"
-                    elif status in _PASS_STATUSES: gate_failures[key]["status"] = "available"
-                    else: gate_failures[key]["unknownCount"] += 1; run_unknown = True
+            for key in ("specGate", "planGate"):
+                gate_status, gate_state = _governance_gate_state(item, key)
+                if gate_status == "available":
+                    gate_failures[key]["status"] = "available"
+                    if gate_state == "failed":
+                        gate_failures[key]["failed"] += 1
+                elif gate_status == "blocked":
+                    gate_failures[key]["status"] = "available"
+                    gate_failures[key]["blocked"] += 1
+                else:
+                    gate_failures[key]["unknownCount"] += 1
+                    run_unknown = True
             repair_loops = item.get("lunaRepairLoops")
             if _bounded_int(repair_loops, MAX_REPAIR_LOOPS):
                 luna_total += repair_loops; luna_observed += 1

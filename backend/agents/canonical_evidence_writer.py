@@ -29,8 +29,8 @@ class CanonicalEvidenceWriter:
             )
             if canonical.run_id != run_id:
                 raise CanonicalEvidenceWriteError("envelope run ID does not match target run")
-            if canonical.contract_fingerprint != entry.contract_fingerprint:
-                raise CanonicalEvidenceWriteError("envelope contract does not match registry authority")
+            if not canonical.is_finalized:
+                raise CanonicalEvidenceWriteError("canonical evidence must be finalized")
 
             with self._store.run_lock(run_id):
                 manifest = self._store.load_manifest(run_id)

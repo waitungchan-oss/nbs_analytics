@@ -17,6 +17,7 @@ from backend.agents.documentation_models import (
     DocumentationProposal,
 )
 from backend.agents.governance_graph_models import (
+    GovernanceGate,
     GovernanceGraphSchemaError,
     GovernanceGraphSnapshot,
 )
@@ -35,6 +36,10 @@ STAGE_FILES = {
     "hermes": "hermes.json",
 }
 GOVERNANCE_GRAPH_FILE = "governance-graph.json"
+GOVERNANCE_GATE_FILES = {
+    "specGate": ("design-spec-gate.json", "spec-gate"),
+    "planGate": ("plan-gate.json", "plan-gate"),
+}
 DOCUMENTATION_FILES = {
     "evidence": "documentation-evidence.json",
     "proposal": "documentation-proposal.json",
@@ -263,6 +268,7 @@ class AgentOperationsService:
             "lunaRepairLoops": self._luna_repair_loops(stage_payloads["implementation"]),
             "documentation": documentation,
             "governanceGraph": self._governance_graph(run_dir, stage_artifact_max_bytes),
+            "governanceGates": self._governance_gates(run_dir, stage_artifact_max_bytes),
             "canonicalEvidence": self.canonical_evidence_reader.read(run_dir, stage_artifact_max_bytes),
             "retentionState": "archived_summary" if archived else "complete",
         }
@@ -289,6 +295,42 @@ class AgentOperationsService:
         except (GovernanceGraphSchemaError, _ArtifactError, OSError, ValueError, json.JSONDecodeError):
             return {"status": "invalid", "diagnostics": [{"code": "invalid_projection"}]}
         return self._compact_governance_graph(snapshot)
+
+    def _governance_gates(self, run_dir: Path, hard_cap: int) -> dict[str, dict[str, str | None]]:
+        return {
+            name: self._governance_gate(run_dir, hard_cap, filename, gate_id)
+            for name, (filename, gate_id) in GOVERNANCE_GATE_FILES.items()
+        }
+
+    def _governance_gate(
+        self, run_dir: Path, hard_cap: int, filename: str, expected_gate_id: str,
+    ) -> dict[str, str | None]:
+        try:
+            payload = self._read_json(run_dir / filename, run_dir, hard_cap, optional=True)
+            if payload is None:
+                return self._compact_gate("unknown", "unknown", "missing", filename, None)
+            gate = GovernanceGate.from_dict(payload)
+            if gate.gate_id != expected_gate_id:
+                raise GovernanceGraphSchemaError("gate ID is invalid")
+            if gate.status in {"passed", "failed"}:
+                return self._compact_gate(gate.status, "available", gate.reason_code, filename, gate.fingerprint)
+            if gate.status == "blocked":
+                return self._compact_gate(gate.status, "blocked", gate.reason_code, filename, gate.fingerprint)
+            return self._compact_gate("unknown", "unknown", "not_finalized", filename, None)
+        except (GovernanceGraphSchemaError, _ArtifactError, OSError, ValueError, json.JSONDecodeError):
+            return self._compact_gate("invalid", "invalid", "invalid_gate", filename, None)
+
+    @staticmethod
+    def _compact_gate(
+        state: str, status: str, reason: str | None, artifact: str, sha256: str | None,
+    ) -> dict[str, str | None]:
+        return {
+            "state": state,
+            "status": status,
+            "reason": reason,
+            "artifact": artifact,
+            "sha256": sha256,
+        }
 
     @staticmethod
     def _compact_governance_graph(snapshot: GovernanceGraphSnapshot) -> dict[str, Any]:
