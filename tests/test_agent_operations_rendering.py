@@ -267,6 +267,8 @@ def test_graph_filters_use_read_only_query_callback(monkeypatch):
     assert query_calls and query_calls[0][0] == "graph-ready"
     assert query_calls[0][1]["nodeType"] is None
     assert any(name == "subheader" and args[0] == "Graph Query" for name, args, _ in calls)
+    assert any(name == "selectbox" and args[0] == "Edge type" for name, args, _ in calls)
+    assert any(name == "text_input" and args[0] == "Node ID" for name, args, _ in calls)
 
 
 def test_graph_query_callback_is_not_required_for_existing_snapshot_render(monkeypatch):
@@ -369,7 +371,7 @@ def test_agent_operations_snapshot_is_session_scoped_and_force_refresh_is_manual
         assert session_state[key] is value
 
 
-def test_agent_operations_refresh_clears_stale_selected_run(monkeypatch):
+def test_agent_operations_refresh_preserves_selection_until_filtered_runs_validate_it(monkeypatch):
     import app_pages
 
     session_state = {"AGENT_OPERATIONS_SELECTED_RUN_ID": "stale-run"}
@@ -401,4 +403,4 @@ def test_agent_operations_refresh_clears_stale_selected_run(monkeypatch):
     app_pages._render_agent_operations_tab()
     rendered["refresh"]()
 
-    assert "AGENT_OPERATIONS_SELECTED_RUN_ID" not in session_state
+    assert session_state["AGENT_OPERATIONS_SELECTED_RUN_ID"] == "stale-run"

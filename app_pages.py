@@ -132,7 +132,6 @@ def _render_agent_operations_tab() -> None:
     snapshot = _load_agent_operations_snapshot()
 
     def refresh() -> None:
-        st.session_state.pop("AGENT_OPERATIONS_SELECTED_RUN_ID", None)
         _load_agent_operations_snapshot(force=True)
 
     def query_graph(run_id: str, filters: dict[str, str | None]) -> dict:

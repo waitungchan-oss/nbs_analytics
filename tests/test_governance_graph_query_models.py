@@ -67,6 +67,16 @@ def test_query_supports_all_exact_filter_dimensions():
     }
 
 
+@pytest.mark.parametrize("key,value", [
+    ("nodeType", "made_up"),
+    ("edgeType", "made_up"),
+    ("artifactKind", "made_up"),
+])
+def test_query_rejects_unknown_enums(key, value):
+    with pytest.raises(GovernanceGraphQuerySchemaError):
+        GovernanceGraphQuery.from_dict({key: value})
+
+
 def test_result_fingerprint_is_reproducible_and_changes_with_filters():
     first = _result(filters={"nodeType": "task_gate"})
     second = _result(filters={"nodeType": "task_gate"})

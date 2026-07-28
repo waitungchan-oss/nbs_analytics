@@ -108,11 +108,11 @@ def _envelope(command: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    run_id = _safe_run_id(args.run_id)
+    run_id = args.run_id if args.command == "query" else _safe_run_id(args.run_id)
     if args.command in {"validate", "status", "query"} and not _runtime_layout_exists():
         raise FileNotFoundError("workflow runtime is not available")
-    builder = GovernanceGraphBuilder(PROJECT_ROOT)
     if args.command == "build":
+        builder = GovernanceGraphBuilder(PROJECT_ROOT)
         snapshot = builder.persist(run_id)
         payload = snapshot.to_dict()
         return _envelope(args.command, {
@@ -122,6 +122,7 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "snapshot": payload,
         }), _exit_code(snapshot.overall_status)
     if args.command == "validate":
+        builder = GovernanceGraphBuilder(PROJECT_ROOT)
         snapshot = builder.validate(run_id)
         payload = snapshot.to_dict()
         return _envelope(args.command, {
@@ -131,6 +132,7 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "snapshot": payload,
         }), _exit_code(snapshot.overall_status)
     if args.command == "status":
+        builder = GovernanceGraphBuilder(PROJECT_ROOT)
         payload = builder.status(run_id)
         return _envelope(args.command, payload), _exit_code(payload["overallStatus"])
     if args.command == "query":

@@ -109,3 +109,14 @@ def test_query_emits_read_only_query_envelope(tmp_path, monkeypatch, capsys):
     assert payload["command"] == "query"
     assert payload["result"]["schemaVersion"] == "governance-graph-query-v1"
     assert _tree_bytes(tmp_path) == before
+
+
+def test_query_schema_violation_is_invalid_result_envelope(tmp_path, monkeypatch, capsys):
+    WorkflowStore(tmp_path)
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+
+    assert cli.main(["query", "--run-id", "run-123", "--node-type", "made_up"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["result"]["schemaVersion"] == "governance-graph-query-v1"
+    assert payload["result"]["status"] == "invalid"

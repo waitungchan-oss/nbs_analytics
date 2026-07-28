@@ -165,6 +165,7 @@ def _render_graph_query(run_id: str, query_graph: Callable[[str, dict[str, str |
         "nodeStatus": ["", "not_started", "ready", "passed", "failed", "blocked", "skipped", "available", "unknown", "invalid"],
         "artifactKind": ["", "risk", "spec_gate", "plan_gate", "implementation", "targeted_verification", "review", "full_verification", "hermes", "documentation", "git_integration", "task_gate", "terra_diagnosis", "protected_incident"],
         "evidenceStatus": ["", "available", "unknown", "invalid", "blocked"],
+        "edgeType": ["", "requires", "produces", "implements", "reviews", "verifies", "blocks", "derived_from", "committed_as", "documented_by"],
     }
     filters = {
         key: (st.selectbox(label, values, key=f"AGENT_GRAPH_QUERY_{key}") or None)
@@ -173,8 +174,10 @@ def _render_graph_query(run_id: str, query_graph: Callable[[str, dict[str, str |
             "nodeStatus": ("Node status", options["nodeStatus"]),
             "artifactKind": ("Artifact kind", options["artifactKind"]),
             "evidenceStatus": ("Evidence status", options["evidenceStatus"]),
+            "edgeType": ("Edge type", options["edgeType"]),
         }.items()
     }
+    filters["nodeId"] = st.text_input("Node ID", key="AGENT_GRAPH_QUERY_nodeId") or None
     result = query_graph(run_id, filters)
     if not isinstance(result, dict):
         st.warning("Graph Query 狀態：invalid")
@@ -379,6 +382,12 @@ def render_agent_operations(
     if not runs:
         st.info("尚無 Agent runs")
     elif filtered:
+        selected_state = getattr(st, "session_state", None)
+        if hasattr(selected_state, "get") and hasattr(selected_state, "pop"):
+            selected_value = selected_state.get(SELECTED_RUN_KEY)
+            valid_ids = {item.get("runId") for item in filtered if isinstance(item, dict)}
+            if selected_value not in valid_ids:
+                selected_state.pop(SELECTED_RUN_KEY, None)
         selected_id = st.selectbox(
             "Run",
             [item["runId"] for item in filtered],

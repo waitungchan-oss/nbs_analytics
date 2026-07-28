@@ -52,6 +52,29 @@ def test_missing_snapshot_is_unavailable_without_fallback_or_write(tmp_path):
     assert _tree_bytes(tmp_path) == before
 
 
+def test_missing_run_is_unavailable_without_fallback(tmp_path):
+    _write_run(tmp_path, "other-run")
+
+    result = GovernanceGraphQueryService(tmp_path).query(run_id="run-1")
+
+    assert result.status == "unavailable"
+
+
+def test_artifact_kind_uses_canonical_path_mapping_and_never_infers_missing_refs(tmp_path):
+    assert GovernanceGraphQueryService._ref_matches(
+        {"path": "design-spec-gate.json", "status": "available"},
+        {"artifactKind": "spec_gate", "evidenceStatus": None},
+    )
+    assert not GovernanceGraphQueryService._ref_matches(
+        {"path": "design-spec-gate.json", "status": "available"},
+        {"artifactKind": "design_spec_gate", "evidenceStatus": None},
+    )
+    assert not GovernanceGraphQueryService._node_matches(
+        {"nodeType": "task_gate", "status": "blocked", "evidenceRefs": []},
+        {"artifactKind": "task_gate", "evidenceStatus": None},
+    )
+
+
 def test_invalid_snapshot_is_invalid_and_does_not_fallback(tmp_path):
     run_dir = _write_valid_snapshot(tmp_path)
     snapshot_path = run_dir / "governance-graph.json"
@@ -72,8 +95,8 @@ def test_exact_artifact_and_evidence_filters_return_bounded_results(tmp_path):
         run_id="run-1", artifact_kind="task_gate", evidence_status="invalid"
     )
 
-    assert result.status == "invalid"
-    assert result.matched_nodes[0]["nodeId"] == "task_gate"
+    assert result.status == "available"
+    assert result.matched_nodes == ()
     assert result.evidence_refs == ()
 
 
@@ -90,5 +113,20 @@ def test_snapshot_path_symlink_is_rejected(tmp_path):
 
 @pytest.mark.parametrize("bad_run_id", ["../escape", ".", ".."])
 def test_query_rejects_unsafe_run_id(tmp_path, bad_run_id):
-    with pytest.raises(ValueError):
-        GovernanceGraphQueryService(tmp_path).query(run_id=bad_run_id)
+    _write_run(tmp_path, "safe-run")
+
+    result = GovernanceGraphQueryService(tmp_path).query(run_id=bad_run_id)
+
+    assert result.status == "invalid"
+    assert result.diagnostics[0]["code"] == "invalid_query"
+
+
+def test_dangling_run_directory_symlink_is_invalid(tmp_path):
+    (tmp_path / ".nbs_agent_runtime" / "runs").mkdir(parents=True)
+    runs_root = tmp_path / ".nbs_agent_runtime" / "runs"
+    (runs_root / "run-1").symlink_to(runs_root / "missing-run")
+
+    result = GovernanceGraphQueryService(tmp_path).query(run_id="run-1")
+
+    assert result.status == "invalid"
+    assert result.diagnostics[0]["code"] == "invalid_run_id"

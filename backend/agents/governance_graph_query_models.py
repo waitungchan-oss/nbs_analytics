@@ -19,6 +19,20 @@ QUERY_FILTER_KEYS = (
     "runId", "nodeType", "nodeStatus", "nodeId", "edgeType",
     "artifactKind", "evidenceStatus", "snapshotFingerprint",
 )
+QUERY_NODE_TYPES = frozenset({
+    "risk", "spec_gate", "plan_gate", "implementation", "targeted_verification",
+    "review", "full_verification", "hermes", "documentation", "git_integration",
+    "task_gate", "terra_diagnosis", "protected_incident",
+})
+QUERY_EDGE_TYPES = frozenset({
+    "requires", "produces", "implements", "reviews", "verifies", "blocks",
+    "derived_from", "committed_as", "documented_by",
+})
+QUERY_ARTIFACT_KINDS = frozenset({
+    "risk", "spec_gate", "plan_gate", "implementation", "targeted_verification",
+    "review", "full_verification", "hermes", "documentation", "git_integration",
+    "task_gate", "terra_diagnosis", "protected_incident",
+})
 _FILTER_KEY_SET = frozenset(QUERY_FILTER_KEYS)
 _SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+@#%=-]{0,127}$")
 _SNAPSHOT_KEYS = frozenset({"runId", "graphFingerprint", "generatedAt", "freshness"})
@@ -99,6 +113,12 @@ class GovernanceGraphQuery:
             _sha256(normalized["snapshotFingerprint"], "snapshotFingerprint")
         if "nodeStatus" in normalized and normalized["nodeStatus"] not in NODE_STATUSES | COMPACT_EVIDENCE_NODE_STATUSES:
             raise GovernanceGraphQuerySchemaError("nodeStatus is invalid")
+        if "nodeType" in normalized and normalized["nodeType"] not in QUERY_NODE_TYPES:
+            raise GovernanceGraphQuerySchemaError("nodeType is invalid")
+        if "edgeType" in normalized and normalized["edgeType"] not in QUERY_EDGE_TYPES:
+            raise GovernanceGraphQuerySchemaError("edgeType is invalid")
+        if "artifactKind" in normalized and normalized["artifactKind"] not in QUERY_ARTIFACT_KINDS:
+            raise GovernanceGraphQuerySchemaError("artifactKind is invalid")
         if "evidenceStatus" in normalized and normalized["evidenceStatus"] not in QUERY_STATUSES:
             raise GovernanceGraphQuerySchemaError("evidenceStatus is invalid")
         return cls(MappingProxyType(dict(sorted(normalized.items()))))

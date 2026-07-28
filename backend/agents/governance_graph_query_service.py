@@ -5,12 +5,36 @@ from pathlib import Path
 from typing import Any
 
 from .governance_graph_models import GovernanceGraphSchemaError, GovernanceGraphSnapshot
-from .governance_graph_query_models import GovernanceGraphQuery, GovernanceGraphQueryResult
+from .governance_graph_query_models import (
+    GovernanceGraphQuery,
+    GovernanceGraphQueryResult,
+    GovernanceGraphQuerySchemaError,
+)
 
 
 GRAPH_FILE = "governance-graph.json"
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
 _STATUS_PRECEDENCE = ("invalid", "blocked", "unknown", "available")
+_ARTIFACT_KIND_BY_PATH = {
+    "context.json": "context",
+    "implementation.json": "implementation",
+    "targeted-verification.json": "targeted_verification",
+    "review.json": "review",
+    "full-verification.json": "full_verification",
+    "hermes.json": "hermes",
+    "documentation-evidence.json": "documentation",
+    "documentation-proposal.json": "documentation",
+    "documentation-preview.json": "documentation",
+    "documentation-application.json": "documentation",
+    "documentation-telemetry.json": "documentation",
+    "risk-classification.json": "risk",
+    "design-spec-gate.json": "spec_gate",
+    "plan-gate.json": "plan_gate",
+    "git-integration.json": "git_integration",
+    "task-gate.json": "task_gate",
+    "terra-diagnosis.json": "terra_diagnosis",
+    "protected-incident.json": "protected_incident",
+}
 
 
 class GovernanceGraphQueryService:
@@ -33,19 +57,31 @@ class GovernanceGraphQueryService:
         evidence_status: str | None = None,
         snapshot_fingerprint: str | None = None,
     ) -> GovernanceGraphQueryResult:
-        query = GovernanceGraphQuery.from_dict({
-            "runId": run_id,
-            "nodeType": node_type,
-            "nodeStatus": node_status,
-            "nodeId": node_id,
-            "edgeType": edge_type,
-            "artifactKind": artifact_kind,
-            "evidenceStatus": evidence_status,
-            "snapshotFingerprint": snapshot_fingerprint,
-        })
+        try:
+            query = GovernanceGraphQuery.from_dict({
+                "runId": run_id,
+                "nodeType": node_type,
+                "nodeStatus": node_status,
+                "nodeId": node_id,
+                "edgeType": edge_type,
+                "artifactKind": artifact_kind,
+                "evidenceStatus": evidence_status,
+                "snapshotFingerprint": snapshot_fingerprint,
+            })
+        except GovernanceGraphQuerySchemaError:
+            return self._invalid(GovernanceGraphQuery.from_dict({}), "invalid_query")
         if run_id is None:
             raise ValueError("runId is required for deterministic query")
-        run_dir = self._run_dir(run_id)
+        try:
+            run_dir = self._run_dir(run_id)
+        except ValueError:
+            return self._invalid(query, "invalid_run_id")
+        if not run_dir.exists():
+            return GovernanceGraphQueryResult.from_parts(
+                status="unavailable", snapshot_identity=None, filters=query,
+                matched_nodes=(), matched_edges=(), evidence_refs=(),
+                unknown_count=0, invalid_count=0, blocked_count=0, diagnostics=(),
+            )
         snapshot_path = run_dir / GRAPH_FILE
         if snapshot_path.is_symlink():
             return self._invalid(query, "unsafe_snapshot")
@@ -75,13 +111,15 @@ class GovernanceGraphQueryService:
             return self._invalid(query, "invalid_snapshot")
 
         nodes = [self._node_record(node) for node in snapshot.nodes]
-        refs = [self._ref_record(ref) for node in snapshot.nodes for ref in node.evidence_refs]
         nodes = [node for node in nodes if self._node_matches(node, query.filters)]
-        refs = [ref for ref in refs if self._ref_matches(ref, query.filters)]
+        refs = [ref for node in nodes for ref in node.get("evidenceRefs", []) if self._ref_matches(ref, query.filters)]
         edges: list[dict[str, Any]] = []
         if query.filters.get("edgeType"):
-            edges = []
-        counts = self._counts(nodes)
+            nodes = []
+            refs = []
+        nodes.sort(key=lambda item: (item["nodeId"], item["nodeType"]))
+        refs.sort(key=lambda item: (item.get("path", ""), item.get("sha256", "")))
+        counts = self._counts(nodes, refs)
         status = next((candidate for candidate in _STATUS_PRECEDENCE if counts[candidate] > 0), "available")
         return GovernanceGraphQueryResult.from_parts(
             status=status, snapshot_identity=identity, filters=query,
@@ -99,7 +137,10 @@ class GovernanceGraphQueryService:
             resolved.relative_to(self.runs_root.resolve())
         except ValueError as exc:
             raise ValueError("runId escapes runs root") from exc
-        self._assert_directory(path, "run directory")
+        if path.is_symlink():
+            raise ValueError("run directory must not be a symlink")
+        if path.exists():
+            self._assert_directory(path, "run directory")
         return path
 
     @staticmethod
@@ -171,12 +212,7 @@ class GovernanceGraphQueryService:
         if not isinstance(refs, list):
             refs = []
         if not refs:
-            artifact_kind = ref_filters["artifactKind"]
-            evidence_status = ref_filters["evidenceStatus"]
-            return (
-                artifact_kind == node.get("nodeType")
-                and (evidence_status is None or evidence_status == node.get("status"))
-            )
+            return False
         return any(
             GovernanceGraphQueryService._ref_matches(ref, ref_filters)
             for ref in refs if isinstance(ref, dict)
@@ -185,7 +221,7 @@ class GovernanceGraphQueryService:
     @staticmethod
     def _ref_matches(ref: dict[str, Any], filters: dict[str, str]) -> bool:
         path = str(ref.get("path", ""))
-        artifact_kind = Path(path).stem.replace("-", "_")
+        artifact_kind = _ARTIFACT_KIND_BY_PATH.get(path)
         return all(
             actual == expected
             for actual, expected in (
@@ -196,13 +232,18 @@ class GovernanceGraphQueryService:
         )
 
     @staticmethod
-    def _counts(nodes: list[dict[str, Any]]) -> dict[str, int]:
-        return {
+    def _counts(nodes: list[dict[str, Any]], refs: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {
             "invalid": sum(node.get("status") == "invalid" for node in nodes),
             "blocked": sum(node.get("status") == "blocked" for node in nodes),
             "unknown": sum(node.get("status") == "unknown" for node in nodes),
             "available": 0,
         }
+        for ref in refs:
+            status = ref.get("status")
+            if status in {"invalid", "blocked", "unknown"}:
+                counts[status] += 1
+        return counts
 
     @staticmethod
     def _invalid(query: GovernanceGraphQuery, code: str) -> GovernanceGraphQueryResult:
