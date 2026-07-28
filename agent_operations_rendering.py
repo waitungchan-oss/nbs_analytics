@@ -158,6 +158,66 @@ def _render_governance_graph(graph: Any) -> None:
         st.dataframe(evidence_rows, use_container_width=True, hide_index=True)
 
 
+def _safe_count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _render_governance_telemetry(telemetry: Any) -> None:
+    st.subheader("Governance telemetry")
+    if not isinstance(telemetry, dict):
+        st.info("尚無可用 Governance telemetry snapshot；此頁不會自行收集 telemetry。")
+        return
+    status = telemetry.get("status") if isinstance(telemetry.get("status"), str) else "unknown"
+    if status == "unavailable":
+        st.info("尚無可用 Governance telemetry snapshot；此頁不會自行收集 telemetry。")
+    elif status != "available":
+        st.warning(f"Governance telemetry 狀態：{status}")
+
+    coverage = telemetry.get("coverage") if isinstance(telemetry.get("coverage"), dict) else {}
+    columns = st.columns(4)
+    for column, label, key in zip(
+        columns,
+        ("Eligible runs", "Unknown runs", "Diagnostics", "Stale evidence"),
+        ("eligibleRunCount", "unknownRunCount", "diagnosticCount", None),
+    ):
+        with column:
+            if key is not None:
+                st.metric(label, _safe_count(coverage.get(key)))
+            else:
+                evidence = telemetry.get("evidenceHealth")
+                stale = evidence.get("stale") if isinstance(evidence, dict) else {}
+                st.metric(label, _safe_count(stale.get("total")))
+
+    latest = telemetry.get("latestRunUpdatedAt")
+    st.caption(f"Latest run: {latest if isinstance(latest, str) and latest else '未提供'}")
+
+    gate_failures = telemetry.get("gateFailures")
+    if isinstance(gate_failures, dict):
+        rows = []
+        for key, label in (("specGate", "Spec gate"), ("planGate", "Plan gate"), ("taskGate", "Task gate")):
+            metric = gate_failures.get(key)
+            if not isinstance(metric, dict):
+                continue
+            rows.append({
+                "Gate": label,
+                "Status": metric.get("status", "unknown"),
+                "Failed": _safe_count(metric.get("failed")),
+                "Blocked": _safe_count(metric.get("blocked")),
+                "Unknown": _safe_count(metric.get("unknownCount")),
+            })
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    activity = telemetry.get("agentActivity")
+    if isinstance(activity, dict):
+        luna = activity.get("lunaRepair")
+        if isinstance(luna, dict):
+            st.caption(f"Luna repair loops: {_safe_count(luna.get('total'))} · status {luna.get('status', 'unknown')}")
+        terra = activity.get("terraDiagnosis")
+        if isinstance(terra, dict) and terra.get("status") == "unknown":
+            st.caption("Terra diagnosis: unknown（缺少可驗證 evidence）")
+
+
 def _render_run_details(run: dict[str, Any]) -> None:
     st.subheader("Selected run")
     st.write(f"**{run.get('briefName', '未提供')}** · {run.get('runId', '未提供')}")
@@ -227,6 +287,8 @@ def render_agent_operations(snapshot: dict, *, on_refresh: Callable[[], None]) -
     st.title("Agent Operations")
     if st.button("Refresh", key="AGENT_OPERATIONS_REFRESH"):
         on_refresh()
+
+    _render_governance_telemetry(snapshot.get("governanceTelemetry"))
 
     summary = snapshot.get("summary", {})
     metric_columns = st.columns(5)
