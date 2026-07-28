@@ -8,6 +8,7 @@ APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 PAGES_PATH = Path(__file__).resolve().parents[1] / "app_pages.py"
 WORKFLOWS_PATH = Path(__file__).resolve().parents[1] / "app_workflows.py"
 STYLES_PATH = Path(__file__).resolve().parents[1] / "app_styles.py"
+GOVERNANCE_GRAPH_SERVICE_PATH = Path(__file__).resolve().parents[1] / "backend" / "agents" / "governance_graph_service.py"
 
 
 def test_app_py_only_keeps_entrypoint_wiring():
@@ -137,3 +138,12 @@ def test_arrow_safe_display_frame_normalizes_mixed_object_columns():
 
     assert safe["數值"].tolist() == ["解釋型 Driver Analytics", "9485484.29", "不適用"]
     pa.Table.from_pandas(safe)
+
+
+def test_governance_graph_projects_canonical_evidence_only_through_reader():
+    source = GOVERNANCE_GRAPH_SERVICE_PATH.read_text(encoding="utf-8")
+
+    assert "CanonicalEvidenceReader" in source
+    assert "canonical_evidence_writer" not in source
+    assert "CanonicalEvidenceWriter" not in source
+    assert "write_final(" not in source
