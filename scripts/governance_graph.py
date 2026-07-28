@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
+from backend.agents.governance_graph_query_service import GovernanceGraphQueryService
 
 
 CLI_SCHEMA = "nbs-governance-graph-cli-v1"
@@ -39,6 +40,15 @@ def _parser() -> argparse.ArgumentParser:
     for command in ("build", "validate", "status"):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--run-id", required=True)
+    query = subparsers.add_parser("query")
+    query.add_argument("--run-id", required=True)
+    query.add_argument("--node-type")
+    query.add_argument("--node-status")
+    query.add_argument("--node-id")
+    query.add_argument("--edge-type")
+    query.add_argument("--artifact-kind")
+    query.add_argument("--evidence-status")
+    query.add_argument("--snapshot-fingerprint")
     return parser
 
 
@@ -99,7 +109,7 @@ def _envelope(command: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     run_id = _safe_run_id(args.run_id)
-    if args.command in {"validate", "status"} and not _runtime_layout_exists():
+    if args.command in {"validate", "status", "query"} and not _runtime_layout_exists():
         raise FileNotFoundError("workflow runtime is not available")
     builder = GovernanceGraphBuilder(PROJECT_ROOT)
     if args.command == "build":
@@ -123,11 +133,23 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.command == "status":
         payload = builder.status(run_id)
         return _envelope(args.command, payload), _exit_code(payload["overallStatus"])
+    if args.command == "query":
+        result = GovernanceGraphQueryService(PROJECT_ROOT).query(
+            run_id=args.run_id,
+            node_type=args.node_type,
+            node_status=args.node_status,
+            node_id=args.node_id,
+            edge_type=args.edge_type,
+            artifact_kind=args.artifact_kind,
+            evidence_status=args.evidence_status,
+            snapshot_fingerprint=args.snapshot_fingerprint,
+        )
+        return _envelope(args.command, {"result": result.to_dict()}), _exit_code(result.status)
     raise ValueError("unknown governance graph command")
 
 
 def _exit_code(status: str) -> int:
-    return _EXIT_CODES.get(status, 5)
+    return _EXIT_CODES.get(status, {"available": 0, "unavailable": 0, "unknown": 0, "invalid": 2}.get(status, 5))
 
 
 def main(argv: list[str] | None = None) -> int:

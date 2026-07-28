@@ -6,6 +6,7 @@ from pathlib import Path
 import scripts.governance_graph as cli
 from backend.agents.workflow_models import MANIFEST_SCHEMA, STATUS_SCHEMA, WorkflowManifest, WorkflowStatus
 from backend.agents.workflow_store import WorkflowStore
+from backend.agents.governance_graph_service import GovernanceGraphBuilder
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
@@ -22,6 +23,17 @@ def test_parser_exposes_only_projection_commands():
     assert parser.parse_args(["build", "--run-id", "run-123"]).command == "build"
     assert parser.parse_args(["validate", "--run-id", "run-123"]).command == "validate"
     assert parser.parse_args(["status", "--run-id", "run-123"]).command == "status"
+
+
+def test_parser_exposes_query_with_exact_filters():
+    args = cli._parser().parse_args([
+        "query", "--run-id", "run-123", "--node-type", "task_gate",
+        "--node-status", "invalid",
+    ])
+
+    assert args.command == "query"
+    assert args.node_type == "task_gate"
+    assert args.node_status == "invalid"
 
 
 def test_validate_and_status_do_not_write(tmp_path, monkeypatch, capsys):
@@ -72,3 +84,28 @@ def test_build_emits_cli_envelope_and_only_writes_projection(tmp_path, monkeypat
     assert payload["snapshot"]["schemaVersion"] == "nbs-governance-graph-v1"
     after = _tree_bytes(tmp_path)
     assert set(after) == set(before) | {".nbs_agent_runtime/runs/run-123/governance-graph.json"}
+
+
+def test_query_emits_read_only_query_envelope(tmp_path, monkeypatch, capsys):
+    store = WorkflowStore(tmp_path)
+    manifest = WorkflowManifest(
+        MANIFEST_SCHEMA, "run-123", "docs/brief.md", "a" * 64, "main", "b" * 40,
+        (), "2026-07-27T10:00:00+00:00", "c" * 64,
+    )
+    status = WorkflowStatus(
+        STATUS_SCHEMA, "run-123", "created", "created",
+        "2026-07-27T10:00:00+00:00", "2026-07-27T10:00:00+00:00", None,
+        "fixture", None, 0,
+    )
+    store.create_run(manifest, status)
+    GovernanceGraphBuilder(tmp_path).persist("run-123")
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    before = _tree_bytes(tmp_path)
+
+    assert cli.main(["query", "--run-id", "run-123", "--node-type", "risk"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["schemaVersion"] == "nbs-governance-graph-cli-v1"
+    assert payload["command"] == "query"
+    assert payload["result"]["schemaVersion"] == "governance-graph-query-v1"
+    assert _tree_bytes(tmp_path) == before

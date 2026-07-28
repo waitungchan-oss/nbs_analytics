@@ -81,7 +81,7 @@ class GovernanceGraphQueryService:
         edges: list[dict[str, Any]] = []
         if query.filters.get("edgeType"):
             edges = []
-        counts = self._counts(snapshot)
+        counts = self._counts(nodes)
         status = next((candidate for candidate in _STATUS_PRECEDENCE if counts[candidate] > 0), "available")
         return GovernanceGraphQueryResult.from_parts(
             status=status, snapshot_identity=identity, filters=query,
@@ -196,11 +196,11 @@ class GovernanceGraphQueryService:
         )
 
     @staticmethod
-    def _counts(snapshot: GovernanceGraphSnapshot) -> dict[str, int]:
+    def _counts(nodes: list[dict[str, Any]]) -> dict[str, int]:
         return {
-            "invalid": sum(node.status == "invalid" for node in snapshot.nodes),
-            "blocked": sum(node.status == "blocked" for node in snapshot.nodes),
-            "unknown": sum(node.status == "unknown" for node in snapshot.nodes),
+            "invalid": sum(node.get("status") == "invalid" for node in nodes),
+            "blocked": sum(node.get("status") == "blocked" for node in nodes),
+            "unknown": sum(node.get("status") == "unknown" for node in nodes),
             "available": 0,
         }
 
