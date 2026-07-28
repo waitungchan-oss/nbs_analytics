@@ -109,11 +109,20 @@ class AgentOperationsService:
         )
         runs = self._load_runs(diagnostics, stage_artifact_max_bytes)
         runs.sort(key=lambda item: (item["updatedAt"], item["runId"]), reverse=True)
+        from backend.services.governance_telemetry_service import GovernanceTelemetryService
+
         return {
             "schemaVersion": SNAPSHOT_SCHEMA,
             "generatedAt": generated_at,
             "summary": self._summary(runs),
             "runs": runs,
+            "governanceTelemetry": GovernanceTelemetryService(
+                self.project_root, runtime_root=self.runtime_root
+            ).build_snapshot(
+                runs=runs,
+                diagnostics=diagnostics,
+                hard_cap=stage_artifact_max_bytes,
+            ),
             "retention": retention,
             "diagnostics": diagnostics,
         }

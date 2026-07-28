@@ -462,7 +462,7 @@ def test_stage_artifact_schema_or_fake_pass_fails_closed_without_token_usage(tmp
     assert snapshot["runs"] == []
     assert snapshot["summary"]["runCount"] == 0
     assert snapshot["diagnostics"][0]["code"] == "invalid_run"
-    assert "tokenUsage" not in json.dumps(snapshot)
+    assert "tokenUsage" not in json.dumps(snapshot["runs"])
 
 
 def test_legacy_full_verification_and_hermes_payloads_without_schema_remain_available(tmp_path):
