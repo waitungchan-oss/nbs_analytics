@@ -21,6 +21,43 @@
 
 ---
 
+## Inline Execution Protocol and Local Agent Boundaries
+
+本 plan 預設採 **Inline Execution**：Codex 是 controller 與主要 implementation worker；本地 agent 只在下列明確邊界內協助，不會自動啟動另一套 Subagent-Driven worker。
+
+### Per-Task sequence
+
+1. Codex 先建立單一 approved Task contract 與 allowlisted files。
+2. 執行 read-only Context collection，將 compact bundle 寫入 ignored `.nbs_agent_runtime/`；禁止把完整 repo 文件或 raw runtime rows 帶入主對話。
+3. Codex 直接完成該 Task 的 TDD、最小實作與 focused verification。
+4. Validation Runner 只執行 plan 列出的 `.venv/bin/python` compile／pytest 命令；不使用 LLM。
+5. Review Agent 先以 `--collect-only` 收集 review evidence；只有在使用者明確批准 approved runner 時，才將 bounded review package 交給該 runner 產生 findings-first verdict。
+6. Codex 處理 findings，重新執行 covering tests；Review PASS 後才進入下一個 Task。
+7. Full pytest、`scripts/system_manager.py acceptance` 與 Hermes 集中在 Task 5，避免每個 Task 重複執行高成本驗證。
+
+### Exact local commands
+
+```bash
+.venv/bin/python scripts/context_agent.py \
+  --brief docs/superpowers/specs/2026-07-28-nbs-governance-graph-phase-d2-snapshot-comparison-design.md \
+  --base main --collect-only --format json \
+  --output .nbs_agent_runtime/reports/phase-d2-context.json
+
+.venv/bin/python scripts/review_agent.py \
+  --brief docs/superpowers/specs/2026-07-28-nbs-governance-graph-phase-d2-snapshot-comparison-design.md \
+  --base <approved-base-sha> --head <approved-head-or-WORKTREE> \
+  --context .nbs_agent_runtime/reports/phase-d2-context.json \
+  --verification .nbs_agent_runtime/reports/phase-d2-verification.json \
+  --strict --collect-only \
+  --output .nbs_agent_runtime/reports/phase-d2-review-evidence.json
+```
+
+`<approved-base-sha>` 與 `<approved-head-or-WORKTREE>` 只可由 Codex 依當前 Task contract 解析，不可由 agent 自行選擇。若沒有 approved Review runner，狀態必須保持 `unknown`／`blocked_missing_runner`，不得宣稱 Review PASS。
+
+Implementation Agent 是 optional，不是 Inline Execution 預設 worker。若日後明確批准使用 `scripts/implementation_agent.py`，仍必須逐 Task 提供 contract、approved worktree、allowedWritePaths 與 approved offline runner；Implementation Agent 不得 commit、merge、push、啟停服務或執行 Hermes。
+
+Context Agent、Review Agent、Validation Runner 與 Hermes 都不得修改 source、SQLite、baseline、runtime evidence、Git 或正式業務資料；`.nbs_agent_runtime/` 只保存 bounded ignored evidence，不是 canonical source of truth。
+
 ## File map
 
 - Create: `backend/agents/governance_graph_comparison_models.py` — immutable input/reference、identity、summary、change records、result 與 deterministic fingerprint。
