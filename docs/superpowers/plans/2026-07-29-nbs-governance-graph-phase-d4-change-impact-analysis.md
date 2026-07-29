@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.10+、frozen dataclasses、`canonical_sha256`、argparse、pytest、既有 D-3 risk models、Context Agent、approved local Review runner、Hermes read-only acceptance。
 
+**Execution status (2026-07-29):** Tasks 1–5 completed. Strict Review PASS (`cc2a058c76ffa11bae7987d9d55bc4c608a1b15e0e888a1a960d988ff4e0b4bc`), full pytest `1284 passed`, system acceptance PASS, Hermes PASS (`714 passed`). The isolated worktree uses an ignored SQLite test copy and ignored runtime cache directory; neither is Git-tracked or a write to the primary worktree database.
+
 ## Global Constraints
 
 - D-4 唯一 input authority 是已驗證的 D-3 `governance-graph-risk-summary-v1`。
