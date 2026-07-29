@@ -18,6 +18,7 @@ from backend.agents.governance_graph_service import GovernanceGraphBuilder
 from backend.agents.governance_graph_query_service import GovernanceGraphQueryService
 from backend.agents.governance_graph_comparison_service import GovernanceGraphComparisonService
 from backend.agents.governance_graph_risk_service import GovernanceGraphRiskService
+from backend.agents.governance_graph_impact_service import GovernanceGraphImpactService
 
 
 CLI_SCHEMA = "nbs-governance-graph-cli-v1"
@@ -57,6 +58,7 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--left-snapshot-fingerprint")
     compare.add_argument("--right-snapshot-fingerprint")
     subparsers.add_parser("risk-summary")
+    subparsers.add_parser("change-impact")
     return parser
 
 
@@ -119,6 +121,10 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.command == "risk-summary":
         payload = json.load(sys.stdin)
         result = GovernanceGraphRiskService().evaluate(payload)
+        return _envelope(args.command, {"result": result.to_dict()}), _exit_code(result.status)
+    if args.command == "change-impact":
+        payload = json.load(sys.stdin)
+        result = GovernanceGraphImpactService().evaluate(payload)
         return _envelope(args.command, {"result": result.to_dict()}), _exit_code(result.status)
     if args.command == "compare":
         if not _runtime_layout_exists():

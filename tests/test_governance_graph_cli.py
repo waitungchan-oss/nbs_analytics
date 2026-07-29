@@ -9,6 +9,7 @@ from backend.agents.workflow_models import MANIFEST_SCHEMA, STATUS_SCHEMA, Workf
 from backend.agents.workflow_store import WorkflowStore
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
 from backend.agents.governance_graph_comparison_models import GovernanceGraphComparisonResult
+from backend.agents.governance_graph_risk_models import GovernanceGraphRiskSummary
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
@@ -243,3 +244,15 @@ def test_risk_summary_rejects_control_plane_flags():
         assert exc.code == 2
     else:
         raise AssertionError("risk-summary accepted a control-plane flag")
+
+
+def test_change_impact_reads_only_wrapper_from_stdin(monkeypatch, capsys):
+    summary = GovernanceGraphRiskSummary.from_parts(
+        status="available", comparison_fingerprint="a" * 64, findings=(),
+        coverage={"observedChanges": 0, "classifiedChanges": 0, "unknownChanges": 0, "invalidChanges": 0, "blockedChanges": 0}, diagnostics=(),
+    ).to_dict()
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps({"schemaVersion": "governance-graph-impact-input-v1", "riskSummary": summary})))
+
+    assert cli.main(["change-impact"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["schemaVersion"] == "governance-graph-change-impact-v1"
