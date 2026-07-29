@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
 from backend.agents.governance_graph_query_service import GovernanceGraphQueryService
 from backend.agents.governance_graph_comparison_service import GovernanceGraphComparisonService
+from backend.agents.governance_graph_risk_service import GovernanceGraphRiskService
 
 
 CLI_SCHEMA = "nbs-governance-graph-cli-v1"
@@ -55,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--right-run-id", required=True)
     compare.add_argument("--left-snapshot-fingerprint")
     compare.add_argument("--right-snapshot-fingerprint")
+    subparsers.add_parser("risk-summary")
     return parser
 
 
@@ -114,6 +116,10 @@ def _envelope(command: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if args.command == "risk-summary":
+        payload = json.load(sys.stdin)
+        result = GovernanceGraphRiskService().evaluate(payload)
+        return _envelope(args.command, {"result": result.to_dict()}), _exit_code(result.status)
     if args.command == "compare":
         if not _runtime_layout_exists():
             raise FileNotFoundError("workflow runtime is not available")
