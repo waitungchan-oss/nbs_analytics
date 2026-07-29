@@ -37,6 +37,7 @@ def test_parser_exposes_only_projection_commands():
     assert parser.parse_args(["validate", "--run-id", "run-123"]).command == "validate"
     assert parser.parse_args(["status", "--run-id", "run-123"]).command == "status"
     assert parser.parse_args(["risk-summary"]).command == "risk-summary"
+    assert parser.parse_args(["evidence-lineage"]).command == "evidence-lineage"
 
 
 def test_parser_exposes_query_with_exact_filters():
@@ -256,3 +257,85 @@ def test_change_impact_reads_only_wrapper_from_stdin(monkeypatch, capsys):
     assert cli.main(["change-impact"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["result"]["schemaVersion"] == "governance-graph-change-impact-v1"
+
+
+def test_evidence_lineage_uses_cli_envelope_and_stdin_only(monkeypatch, capsys, tmp_path):
+    class FakeResult:
+        status = "available"
+
+        def to_dict(self):
+            return {
+                "schemaVersion": "governance-graph-evidence-lineage-v1",
+                "status": "available",
+                "lineagePolicyVersion": "e1-canonical-evidence-lineage-v1",
+                "runId": "run-123",
+                "snapshotFingerprint": "a" * 64,
+                "source": {"kind": "node", "identity": "protected_incident"},
+                "evidence": [], "links": [], "diagnostics": [], "lineageFingerprint": "b" * 64,
+            }
+
+    class FakeService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def resolve(self, request):
+            assert request.run_id == "run-123"
+            return FakeResult()
+
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli, "GovernanceGraphEvidenceLineageService", FakeService)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps({
+        "schemaVersion": "governance-graph-evidence-lineage-input-v1",
+        "runId": "run-123", "snapshotFingerprint": None,
+        "source": {"kind": "node", "identity": "protected_incident"}, "evidence": None,
+    })))
+
+    assert cli.main(["evidence-lineage"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schemaVersion"] == "nbs-governance-graph-cli-v1"
+    assert payload["result"]["schemaVersion"] == "governance-graph-evidence-lineage-v1"
+
+
+def test_evidence_lineage_malformed_input_returns_blocked_envelope(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("{"))
+
+    assert cli.main(["evidence-lineage"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "evidence-lineage"
+    assert payload["status"] == "blocked"
+
+
+def test_evidence_lineage_empty_input_returns_blocked_envelope(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(""))
+
+    assert cli.main(["evidence-lineage"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "evidence-lineage"
+    assert payload["status"] == "blocked"
+
+
+def test_evidence_lineage_real_service_is_read_only(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".nbs_agent_runtime" / "runs").mkdir(parents=True)
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps({
+        "schemaVersion": "governance-graph-evidence-lineage-input-v1",
+        "runId": "run-missing", "snapshotFingerprint": None,
+        "source": {"kind": "node", "identity": "protected_incident"}, "evidence": None,
+    })))
+    before = _tree_bytes(tmp_path)
+
+    assert cli.main(["evidence-lineage"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["schemaVersion"] == "governance-graph-evidence-lineage-v1"
+    assert payload["result"]["status"] == "unknown"
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_evidence_lineage_rejects_control_flags():
+    for flag in ("--run-id", "--path", "--writer", "--approve", "--dispatch"):
+        try:
+            cli._parser().parse_args(["evidence-lineage", flag, "run-1"])
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"evidence-lineage accepted forbidden flag: {flag}")
