@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
 
 import scripts.governance_graph as cli
 from backend.agents.workflow_models import MANIFEST_SCHEMA, STATUS_SCHEMA, WorkflowManifest, WorkflowStatus
 from backend.agents.workflow_store import WorkflowStore
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
+from backend.agents.governance_graph_comparison_models import GovernanceGraphComparisonResult
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
@@ -17,12 +19,23 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
+def _comparison_payload() -> dict:
+    identity = {"runId": "run-left", "graphFingerprint": "a" * 64, "generatedAt": "2026-07-29T00:00:00+00:00", "freshness": "fresh"}
+    summary = {"addedNodes": 0, "removedNodes": 0, "changedNodes": 0, "unchangedNodes": 0, "addedEdges": 0, "removedEdges": 0, "changedEdges": 0, "addedEvidenceRefs": 0, "removedEvidenceRefs": 0, "changedEvidenceRefs": 0}
+    return GovernanceGraphComparisonResult.from_parts(
+        status="available", left_reference={"runId": "run-left"}, right_reference={"runId": "run-right"},
+        left_snapshot=identity, right_snapshot={**identity, "runId": "run-right"}, summary=summary,
+        node_changes=(), edge_changes=(), evidence_changes=(), diagnostics=(),
+    ).to_dict()
+
+
 def test_parser_exposes_only_projection_commands():
     parser = cli._parser()
 
     assert parser.parse_args(["build", "--run-id", "run-123"]).command == "build"
     assert parser.parse_args(["validate", "--run-id", "run-123"]).command == "validate"
     assert parser.parse_args(["status", "--run-id", "run-123"]).command == "status"
+    assert parser.parse_args(["risk-summary"]).command == "risk-summary"
 
 
 def test_parser_exposes_query_with_exact_filters():
@@ -211,3 +224,22 @@ def test_compare_invalid_snapshot_fingerprint_returns_invalid_exit(tmp_path, mon
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["result"]["status"] == "invalid"
+
+
+def test_risk_summary_reads_bridge_result_from_stdin(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps(_comparison_payload())))
+
+    assert cli.main(["risk-summary"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["schemaVersion"] == "nbs-governance-graph-cli-v1"
+    assert payload["result"]["schemaVersion"] == "governance-graph-risk-summary-v1"
+
+
+def test_risk_summary_rejects_control_plane_flags():
+    try:
+        cli._parser().parse_args(["risk-summary", "--run-id", "run-1"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("risk-summary accepted a control-plane flag")

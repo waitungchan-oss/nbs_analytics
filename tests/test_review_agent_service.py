@@ -95,6 +95,21 @@ def test_review_payload_git_diff_fingerprint_is_deterministic_and_content_bound(
     assert changed["gitDiff"]["diffFingerprint"] != git_diff["diffFingerprint"]
 
 
+def test_review_runtime_instructions_bind_output_fingerprint_to_input_bundle(tmp_path):
+    runner = ReviewRunner()
+
+    build_review_report(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=runner,
+        runtime_root=tmp_path / ".nbs_agent_runtime",
+        instructions="review-contract-v1", strict=True,
+    )
+
+    runtime_instructions = runner.last_payload["instructions"]
+    assert "reviewFingerprint" in runtime_instructions
+    assert "payload.bundleFingerprint" in runtime_instructions
+
+
 def test_strict_review_blocks_pass_without_verification(tmp_path):
     report = build_review_report(
         review_bundle(), context_summary=context_summary(), verification=[],

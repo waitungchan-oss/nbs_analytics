@@ -8,7 +8,7 @@ from typing import Any, Callable
 import pandas as pd
 
 import database
-from backend.services.cache_generation_service import advance_cache_generation
+from backend.services.cache_generation_service import advance_cache_generation, refresh_cache_generation_signature
 from backend.services.monthly_baseline_service import build_governed_stability_gate
 from backend.services.receipt_exclusion_governance_service import verify_receipt_exclusion_confirmation
 from backend.services.receipt_exclusion_models import ReceiptExclusionIdentity, ReceiptExclusionRule
@@ -112,6 +112,7 @@ def _commit_matched_upload(
     gate_builder: Callable,
     rollback_handler: Callable,
     generation_advancer: Callable,
+    generation_signature_refresher: Callable,
     history_writer: Callable,
     accepted_cache_rebuilder: Callable[[], None] | None,
     receipt_exclusion_revision: str | None,
@@ -194,6 +195,14 @@ def _commit_matched_upload(
         history_error = f"{type(exc).__name__}: {exc}"
         if public_status == "success":
             public_status, message = "degraded", "資料已寫入，但 stability history 未完整保存。"
+    if history_id is not None and generation and cache_error is None:
+        try:
+            generation = generation_signature_refresher(db_path=live_path)
+        except Exception as exc:
+            cache_error = f"{type(exc).__name__}: {exc}"
+            cache_state = "refresh_required"
+            if public_status == "success":
+                public_status, message = "degraded", "資料已寫入，但 cache generation signature 更新失敗。"
     response = {
         **base, "status": public_status, "message": message, "upsertSummary": upsert,
         "stabilityGate": gate, "monthlyBaseline": final_gate.get("monthlyBaseline") or {},
@@ -223,6 +232,7 @@ def execute_upload_operation(
     gate_builder: Callable = build_governed_stability_gate,
     rollback_handler: Callable = handle_core_drift_rollback,
     generation_advancer: Callable = advance_cache_generation,
+    generation_signature_refresher: Callable = refresh_cache_generation_signature,
     history_writer: Callable = record_stability_history,
     rules_loader: Callable = load_business_rules,
     accepted_cache_rebuilder: Callable[[], None] | None = None,
@@ -307,6 +317,7 @@ def execute_upload_operation(
         operation, preflight, live_path,
         upsert_runner=upsert_runner, load_runner=load_runner, gate_builder=gate_builder,
         rollback_handler=rollback_handler, generation_advancer=generation_advancer,
+        generation_signature_refresher=generation_signature_refresher,
         history_writer=history_writer, accepted_cache_rebuilder=accepted_cache_rebuilder,
         receipt_exclusion_revision=initial_revision or None,
         receipt_exclusion_rule_ids=rule_ids,

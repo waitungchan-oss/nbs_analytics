@@ -25,6 +25,7 @@ def _accepted_execution(tmp_path, **overrides):
         "gate_builder": lambda **kwargs: {"status": "matched", "monthlyBaseline": {"allMatched": True}},
         "rollback_handler": lambda *args, **kwargs: {"status": "accepted", "rollbackStatus": "not_required", "postRollbackGate": None},
         "generation_advancer": lambda **kwargs: {"generation": 1, "operationId": "op-1"},
+        "generation_signature_refresher": lambda **kwargs: {"generation": 1, "operationId": "op-1", "signatureMatched": True},
         "history_writer": lambda *args, **kwargs: 1,
         "rules_loader": lambda: {"BRANCH_MAPPING": {}, "EXCLUDE_PREFIXES": [], "SALES_REP_LIST": []},
     }
@@ -68,6 +69,19 @@ def test_accepted_upload_records_history_and_generation(tmp_path):
     assert execution.response["cacheState"] == "invalidated"
     assert contexts[0]["operation_id"] == "op-1"
     assert contexts[0]["latest_data_date"] == "2026-07-01"
+
+
+def test_generation_signature_refreshes_after_history_write(tmp_path):
+    calls = []
+    execution = _accepted_execution(
+        tmp_path,
+        history_writer=lambda *args, **kwargs: calls.append("history") or 7,
+        generation_signature_refresher=lambda **kwargs: calls.append("refresh") or {"generation": 1, "operationId": "op-1", "signatureMatched": True},
+    )
+
+    assert execution.response["status"] == "success"
+    assert calls == ["history", "refresh"]
+    assert execution.response["dataGeneration"]["signatureMatched"] is True
 
 
 def test_generation_or_history_failure_is_degraded(tmp_path):

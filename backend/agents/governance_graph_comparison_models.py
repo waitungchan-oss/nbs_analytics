@@ -16,6 +16,11 @@ _SAFE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 _SAFE_VALUE_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,256}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REFERENCE_KEYS = frozenset({"runId", "snapshotFingerprint"})
+_RESULT_KEYS = frozenset({
+    "schemaVersion", "status", "leftReference", "rightReference",
+    "leftSnapshot", "rightSnapshot", "comparisonFingerprint", "summary",
+    "nodeChanges", "edgeChanges", "evidenceChanges", "diagnostics",
+})
 _IDENTITY_KEYS = frozenset({"runId", "graphFingerprint", "generatedAt", "freshness"})
 _SUMMARY_KEYS = frozenset({
     "addedNodes", "removedNodes", "changedNodes", "unchangedNodes",
@@ -162,6 +167,36 @@ class GovernanceGraphComparisonResult:
             tuple(sorted((_diagnostic(item) for item in diagnostics), key=_diagnostic_key)),
         )
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "GovernanceGraphComparisonResult":
+        """Parse and verify the public comparison envelope.
+
+        This is intentionally a strict, read-only bridge for downstream
+        projections such as the D-3 risk summary service.
+        """
+        if not isinstance(payload, Mapping) or set(payload) != _RESULT_KEYS:
+            raise GovernanceGraphComparisonSchemaError("comparison result keys are invalid")
+        if payload.get("schemaVersion") != COMPARISON_SCHEMA:
+            raise GovernanceGraphComparisonSchemaError("schemaVersion is invalid")
+        try:
+            result = cls.from_parts(
+                status=payload["status"],
+                left_reference=payload["leftReference"],
+                right_reference=payload["rightReference"],
+                left_snapshot=payload["leftSnapshot"],
+                right_snapshot=payload["rightSnapshot"],
+                summary=payload["summary"],
+                node_changes=payload["nodeChanges"],
+                edge_changes=payload["edgeChanges"],
+                evidence_changes=payload["evidenceChanges"],
+                diagnostics=payload["diagnostics"],
+            )
+        except (KeyError, TypeError) as exc:
+            raise GovernanceGraphComparisonSchemaError("comparison result payload is malformed") from exc
+        if payload["comparisonFingerprint"] != result.comparison_fingerprint:
+            raise GovernanceGraphComparisonSchemaError("comparisonFingerprint does not match the payload")
+        return result
+
     @property
     def comparison_fingerprint(self) -> str:
         return canonical_sha256({
@@ -181,6 +216,8 @@ class GovernanceGraphComparisonResult:
         return {
             "schemaVersion": COMPARISON_SCHEMA,
             "status": self.status,
+            "leftReference": self.left_reference.to_dict(),
+            "rightReference": self.right_reference.to_dict(),
             "leftSnapshot": _thaw(self.left_snapshot),
             "rightSnapshot": _thaw(self.right_snapshot),
             "comparisonFingerprint": self.comparison_fingerprint,
