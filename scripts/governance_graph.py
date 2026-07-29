@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
 from backend.agents.governance_graph_query_service import GovernanceGraphQueryService
+from backend.agents.governance_graph_comparison_service import GovernanceGraphComparisonService
 
 
 CLI_SCHEMA = "nbs-governance-graph-cli-v1"
@@ -49,6 +50,11 @@ def _parser() -> argparse.ArgumentParser:
     query.add_argument("--artifact-kind")
     query.add_argument("--evidence-status")
     query.add_argument("--snapshot-fingerprint")
+    compare = subparsers.add_parser("compare")
+    compare.add_argument("--left-run-id", required=True)
+    compare.add_argument("--right-run-id", required=True)
+    compare.add_argument("--left-snapshot-fingerprint")
+    compare.add_argument("--right-snapshot-fingerprint")
     return parser
 
 
@@ -108,6 +114,16 @@ def _envelope(command: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if args.command == "compare":
+        if not _runtime_layout_exists():
+            raise FileNotFoundError("workflow runtime is not available")
+        result = GovernanceGraphComparisonService(PROJECT_ROOT).compare(
+            left_run_id=_safe_run_id(args.left_run_id),
+            right_run_id=_safe_run_id(args.right_run_id),
+            left_snapshot_fingerprint=args.left_snapshot_fingerprint,
+            right_snapshot_fingerprint=args.right_snapshot_fingerprint,
+        )
+        return _envelope(args.command, {"result": result.to_dict()}), _exit_code(result.status)
     run_id = args.run_id if args.command == "query" else _safe_run_id(args.run_id)
     if args.command in {"validate", "status", "query"} and not _runtime_layout_exists():
         raise FileNotFoundError("workflow runtime is not available")
