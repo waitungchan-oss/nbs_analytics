@@ -70,6 +70,19 @@ def test_accepted_upload_records_history_and_generation(tmp_path):
     assert contexts[0]["latest_data_date"] == "2026-07-01"
 
 
+def test_generation_signature_refreshes_after_history_write(tmp_path):
+    calls = []
+    execution = _accepted_execution(
+        tmp_path,
+        history_writer=lambda *args, **kwargs: calls.append("history") or 7,
+        generation_signature_refresher=lambda **kwargs: calls.append("refresh") or {"generation": 1, "operationId": "op-1", "signatureMatched": True},
+    )
+
+    assert execution.response["status"] == "success"
+    assert calls == ["history", "refresh"]
+    assert execution.response["dataGeneration"]["signatureMatched"] is True
+
+
 def test_generation_or_history_failure_is_degraded(tmp_path):
     generation_failed = _accepted_execution(tmp_path, generation_advancer=lambda **kwargs: (_ for _ in ()).throw(OSError("generation failed")))
     history_failed = _accepted_execution(tmp_path, history_writer=lambda *args, **kwargs: (_ for _ in ()).throw(OSError("history failed")))
