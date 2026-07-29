@@ -1,6 +1,6 @@
 import pytest
 
-from backend.agents.evidence_models import EvidenceBundle, EvidenceItem
+from backend.agents.evidence_models import EvidenceBundle, EvidenceItem, canonical_fingerprint
 from backend.agents.review_agent_service import (
     build_review_evidence_payload,
     build_review_report,
@@ -73,7 +73,26 @@ def test_review_payload_has_exact_public_contract():
         review_bundle(), context_summary=context_summary(), verification=verification(),
     )
     assert set(payload) == {"schemaVersion", "taskContract", "contextSummary", "gitDiff", "verification", "bundleFingerprint"}
-    assert set(payload["gitDiff"]) == {"base", "head", "files", "patches", "truncated"}
+    assert set(payload["gitDiff"]) == {
+        "base", "head", "files", "patches", "truncated", "diffFingerprint",
+    }
+
+
+def test_review_payload_git_diff_fingerprint_is_deterministic_and_content_bound():
+    payload = build_review_evidence_payload(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+    )
+    git_diff = payload["gitDiff"]
+    unsigned_git_diff = {key: value for key, value in git_diff.items() if key != "diffFingerprint"}
+    assert git_diff["diffFingerprint"] == canonical_fingerprint(unsigned_git_diff)
+    assert len(git_diff["diffFingerprint"]) == 64
+    assert build_review_evidence_payload(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+    )["gitDiff"]["diffFingerprint"] == git_diff["diffFingerprint"]
+    changed = build_review_evidence_payload(
+        review_bundle(content="+different"), context_summary=context_summary(), verification=verification(),
+    )
+    assert changed["gitDiff"]["diffFingerprint"] != git_diff["diffFingerprint"]
 
 
 def test_strict_review_blocks_pass_without_verification(tmp_path):

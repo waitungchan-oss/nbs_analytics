@@ -160,18 +160,20 @@ def build_review_evidence_payload(
         validate_context_summary(context_summary)
     _validate_verification(verification)
     patches = [item for item in bundle.evidence if item.kind == "diff"]
+    git_diff = {
+        "base": bundle.repository.get("base"),
+        "head": bundle.repository.get("headRef"),
+        "files": [item.source for item in patches],
+        "patches": [item.to_dict() for item in patches],
+        "truncated": bool(bundle.repository.get("diffFileLimitExceeded"))
+        or any(bool(item.metadata.get("truncated")) for item in patches),
+    }
+    git_diff["diffFingerprint"] = canonical_fingerprint(git_diff)
     unsigned = {
         "schemaVersion": REVIEW_EVIDENCE_SCHEMA,
         "taskContract": bundle.task,
         "contextSummary": context_summary,
-        "gitDiff": {
-            "base": bundle.repository.get("base"),
-            "head": bundle.repository.get("headRef"),
-            "files": [item.source for item in patches],
-            "patches": [item.to_dict() for item in patches],
-            "truncated": bool(bundle.repository.get("diffFileLimitExceeded"))
-            or any(bool(item.metadata.get("truncated")) for item in patches),
-        },
+        "gitDiff": git_diff,
         "verification": {"commands": verification},
     }
     return {**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)}
