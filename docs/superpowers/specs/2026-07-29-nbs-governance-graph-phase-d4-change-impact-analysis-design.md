@@ -1,6 +1,6 @@
 # NBS Governance Graph Phase D-4 Change Impact Analysis Design
 
-狀態：draft for review  
+狀態：approved
 日期：2026-07-29  
 風險：R1 standard engineering（本 spec 不改變正式業務風險裁決）
 
@@ -81,8 +81,13 @@ Rules：
 - input 不接受 `runId`、snapshot path、任意 filesystem path、`--approve`、`--dispatch`、
   `--writer`、model command 或其他 control-plane 欄位。
 - status precedence 沿用 D-2：`invalid > unavailable > blocked > unknown > available`。
-  `invalid`／`unavailable` 只回傳 bounded diagnostics；`blocked` 保留已驗證 impact；`unknown`
-  不得降級成「無影響」。
+`invalid`／`unavailable` 只回傳 bounded diagnostics；`blocked` 保留已驗證 impact；`unknown`
+不得降級成「無影響」。
+
+Invalid／unavailable provenance：若 D-3 envelope 或 fingerprint 無法信任，
+`comparisonFingerprint`、`riskSummaryFingerprint` 與 `impactSummaryFingerprint` 必須為 `null`；
+不得對未驗證或未完整解析的輸入計算／輸出假 SHA-256。Valid、blocked、unknown 結果則必須
+保留已驗證的兩個 source fingerprints，並計算 impact fingerprint。
 
 ## 5. Impact semantics
 
@@ -130,6 +135,7 @@ Schema 固定為 `governance-graph-change-impact-v1`：
   "comparisonFingerprint": "<sha256>",
   "impactSummaryFingerprint": "<sha256>",
   "coverage": {
+    "coverageStatus": "available",
     "changedSeeds": 2,
     "mappedImpacts": 2,
     "protectedSignals": 0,
@@ -158,6 +164,8 @@ Output invariants：
 - impacts 依 `(impactState priority, category, sourceFindingId)` 固定排序。
 - `impactSummaryFingerprint` 覆蓋 schema、policy version、status、兩個 input fingerprints、
   coverage、sorted impacts 與 diagnostics；排除 fingerprint 欄位本身。
+- `coverageStatus` 固定為 `available`、`blocked` 或 `unknown`；status=unknown 或 evidence
+  coverage 不足時必須是 `unknown`，即使 `impacts` 為空，也不得表示 zero impact。
 - 所有 identity、rationale、diagnostic 與 evidence ref 都必須 bounded；不得輸出 raw payload、
   absolute path、secret、prompt、command 或 stdout/stderr。
 - `status` 與 `riskLevel` 分離；D-4 不得把 `blocked` 自動變成 approval denial。
