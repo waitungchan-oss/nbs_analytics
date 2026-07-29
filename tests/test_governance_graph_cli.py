@@ -36,6 +36,17 @@ def test_parser_exposes_query_with_exact_filters():
     assert args.node_status == "invalid"
 
 
+def test_parser_exposes_compare_with_explicit_sides():
+    args = cli._parser().parse_args([
+        "compare", "--left-run-id", "run-before", "--right-run-id", "run-after",
+    ])
+
+    assert (args.command, args.left_run_id, args.right_run_id) == (
+        "compare", "run-before", "run-after",
+    )
+    assert args.left_snapshot_fingerprint is None
+
+
 def test_validate_and_status_do_not_write(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
     before = _tree_bytes(tmp_path)
@@ -119,4 +130,84 @@ def test_query_schema_violation_is_invalid_result_envelope(tmp_path, monkeypatch
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["result"]["schemaVersion"] == "governance-graph-query-v1"
+    assert payload["result"]["status"] == "invalid"
+
+
+def test_compare_emits_read_only_comparison_envelope(tmp_path, monkeypatch, capsys):
+    store = WorkflowStore(tmp_path)
+    for run_id in ("run-left", "run-right"):
+        store.create_run(
+            WorkflowManifest(
+                MANIFEST_SCHEMA, run_id, "docs/brief.md", "a" * 64, "main", "b" * 40,
+                (), "2026-07-27T10:00:00+00:00", "c" * 64,
+            ),
+            WorkflowStatus(
+                STATUS_SCHEMA, run_id, "created", "created",
+                "2026-07-27T10:00:00+00:00", "2026-07-27T10:00:00+00:00", None,
+                "fixture", None, 0,
+            ),
+        )
+        GovernanceGraphBuilder(tmp_path).persist(run_id)
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    before = _tree_bytes(tmp_path)
+
+    assert cli.main([
+        "compare", "--left-run-id", "run-left", "--right-run-id", "run-right",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["schemaVersion"] == "nbs-governance-graph-cli-v1"
+    assert payload["command"] == "compare"
+    assert payload["result"]["schemaVersion"] == "governance-graph-comparison-v1"
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_compare_missing_side_is_unavailable_and_does_not_write(tmp_path, monkeypatch, capsys):
+    store = WorkflowStore(tmp_path)
+    store.create_run(
+        WorkflowManifest(
+            MANIFEST_SCHEMA, "run-left", "docs/brief.md", "a" * 64, "main", "b" * 40,
+            (), "2026-07-27T10:00:00+00:00", "c" * 64,
+        ),
+        WorkflowStatus(
+            STATUS_SCHEMA, "run-left", "created", "created",
+            "2026-07-27T10:00:00+00:00", "2026-07-27T10:00:00+00:00", None,
+            "fixture", None, 0,
+        ),
+    )
+    GovernanceGraphBuilder(tmp_path).persist("run-left")
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    before = _tree_bytes(tmp_path)
+
+    assert cli.main([
+        "compare", "--left-run-id", "run-left", "--right-run-id", "run-missing",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["result"]["status"] == "unavailable"
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_compare_invalid_snapshot_fingerprint_returns_invalid_exit(tmp_path, monkeypatch, capsys):
+    store = WorkflowStore(tmp_path)
+    store.create_run(
+        WorkflowManifest(
+            MANIFEST_SCHEMA, "run-left", "docs/brief.md", "a" * 64, "main", "b" * 40,
+            (), "2026-07-27T10:00:00+00:00", "c" * 64,
+        ),
+        WorkflowStatus(
+            STATUS_SCHEMA, "run-left", "created", "created",
+            "2026-07-27T10:00:00+00:00", "2026-07-27T10:00:00+00:00", None,
+            "fixture", None, 0,
+        ),
+    )
+    GovernanceGraphBuilder(tmp_path).persist("run-left")
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+
+    assert cli.main([
+        "compare", "--left-run-id", "run-left", "--right-run-id", "run-left",
+        "--left-snapshot-fingerprint", "0" * 64,
+    ]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
     assert payload["result"]["status"] == "invalid"
