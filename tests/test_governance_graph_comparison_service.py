@@ -74,3 +74,14 @@ def test_reversed_sides_change_fingerprint(tmp_path):
     reverse = service.compare(left_run_id="run-right", right_run_id="run-left")
 
     assert forward.comparison_fingerprint != reverse.comparison_fingerprint
+
+
+def test_evidence_identity_is_path_and_sha256_per_contract():
+    changes, summary = GovernanceGraphComparisonService._compare_records(
+        {("review.json", "a" * 64): {"path": "review.json", "sha256": "a" * 64, "status": "available", "generatedAt": "2026-07-28T00:00:00+00:00"}},
+        {("review.json", "b" * 64): {"path": "review.json", "sha256": "b" * 64, "status": "available", "generatedAt": "2026-07-29T00:00:00+00:00"}},
+        ("path", "sha256"),
+        "EvidenceRefs",
+    )
+    assert [item["changeType"] for item in changes] == ["removed", "added"]
+    assert summary == {"addedEvidenceRefs": 1, "removedEvidenceRefs": 1, "changedEvidenceRefs": 0}
