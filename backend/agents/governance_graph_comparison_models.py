@@ -41,7 +41,7 @@ def _safe_value(value: Any, key: str) -> str:
 def _safe_run_id(value: Any) -> str:
     if not isinstance(value, str) or not value or value in {".", ".."}:
         raise GovernanceGraphComparisonSchemaError("runId must be a safe single path component")
-    if "/" in value or "\\" in value or ".." in value or len(value) > 128:
+    if "/" in value or "\\" in value or "." in value or len(value) > 128:
         raise GovernanceGraphComparisonSchemaError("runId must be a safe single path component")
     return _safe_value(value, "runId")
 
@@ -138,6 +138,14 @@ class GovernanceGraphComparisonResult:
         normalized_summary = MappingProxyType({
             key: _count(summary[key], key) for key in sorted(_SUMMARY_KEYS)
         })
+        normalized_nodes = tuple(_change(item, "nodeChanges") for item in node_changes)
+        normalized_edges = tuple(_change(item, "edgeChanges") for item in edge_changes)
+        normalized_evidence = tuple(_change(item, "evidenceChanges") for item in evidence_changes)
+        if status == "available" and (left_identity is None or right_identity is None):
+            raise GovernanceGraphComparisonSchemaError("available results require both snapshot identities")
+        _validate_summary_counts(normalized_summary, normalized_nodes, "Nodes")
+        _validate_summary_counts(normalized_summary, normalized_edges, "Edges")
+        _validate_summary_counts(normalized_summary, normalized_evidence, "EvidenceRefs")
         return cls(
             status,
             left_ref,
@@ -145,10 +153,10 @@ class GovernanceGraphComparisonResult:
             left_identity,
             right_identity,
             normalized_summary,
-            tuple(_change(item, "nodeChanges") for item in node_changes),
-            tuple(_change(item, "edgeChanges") for item in edge_changes),
-            tuple(_change(item, "evidenceChanges") for item in evidence_changes),
-            tuple(_diagnostic(item) for item in diagnostics),
+            tuple(sorted(normalized_nodes, key=_node_change_key)),
+            tuple(sorted(normalized_edges, key=_edge_change_key)),
+            tuple(sorted(normalized_evidence, key=_evidence_change_key)),
+            tuple(sorted((_diagnostic(item) for item in diagnostics), key=_diagnostic_key)),
         )
 
     @property
@@ -222,3 +230,34 @@ def _diagnostic(value: Any) -> Mapping[str, Any]:
         "code": _safe_value(value["code"], "diagnostics.code"),
         "summary": _safe_value(value["summary"], "diagnostics.summary"),
     })
+
+
+def _change_type_counts(changes: tuple[Mapping[str, Any], ...]) -> dict[str, int]:
+    return {change_type: sum(item["changeType"] == change_type for item in changes) for change_type in CHANGE_TYPES}
+
+
+def _validate_summary_counts(summary: Mapping[str, int], changes: tuple[Mapping[str, Any], ...], label: str) -> None:
+    counts = _change_type_counts(changes)
+    for change_type, field in (("added", "added"), ("removed", "removed"), ("changed", "changed")):
+        key = f"{field}{label}"
+        if summary[key] != counts[change_type]:
+            raise GovernanceGraphComparisonSchemaError(f"{key} does not match change records")
+
+
+def _node_change_key(value: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(value.get("nodeId", "")), str(value["changeType"]))
+
+
+def _edge_change_key(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(value.get("source", "")), str(value.get("target", "")),
+        str(value.get("type", "")), str(value["changeType"]),
+    )
+
+
+def _evidence_change_key(value: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (str(value.get("path", "")), str(value.get("sha256", "")), str(value["changeType"]))
+
+
+def _diagnostic_key(value: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(value["code"]), str(value["summary"]))
