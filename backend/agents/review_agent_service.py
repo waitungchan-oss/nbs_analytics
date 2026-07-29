@@ -108,7 +108,12 @@ def _validate_verification(verification: object) -> list[dict]:
 
 
 def _runtime_instructions(instructions: str, *, strict: bool) -> str:
-    return f"{instructions}\n\n[review-runtime]\nstrict={str(strict).lower()}"
+    return (
+        f"{instructions}\n\n[review-runtime]\n"
+        f"strict={str(strict).lower()}\n"
+        "reviewFingerprint must equal the top-level payload.bundleFingerprint exactly; "
+        "copy that value verbatim and do not recompute, replace, or omit it."
+    )
 
 
 def split_review_bundle_by_file(
