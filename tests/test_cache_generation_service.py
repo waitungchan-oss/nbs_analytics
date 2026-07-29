@@ -1,4 +1,7 @@
+import json
 import sqlite3
+
+import pytest
 
 
 def test_generation_advances_atomically_with_database_signature(tmp_path):
@@ -85,3 +88,29 @@ def test_generation_signature_refresh_preserves_generation_and_operation(tmp_pat
     assert refreshed["operationId"] == before["operationId"]
     assert refreshed["status"] == before["status"]
     assert refreshed["signatureMatched"] is True
+
+
+def test_refresh_missing_database_does_not_clobber_existing_signature(tmp_path):
+    from backend.services.cache_generation_service import (
+        advance_cache_generation,
+        refresh_cache_generation_signature,
+    )
+
+    db_path = tmp_path / "live.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("CREATE TABLE sample (value TEXT)")
+        connection.commit()
+    finally:
+        connection.close()
+    generation_path = tmp_path / "data_generation.json"
+    before = advance_cache_generation(
+        db_path=db_path, operation_id="op-1", status="accepted", path=generation_path,
+    )
+    with pytest.raises(FileNotFoundError, match="database signature"):
+        refresh_cache_generation_signature(
+            db_path=tmp_path / "missing.db", path=generation_path,
+        )
+
+    after = json.loads(generation_path.read_text(encoding="utf-8"))
+    assert after["dbSignature"] == before["dbSignature"]

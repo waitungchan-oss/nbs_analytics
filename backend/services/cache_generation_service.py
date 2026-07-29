@@ -99,12 +99,15 @@ def refresh_cache_generation_signature(
     target = Path(path or DEFAULT_GENERATION_PATH)
     db = Path(db_path)
     previous = load_cache_generation(target, db_path=db)
+    signature = _db_signature(db)
+    if not signature:
+        raise FileNotFoundError(f"database signature unavailable: {db}")
     value = {
         "generation": int(previous.get("generation", 0)),
         "operationId": previous.get("operationId"),
         "status": str(previous.get("status") or "uninitialized"),
         "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "dbSignature": _db_signature(db),
+        "dbSignature": signature,
     }
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")

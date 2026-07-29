@@ -25,6 +25,7 @@ def _accepted_execution(tmp_path, **overrides):
         "gate_builder": lambda **kwargs: {"status": "matched", "monthlyBaseline": {"allMatched": True}},
         "rollback_handler": lambda *args, **kwargs: {"status": "accepted", "rollbackStatus": "not_required", "postRollbackGate": None},
         "generation_advancer": lambda **kwargs: {"generation": 1, "operationId": "op-1"},
+        "generation_signature_refresher": lambda **kwargs: {"generation": 1, "operationId": "op-1", "signatureMatched": True},
         "history_writer": lambda *args, **kwargs: 1,
         "rules_loader": lambda: {"BRANCH_MAPPING": {}, "EXCLUDE_PREFIXES": [], "SALES_REP_LIST": []},
     }
