@@ -23,6 +23,10 @@ _IDENTITY_RE = re.compile(r"^[A-Za-z0-9_./:-]{1,256}$")
 _FINDING_KEYS = frozenset({"findingId", "ruleId", "level", "category", "confidence", "sourceChange", "evidenceIdentities", "rationaleCode", "summary"})
 _SOURCE_KEYS = frozenset({"kind", "identity", "changeType"})
 _COVERAGE_KEYS = frozenset({"observedChanges", "classifiedChanges", "unknownChanges", "invalidChanges", "blockedChanges"})
+_SUMMARY_KEYS = frozenset({
+    "schemaVersion", "status", "riskRuleRegistryVersion", "comparisonFingerprint",
+    "riskSummaryFingerprint", "overallRiskLevel", "findings", "coverage", "diagnostics",
+})
 
 
 class GovernanceGraphRiskSchemaError(ValueError):
@@ -144,6 +148,38 @@ class GovernanceGraphRiskSummary:
     findings: tuple[GovernanceGraphRiskFinding, ...]
     coverage: Mapping[str, int]
     diagnostics: tuple[Mapping[str, str], ...]
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "GovernanceGraphRiskSummary":
+        if not isinstance(payload, Mapping) or set(payload) != _SUMMARY_KEYS:
+            raise GovernanceGraphRiskSchemaError("risk summary keys are invalid")
+        if payload.get("schemaVersion") != RISK_SUMMARY_SCHEMA:
+            raise GovernanceGraphRiskSchemaError("schemaVersion is invalid")
+        if payload.get("riskRuleRegistryVersion") != RISK_RULE_REGISTRY_VERSION:
+            raise GovernanceGraphRiskSchemaError("riskRuleRegistryVersion is invalid")
+        findings_payload = payload.get("findings")
+        if not isinstance(findings_payload, (list, tuple)) or len(findings_payload) > 100000:
+            raise GovernanceGraphRiskSchemaError("findings is invalid")
+        try:
+            findings = tuple(GovernanceGraphRiskFinding.from_dict(item) for item in findings_payload)
+            if len({item.finding_id for item in findings}) != len(findings):
+                raise GovernanceGraphRiskSchemaError("findingId values must be unique")
+            result = cls.from_parts(
+                status=payload["status"],
+                comparison_fingerprint=payload["comparisonFingerprint"],
+                findings=findings,
+                coverage=payload["coverage"],
+                diagnostics=payload["diagnostics"],
+            )
+        except GovernanceGraphRiskSchemaError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GovernanceGraphRiskSchemaError("risk summary payload is malformed") from exc
+        if payload.get("overallRiskLevel") != result.overall_risk_level:
+            raise GovernanceGraphRiskSchemaError("overallRiskLevel does not match findings")
+        if payload.get("riskSummaryFingerprint") != result.risk_summary_fingerprint:
+            raise GovernanceGraphRiskSchemaError("riskSummaryFingerprint does not match payload")
+        return result
 
     @classmethod
     def from_parts(cls, *, status: str, comparison_fingerprint: str, findings: Any, coverage: Mapping[str, Any], diagnostics: Any) -> "GovernanceGraphRiskSummary":

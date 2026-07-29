@@ -98,3 +98,31 @@ def test_invalid_summary_cannot_contain_findings():
             status="invalid", comparison_fingerprint="a" * 64,
             findings=(_finding(),), coverage={"observedChanges": 1, "classifiedChanges": 0, "unknownChanges": 0, "invalidChanges": 1, "blockedChanges": 0}, diagnostics=(),
         )
+
+
+def test_risk_summary_from_dict_round_trips_exact_public_envelope():
+    payload = _summary(findings=(_finding(),)).to_dict()
+    parsed = GovernanceGraphRiskSummary.from_dict(payload)
+    assert parsed.to_dict() == payload
+
+
+def test_risk_summary_from_dict_rejects_extra_top_level_key():
+    payload = _summary().to_dict()
+    payload["extra"] = "not allowed"
+    with pytest.raises(GovernanceGraphRiskSchemaError):
+        GovernanceGraphRiskSummary.from_dict(payload)
+
+
+def test_risk_summary_from_dict_rejects_tampered_fingerprint():
+    payload = _summary().to_dict()
+    payload["riskSummaryFingerprint"] = "b" * 64
+    with pytest.raises(GovernanceGraphRiskSchemaError):
+        GovernanceGraphRiskSummary.from_dict(payload)
+
+
+def test_risk_summary_from_dict_rejects_duplicate_finding_id():
+    finding = _finding().to_dict()
+    payload = _summary(findings=(_finding(),)).to_dict()
+    payload["findings"].append(finding)
+    with pytest.raises(GovernanceGraphRiskSchemaError):
+        GovernanceGraphRiskSummary.from_dict(payload)
