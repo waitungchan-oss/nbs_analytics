@@ -60,6 +60,10 @@ Review Agent 根據已批准 task contract、Context summary、實際 Git diff �
 }
 ```
 
+`reviewFingerprint` 必須逐字等於 Review runtime input payload 頂層的
+`payload.bundleFingerprint`。Review Agent 不得重新計算、替換、截短或省略此值；這是
+Review evidence 與實際 diff／verification bundle 的完整性綁定。
+
 `verdict` 只允許：
 
 - `pass`
