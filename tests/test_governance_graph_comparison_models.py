@@ -256,3 +256,28 @@ def test_result_serializes_fixed_envelope_and_bounded_change():
     assert payload["schemaVersion"] == "governance-graph-comparison-v1"
     assert payload["nodeChanges"][0]["changeType"] == "added"
     assert payload["nodeChanges"][0]["before"] is None
+
+
+def test_comparison_output_exposes_both_input_references():
+    result = _result(left_run_id="run-left", right_run_id="run-right")
+
+    payload = result.to_dict()
+
+    assert payload["leftReference"] == {"runId": "run-left", "snapshotFingerprint": None}
+    assert payload["rightReference"] == {"runId": "run-right", "snapshotFingerprint": None}
+
+
+def test_comparison_from_dict_round_trips_public_contract():
+    result = _result(left_run_id="run-left", right_run_id="run-right")
+
+    restored = GovernanceGraphComparisonResult.from_dict(result.to_dict())
+
+    assert restored.to_dict() == result.to_dict()
+
+
+def test_comparison_from_dict_rejects_missing_reference():
+    payload = _result().to_dict()
+    payload.pop("rightReference")
+
+    with pytest.raises(GovernanceGraphComparisonSchemaError):
+        GovernanceGraphComparisonResult.from_dict(payload)
