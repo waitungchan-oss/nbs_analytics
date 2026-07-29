@@ -251,8 +251,8 @@ def _node_change_key(value: Mapping[str, Any]) -> tuple[str, str]:
     return (str(value.get("nodeId", "")), str(value["changeType"]))
 
 
-def _node_identity_key(value: Mapping[str, Any]) -> tuple[str, str]:
-    return (str(value.get("nodeId", "")), str(value["changeType"]))
+def _node_identity_key(value: Mapping[str, Any]) -> tuple[str]:
+    return (str(value.get("nodeId", "")),)
 
 
 def _edge_change_key(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
@@ -262,16 +262,19 @@ def _edge_change_key(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
     )
 
 
-def _edge_identity_key(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
-    return _edge_change_key(value)
+def _edge_identity_key(value: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(value.get("source", "")), str(value.get("target", "")),
+        str(value.get("type", "")),
+    )
 
 
 def _evidence_change_key(value: Mapping[str, Any]) -> tuple[str, str, str]:
     return (str(value.get("path", "")), str(value.get("sha256", "")), str(value["changeType"]))
 
 
-def _evidence_identity_key(value: Mapping[str, Any]) -> tuple[str, str, str]:
-    return _evidence_change_key(value)
+def _evidence_identity_key(value: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(value.get("path", "")), str(value.get("sha256", "")))
 
 
 def _diagnostic_key(value: Mapping[str, Any]) -> tuple[str, str]:

@@ -150,6 +150,27 @@ def test_duplicate_change_identity_is_rejected():
         )
 
 
+def test_same_node_identity_with_conflicting_change_type_is_rejected():
+    with pytest.raises(GovernanceGraphComparisonSchemaError):
+        GovernanceGraphComparisonResult.from_parts(
+            status="available",
+            left_reference=_reference("before"),
+            right_reference=_reference("after"),
+            left_snapshot=_identity("before"),
+            right_snapshot=_identity("after"),
+            summary={
+                "addedNodes": 1, "removedNodes": 1, "changedNodes": 0, "unchangedNodes": 0,
+                "addedEdges": 0, "removedEdges": 0, "changedEdges": 0,
+                "addedEvidenceRefs": 0, "removedEvidenceRefs": 0, "changedEvidenceRefs": 0,
+            },
+            node_changes=(
+                {"changeType": "added", "nodeId": "task_gate", "before": None, "after": {}},
+                {"changeType": "removed", "nodeId": "task_gate", "before": {}, "after": None},
+            ),
+            edge_changes=(), evidence_changes=(), diagnostics=(),
+        )
+
+
 def test_result_serializes_fixed_envelope_and_bounded_change():
     result = GovernanceGraphComparisonResult.from_parts(
         status="available",
