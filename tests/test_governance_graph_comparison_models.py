@@ -171,6 +171,56 @@ def test_same_node_identity_with_conflicting_change_type_is_rejected():
         )
 
 
+@pytest.mark.parametrize(
+    ("changes", "summary_key", "identity_fields"),
+    [
+        (
+            (
+                {"changeType": "added", "source": "risk", "target": "spec_gate", "type": "requires", "before": None, "after": {}},
+                {"changeType": "removed", "source": "risk", "target": "spec_gate", "type": "requires", "before": {}, "after": None},
+            ),
+            ("addedEdges", "removedEdges"),
+            ("edge",),
+        ),
+        (
+            (
+                {"changeType": "added", "path": "task-gate.json", "sha256": "a" * 64, "before": None, "after": {}},
+                {"changeType": "removed", "path": "task-gate.json", "sha256": "a" * 64, "before": {}, "after": None},
+            ),
+            ("addedEvidenceRefs", "removedEvidenceRefs"),
+            ("evidence",),
+        ),
+    ],
+)
+def test_edge_and_evidence_identity_conflicts_are_rejected(changes, summary_key, identity_fields):
+    del identity_fields
+    summary = {
+        "addedNodes": 0, "removedNodes": 0, "changedNodes": 0, "unchangedNodes": 0,
+        "addedEdges": 0, "removedEdges": 0, "changedEdges": 0,
+        "addedEvidenceRefs": 0, "removedEvidenceRefs": 0, "changedEvidenceRefs": 0,
+    }
+    summary[summary_key[0]] = 1
+    summary[summary_key[1]] = 1
+    kwargs = {
+        "status": "available",
+        "left_reference": _reference("before"),
+        "right_reference": _reference("after"),
+        "left_snapshot": _identity("before"),
+        "right_snapshot": _identity("after"),
+        "summary": summary,
+        "node_changes": (),
+        "diagnostics": (),
+    }
+    if summary_key[0].endswith("Edges"):
+        kwargs["edge_changes"] = changes
+        kwargs["evidence_changes"] = ()
+    else:
+        kwargs["edge_changes"] = ()
+        kwargs["evidence_changes"] = changes
+    with pytest.raises(GovernanceGraphComparisonSchemaError):
+        GovernanceGraphComparisonResult.from_parts(**kwargs)
+
+
 def test_result_serializes_fixed_envelope_and_bounded_change():
     result = GovernanceGraphComparisonResult.from_parts(
         status="available",
