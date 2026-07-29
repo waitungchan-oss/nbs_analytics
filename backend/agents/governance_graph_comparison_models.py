@@ -141,6 +141,9 @@ class GovernanceGraphComparisonResult:
         normalized_nodes = tuple(_change(item, "nodeChanges") for item in node_changes)
         normalized_edges = tuple(_change(item, "edgeChanges") for item in edge_changes)
         normalized_evidence = tuple(_change(item, "evidenceChanges") for item in evidence_changes)
+        _reject_duplicate_keys(normalized_nodes, _node_identity_key, "nodeChanges")
+        _reject_duplicate_keys(normalized_edges, _edge_identity_key, "edgeChanges")
+        _reject_duplicate_keys(normalized_evidence, _evidence_identity_key, "evidenceChanges")
         if status == "available" and (left_identity is None or right_identity is None):
             raise GovernanceGraphComparisonSchemaError("available results require both snapshot identities")
         _validate_summary_counts(normalized_summary, normalized_nodes, "Nodes")
@@ -248,6 +251,10 @@ def _node_change_key(value: Mapping[str, Any]) -> tuple[str, str]:
     return (str(value.get("nodeId", "")), str(value["changeType"]))
 
 
+def _node_identity_key(value: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(value.get("nodeId", "")), str(value["changeType"]))
+
+
 def _edge_change_key(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
     return (
         str(value.get("source", "")), str(value.get("target", "")),
@@ -255,9 +262,25 @@ def _edge_change_key(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
     )
 
 
+def _edge_identity_key(value: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return _edge_change_key(value)
+
+
 def _evidence_change_key(value: Mapping[str, Any]) -> tuple[str, str, str]:
     return (str(value.get("path", "")), str(value.get("sha256", "")), str(value["changeType"]))
 
 
+def _evidence_identity_key(value: Mapping[str, Any]) -> tuple[str, str, str]:
+    return _evidence_change_key(value)
+
+
 def _diagnostic_key(value: Mapping[str, Any]) -> tuple[str, str]:
     return (str(value["code"]), str(value["summary"]))
+
+
+def _reject_duplicate_keys(
+    changes: tuple[Mapping[str, Any], ...], key_fn, label: str,
+) -> None:
+    keys = [key_fn(item) for item in changes]
+    if len(keys) != len(set(keys)):
+        raise GovernanceGraphComparisonSchemaError(f"{label} contains duplicate identities")

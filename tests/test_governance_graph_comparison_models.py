@@ -132,6 +132,24 @@ def test_summary_counts_must_match_change_records():
         )
 
 
+def test_duplicate_change_identity_is_rejected():
+    change = {"changeType": "added", "nodeId": "task_gate", "before": None, "after": {}}
+    with pytest.raises(GovernanceGraphComparisonSchemaError):
+        GovernanceGraphComparisonResult.from_parts(
+            status="available",
+            left_reference=_reference("before"),
+            right_reference=_reference("after"),
+            left_snapshot=_identity("before"),
+            right_snapshot=_identity("after"),
+            summary={
+                "addedNodes": 2, "removedNodes": 0, "changedNodes": 0, "unchangedNodes": 0,
+                "addedEdges": 0, "removedEdges": 0, "changedEdges": 0,
+                "addedEvidenceRefs": 0, "removedEvidenceRefs": 0, "changedEvidenceRefs": 0,
+            },
+            node_changes=(change, dict(change)), edge_changes=(), evidence_changes=(), diagnostics=(),
+        )
+
+
 def test_result_serializes_fixed_envelope_and_bounded_change():
     result = GovernanceGraphComparisonResult.from_parts(
         status="available",
