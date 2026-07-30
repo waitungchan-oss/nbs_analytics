@@ -215,6 +215,22 @@ def test_read_model_allows_null_snapshot_only_for_invalid_status() -> None:
     assert model.read_model_fingerprint is None
 
 
+def test_read_model_rejects_null_snapshot_for_unavailable_status() -> None:
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerDependencyReadModel.from_parts(
+            status="unavailable",
+            snapshot_fingerprint=None,
+            owner_catalog_fingerprint=None,
+            dependency_catalog_fingerprint=None,
+            owner_policy_version="e3-owner-policy-v1",
+            dependency_policy_version="e3-dependency-policy-v1",
+            owners=(),
+            dependencies=(),
+            coverage={"ownerStatus": "unavailable", "dependencyStatus": "unavailable", "ownerEntries": 0, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0},
+            diagnostics=(),
+        )
+
+
 def test_read_model_canonicalizes_owner_order_and_rejects_conflicting_duplicate() -> None:
     first = _owner_entry()
     second = _owner_entry(subject={"kind": "node", "id": "implementation"}, owner={"kind": "governance_role", "id": "implementation_owner"})

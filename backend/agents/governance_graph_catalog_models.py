@@ -311,7 +311,7 @@ class GovernanceGraphOwnerDependencyReadModel:
     def from_parts(cls, *, status: str, snapshot_fingerprint: str, owner_catalog_fingerprint: str | None, dependency_catalog_fingerprint: str | None, owner_policy_version: str, dependency_policy_version: str, owners: Any, dependencies: Any, coverage: Mapping[str, Any], diagnostics: Any) -> "GovernanceGraphOwnerDependencyReadModel":
         if status not in READ_MODEL_STATUSES:
             raise GovernanceGraphCatalogSchemaError("read model status is invalid")
-        if snapshot_fingerprint is None and status in {"invalid", "unavailable"}:
+        if snapshot_fingerprint is None and status == "invalid":
             snapshot = None
         else:
             snapshot = _sha(snapshot_fingerprint, "snapshotFingerprint")
