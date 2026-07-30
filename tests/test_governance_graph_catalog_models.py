@@ -8,8 +8,10 @@ from backend.agents.governance_graph_catalog_models import (
     OWNER_ROLES,
     GovernanceGraphCatalogSchemaError,
     GovernanceGraphDependencyCatalog,
+    GovernanceGraphOwnerDependencyReadModel,
     GovernanceGraphOwnerCatalog,
 )
+from backend.agents.workflow_models import canonical_sha256
 
 
 FINGERPRINT = "a" * 64
@@ -42,6 +44,7 @@ def _owner_catalog(entries: list[dict] | None = None, **overrides: object) -> di
         "diagnostics": [],
     }
     payload.update(overrides)
+    payload["catalogFingerprint"] = canonical_sha256({key: value for key, value in payload.items() if key != "catalogFingerprint"})
     return payload
 
 
@@ -70,6 +73,7 @@ def _dependency_catalog(entries: list[dict] | None = None, **overrides: object) 
         "diagnostics": [],
     }
     payload.update(overrides)
+    payload["catalogFingerprint"] = canonical_sha256({key: value for key, value in payload.items() if key != "catalogFingerprint"})
     return payload
 
 
@@ -86,7 +90,7 @@ def test_owner_catalog_accepts_role_only_owner_and_round_trips() -> None:
         "kind": "governance_role",
         "id": "review_owner",
     }
-    assert catalog.catalog_fingerprint == FINGERPRINT
+    assert catalog.catalog_fingerprint == _owner_catalog()["catalogFingerprint"]
 
 
 def test_dependency_catalog_accepts_workflow_edge_and_round_trips() -> None:
@@ -99,7 +103,54 @@ def test_dependency_catalog_accepts_workflow_edge_and_round_trips() -> None:
     entry = catalog.to_dict()["entries"][0]
     assert entry["relation"] == "requires"
     assert entry["relationKind"] == "workflow_edge"
-    assert catalog.catalog_fingerprint == FINGERPRINT
+    assert catalog.catalog_fingerprint == _dependency_catalog()["catalogFingerprint"]
+
+
+def test_catalog_rejects_catalog_fingerprint_that_does_not_match_canonical_envelope() -> None:
+    payload = _owner_catalog()
+    payload["catalogFingerprint"] = FINGERPRINT
+
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerCatalog.from_dict(payload)
+
+
+def test_catalog_rejects_entry_snapshot_fingerprint_mismatch() -> None:
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerCatalog.from_dict(_owner_catalog([_owner_entry(snapshotFingerprint="b" * 64)]))
+
+
+@pytest.mark.parametrize("field", ["subject", "owner"])
+def test_catalog_rejects_unsafe_owner_metadata(field: str) -> None:
+    entry = _owner_entry()
+    entry[field] = {"kind": "governance_role", "id": "secret_prompt"}
+
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerCatalog.from_dict(_owner_catalog([entry]))
+
+
+@pytest.mark.parametrize("payload", [
+    _owner_catalog(source={**_source(), "kind": []}),
+    _owner_catalog([_owner_entry(owner={"kind": "governance_role", "id": []})]),
+])
+def test_catalog_converts_malformed_unhashable_values_to_schema_error(payload: dict) -> None:
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerCatalog.from_dict(payload)
+
+
+def test_read_model_contract_has_deterministic_public_fingerprint() -> None:
+    model = GovernanceGraphOwnerDependencyReadModel.from_parts(
+        status="available",
+        snapshot_fingerprint=FINGERPRINT,
+        owner_catalog_fingerprint=FINGERPRINT,
+        dependency_catalog_fingerprint=None,
+        owners=({"subject": {"kind": "node", "id": "review"}, "owner": {"kind": "governance_role", "id": "review_owner"}},),
+        dependencies=(),
+        coverage={"ownerStatus": "available", "dependencyStatus": "unavailable", "ownerEntries": 1, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0},
+        diagnostics=(),
+    )
+
+    assert model.to_dict()["schemaVersion"] == "governance-graph-owner-dependency-read-v1"
+    assert model.to_dict()["readModelFingerprint"] == model.read_model_fingerprint
 
 
 @pytest.mark.parametrize("source_kind", ["arbitrary", "file", "https"])
