@@ -116,7 +116,7 @@ def _catalog_result(*, status="available", snapshot=None):
         "readModelFingerprint": "e" * 64 if status == "available" else None,
         "owners": [{
             "subject": {"kind": "task", "id": "task-1"},
-            "owner": {"kind": "governance_role", "id": "implementation"},
+            "owner": {"kind": "governance_role", "id": "implementation_owner"},
             "source": {"kind": "approved_catalog", "identity": "owner-catalog", "fingerprint": "f" * 64},
             "snapshotFingerprint": snapshot,
             "status": "available",
@@ -148,7 +148,7 @@ def test_catalog_lookup_renders_role_and_workflow_edge_read_only(monkeypatch):
     assert calls == [("run-123", "a" * 64)]
     rendered = " ".join(str(args) for _, args, _ in fake.calls)
     assert "Owner / dependency catalog" in rendered
-    assert "implementation" in rendered
+    assert "implementation_owner" in rendered
     assert "workflow_edge" in rendered
 
 
