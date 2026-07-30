@@ -82,15 +82,7 @@ def _source(value: Any, key: str) -> MappingProxyType:
     kind = source["kind"]
     if not isinstance(kind, str) or kind not in SOURCE_KINDS:
         raise GovernanceGraphCatalogSchemaError(f"{key}.kind is not allowlisted")
-    identity = source["identity"]
-    if not isinstance(identity, str) or not identity or len(identity) > 128:
-        raise GovernanceGraphCatalogSchemaError(f"{key}.identity is invalid")
-    if identity.startswith(("/", "~")) or "/" in identity or "\\" in identity or "://" in identity:
-        raise GovernanceGraphCatalogSchemaError(f"{key}.identity must not be a path or URI")
-    if any(ord(char) < 32 for char in identity) or _FORBIDDEN_TEXT_RE.search(identity):
-        raise GovernanceGraphCatalogSchemaError(f"{key}.identity contains unsafe text")
-    if any(token in identity.lower() for token in ("prompt", "command", "stdout", "stderr", "secret")):
-        raise GovernanceGraphCatalogSchemaError(f"{key}.identity contains forbidden text")
+    identity = _identifier(source["identity"], f"{key}.identity")
     return MappingProxyType({"kind": kind, "identity": identity, "fingerprint": _sha(source["fingerprint"], f"{key}.fingerprint")})
 
 
@@ -130,9 +122,10 @@ def _dedupe_entries(entries: list[MappingProxyType], identity_fn, key: str) -> t
     return tuple(by_identity[identity] for identity in sorted(by_identity, key=lambda item: repr(item)))
 
 
-def _catalog_fingerprint(payload: Mapping[str, Any], fingerprint_key: str) -> str:
+def _catalog_fingerprint(payload: Mapping[str, Any], fingerprint_key: str, normalized_entries: tuple[Mapping[str, Any], ...]) -> str:
     supplied = _sha(payload[fingerprint_key], fingerprint_key)
     unsigned = {key: value for key, value in payload.items() if key != fingerprint_key}
+    unsigned["entries"] = [_thaw(item) for item in normalized_entries]
     expected = canonical_sha256(unsigned)
     if supplied != expected:
         raise GovernanceGraphCatalogSchemaError(f"{fingerprint_key} does not match canonical envelope")
@@ -160,7 +153,6 @@ class GovernanceGraphOwnerCatalog:
         if data["schemaVersion"] != OWNER_CATALOG_SCHEMA or data["catalogPolicyVersion"] != OWNER_POLICY_VERSION:
             raise GovernanceGraphCatalogSchemaError("owner catalog schema or policy version is invalid")
         source = _source(data["source"], "source")
-        catalog_fingerprint = _catalog_fingerprint(data, "catalogFingerprint")
         snapshot_fingerprint = _snapshot(data["snapshotFingerprint"], "snapshotFingerprint")
         entries_raw = data["entries"]
         if not isinstance(entries_raw, list) or len(entries_raw) > 128:
@@ -183,6 +175,7 @@ class GovernanceGraphOwnerCatalog:
         normalized = _dedupe_entries(entries, lambda item: (item["subject"]["kind"], item["subject"]["id"]), "owner entries")
         if normalized and any(entry["source"] != source for entry in normalized):
             raise GovernanceGraphCatalogSchemaError("owner entry source does not match catalog source")
+        catalog_fingerprint = _catalog_fingerprint(data, "catalogFingerprint", normalized)
         diagnostics = _diagnostics(data["diagnostics"], "diagnostics")
         return cls(catalog_fingerprint, snapshot_fingerprint, source, normalized, "available", diagnostics)
 
@@ -213,7 +206,6 @@ class GovernanceGraphDependencyCatalog:
         if data["schemaVersion"] != DEPENDENCY_CATALOG_SCHEMA or data["catalogPolicyVersion"] != DEPENDENCY_POLICY_VERSION:
             raise GovernanceGraphCatalogSchemaError("dependency catalog schema or policy version is invalid")
         source = _source(data["source"], "source")
-        catalog_fingerprint = _catalog_fingerprint(data, "catalogFingerprint")
         snapshot_fingerprint = _snapshot(data["snapshotFingerprint"], "snapshotFingerprint")
         entries_raw = data["entries"]
         if not isinstance(entries_raw, list) or len(entries_raw) > 128:
@@ -236,6 +228,7 @@ class GovernanceGraphDependencyCatalog:
         normalized = _dedupe_entries(entries, lambda item: (item["from"]["kind"], item["from"]["id"], item["to"]["kind"], item["to"]["id"], item["relation"], item["relationKind"]), "dependency entries")
         if normalized and any(entry["source"] != source for entry in normalized):
             raise GovernanceGraphCatalogSchemaError("dependency entry source does not match catalog source")
+        catalog_fingerprint = _catalog_fingerprint(data, "catalogFingerprint", normalized)
         diagnostics = _diagnostics(data["diagnostics"], "diagnostics")
         return cls(catalog_fingerprint, snapshot_fingerprint, source, normalized, "available", diagnostics)
 
@@ -271,6 +264,29 @@ def _public_text(value: Any, key: str) -> str:
     return value
 
 
+def _freeze_public(value: Any, key: str, depth: int = 0) -> Any:
+    if depth > 4:
+        raise GovernanceGraphCatalogSchemaError(f"{key} is too deeply nested")
+    if isinstance(value, Mapping):
+        if len(value) > 16:
+            raise GovernanceGraphCatalogSchemaError(f"{key} contains too many fields")
+        result = {}
+        for name, item in value.items():
+            if not isinstance(name, str) or not _IDENTIFIER_RE.fullmatch(name) or name in _FORBIDDEN_KEYS:
+                raise GovernanceGraphCatalogSchemaError(f"{key} contains an unsafe key")
+            result[name] = _freeze_public(item, f"{key}.{name}", depth + 1)
+        return MappingProxyType(dict(sorted(result.items())))
+    if isinstance(value, (list, tuple)):
+        if len(value) > 128:
+            raise GovernanceGraphCatalogSchemaError(f"{key} contains too many entries")
+        return tuple(_freeze_public(item, key, depth + 1) for item in value)
+    if isinstance(value, str):
+        return _public_text(value, key)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise GovernanceGraphCatalogSchemaError(f"{key} contains unsupported metadata")
+
+
 READ_MODEL_STATUSES = frozenset({"available", "unavailable", "missing", "unknown", "blocked", "stale", "invalid"})
 READ_MODEL_COVERAGE_KEYS = frozenset({"ownerStatus", "dependencyStatus", "ownerEntries", "dependencyEntries", "unknownCount", "missingCount", "staleCount", "blockedCount"})
 
@@ -281,18 +297,22 @@ class GovernanceGraphOwnerDependencyReadModel:
     snapshot_fingerprint: str
     owner_catalog_fingerprint: str | None
     dependency_catalog_fingerprint: str | None
+    owner_policy_version: str
+    dependency_policy_version: str
     owners: tuple[Mapping[str, Any], ...]
     dependencies: tuple[Mapping[str, Any], ...]
     coverage: Mapping[str, Any]
     diagnostics: tuple[Mapping[str, str], ...]
 
     @classmethod
-    def from_parts(cls, *, status: str, snapshot_fingerprint: str, owner_catalog_fingerprint: str | None, dependency_catalog_fingerprint: str | None, owners: Any, dependencies: Any, coverage: Mapping[str, Any], diagnostics: Any) -> "GovernanceGraphOwnerDependencyReadModel":
+    def from_parts(cls, *, status: str, snapshot_fingerprint: str, owner_catalog_fingerprint: str | None, dependency_catalog_fingerprint: str | None, owner_policy_version: str, dependency_policy_version: str, owners: Any, dependencies: Any, coverage: Mapping[str, Any], diagnostics: Any) -> "GovernanceGraphOwnerDependencyReadModel":
         if status not in READ_MODEL_STATUSES:
             raise GovernanceGraphCatalogSchemaError("read model status is invalid")
         snapshot = _sha(snapshot_fingerprint, "snapshotFingerprint")
         owner_fp = None if owner_catalog_fingerprint is None else _sha(owner_catalog_fingerprint, "ownerCatalogFingerprint")
         dependency_fp = None if dependency_catalog_fingerprint is None else _sha(dependency_catalog_fingerprint, "dependencyCatalogFingerprint")
+        if owner_policy_version != OWNER_POLICY_VERSION or dependency_policy_version != DEPENDENCY_POLICY_VERSION:
+            raise GovernanceGraphCatalogSchemaError("read model policy versions are invalid")
         if not isinstance(owners, (list, tuple)) or not isinstance(dependencies, (list, tuple)) or len(owners) > 128 or len(dependencies) > 128:
             raise GovernanceGraphCatalogSchemaError("read model entries are invalid")
         if not isinstance(coverage, Mapping) or set(coverage) != READ_MODEL_COVERAGE_KEYS:
@@ -305,15 +325,35 @@ class GovernanceGraphOwnerDependencyReadModel:
         if not isinstance(diagnostics, (list, tuple)) or len(diagnostics) > 32:
             raise GovernanceGraphCatalogSchemaError("read model diagnostics are invalid")
         normalized_diagnostics = _diagnostics(list(diagnostics), "diagnostics")
-        normalized_owners = tuple(dict(item) for item in owners if isinstance(item, Mapping))
-        normalized_dependencies = tuple(dict(item) for item in dependencies if isinstance(item, Mapping))
-        if len(normalized_owners) != len(owners) or len(normalized_dependencies) != len(dependencies):
-            raise GovernanceGraphCatalogSchemaError("read model entries must be objects")
-        return cls(status, snapshot, owner_fp, dependency_fp, normalized_owners, normalized_dependencies, dict(coverage), normalized_diagnostics)
+        normalized_owners = tuple(_freeze_public(item, "owners") for item in owners)
+        normalized_dependencies = tuple(_freeze_public(item, "dependencies") for item in dependencies)
+        for index, entry in enumerate(normalized_owners):
+            if set(entry) != OWNER_ENTRY_KEYS:
+                raise GovernanceGraphCatalogSchemaError(f"owners[{index}] keys are invalid")
+            _subject(entry["subject"], f"owners[{index}].subject")
+            owner = _require_keys(entry["owner"], frozenset({"kind", "id"}), f"owners[{index}].owner")
+            if owner["kind"] != "governance_role" or owner["id"] not in OWNER_ROLES:
+                raise GovernanceGraphCatalogSchemaError(f"owners[{index}].owner is invalid")
+            _source(entry["source"], f"owners[{index}].source")
+            if _snapshot(entry["snapshotFingerprint"], f"owners[{index}].snapshotFingerprint") != snapshot:
+                raise GovernanceGraphCatalogSchemaError(f"owners[{index}] is stale for the selected snapshot")
+            _status(entry["status"], f"owners[{index}].status")
+        for index, entry in enumerate(normalized_dependencies):
+            if set(entry) != DEPENDENCY_ENTRY_KEYS:
+                raise GovernanceGraphCatalogSchemaError(f"dependencies[{index}] keys are invalid")
+            _subject(entry["from"], f"dependencies[{index}].from")
+            _subject(entry["to"], f"dependencies[{index}].to")
+            if entry["from"] == entry["to"] or entry["relation"] not in RELATIONS or entry["relationKind"] not in RELATION_KINDS:
+                raise GovernanceGraphCatalogSchemaError(f"dependencies[{index}] relation is invalid")
+            _source(entry["source"], f"dependencies[{index}].source")
+            if _snapshot(entry["snapshotFingerprint"], f"dependencies[{index}].snapshotFingerprint") != snapshot:
+                raise GovernanceGraphCatalogSchemaError(f"dependencies[{index}] is stale for the selected snapshot")
+            _status(entry["status"], f"dependencies[{index}].status")
+        return cls(status, snapshot, owner_fp, dependency_fp, owner_policy_version, dependency_policy_version, normalized_owners, normalized_dependencies, MappingProxyType(dict(coverage)), normalized_diagnostics)
 
     @property
     def read_model_fingerprint(self) -> str | None:
-        if self.status in {"invalid", "unavailable"}:
+        if self.status in {"invalid", "stale", "unavailable"}:
             return None
         payload = {
             "schemaVersion": READ_MODEL_SCHEMA,
@@ -321,7 +361,8 @@ class GovernanceGraphOwnerDependencyReadModel:
             "snapshotFingerprint": self.snapshot_fingerprint,
             "ownerCatalogFingerprint": self.owner_catalog_fingerprint,
             "dependencyCatalogFingerprint": self.dependency_catalog_fingerprint,
-            "readModelFingerprint": None,
+            "ownerPolicyVersion": self.owner_policy_version,
+            "dependencyPolicyVersion": self.dependency_policy_version,
             "owners": [_thaw(item) for item in self.owners],
             "dependencies": [_thaw(item) for item in self.dependencies],
             "coverage": _thaw(self.coverage),
@@ -336,6 +377,8 @@ class GovernanceGraphOwnerDependencyReadModel:
             "snapshotFingerprint": self.snapshot_fingerprint,
             "ownerCatalogFingerprint": self.owner_catalog_fingerprint,
             "dependencyCatalogFingerprint": self.dependency_catalog_fingerprint,
+            "ownerPolicyVersion": self.owner_policy_version,
+            "dependencyPolicyVersion": self.dependency_policy_version,
             "readModelFingerprint": self.read_model_fingerprint,
             "owners": [_thaw(item) for item in self.owners],
             "dependencies": [_thaw(item) for item in self.dependencies],

@@ -143,7 +143,9 @@ def test_read_model_contract_has_deterministic_public_fingerprint() -> None:
         snapshot_fingerprint=FINGERPRINT,
         owner_catalog_fingerprint=FINGERPRINT,
         dependency_catalog_fingerprint=None,
-        owners=({"subject": {"kind": "node", "id": "review"}, "owner": {"kind": "governance_role", "id": "review_owner"}},),
+        owner_policy_version="e3-owner-policy-v1",
+        dependency_policy_version="e3-dependency-policy-v1",
+        owners=(_owner_entry(),),
         dependencies=(),
         coverage={"ownerStatus": "available", "dependencyStatus": "unavailable", "ownerEntries": 1, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0},
         diagnostics=(),
@@ -151,6 +153,43 @@ def test_read_model_contract_has_deterministic_public_fingerprint() -> None:
 
     assert model.to_dict()["schemaVersion"] == "governance-graph-owner-dependency-read-v1"
     assert model.to_dict()["readModelFingerprint"] == model.read_model_fingerprint
+    with pytest.raises(TypeError):
+        model.coverage["ownerEntries"] = 2
+    with pytest.raises(TypeError):
+        model.owners[0]["owner"]["id"] = "plan_owner"
+
+
+def test_read_model_rejects_unvalidated_entry_mapping() -> None:
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerDependencyReadModel.from_parts(
+            status="available",
+            snapshot_fingerprint=FINGERPRINT,
+            owner_catalog_fingerprint=FINGERPRINT,
+            dependency_catalog_fingerprint=None,
+            owner_policy_version="e3-owner-policy-v1",
+            dependency_policy_version="e3-dependency-policy-v1",
+            owners=({"subject": {"id": "review"}},),
+            dependencies=(),
+            coverage={"ownerStatus": "available", "dependencyStatus": "unavailable", "ownerEntries": 1, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0},
+            diagnostics=(),
+        )
+
+
+def test_read_model_does_not_fingerprint_stale_result() -> None:
+    model = GovernanceGraphOwnerDependencyReadModel.from_parts(
+        status="stale",
+        snapshot_fingerprint=FINGERPRINT,
+        owner_catalog_fingerprint=FINGERPRINT,
+        dependency_catalog_fingerprint=None,
+        owner_policy_version="e3-owner-policy-v1",
+        dependency_policy_version="e3-dependency-policy-v1",
+        owners=(),
+        dependencies=(),
+        coverage={"ownerStatus": "stale", "dependencyStatus": "unavailable", "ownerEntries": 0, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 1, "blockedCount": 0},
+        diagnostics=(),
+    )
+
+    assert model.read_model_fingerprint is None
 
 
 @pytest.mark.parametrize("source_kind", ["arbitrary", "file", "https"])
@@ -161,6 +200,12 @@ def test_catalog_rejects_source_kind_outside_closed_allowlist(source_kind: str) 
 
 @pytest.mark.parametrize("value", ["/tmp/catalog.json", "https://example.test", "sk-secret-value", "{raw:json}", "run command"])
 def test_catalog_rejects_unsafe_source_identity(value: str) -> None:
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerCatalog.from_dict(_owner_catalog(source={**_source(), "identity": value}))
+
+
+@pytest.mark.parametrize("value", ["owner catalog", "foo..bar", "owner@catalog"])
+def test_catalog_rejects_non_identifier_source_identity(value: str) -> None:
     with pytest.raises(GovernanceGraphCatalogSchemaError):
         GovernanceGraphOwnerCatalog.from_dict(_owner_catalog(source={**_source(), "identity": value}))
 
@@ -182,9 +227,23 @@ def test_catalog_rejects_conflicting_owner_entries() -> None:
 
 
 def test_catalog_deduplicates_identical_owner_entries_deterministically() -> None:
-    catalog = GovernanceGraphOwnerCatalog.from_dict(_owner_catalog([_owner_entry(), _owner_entry()]))
+    payload = _owner_catalog([_owner_entry(), _owner_entry()])
+    payload["catalogFingerprint"] = canonical_sha256({**{key: value for key, value in payload.items() if key != "catalogFingerprint"}, "entries": [payload["entries"][0]]})
+    catalog = GovernanceGraphOwnerCatalog.from_dict(payload)
 
     assert len(catalog.entries) == 1
+
+
+def test_catalog_duplicate_fingerprint_uses_normalized_entries() -> None:
+    payload = _owner_catalog([_owner_entry(), _owner_entry()])
+    normalized = dict(payload)
+    normalized["entries"] = [payload["entries"][0]]
+    normalized["catalogFingerprint"] = canonical_sha256({key: value for key, value in normalized.items() if key != "catalogFingerprint"})
+
+    catalog = GovernanceGraphOwnerCatalog.from_dict(normalized)
+
+    assert catalog.catalog_fingerprint == normalized["catalogFingerprint"]
+    assert GovernanceGraphOwnerCatalog.from_dict(catalog.to_dict()).to_dict() == catalog.to_dict()
 
 
 def test_dependency_rejects_unsupported_relation_and_self_loop() -> None:
