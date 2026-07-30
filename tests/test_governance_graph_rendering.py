@@ -166,3 +166,30 @@ def test_catalog_lookup_status_and_selection_are_bounded(monkeypatch):
     rendered = " ".join(str(args) for _, args, _ in fake.calls)
     assert "invalid" in rendered
     assert "sk-secretvalue" not in rendered
+
+
+def test_catalog_lookup_requires_public_schema_and_allowlists(monkeypatch):
+    fake = FakeStreamlit()
+    monkeypatch.setattr(rendering, "st", fake)
+    payload = _catalog_result()
+    payload["schemaVersion"] = "forged"
+    payload["owners"][0]["owner"]["id"] = "unknown-role"
+
+    rendering.render_governance_graph_workspace(
+        _run(_graph()),
+        catalog_lookup=lambda run_id, snapshot: payload,
+    )
+
+    rendered = " ".join(str(args) for _, args, _ in fake.calls)
+    assert "unavailable" in rendered
+    assert "unknown-role" not in rendered
+
+
+def test_catalog_selection_clears_when_graph_is_unavailable(monkeypatch):
+    fake = FakeStreamlit()
+    fake.session_state[rendering.SELECTED_CATALOG_KEY] = {"runId": "run-123", "snapshotFingerprint": "a" * 64}
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_governance_graph_workspace(_run({"status": "unavailable"}))
+
+    assert rendering.SELECTED_CATALOG_KEY not in fake.session_state
