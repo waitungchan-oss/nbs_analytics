@@ -192,6 +192,56 @@ def test_read_model_does_not_fingerprint_stale_result() -> None:
     assert model.read_model_fingerprint is None
 
 
+def test_read_model_canonicalizes_owner_order_and_rejects_conflicting_duplicate() -> None:
+    first = _owner_entry()
+    second = _owner_entry(subject={"kind": "node", "id": "implementation"}, owner={"kind": "governance_role", "id": "implementation_owner"})
+    coverage = {"ownerStatus": "available", "dependencyStatus": "unavailable", "ownerEntries": 2, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0}
+    kwargs = dict(status="available", snapshot_fingerprint=FINGERPRINT, owner_catalog_fingerprint=FINGERPRINT, dependency_catalog_fingerprint=None, owner_policy_version="e3-owner-policy-v1", dependency_policy_version="e3-dependency-policy-v1", dependencies=(), coverage=coverage, diagnostics=())
+    left = GovernanceGraphOwnerDependencyReadModel.from_parts(owners=(first, second), **kwargs)
+    right = GovernanceGraphOwnerDependencyReadModel.from_parts(owners=(second, first), **kwargs)
+
+    assert left.read_model_fingerprint == right.read_model_fingerprint
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerDependencyReadModel.from_parts(owners=(first, first | {"status": "missing"}), **kwargs)
+
+
+def test_read_model_rejects_coverage_count_mismatch() -> None:
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerDependencyReadModel.from_parts(
+            status="available",
+            snapshot_fingerprint=FINGERPRINT,
+            owner_catalog_fingerprint=FINGERPRINT,
+            dependency_catalog_fingerprint=None,
+            owner_policy_version="e3-owner-policy-v1",
+            dependency_policy_version="e3-dependency-policy-v1",
+            owners=(_owner_entry(),),
+            dependencies=(),
+            coverage={"ownerStatus": "available", "dependencyStatus": "unavailable", "ownerEntries": 0, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0},
+            diagnostics=(),
+        )
+
+
+def test_read_model_rejects_unsafe_mapping_key_and_non_finite_scalar() -> None:
+    unsafe_entry = _owner_entry()
+    unsafe_entry["source"] = {"kind": "approved_catalog", "identity": "owner-catalog-v1", "fingerprint": FINGERPRINT, "Secret": "x"}
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerDependencyReadModel.from_parts(
+            status="available", snapshot_fingerprint=FINGERPRINT, owner_catalog_fingerprint=FINGERPRINT,
+            dependency_catalog_fingerprint=None, owner_policy_version="e3-owner-policy-v1",
+            dependency_policy_version="e3-dependency-policy-v1", owners=(unsafe_entry,), dependencies=(),
+            coverage={"ownerStatus": "available", "dependencyStatus": "unavailable", "ownerEntries": 1, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0}, diagnostics=(),
+        )
+
+    non_finite_entry = _owner_entry(status=float("nan"))
+    with pytest.raises(GovernanceGraphCatalogSchemaError):
+        GovernanceGraphOwnerDependencyReadModel.from_parts(
+            status="available", snapshot_fingerprint=FINGERPRINT, owner_catalog_fingerprint=FINGERPRINT,
+            dependency_catalog_fingerprint=None, owner_policy_version="e3-owner-policy-v1",
+            dependency_policy_version="e3-dependency-policy-v1", owners=(non_finite_entry,), dependencies=(),
+            coverage={"ownerStatus": "available", "dependencyStatus": "unavailable", "ownerEntries": 1, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0}, diagnostics=(),
+        )
+
+
 @pytest.mark.parametrize("source_kind", ["arbitrary", "file", "https"])
 def test_catalog_rejects_source_kind_outside_closed_allowlist(source_kind: str) -> None:
     with pytest.raises(GovernanceGraphCatalogSchemaError):

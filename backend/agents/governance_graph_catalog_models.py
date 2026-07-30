@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -272,7 +273,7 @@ def _freeze_public(value: Any, key: str, depth: int = 0) -> Any:
             raise GovernanceGraphCatalogSchemaError(f"{key} contains too many fields")
         result = {}
         for name, item in value.items():
-            if not isinstance(name, str) or not _IDENTIFIER_RE.fullmatch(name) or name in _FORBIDDEN_KEYS:
+            if not isinstance(name, str) or not _IDENTIFIER_RE.fullmatch(name) or ".." in name or "/" in name or "\\" in name or name.lower() in {item.lower() for item in _FORBIDDEN_KEYS}:
                 raise GovernanceGraphCatalogSchemaError(f"{key} contains an unsafe key")
             result[name] = _freeze_public(item, f"{key}.{name}", depth + 1)
         return MappingProxyType(dict(sorted(result.items())))
@@ -282,7 +283,9 @@ def _freeze_public(value: Any, key: str, depth: int = 0) -> Any:
         return tuple(_freeze_public(item, key, depth + 1) for item in value)
     if isinstance(value, str):
         return _public_text(value, key)
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
         return value
     raise GovernanceGraphCatalogSchemaError(f"{key} contains unsupported metadata")
 
@@ -349,6 +352,10 @@ class GovernanceGraphOwnerDependencyReadModel:
             if _snapshot(entry["snapshotFingerprint"], f"dependencies[{index}].snapshotFingerprint") != snapshot:
                 raise GovernanceGraphCatalogSchemaError(f"dependencies[{index}] is stale for the selected snapshot")
             _status(entry["status"], f"dependencies[{index}].status")
+        normalized_owners = _dedupe_entries(normalized_owners, lambda item: (item["subject"]["kind"], item["subject"]["id"]), "read model owner entries")
+        normalized_dependencies = _dedupe_entries(normalized_dependencies, lambda item: (item["from"]["kind"], item["from"]["id"], item["to"]["kind"], item["to"]["id"], item["relation"], item["relationKind"]), "read model dependency entries")
+        if coverage["ownerEntries"] != len(normalized_owners) or coverage["dependencyEntries"] != len(normalized_dependencies):
+            raise GovernanceGraphCatalogSchemaError("read model coverage counts do not match entries")
         return cls(status, snapshot, owner_fp, dependency_fp, owner_policy_version, dependency_policy_version, normalized_owners, normalized_dependencies, MappingProxyType(dict(coverage)), normalized_diagnostics)
 
     @property
