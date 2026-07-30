@@ -278,6 +278,26 @@ def test_dashboard_repairs_refresh_generation_after_updates():
     assert "refresh_cache_generation_signature(" in workflows
 
 
+def test_legacy_upload_refreshes_generation_only_after_verified_database_state(tmp_path):
+    from app_workflows import _refresh_generation_after_database_write
+
+    calls = []
+    refreshed = _refresh_generation_after_database_write(
+        "accepted",
+        db_path=tmp_path / "nbs_marketing_data.db",
+        refresher=lambda **kwargs: calls.append(kwargs) or {"signatureMatched": True},
+    )
+    assert refreshed == {"signatureMatched": True}
+    assert calls == [{"db_path": tmp_path / "nbs_marketing_data.db"}]
+
+    skipped = _refresh_generation_after_database_write(
+        "rollback_failed",
+        db_path=tmp_path / "nbs_marketing_data.db",
+        refresher=lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not refresh")),
+    )
+    assert skipped["status"] == "skipped"
+
+
 def test_streamlit_cache_load_uses_dashboard_facts_service():
     source = _workflows_function_source("_load_and_compute_cache")
 

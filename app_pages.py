@@ -68,6 +68,7 @@ from app_workflows import (
     _parse_gmv_exclusion_ids,
     _rebuild_cache_after_database_restore,
     _refresh_cache_and_rerun,
+    _refresh_generation_after_database_write,
     _repair_operator_assignments_before_load,
     _repair_subtable_branch_assignments_before_load,
     _render_kpi_filter_center,
@@ -1105,6 +1106,14 @@ def _render_upload_area_legacy(has_db_data: bool) -> None:
                         except Exception as history_exc:
                             history_error = f"{type(history_exc).__name__}: {history_exc}"
                         _record_stage("Stability history 記錄", stage_started)
+                        stage_started = time.perf_counter()
+                        cache_generation = _refresh_generation_after_database_write(
+                            rollback_result.get("status"),
+                            db_path=database_module.DB_FILE,
+                        )
+                        _record_stage("Cache generation signature refresh", stage_started)
+                        if cache_generation.get("status") == "degraded" and not history_error:
+                            history_error = cache_generation.get("error")
                         _record_stage("Upload total", upload_started)
 
                         st.session_state["LAST_UPLOAD_AUDIT"] = {
@@ -1120,6 +1129,7 @@ def _render_upload_area_legacy(has_db_data: bool) -> None:
                             "source_files": source_files,
                             "history_record_id": history_record_id,
                             "history_error": history_error,
+                            "cache_generation": cache_generation,
                             "rollback_status": rollback_result.get("rollbackStatus"),
                             "quarantine_path": rollback_result.get("quarantinePath"),
                             "post_rollback_gate": rollback_result.get("postRollbackGate"),
