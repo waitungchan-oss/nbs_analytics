@@ -183,6 +183,8 @@ def test_render_run_details_includes_compact_documentation_status(monkeypatch):
 
 def _render_details_with_graph(graph, monkeypatch):
     calls = []
+    if isinstance(graph, dict) and graph.get("status") == "available":
+        graph.setdefault("snapshotFingerprint", "a" * 64)
     monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit(calls=calls))
     agent_operations_rendering._render_run_details({
         "runId": "graph-ready",
@@ -397,7 +399,7 @@ def test_agent_operations_refresh_preserves_selection_until_filtered_runs_valida
     monkeypatch.setattr(
         app_pages,
         "render_agent_operations",
-        lambda snapshot, *, on_refresh, query_graph: rendered.update(refresh=on_refresh, query=query_graph),
+        lambda snapshot, *, on_refresh, query_graph, lineage_lookup: rendered.update(refresh=on_refresh, query=query_graph, lineage=lineage_lookup),
     )
 
     app_pages._render_agent_operations_tab()
