@@ -399,7 +399,7 @@ def test_agent_operations_refresh_preserves_selection_until_filtered_runs_valida
     monkeypatch.setattr(
         app_pages,
         "render_agent_operations",
-        lambda snapshot, *, on_refresh, query_graph: rendered.update(refresh=on_refresh, query=query_graph),
+        lambda snapshot, *, on_refresh, query_graph, lineage_lookup: rendered.update(refresh=on_refresh, query=query_graph, lineage=lineage_lookup),
     )
 
     app_pages._render_agent_operations_tab()
