@@ -21,9 +21,11 @@ from backend.agents.governance_graph_risk_service import GovernanceGraphRiskServ
 from backend.agents.governance_graph_impact_service import GovernanceGraphImpactService
 from backend.agents.governance_graph_evidence_lineage_models import EvidenceLineageInput
 from backend.agents.governance_graph_evidence_lineage_service import GovernanceGraphEvidenceLineageService
+from backend.agents.governance_graph_catalog_service import OwnerDependencyReadService
 
 
 CLI_SCHEMA = "nbs-governance-graph-cli-v1"
+CATALOG_CLI_SCHEMA = "governance-graph-catalog-cli-v1"
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?:[^\s'\"<>]+)")
 _EXIT_CODES = {
     "completed": 0,
@@ -62,6 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("risk-summary")
     subparsers.add_parser("change-impact")
     subparsers.add_parser("evidence-lineage")
+    subparsers.add_parser("catalog-validate")
     return parser
 
 
@@ -121,6 +124,27 @@ def _envelope(command: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if args.command == "catalog-validate":
+        try:
+            payload = json.load(sys.stdin)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Keep malformed stdin inside the catalog contract and bounded
+            # rather than leaking into the generic CLI runtime-error envelope.
+            result = OwnerDependencyReadService().resolve(
+                snapshot_fingerprint=None,
+                owner_catalog=None,
+                dependency_catalog=None,
+            )
+            return {"schemaVersion": CATALOG_CLI_SCHEMA, "command": args.command, "result": result.to_dict()}, 2
+        if not isinstance(payload, dict):
+            payload = {}
+        result = OwnerDependencyReadService().resolve(
+            snapshot_fingerprint=payload.get("snapshotFingerprint"),
+            owner_catalog=payload.get("ownerCatalog"),
+            dependency_catalog=payload.get("dependencyCatalog"),
+        )
+        result_payload = result.to_dict()
+        return {"schemaVersion": CATALOG_CLI_SCHEMA, "command": args.command, "result": result_payload}, _exit_code(result.status)
     if args.command == "risk-summary":
         payload = json.load(sys.stdin)
         result = GovernanceGraphRiskService().evaluate(payload)

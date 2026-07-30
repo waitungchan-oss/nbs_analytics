@@ -8,6 +8,13 @@ import streamlit as st
 
 
 SELECTED_EVIDENCE_KEY = "AGENT_OPERATIONS_SELECTED_EVIDENCE"
+SELECTED_CATALOG_KEY = "AGENT_OPERATIONS_SELECTED_CATALOG"
+CATALOG_READ_SCHEMA = "governance-graph-owner-dependency-read-v1"
+CATALOG_PUBLIC_KEYS = frozenset({"schemaVersion", "status", "snapshotFingerprint", "ownerCatalogFingerprint", "dependencyCatalogFingerprint", "readModelFingerprint", "owners", "dependencies", "coverage", "diagnostics"})
+CATALOG_COVERAGE_KEYS = frozenset({"ownerStatus", "dependencyStatus", "ownerEntries", "dependencyEntries", "unknownCount", "missingCount", "staleCount", "blockedCount"})
+OWNER_ROLES = frozenset({"spec_owner", "plan_owner", "implementation_owner", "review_owner", "verification_owner", "hermes_owner", "documentation_owner"})
+RELATIONS = frozenset({"requires", "produces", "implements", "reviews", "verifies", "blocks", "derived_from", "committed_as", "documented_by"})
+RELATION_KINDS = frozenset({"workflow_edge", "declared_dependency"})
 LINEAGE_INPUT_SCHEMA = "governance-graph-evidence-lineage-input-v1"
 LINEAGE_OUTPUT_SCHEMA = "governance-graph-evidence-lineage-v1"
 CANONICAL_PATHS = frozenset({"task-gate.json", "terra-diagnosis.json", "protected-incident.json"})
@@ -36,6 +43,8 @@ def _safe_value(value: Any) -> str | None:
     if not isinstance(value, str) or not value or len(value) > 128 or "/" in value or "\\" in value or ".." in value:
         return None
     if re.search(r"(?:sk-[A-Za-z0-9_-]{6,}|ghp_[A-Za-z0-9_-]{6,})", value, re.IGNORECASE):
+        return None
+    if any(token in value.lower() for token in ("prompt", "secret", "command", "stdout", "stderr")):
         return None
     return value if SAFE_VALUE.fullmatch(value) else None
 
@@ -115,6 +124,141 @@ def _render_derived_status(name: str, callback: Callable[..., dict[str, Any]] | 
             st.write(safe)
 
 
+def _render_catalog_lookup(
+    run: dict[str, Any],
+    snapshot_fingerprint: str,
+    callback: Callable[[str, str], dict[str, Any]] | None,
+) -> None:
+    """Render an externally supplied, validated catalog read model only."""
+    state = getattr(st, "session_state", None)
+    if callback is None:
+        if hasattr(state, "pop"):
+            state.pop(SELECTED_CATALOG_KEY, None)
+        st.caption("Owner / dependency catalog：unavailable；目前沒有可供 UI 消費的 validated read model。")
+        return
+    try:
+        result = callback(run["runId"], snapshot_fingerprint)
+    except Exception:
+        result = None
+    if not isinstance(result, dict):
+        result = None
+    if not _valid_catalog_payload(result, snapshot_fingerprint):
+        result = None
+    status = result.get("status") if result and result.get("status") in SAFE_STATUSES else "invalid"
+    if status != "available":
+        if hasattr(state, "pop"):
+            state.pop(SELECTED_CATALOG_KEY, None)
+        st.caption(f"Owner / dependency catalog：{status}")
+        return
+    if result.get("snapshotFingerprint") != snapshot_fingerprint:
+        if hasattr(state, "pop"):
+            state.pop(SELECTED_CATALOG_KEY, None)
+        st.caption("Owner / dependency catalog：stale")
+        return
+    owners = result.get("owners")
+    dependencies = result.get("dependencies")
+    owner_rows = []
+    if isinstance(owners, list):
+        for item in owners[:MAX_EVIDENCE]:
+            if not isinstance(item, dict) or item.get("snapshotFingerprint") != snapshot_fingerprint:
+                continue
+            subject = item.get("subject")
+            owner = item.get("owner")
+            if not isinstance(subject, dict) or not isinstance(owner, dict):
+                continue
+            subject_kind = _safe_value(subject.get("kind"))
+            subject_id = _safe_value(subject.get("id"))
+            owner_kind = _safe_value(owner.get("kind"))
+            owner_id = _safe_value(owner.get("id"))
+            if not all((subject_kind, subject_id, owner_kind == "governance_role", owner_id)):
+                continue
+            owner_rows.append({"Subject": f"{subject_kind}:{subject_id}", "Owner role": owner_id, "Status": item.get("status") if item.get("status") in SAFE_STATUSES else "invalid"})
+    dependency_rows = []
+    if isinstance(dependencies, list):
+        for item in dependencies[:MAX_EVIDENCE]:
+            if not isinstance(item, dict) or item.get("snapshotFingerprint") != snapshot_fingerprint:
+                continue
+            source = item.get("from")
+            target = item.get("to")
+            relation = _safe_value(item.get("relation"))
+            relation_kind = _safe_value(item.get("relationKind"))
+            if not isinstance(source, dict) or not isinstance(target, dict) or not relation or not relation_kind:
+                continue
+            source_kind, source_id = _safe_value(source.get("kind")), _safe_value(source.get("id"))
+            target_kind, target_id = _safe_value(target.get("kind")), _safe_value(target.get("id"))
+            if not all((source_kind, source_id, target_kind, target_id)):
+                continue
+            dependency_rows.append({"From": f"{source_kind}:{source_id}", "To": f"{target_kind}:{target_id}", "Relation": relation, "Relation kind": relation_kind, "Status": item.get("status") if item.get("status") in SAFE_STATUSES else "invalid"})
+    if hasattr(state, "get") and hasattr(state, "pop"):
+        selected = state.get(SELECTED_CATALOG_KEY)
+        if isinstance(selected, dict) and (selected.get("runId") != run["runId"] or selected.get("snapshotFingerprint") != snapshot_fingerprint):
+            state.pop(SELECTED_CATALOG_KEY, None)
+    st.caption("Owner / dependency catalog：available")
+    if owner_rows:
+        st.dataframe(owner_rows, use_container_width=True, hide_index=True)
+    if dependency_rows:
+        st.dataframe(dependency_rows, use_container_width=True, hide_index=True)
+    identities = [*[("owner", row["Subject"]) for row in owner_rows], *[("dependency", f"{row['From']}->{row['To']}:{row['Relation']}") for row in dependency_rows]]
+    if identities:
+        label = st.selectbox("Catalog subject / relation", [item[1] for item in identities], key="AGENT_OPERATIONS_CATALOG_SELECT")
+        if hasattr(state, "__setitem__"):
+            state[SELECTED_CATALOG_KEY] = {"runId": run["runId"], "snapshotFingerprint": snapshot_fingerprint, "kind": next((kind for kind, identity in identities if identity == label), "unknown"), "identity": label}
+    elif hasattr(state, "pop"):
+        state.pop(SELECTED_CATALOG_KEY, None)
+
+
+def _valid_catalog_payload(result: dict[str, Any] | None, snapshot_fingerprint: str) -> bool:
+    if not isinstance(result, dict) or set(result) != CATALOG_PUBLIC_KEYS or result.get("schemaVersion") != CATALOG_READ_SCHEMA or result.get("status") not in SAFE_STATUSES:
+        return False
+    status = result["status"]
+    if status == "available":
+        if result.get("snapshotFingerprint") != snapshot_fingerprint or not _safe_sha(result.get("readModelFingerprint")):
+            return False
+    elif result.get("snapshotFingerprint") not in (None, snapshot_fingerprint):
+        return False
+    for key in ("ownerCatalogFingerprint", "dependencyCatalogFingerprint"):
+        value = result.get(key)
+        if value is not None and not _safe_sha(value):
+            return False
+    owners, dependencies = result.get("owners"), result.get("dependencies")
+    if not isinstance(owners, list) or not isinstance(dependencies, list) or len(owners) > MAX_EVIDENCE or len(dependencies) > MAX_EVIDENCE:
+        return False
+    for item in owners:
+        if not isinstance(item, dict) or set(item) != {"subject", "owner", "source", "snapshotFingerprint", "status"} or item.get("snapshotFingerprint") != snapshot_fingerprint or item.get("status") not in SAFE_STATUSES:
+            return False
+        subject, owner, source = item["subject"], item["owner"], item["source"]
+        if not (isinstance(subject, dict) and set(subject) == {"kind", "id"} and _safe_value(subject.get("kind")) and _safe_value(subject.get("id"))):
+            return False
+        if not (isinstance(owner, dict) and set(owner) == {"kind", "id"} and owner.get("kind") == "governance_role" and owner.get("id") in OWNER_ROLES):
+            return False
+        if not _valid_catalog_source(source):
+            return False
+    for item in dependencies:
+        if not isinstance(item, dict) or set(item) != {"from", "to", "relation", "relationKind", "source", "snapshotFingerprint", "status"} or item.get("snapshotFingerprint") != snapshot_fingerprint or item.get("status") not in SAFE_STATUSES:
+            return False
+        if not (isinstance(item["from"], dict) and isinstance(item["to"], dict) and _valid_subject(item["from"]) and _valid_subject(item["to"])):
+            return False
+        if item.get("relation") not in RELATIONS or item.get("relationKind") not in RELATION_KINDS or not _valid_catalog_source(item.get("source")):
+            return False
+    coverage = result.get("coverage")
+    if not isinstance(coverage, dict) or set(coverage) != CATALOG_COVERAGE_KEYS:
+        return False
+    if any(coverage.get(key) not in SAFE_STATUSES for key in ("ownerStatus", "dependencyStatus")):
+        return False
+    if any(isinstance(coverage.get(key), bool) or not isinstance(coverage.get(key), int) or coverage.get(key) < 0 for key in CATALOG_COVERAGE_KEYS - {"ownerStatus", "dependencyStatus"}):
+        return False
+    diagnostics = result.get("diagnostics")
+    return isinstance(diagnostics, list) and len(diagnostics) <= MAX_EVIDENCE and all(isinstance(item, dict) and _safe_value(item.get("code")) and isinstance(item.get("summary"), str) and _safe_value(item.get("summary")) for item in diagnostics)
+
+
+def _valid_subject(value: Any) -> bool:
+    return set(value) == {"kind", "id"} and bool(_safe_value(value.get("kind"))) and bool(_safe_value(value.get("id")))
+
+
+def _valid_catalog_source(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) == {"kind", "identity", "fingerprint"} and value.get("kind") in {"approved_catalog", "graph_contract", "canonical_evidence"} and bool(_safe_value(value.get("identity"))) and bool(_safe_sha(value.get("fingerprint")))
+
+
 def render_governance_graph_workspace(
     run: dict[str, Any],
     *,
@@ -123,6 +267,7 @@ def render_governance_graph_workspace(
     comparison_lookup: Callable[..., dict[str, Any]] | None = None,
     risk_summary_lookup: Callable[..., dict[str, Any]] | None = None,
     impact_lookup: Callable[..., dict[str, Any]] | None = None,
+    catalog_lookup: Callable[[str, str], dict[str, Any]] | None = None,
     streamlit_module: Any | None = None,
 ) -> None:
     global st
@@ -137,6 +282,7 @@ def render_governance_graph_workspace(
             comparison_lookup=comparison_lookup,
             risk_summary_lookup=risk_summary_lookup,
             impact_lookup=impact_lookup,
+            catalog_lookup=catalog_lookup,
         )
     finally:
         st = original_streamlit
@@ -150,6 +296,7 @@ def _render_governance_graph_workspace(
     comparison_lookup: Callable[..., dict[str, Any]] | None,
     risk_summary_lookup: Callable[..., dict[str, Any]] | None,
     impact_lookup: Callable[..., dict[str, Any]] | None,
+    catalog_lookup: Callable[[str, str], dict[str, Any]] | None,
 ) -> None:
     graph = run.get("governanceGraph") if isinstance(run, dict) else None
     state = getattr(st, "session_state", None)
@@ -157,11 +304,13 @@ def _render_governance_graph_workspace(
     if not isinstance(graph, dict) or graph.get("status") == "unavailable":
         if hasattr(state, "pop"):
             state.pop(SELECTED_EVIDENCE_KEY, None)
+            state.pop(SELECTED_CATALOG_KEY, None)
         st.info("尚無已建 Graph snapshot；此頁不會自行建立或更新 snapshot。")
         return
     if graph.get("status") != "available":
         if hasattr(state, "pop"):
             state.pop(SELECTED_EVIDENCE_KEY, None)
+            state.pop(SELECTED_CATALOG_KEY, None)
         st.warning("Governance Graph 狀態：invalid")
         return
     run_id = run.get("runId")
@@ -169,6 +318,7 @@ def _render_governance_graph_workspace(
     if not isinstance(run_id, str) or not SAFE_RUN_ID.fullmatch(run_id) or not _safe_sha(snapshot_fingerprint):
         if hasattr(state, "pop"):
             state.pop(SELECTED_EVIDENCE_KEY, None)
+            state.pop(SELECTED_CATALOG_KEY, None)
         st.warning("Governance Graph 狀態：invalid")
         return
     st.write(
@@ -230,9 +380,11 @@ def _render_governance_graph_workspace(
                 }
                 _render_lineage_result(lineage_lookup(request))
     st.subheader("Derived analysis")
+    st.subheader("Owner / dependency catalog")
+    _render_catalog_lookup(run, snapshot_fingerprint, catalog_lookup)
     _render_derived_status("Snapshot comparison", comparison_lookup, run)
     _render_derived_status("Risk summary", risk_summary_lookup, run)
     _render_derived_status("Change impact", impact_lookup, run)
 
 
-__all__ = ["SELECTED_EVIDENCE_KEY", "render_governance_graph_workspace"]
+__all__ = ["SELECTED_EVIDENCE_KEY", "SELECTED_CATALOG_KEY", "render_governance_graph_workspace"]
