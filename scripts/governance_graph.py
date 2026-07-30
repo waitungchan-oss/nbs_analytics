@@ -125,7 +125,17 @@ def _envelope(command: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.command == "catalog-validate":
-        payload = json.load(sys.stdin)
+        try:
+            payload = json.load(sys.stdin)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Keep malformed stdin inside the catalog contract and bounded
+            # rather than leaking into the generic CLI runtime-error envelope.
+            result = OwnerDependencyReadService().resolve(
+                snapshot_fingerprint=None,
+                owner_catalog=None,
+                dependency_catalog=None,
+            )
+            return {"schemaVersion": CATALOG_CLI_SCHEMA, "command": args.command, "result": result.to_dict()}, 2
         if not isinstance(payload, dict):
             payload = {}
         result = OwnerDependencyReadService().resolve(

@@ -4,6 +4,8 @@ import json
 import io
 from pathlib import Path
 
+import pytest
+
 import scripts.governance_graph as cli
 from backend.agents.workflow_models import MANIFEST_SCHEMA, STATUS_SCHEMA, WorkflowManifest, WorkflowStatus
 from backend.agents.workflow_models import canonical_sha256
@@ -131,6 +133,18 @@ def test_catalog_validate_malformed_stdin_is_bounded_invalid(tmp_path, monkeypat
 
     assert cli.main(["catalog-validate"]) == 2
     payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["status"] == "invalid"
+    assert "raw" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("raw", ["", "{not-json"])
+def test_catalog_validate_syntax_or_empty_stdin_is_bounded_invalid(tmp_path, monkeypatch, capsys, raw):
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(raw))
+
+    assert cli.main(["catalog-validate"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schemaVersion"] == "governance-graph-catalog-cli-v1"
     assert payload["result"]["status"] == "invalid"
     assert "raw" not in json.dumps(payload)
 
