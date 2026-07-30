@@ -265,6 +265,7 @@ def _render_run_details(
     *,
     query_graph: Callable[[str, dict[str, str | None]], dict[str, Any]] | None = None,
     lineage_lookup: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    catalog_lookup: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> None:
     st.subheader("Selected run")
     st.write(f"**{run.get('briefName', '未提供')}** · {run.get('runId', '未提供')}")
@@ -307,7 +308,7 @@ def _render_run_details(
     if query_graph is not None and isinstance(run.get("runId"), str):
         _render_graph_query(run["runId"], query_graph)
     render_governance_graph_workspace(
-        run, query_graph=query_graph, lineage_lookup=lineage_lookup, streamlit_module=st,
+        run, query_graph=query_graph, lineage_lookup=lineage_lookup, catalog_lookup=catalog_lookup, streamlit_module=st,
     )
 
 
@@ -336,6 +337,7 @@ def render_agent_operations(
     on_refresh: Callable[[], None],
     query_graph: Callable[[str, dict[str, str | None]], dict[str, Any]] | None = None,
     lineage_lookup: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    catalog_lookup: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> None:
     if snapshot.get("schemaVersion") != SNAPSHOT_SCHEMA:
         st.warning("Agent operations snapshot schema unavailable")
@@ -400,7 +402,7 @@ def render_agent_operations(
             key=SELECTED_RUN_KEY,
         )
         selected = next((item for item in filtered if item.get("runId") == selected_id), filtered[0])
-        _render_run_details(selected, query_graph=query_graph, lineage_lookup=lineage_lookup)
+        _render_run_details(selected, query_graph=query_graph, lineage_lookup=lineage_lookup, catalog_lookup=catalog_lookup)
     else:
         st.info("目前篩選條件沒有 Agent runs")
 

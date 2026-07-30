@@ -144,6 +144,26 @@ def test_render_non_empty_snapshot_covers_main_ui_contract(monkeypatch):
     assert any(call[0] == "warning" and "Diagnostics: 1" in call[1][0] for call in calls)
 
 
+def test_catalog_lookup_is_optional_dependency_injected(monkeypatch):
+    snapshot = _empty_snapshot()
+    snapshot["summary"].update({"runCount": 1, "completedCount": 1})
+    snapshot["runs"] = [{
+        "runId": "run-1", "briefName": "Brief", "status": "completed",
+        "updatedAt": "2026-07-16T10:00:00+08:00", "stages": {},
+        "governanceGraph": {"status": "available", "snapshotFingerprint": "a" * 64, "nodes": [], "evidence": [], "blockers": [], "diagnostics": []},
+    }]
+    calls = []
+    monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit(calls=calls))
+
+    agent_operations_rendering.render_agent_operations(
+        snapshot,
+        on_refresh=lambda: None,
+        catalog_lookup=lambda run_id, fingerprint: {"status": "unavailable"},
+    )
+
+    assert any(call[0] == "caption" and "Owner / dependency catalog" in call[1][0] for call in calls)
+
+
 def test_render_run_details_includes_compact_documentation_status(monkeypatch):
     calls = []
 

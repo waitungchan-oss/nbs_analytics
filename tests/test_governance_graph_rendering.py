@@ -103,3 +103,66 @@ def test_invalid_lineage_result_is_isolated(monkeypatch):
     rendered = " ".join(str(args) for _, args, _ in fake.calls)
     assert "invalid" in rendered
     assert '"secret"' not in rendered
+
+
+def _catalog_result(*, status="available", snapshot=None):
+    snapshot = snapshot or "a" * 64
+    return {
+        "schemaVersion": "governance-graph-owner-dependency-read-v1",
+        "status": status,
+        "snapshotFingerprint": snapshot if status != "invalid" else None,
+        "ownerCatalogFingerprint": "c" * 64 if status == "available" else None,
+        "dependencyCatalogFingerprint": "d" * 64 if status == "available" else None,
+        "readModelFingerprint": "e" * 64 if status == "available" else None,
+        "owners": [{
+            "subject": {"kind": "task", "id": "task-1"},
+            "owner": {"kind": "governance_role", "id": "implementation"},
+            "source": {"kind": "approved_catalog", "identity": "owner-catalog", "fingerprint": "f" * 64},
+            "snapshotFingerprint": snapshot,
+            "status": "available",
+        }] if status == "available" else [],
+        "dependencies": [{
+            "from": {"kind": "task", "id": "task-1"},
+            "to": {"kind": "task", "id": "task-2"},
+            "relation": "requires",
+            "relationKind": "workflow_edge",
+            "source": {"kind": "graph_contract", "identity": "dependency-catalog", "fingerprint": "1" * 64},
+            "snapshotFingerprint": snapshot,
+            "status": "available",
+        }] if status == "available" else [],
+        "coverage": {"ownerStatus": status, "dependencyStatus": status, "ownerEntries": 1 if status == "available" else 0, "dependencyEntries": 1 if status == "available" else 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0},
+        "diagnostics": [],
+    }
+
+
+def test_catalog_lookup_renders_role_and_workflow_edge_read_only(monkeypatch):
+    fake = FakeStreamlit()
+    monkeypatch.setattr(rendering, "st", fake)
+    calls = []
+
+    rendering.render_governance_graph_workspace(
+        _run(_graph()),
+        catalog_lookup=lambda run_id, snapshot: calls.append((run_id, snapshot)) or _catalog_result(),
+    )
+
+    assert calls == [("run-123", "a" * 64)]
+    rendered = " ".join(str(args) for _, args, _ in fake.calls)
+    assert "Owner / dependency catalog" in rendered
+    assert "implementation" in rendered
+    assert "workflow_edge" in rendered
+
+
+def test_catalog_lookup_status_and_selection_are_bounded(monkeypatch):
+    fake = FakeStreamlit()
+    fake.session_state[rendering.SELECTED_CATALOG_KEY] = {"runId": "old", "snapshotFingerprint": "b" * 64}
+    monkeypatch.setattr(rendering, "st", fake)
+
+    rendering.render_governance_graph_workspace(
+        _run(_graph()),
+        catalog_lookup=lambda run_id, snapshot: {"status": "invalid", "raw": "sk-secretvalue"},
+    )
+
+    assert rendering.SELECTED_CATALOG_KEY not in fake.session_state
+    rendered = " ".join(str(args) for _, args, _ in fake.calls)
+    assert "invalid" in rendered
+    assert "sk-secretvalue" not in rendered

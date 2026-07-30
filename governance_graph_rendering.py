@@ -8,6 +8,7 @@ import streamlit as st
 
 
 SELECTED_EVIDENCE_KEY = "AGENT_OPERATIONS_SELECTED_EVIDENCE"
+SELECTED_CATALOG_KEY = "AGENT_OPERATIONS_SELECTED_CATALOG"
 LINEAGE_INPUT_SCHEMA = "governance-graph-evidence-lineage-input-v1"
 LINEAGE_OUTPUT_SCHEMA = "governance-graph-evidence-lineage-v1"
 CANONICAL_PATHS = frozenset({"task-gate.json", "terra-diagnosis.json", "protected-incident.json"})
@@ -115,6 +116,87 @@ def _render_derived_status(name: str, callback: Callable[..., dict[str, Any]] | 
             st.write(safe)
 
 
+def _render_catalog_lookup(
+    run: dict[str, Any],
+    snapshot_fingerprint: str,
+    callback: Callable[[str, str], dict[str, Any]] | None,
+) -> None:
+    """Render an externally supplied, validated catalog read model only."""
+    state = getattr(st, "session_state", None)
+    if callback is None:
+        if hasattr(state, "pop"):
+            state.pop(SELECTED_CATALOG_KEY, None)
+        st.caption("Owner / dependency catalog：unavailable；目前沒有可供 UI 消費的 validated read model。")
+        return
+    try:
+        result = callback(run["runId"], snapshot_fingerprint)
+    except Exception:
+        result = None
+    if not isinstance(result, dict):
+        result = None
+    status = result.get("status") if result and result.get("status") in SAFE_STATUSES else "invalid"
+    if status != "available":
+        if hasattr(state, "pop"):
+            state.pop(SELECTED_CATALOG_KEY, None)
+        st.caption(f"Owner / dependency catalog：{status}")
+        return
+    if result.get("snapshotFingerprint") != snapshot_fingerprint:
+        if hasattr(state, "pop"):
+            state.pop(SELECTED_CATALOG_KEY, None)
+        st.caption("Owner / dependency catalog：stale")
+        return
+    owners = result.get("owners")
+    dependencies = result.get("dependencies")
+    owner_rows = []
+    if isinstance(owners, list):
+        for item in owners[:MAX_EVIDENCE]:
+            if not isinstance(item, dict) or item.get("snapshotFingerprint") != snapshot_fingerprint:
+                continue
+            subject = item.get("subject")
+            owner = item.get("owner")
+            if not isinstance(subject, dict) or not isinstance(owner, dict):
+                continue
+            subject_kind = _safe_value(subject.get("kind"))
+            subject_id = _safe_value(subject.get("id"))
+            owner_kind = _safe_value(owner.get("kind"))
+            owner_id = _safe_value(owner.get("id"))
+            if not all((subject_kind, subject_id, owner_kind == "governance_role", owner_id)):
+                continue
+            owner_rows.append({"Subject": f"{subject_kind}:{subject_id}", "Owner role": owner_id, "Status": item.get("status") if item.get("status") in SAFE_STATUSES else "invalid"})
+    dependency_rows = []
+    if isinstance(dependencies, list):
+        for item in dependencies[:MAX_EVIDENCE]:
+            if not isinstance(item, dict) or item.get("snapshotFingerprint") != snapshot_fingerprint:
+                continue
+            source = item.get("from")
+            target = item.get("to")
+            relation = _safe_value(item.get("relation"))
+            relation_kind = _safe_value(item.get("relationKind"))
+            if not isinstance(source, dict) or not isinstance(target, dict) or not relation or not relation_kind:
+                continue
+            source_kind, source_id = _safe_value(source.get("kind")), _safe_value(source.get("id"))
+            target_kind, target_id = _safe_value(target.get("kind")), _safe_value(target.get("id"))
+            if not all((source_kind, source_id, target_kind, target_id)):
+                continue
+            dependency_rows.append({"From": f"{source_kind}:{source_id}", "To": f"{target_kind}:{target_id}", "Relation": relation, "Relation kind": relation_kind, "Status": item.get("status") if item.get("status") in SAFE_STATUSES else "invalid"})
+    if hasattr(state, "get") and hasattr(state, "pop"):
+        selected = state.get(SELECTED_CATALOG_KEY)
+        if isinstance(selected, dict) and (selected.get("runId") != run["runId"] or selected.get("snapshotFingerprint") != snapshot_fingerprint):
+            state.pop(SELECTED_CATALOG_KEY, None)
+    st.caption("Owner / dependency catalog：available")
+    if owner_rows:
+        st.dataframe(owner_rows, use_container_width=True, hide_index=True)
+    if dependency_rows:
+        st.dataframe(dependency_rows, use_container_width=True, hide_index=True)
+    identities = [*[("owner", row["Subject"]) for row in owner_rows], *[("dependency", f"{row['From']}->{row['To']}:{row['Relation']}") for row in dependency_rows]]
+    if identities:
+        label = st.selectbox("Catalog subject / relation", [item[1] for item in identities], key="AGENT_OPERATIONS_CATALOG_SELECT")
+        if hasattr(state, "__setitem__"):
+            state[SELECTED_CATALOG_KEY] = {"runId": run["runId"], "snapshotFingerprint": snapshot_fingerprint, "kind": next((kind for kind, identity in identities if identity == label), "unknown"), "identity": label}
+    elif hasattr(state, "pop"):
+        state.pop(SELECTED_CATALOG_KEY, None)
+
+
 def render_governance_graph_workspace(
     run: dict[str, Any],
     *,
@@ -123,6 +205,7 @@ def render_governance_graph_workspace(
     comparison_lookup: Callable[..., dict[str, Any]] | None = None,
     risk_summary_lookup: Callable[..., dict[str, Any]] | None = None,
     impact_lookup: Callable[..., dict[str, Any]] | None = None,
+    catalog_lookup: Callable[[str, str], dict[str, Any]] | None = None,
     streamlit_module: Any | None = None,
 ) -> None:
     global st
@@ -137,6 +220,7 @@ def render_governance_graph_workspace(
             comparison_lookup=comparison_lookup,
             risk_summary_lookup=risk_summary_lookup,
             impact_lookup=impact_lookup,
+            catalog_lookup=catalog_lookup,
         )
     finally:
         st = original_streamlit
@@ -150,6 +234,7 @@ def _render_governance_graph_workspace(
     comparison_lookup: Callable[..., dict[str, Any]] | None,
     risk_summary_lookup: Callable[..., dict[str, Any]] | None,
     impact_lookup: Callable[..., dict[str, Any]] | None,
+    catalog_lookup: Callable[[str, str], dict[str, Any]] | None,
 ) -> None:
     graph = run.get("governanceGraph") if isinstance(run, dict) else None
     state = getattr(st, "session_state", None)
@@ -230,9 +315,11 @@ def _render_governance_graph_workspace(
                 }
                 _render_lineage_result(lineage_lookup(request))
     st.subheader("Derived analysis")
+    st.subheader("Owner / dependency catalog")
+    _render_catalog_lookup(run, snapshot_fingerprint, catalog_lookup)
     _render_derived_status("Snapshot comparison", comparison_lookup, run)
     _render_derived_status("Risk summary", risk_summary_lookup, run)
     _render_derived_status("Change impact", impact_lookup, run)
 
 
-__all__ = ["SELECTED_EVIDENCE_KEY", "render_governance_graph_workspace"]
+__all__ = ["SELECTED_EVIDENCE_KEY", "SELECTED_CATALOG_KEY", "render_governance_graph_workspace"]

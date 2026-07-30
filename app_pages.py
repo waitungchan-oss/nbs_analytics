@@ -130,7 +130,7 @@ def _load_agent_operations_snapshot(*, force: bool = False) -> dict:
     return st.session_state[key]
 
 
-def _render_agent_operations_tab() -> None:
+def _render_agent_operations_tab(*, catalog_lookup=None) -> None:
     snapshot = _load_agent_operations_snapshot()
 
     def refresh() -> None:
@@ -143,7 +143,10 @@ def _render_agent_operations_tab() -> None:
         parsed = EvidenceLineageInput.from_dict(request)
         return GovernanceGraphEvidenceLineageService(PROJECT_ROOT).resolve(parsed).to_dict()
 
-    render_agent_operations(snapshot, on_refresh=refresh, query_graph=query_graph, lineage_lookup=lineage_lookup)
+    kwargs = {"on_refresh": refresh, "query_graph": query_graph, "lineage_lookup": lineage_lookup}
+    if catalog_lookup is not None:
+        kwargs["catalog_lookup"] = catalog_lookup
+    render_agent_operations(snapshot, **kwargs)
 
 
 def _coerce_entity_audit_dataframe(value: object) -> pd.DataFrame:
