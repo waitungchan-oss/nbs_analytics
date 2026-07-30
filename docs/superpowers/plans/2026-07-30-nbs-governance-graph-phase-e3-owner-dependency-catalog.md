@@ -8,6 +8,10 @@
 
 **Tech Stack:** Python 3、dataclasses／既有 workflow validation helpers、Streamlit callback、stdin-only CLI、pytest、system acceptance、Hermes。
 
+### Reconciliation (2026-07-30)
+
+Task 1–5 已依本 plan 完成並通過 immutable strict Review；Task 6 final acceptance evidence：focused E-3 tests 192 passed、full pytest 1389 passed、受影響 Python `py_compile` passed、`scripts/system_manager.py acceptance` passed、final Review PASS（immutable range `1c10cb9..a548ef4`）、`scripts/hermes_post_change_check.py` exit 0 / Overall PASS。Hermes system-monitor 仍觀察到既有 cache generation signature mismatch（overall Hermes 仍 PASS，SQLite integrity、baseline 與正式口徑 matched）；此為既有監測狀態，未由 E-3 變更修正或寫入。E-3 未 push、未建立 PR、未 merge、未刪除 branch。
+
 ## Global Constraints
 
 - Owner 只代表治理角色／責任群組，不保存個人姓名、email、GitHub handle、Git author 或聯絡資料。
@@ -57,7 +61,7 @@
 - Consumes: `Mapping[str, Any]` catalog envelopes；既有 `canonical_sha256`／safe validation patterns；envelope-level 與 entry-level source provenance。
 - Produces: `GovernanceGraphOwnerCatalog.from_dict()`、`GovernanceGraphDependencyCatalog.from_dict()`、`GovernanceGraphOwnerDependencyReadModel.to_dict()`、各自 `to_dict()` 與 deterministic fingerprint。
 
-- [ ] **Step 1: Write failing model tests.** 建立 fixture 並測試 exact public keys、schema／policy version、role／relation allowlist、envelope-level 與 entry-level `source.kind` closed allowlist（`approved_catalog`、`graph_contract`、`canonical_evidence`）、bounded source identity、lowercase SHA-256、safe identifier、absolute path／URI／secret／raw JSON／prompt／command rejection、missing／unknown／stale／blocked／invalid parsing、owner subject conflict、dependency identity conflict 與 deterministic duplicate dedupe。
+- [x] **Step 1: Write failing model tests.** 建立 fixture 並測試 exact public keys、schema／policy version、role／relation allowlist、envelope-level 與 entry-level `source.kind` closed allowlist（`approved_catalog`、`graph_contract`、`canonical_evidence`）、bounded source identity、lowercase SHA-256、safe identifier、absolute path／URI／secret／raw JSON／prompt／command rejection、missing／unknown／stale／blocked／invalid parsing、owner subject conflict、dependency identity conflict 與 deterministic duplicate dedupe。
 
   測試 fixture 至少包含：
 
@@ -66,23 +70,23 @@
   DEPENDENCY = {"from": {"kind": "node", "id": "implementation"}, "to": {"kind": "node", "id": "verification"}, "relation": "requires", "relationKind": "workflow_edge"}
   ```
 
-- [ ] **Step 2: Run model tests to verify RED.**
+- [x] **Step 2: Run model tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_catalog_models.py -q`
 
   Expected: import／constructor failures because E-3 catalog models do not yet exist。
 
-- [ ] **Step 3: Implement immutable models and parsers.** 使用 frozen dataclasses 或既有 model pattern，固定 schemas、policy versions、allowlists、bounded entries、diagnostics 與 fingerprint exclusion rules。完全相同 duplicate 依 canonical identity dedupe；conflict、unsafe metadata、unsupported relation 或 missing required provenance 回傳 strict validation error，不能 fallback。
+- [x] **Step 3: Implement immutable models and parsers.** 使用 frozen dataclasses 或既有 model pattern，固定 schemas、policy versions、allowlists、bounded entries、diagnostics 與 fingerprint exclusion rules。完全相同 duplicate 依 canonical identity dedupe；conflict、unsafe metadata、unsupported relation 或 missing required provenance 回傳 strict validation error，不能 fallback。
 
-- [ ] **Step 4: Run model tests to verify GREEN.**
+- [x] **Step 4: Run model tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_catalog_models.py -q`
 
   Expected: 所有 model tests PASS，且 tests 不建立 runtime、Graph snapshot 或 catalog writer。
 
-- [ ] **Step 5: Submit Task 1 to strict Review.** Review 只涵蓋 models 與 model tests，確認 exact keys、safe bounds、fingerprint provenance、role-only owner 與 no-write boundary。
+- [x] **Step 5: Submit Task 1 to strict Review.** Review 只涵蓋 models 與 model tests，確認 exact keys、safe bounds、fingerprint provenance、role-only owner 與 no-write boundary。
 
-- [ ] **Step 6: After Review PASS, Codex commits Task 1.**
+- [x] **Step 6: After Review PASS, Codex commits Task 1.**
 
   ```bash
   git add backend/agents/governance_graph_catalog_models.py tests/test_governance_graph_catalog_models.py
@@ -99,25 +103,25 @@
 - Consumes: Task 1 `GovernanceGraphOwnerCatalog`、`GovernanceGraphDependencyCatalog`；selected `snapshot_fingerprint`。
 - Produces: `OwnerDependencyReadService.resolve(*, snapshot_fingerprint: str, owner_catalog: Mapping[str, Any] | None, dependency_catalog: Mapping[str, Any] | None) -> GovernanceGraphOwnerDependencyReadModel`。
 
-- [ ] **Step 1: Write failing service tests.** 覆蓋兩個 catalog 都 available、只有 owner、只有 dependency、caller 未提供 catalog、catalog fingerprint mismatch、使用兩個不同 synthetic snapshot fingerprint 的 cross-run binding mismatch（v1 不新增 runId，cross-run 等同 selected snapshot fingerprint mismatch）、owner available＋dependency invalid、blocked／unknown／missing precedence、conflicting duplicate、one-side isolation、deterministic repeated output 與 no-write tree/runtime assertions。
+- [x] **Step 1: Write failing service tests.** 覆蓋兩個 catalog 都 available、只有 owner、只有 dependency、caller 未提供 catalog、catalog fingerprint mismatch、使用兩個不同 synthetic snapshot fingerprint 的 cross-run binding mismatch（v1 不新增 runId，cross-run 等同 selected snapshot fingerprint mismatch）、owner available＋dependency invalid、blocked／unknown／missing precedence、conflicting duplicate、one-side isolation、deterministic repeated output 與 no-write tree/runtime assertions。
 
-- [ ] **Step 2: Run service tests to verify RED.**
+- [x] **Step 2: Run service tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_catalog_service.py -q`
 
   Expected: service import／method failures。
 
-- [ ] **Step 3: Implement validation and composition only.** Service 先以 Task 1 parser 驗證每一側，再以 selected snapshot fingerprint 做 binding；v1 不引入額外 runId，跨 run 僅能透過不同 selected snapshot fingerprint 判定 stale。每一側保留自己的 status／diagnostics，overall status 依 `invalid > stale > blocked > unknown > missing > unavailable > available` 計算。只輸出 bounded owners、dependencies、coverage、source fingerprints 與 read-model fingerprint；不讀檔、不呼叫 D-1～D-4 writer、不寫任何 state。
+- [x] **Step 3: Implement validation and composition only.** Service 先以 Task 1 parser 驗證每一側，再以 selected snapshot fingerprint 做 binding；v1 不引入額外 runId，跨 run 僅能透過不同 selected snapshot fingerprint 判定 stale。每一側保留自己的 status／diagnostics，overall status 依 `invalid > stale > blocked > unknown > missing > unavailable > available` 計算。只輸出 bounded owners、dependencies、coverage、source fingerprints 與 read-model fingerprint；不讀檔、不呼叫 D-1～D-4 writer、不寫任何 state。
 
-- [ ] **Step 4: Run service tests to verify GREEN.**
+- [x] **Step 4: Run service tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_catalog_service.py -q`
 
   Expected: service tests PASS，重複 input 產生相同 canonical output 與 fingerprint。
 
-- [ ] **Step 5: Submit Task 2 to strict Review.** 確認 service 沒有 catalog auto-generation、filesystem／SQLite／Git access、owner/dependency inference、last-write-wins 或 cross-run fallback。
+- [x] **Step 5: Submit Task 2 to strict Review.** 確認 service 沒有 catalog auto-generation、filesystem／SQLite／Git access、owner/dependency inference、last-write-wins 或 cross-run fallback。
 
-- [ ] **Step 6: After Review PASS, Codex commits Task 2.**
+- [x] **Step 6: After Review PASS, Codex commits Task 2.**
 
   ```bash
   git add backend/agents/governance_graph_catalog_service.py tests/test_governance_graph_catalog_service.py
@@ -138,23 +142,23 @@
   - `catalog_for_risk(read_model) -> dict[str, Any]`
   - `catalog_for_impact(read_model) -> dict[str, Any]`
 
-- [ ] **Step 1: Write failing adapter tests.** 驗證每個 adapter 只保留 status、role／relation identity、source／snapshot fingerprints、coverage 與 bounded diagnostics；`unknown`／`missing` 不轉成 zero、low risk、no impact 或 PASS；workflow edge 維持原 relationKind；invalid read model 不產生推測 projection。以既有 D-1～D-4 public model fixtures 做 exact-key contract assertions，確認既有 output schema 與 semantics 完全不變，只允許明確命名的 additive `catalog` section。
+- [x] **Step 1: Write failing adapter tests.** 驗證每個 adapter 只保留 status、role／relation identity、source／snapshot fingerprints、coverage 與 bounded diagnostics；`unknown`／`missing` 不轉成 zero、low risk、no impact 或 PASS；workflow edge 維持原 relationKind；invalid read model 不產生推測 projection。以既有 D-1～D-4 public model fixtures 做 exact-key contract assertions，確認既有 output schema 與 semantics 完全不變，只允許明確命名的 additive `catalog` section。
 
-- [ ] **Step 2: Run adapter tests to verify RED.**
+- [x] **Step 2: Run adapter tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_catalog_adapters.py -q`
 
   Expected: module／helper failures。
 
-- [ ] **Step 3: Implement pure adapters.** 每個 helper 只做 schema-preserving projection，不呼叫 D-1～D-4 service、不重算 comparison、risk、impact、不 traversal dependency；使用 exact additive allowlist `catalog` section，不修改既有 D1～D4 public keys、status precedence、fingerprint 覆蓋範圍或既有 semantics。若 consumer 尚未支援 catalog 欄位，adapter 只回傳獨立 bounded projection，不強行注入既有 output。
+- [x] **Step 3: Implement pure adapters.** 每個 helper 只做 schema-preserving projection，不呼叫 D-1～D-4 service、不重算 comparison、risk、impact、不 traversal dependency；使用 exact additive allowlist `catalog` section，不修改既有 D1～D4 public keys、status precedence、fingerprint 覆蓋範圍或既有 semantics。若 consumer 尚未支援 catalog 欄位，adapter 只回傳獨立 bounded projection，不強行注入既有 output。
 
-- [ ] **Step 4: Run adapter tests to verify GREEN.**
+- [x] **Step 4: Run adapter tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_catalog_adapters.py -q`
 
-- [ ] **Step 5: Submit Task 3 to strict Review.** Review adapter data flow、schema compatibility、no-inference、D1-D4 isolation 與 no-write boundary。
+- [x] **Step 5: Submit Task 3 to strict Review.** Review adapter data flow、schema compatibility、no-inference、D1-D4 isolation 與 no-write boundary。
 
-- [ ] **Step 6: After Review PASS, Codex commits Task 3.**
+- [x] **Step 6: After Review PASS, Codex commits Task 3.**
 
   ```bash
   git add backend/agents/governance_graph_catalog_adapters.py tests/test_governance_graph_catalog_adapters.py
@@ -171,23 +175,23 @@
 - Consumes: stdin JSON envelope containing owner／dependency catalog mappings and selected snapshot fingerprint。
 - Produces: bounded `governance-graph-catalog-cli-v1` result；non-zero exit for invalid input，stdout 不輸出 raw payload。
 
-- [ ] **Step 1: Write failing CLI tests.** 測試 `catalog-validate` 接受 stdin、輸出 bounded available／missing／unknown／stale／invalid result；`--run-id`、path、writer、approve、dispatch、repair、prune、delete、shell 或 model flags 被拒絕；無 stdin 不建立檔案；malformed／secret／absolute path 不洩漏。
+- [x] **Step 1: Write failing CLI tests.** 測試 `catalog-validate` 接受 stdin、輸出 bounded available／missing／unknown／stale／invalid result；`--run-id`、path、writer、approve、dispatch、repair、prune、delete、shell 或 model flags 被拒絕；無 stdin 不建立檔案；malformed／secret／absolute path 不洩漏。
 
-- [ ] **Step 2: Run CLI tests to verify RED.**
+- [x] **Step 2: Run CLI tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_cli.py -q`
 
   Expected: command／parser assertion failures because catalog validation command does not yet exist。
 
-- [ ] **Step 3: Implement the stdin-only command.** 重用 Task 2 service；CLI 只 parse stdin、呼叫 `OwnerDependencyReadService.resolve()`、輸出 `governance-graph-catalog-cli-v1` bounded envelope。不得取得 arbitrary path 或 runtime run directory，不得呼叫 builder、persist、writer、approval、dispatch 或 subprocess。
+- [x] **Step 3: Implement the stdin-only command.** 重用 Task 2 service；CLI 只 parse stdin、呼叫 `OwnerDependencyReadService.resolve()`、輸出 `governance-graph-catalog-cli-v1` bounded envelope。不得取得 arbitrary path 或 runtime run directory，不得呼叫 builder、persist、writer、approval、dispatch 或 subprocess。
 
-- [ ] **Step 4: Run CLI tests to verify GREEN.**
+- [x] **Step 4: Run CLI tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_cli.py -q`
 
-- [ ] **Step 5: Submit Task 4 to strict Review.** 確認 CLI 是 read-only stdin boundary，沒有 path traversal、writer flags、raw echo 或 control-plane action。
+- [x] **Step 5: Submit Task 4 to strict Review.** 確認 CLI 是 read-only stdin boundary，沒有 path traversal、writer flags、raw echo 或 control-plane action。
 
-- [ ] **Step 6: After Review PASS, Codex commits Task 4.**
+- [x] **Step 6: After Review PASS, Codex commits Task 4.**
 
   ```bash
   git add scripts/governance_graph.py tests/test_governance_graph_cli.py
@@ -208,23 +212,23 @@
 - Consumes: 外部 approved producer 注入的 Task 2 validated read-model callback；selected run／snapshot fingerprint。
 - Produces: optional `catalog_lookup(run_id: str, snapshot_fingerprint: str) -> dict[str, Any]` callback；bounded owner／dependency panel in existing Agent Operations Governance Graph workspace。若沒有外部 approved producer，callback 必須保持 `None`，UI 顯示 `unavailable`。
 
-- [ ] **Step 1: Write failing UI boundary tests.** 覆蓋 callback receives exact run／fingerprint、role-only owner rendering、workflow edge rendering、unavailable／missing／unknown／stale／invalid display、malformed callback isolation、raw path／secret non-rendering、selected identity cleanup、refresh preservation 與 no CLI/subprocess/writer invocation。
+- [x] **Step 1: Write failing UI boundary tests.** 覆蓋 callback receives exact run／fingerprint、role-only owner rendering、workflow edge rendering、unavailable／missing／unknown／stale／invalid display、malformed callback isolation、raw path／secret non-rendering、selected identity cleanup、refresh preservation 與 no CLI/subprocess/writer invocation。
 
-- [ ] **Step 2: Run UI tests to verify RED.**
+- [x] **Step 2: Run UI tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_rendering.py tests/test_agent_operations_rendering.py tests/test_app_pages_governance_graph_catalog.py -q`
 
   Expected: callback signature／render assertions fail because E-3 catalog callback is not wired。
 
-- [ ] **Step 3: Implement callback-only UI integration.** 只在 `render_agent_operations`、`_render_run_details` 與 `app_pages.py` 傳遞 optional `catalog_lookup` dependency-injected callback；不得在 app page 讀 catalog path、建立 catalog、呼叫 Task 2 service 取得 authority 或寫 session authority。外部 approved producer 尚未注入時 callback 保持 `None`，renderer 顯示明確 `unavailable`；callback result 只接受 bounded `.to_dict()`，並只保存 bounded selected subject／relation identity，run／fingerprint 不相容時清除。
+- [x] **Step 3: Implement callback-only UI integration.** 只在 `render_agent_operations`、`_render_run_details` 與 `app_pages.py` 傳遞 optional `catalog_lookup` dependency-injected callback；不得在 app page 讀 catalog path、建立 catalog、呼叫 Task 2 service 取得 authority 或寫 session authority。外部 approved producer 尚未注入時 callback 保持 `None`，renderer 顯示明確 `unavailable`；callback result 只接受 bounded `.to_dict()`，並只保存 bounded selected subject／relation identity，run／fingerprint 不相容時清除。
 
-- [ ] **Step 4: Run UI tests to verify GREEN.**
+- [x] **Step 4: Run UI tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_rendering.py tests/test_agent_operations_rendering.py tests/test_app_pages_governance_graph_catalog.py -q`
 
-- [ ] **Step 5: Submit Task 5 to strict Review.** 確認 Streamlit 沒有 approval、dispatch、snapshot build、raw download、catalog writer 或 D1-D4 inference。
+- [x] **Step 5: Submit Task 5 to strict Review.** 確認 Streamlit 沒有 approval、dispatch、snapshot build、raw download、catalog writer 或 D1-D4 inference。
 
-- [ ] **Step 6: After Review PASS, Codex commits Task 5.**
+- [x] **Step 6: After Review PASS, Codex commits Task 5.**
 
   ```bash
   git add governance_graph_rendering.py agent_operations_rendering.py app_pages.py tests/test_governance_graph_rendering.py tests/test_agent_operations_rendering.py tests/test_app_pages_governance_graph_catalog.py
@@ -241,25 +245,25 @@
 - Consumes: Task 1–5 immutable commits、approved E-3 spec、Review PASS artifacts。
 - Produces: final acceptance evidence、reconciled plan、clean branch；不自動 push／PR／merge。
 
-- [ ] **Step 1: Run compile and focused E-3 verification.**
+- [x] **Step 1: Run compile and focused E-3 verification.**
 
   Run: `.venv/bin/python -m py_compile backend/agents/governance_graph_catalog_models.py backend/agents/governance_graph_catalog_service.py backend/agents/governance_graph_catalog_adapters.py scripts/governance_graph.py governance_graph_rendering.py agent_operations_rendering.py app_pages.py && .venv/bin/python -m pytest tests/test_governance_graph_catalog_models.py tests/test_governance_graph_catalog_service.py tests/test_governance_graph_catalog_adapters.py tests/test_governance_graph_cli.py tests/test_governance_graph_rendering.py tests/test_agent_operations_rendering.py tests/test_app_pages_governance_graph_catalog.py -q`
 
   Expected: compile succeeds and all focused tests PASS。
 
-- [ ] **Step 2: Run full project verification.**
+- [x] **Step 2: Run full project verification.**
 
   Run: `.venv/bin/python -m pytest -q && .venv/bin/python scripts/system_manager.py acceptance`
 
   Expected: full pytest、Streamlit／API／Vue system acceptance PASS；timeout 或 degraded 必須保持 blocked，不得改稱 PASS。
 
-- [ ] **Step 3: Run final strict Review and Hermes.**
+- [x] **Step 3: Run final strict Review and Hermes.**
 
   使用 approved Review runner review immutable Task 1–5 diff，取得 findings-first PASS；再執行 `.venv/bin/python scripts/hermes_post_change_check.py`。Hermes 必須 explicit exit 0／Overall PASS，並確認 catalog report read-only、writes 0、baseline／formal scope matched。
 
-- [ ] **Step 4: Verify invariants and no-write boundary.** 確認 SQLite integrity、baseline、formal scope、Graph snapshots、canonical artifacts、runtime、workflow status、Git state 未被改動；確認 CLI／service／UI 沒有 writer、subprocess、network、raw path 或 control-plane action；執行 `git diff --check` 與 `git status --short`。
+- [x] **Step 4: Verify invariants and no-write boundary.** 確認 SQLite integrity、baseline、formal scope、Graph snapshots、canonical artifacts、runtime、workflow status、Git state 未被改動；確認 CLI／service／UI 沒有 writer、subprocess、network、raw path 或 control-plane action；執行 `git diff --check` 與 `git status --short`。
 
-- [ ] **Step 5: Reconcile plan against E-3 spec.** 只標記已完成 Task，記錄 focused/full/system/Review/Hermes evidence；D-3/D-4 business impact、owner assignment、approval／dispatch 與 catalog persistence 不得超出本 plan；未經另外授權不得 push、建立 PR、merge 或刪除 branch。
+- [x] **Step 5: Reconcile plan against E-3 spec.** 只標記已完成 Task，記錄 focused/full/system/Review/Hermes evidence；D-3/D-4 business impact、owner assignment、approval／dispatch 與 catalog persistence 不得超出本 plan；未經另外授權不得 push、建立 PR、merge 或刪除 branch。
 
 ## Agent and Review Protocol
 
