@@ -1294,6 +1294,21 @@ def _should_run_persistent_repairs(current_token: str, checked_token: str | None
     return bool(current_token) and current_token != checked_token
 
 
+def _refresh_generation_after_database_write(
+    rollback_status: str,
+    *,
+    db_path: str | Path,
+    refresher=refresh_cache_generation_signature,
+) -> dict:
+    """Refresh runtime DB signature after a legacy upload reaches a safe state."""
+    if str(rollback_status) not in {"accepted", "rejected_rolled_back"}:
+        return {"status": "skipped", "reason": "database_state_not_verified"}
+    try:
+        return dict(refresher(db_path=db_path))
+    except Exception as exc:
+        return {"status": "degraded", "error": f"{type(exc).__name__}: {exc}"}
+
+
 def _load_persistent_repair_token(path: str | Path | None = None) -> str | None:
     target = Path(path or PERSISTENT_REPAIR_STATE_PATH)
     try:
