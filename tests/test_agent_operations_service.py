@@ -237,6 +237,7 @@ def _make_invalid_graph_artifact(path: Path, root: Path, mode: str) -> None:
 def test_existing_graph_projection_is_compacted_without_rebuilding(tmp_path, monkeypatch):
     run = _valid_run(tmp_path, "graph-ready")
     graph_path = _write_graph_projection(tmp_path, run.name)
+    graph_fingerprint = json.loads(graph_path.read_text(encoding="utf-8"))["graphFingerprint"]
     before = graph_path.read_bytes()
     called = []
     monkeypatch.setattr(
@@ -249,6 +250,7 @@ def test_existing_graph_projection_is_compacted_without_rebuilding(tmp_path, mon
 
     assert called == []
     assert item["governanceGraph"]["status"] == "available"
+    assert item["governanceGraph"]["snapshotFingerprint"] == graph_fingerprint
     assert item["governanceGraph"]["overallStatus"] == "awaiting_authorization"
     assert item["governanceGraph"]["nodes"][0] == {
         "nodeId": "risk", "status": "passed", "reasonCode": None,

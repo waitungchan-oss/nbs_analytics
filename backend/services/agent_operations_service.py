@@ -345,6 +345,7 @@ class AgentOperationsService:
                 })
         return {
             "status": "available",
+            "snapshotFingerprint": snapshot.graph_fingerprint,
             "overallStatus": snapshot.overall_status,
             "freshness": snapshot.freshness["status"],
             "nodes": [
