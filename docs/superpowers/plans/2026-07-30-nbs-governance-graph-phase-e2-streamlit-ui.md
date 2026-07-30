@@ -43,20 +43,20 @@
 - Consumes: validated `GovernanceGraphSnapshot`.
 - Produces: `governanceGraph` compact mapping with `snapshotFingerprint` equal to `snapshot.graph_fingerprint` only for `status=available`; existing fields and unavailable/invalid behavior remain unchanged. Later rendering tasks consume `graph["snapshotFingerprint"]` without recomputation.
 
-- [ ] **Step 1: Write failing service tests.** Extend the valid projection fixture to assert exact `snapshotFingerprint`; assert unavailable projection remains exactly `{"status": "unavailable"}`, invalid projection has no guessed fingerprint, and the compact field is a lowercase SHA-256 copied from the validated snapshot.
-- [ ] **Step 2: Run focused tests to verify RED.**
+- [x] **Step 1: Write failing service tests.** Extend the valid projection fixture to assert exact `snapshotFingerprint`; assert unavailable projection remains exactly `{"status": "unavailable"}`, invalid projection has no guessed fingerprint, and the compact field is a lowercase SHA-256 copied from the validated snapshot.
+- [x] **Step 2: Run focused tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_agent_operations_service.py -q`
 
   Expected: the new valid-projection assertion fails because compact output currently omits `snapshotFingerprint`; existing tests remain otherwise green.
-- [ ] **Step 3: Implement the minimal additive field.** Add only `"snapshotFingerprint": snapshot.graph_fingerprint` to `_compact_governance_graph`; do not alter evidence mapping, status, freshness, file reading, or writer behavior. Keep unavailable/invalid branches unchanged so they cannot expose a fabricated fingerprint.
-- [ ] **Step 4: Run focused tests to verify GREEN.**
+- [x] **Step 3: Implement the minimal additive field.** Add only `"snapshotFingerprint": snapshot.graph_fingerprint` to `_compact_governance_graph`; do not alter evidence mapping, status, freshness, file reading, or writer behavior. Keep unavailable/invalid branches unchanged so they cannot expose a fabricated fingerprint.
+- [x] **Step 4: Run focused tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_agent_operations_service.py -q`
 
   Expected: all AgentOperationsService tests PASS and no runtime/Graph files are created by read-only fixtures.
-- [ ] **Step 5: Submit Task 1 to strict Review.** Review only the service method and its focused tests; confirm additive schema compatibility, validated-source provenance and no-write boundary.
-- [ ] **Step 6: After Review PASS, Codex commits Task 1.**
+- [x] **Step 5: Submit Task 1 to strict Review.** Review only the service method and its focused tests; confirm additive schema compatibility, validated-source provenance and no-write boundary.
+- [x] **Step 6: After Review PASS, Codex commits Task 1.**
 
   Run: `git add backend/services/agent_operations_service.py tests/test_agent_operations_service.py && git commit -m "feat: expose validated graph fingerprint in operations snapshot"`
 
@@ -72,20 +72,20 @@
 - Consumes: compact `governanceGraph`, `query_graph(run_id, filters)`, optional `lineage_lookup(request)`, and optional future derived-result callbacks.
 - Produces: `render_governance_graph_workspace(run, *, query_graph, lineage_lookup=None, comparison_lookup=None, risk_summary_lookup=None, impact_lookup=None) -> None`; it renders only bounded read models and maintains `AGENT_OPERATIONS_SELECTED_EVIDENCE` as bounded selection metadata.
 
-- [ ] **Step 1: Write failing rendering tests.** Cover valid summary/lineage/query, canonical node selection creating the exact E-1 request with run ID and compact fingerprint, non-canonical `hermes.json` disabled state, all E-1 statuses, missing/invalid Graph state, malformed callback payload, raw/absolute-path/secret non-rendering, max 12 evidence refs, and D-2/D-3/D-4 absent callbacks showing unavailable.
-- [ ] **Step 2: Run rendering tests to verify RED.**
+- [x] **Step 1: Write failing rendering tests.** Cover valid summary/lineage/query, canonical node selection creating the exact E-1 request with run ID and compact fingerprint, non-canonical `hermes.json` disabled state, all E-1 statuses, missing/invalid Graph state, malformed callback payload, raw/absolute-path/secret non-rendering, max 12 evidence refs, and D-2/D-3/D-4 absent callbacks showing unavailable.
+- [x] **Step 2: Run rendering tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_rendering.py tests/test_agent_operations_rendering.py -q`
 
   Expected: import or assertion failures because the focused workspace and lineage controls do not yet exist.
-- [ ] **Step 3: Implement bounded rendering helpers.** Extract only Graph-specific functions; preserve existing summary, query callback, refresh and selected-run behavior. Render safe tables/captions, validate callback result schema before display, construct E-1 input only from the selected compact canonical node row, gate registry filenames, and `st.pop("AGENT_OPERATIONS_SELECTED_EVIDENCE", None)` on run/fingerprint/node/gating mismatch. Never read a path, run a command, or store a lineage result.
-- [ ] **Step 4: Run rendering tests to verify GREEN.**
+- [x] **Step 3: Implement bounded rendering helpers.** Extract only Graph-specific functions; preserve existing summary, query callback, refresh and selected-run behavior. Render safe tables/captions, validate callback result schema before display, construct E-1 input only from the selected compact canonical node row, gate registry filenames, and `st.pop("AGENT_OPERATIONS_SELECTED_EVIDENCE", None)` on run/fingerprint/node/gating mismatch. Never read a path, run a command, or store a lineage result.
+- [x] **Step 4: Run rendering tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_governance_graph_rendering.py tests/test_agent_operations_rendering.py -q`
 
   Expected: all focused rendering and legacy Agent Operations tests PASS; malformed one-run data does not prevent other panels/runs from rendering.
-- [ ] **Step 5: Submit Task 2 to strict Review.** Review only the rendering helper, integration points and focused tests; verify no raw leak, no inference, callback-only data flow and session-state bounds.
-- [ ] **Step 6: After Review PASS, Codex commits Task 2.**
+- [x] **Step 5: Submit Task 2 to strict Review.** Review only the rendering helper, integration points and focused tests; verify no raw leak, no inference, callback-only data flow and session-state bounds.
+- [x] **Step 6: After Review PASS, Codex commits Task 2.**
 
   Run: `git add governance_graph_rendering.py agent_operations_rendering.py tests/test_governance_graph_rendering.py tests/test_agent_operations_rendering.py && git commit -m "feat: add governance graph lineage rendering workspace"`
 
@@ -100,20 +100,20 @@
 - Consumes: `PROJECT_ROOT`, selected-run compact Graph result, `GovernanceGraphQueryService`, `GovernanceGraphEvidenceLineageService`, and Task 2 renderer signature.
 - Produces: `query_graph(run_id, filters)` unchanged; `lineage_lookup(request)` that calls `EvidenceLineageInput.from_dict(request)` and E-1 service `.resolve(...).to_dict()` only; future comparison/risk/impact callbacks remain `None` until a validated source is wired.
 
-- [ ] **Step 1: Write failing page-boundary tests.** Assert app page injects both callbacks, lineage request reaches E-1 service with exact run/node/path/SHA/fingerprint, no CLI/subprocess/builder/persist call occurs, selected run/evidence keys are cleaned on incompatibility, and refresh preserves unrelated dashboard/upload/export session caches.
-- [ ] **Step 2: Run page tests to verify RED.**
+- [x] **Step 1: Write failing page-boundary tests.** Assert app page injects both callbacks, lineage request reaches E-1 service with exact run/node/path/SHA/fingerprint, no CLI/subprocess/builder/persist call occurs, selected run/evidence keys are cleaned on incompatibility, and refresh preserves unrelated dashboard/upload/export session caches.
+- [x] **Step 2: Run page tests to verify RED.**
 
   Run: `.venv/bin/python -m pytest tests/test_app_pages_governance_graph.py tests/test_agent_operations_rendering.py -q`
 
   Expected: missing callback injection or signature failures because the page currently injects only `query_graph`.
-- [ ] **Step 3: Implement read-only callback wiring.** Instantiate E-1 service inside the callback using `PROJECT_ROOT`; validate request through the E-1 model; return only bounded `.to_dict()`. Pass callbacks into the renderer without adding a writer, CLI, subprocess or new snapshot cache. Keep `AGENT_OPERATIONS_SNAPSHOT`, selected-run and Refresh lifecycle unchanged.
-- [ ] **Step 4: Run page/no-write tests to verify GREEN.**
+- [x] **Step 3: Implement read-only callback wiring.** Instantiate E-1 service inside the callback using `PROJECT_ROOT`; validate request through the E-1 model; return only bounded `.to_dict()`. Pass callbacks into the renderer without adding a writer, CLI, subprocess or new snapshot cache. Keep `AGENT_OPERATIONS_SNAPSHOT`, selected-run and Refresh lifecycle unchanged.
+- [x] **Step 4: Run page/no-write tests to verify GREEN.**
 
   Run: `.venv/bin/python -m pytest tests/test_app_pages_governance_graph.py tests/test_agent_operations_rendering.py -q`
 
   Expected: callback boundary, session selection, malformed result isolation and tree/runtime no-write tests PASS.
-- [ ] **Step 5: Submit Task 3 to strict Review.** Review only `app_pages.py` and allowlisted tests; confirm app layer cannot become approval/dispatch/runtime/SQLite/Git writer and D-2/D-3/D-4 remain explicit unavailable without adapters.
-- [ ] **Step 6: After Review PASS, Codex commits Task 3.**
+- [x] **Step 5: Submit Task 3 to strict Review.** Review only `app_pages.py` and allowlisted tests; confirm app layer cannot become approval/dispatch/runtime/SQLite/Git writer and D-2/D-3/D-4 remain explicit unavailable without adapters.
+- [x] **Step 6: After Review PASS, Codex commits Task 3.**
 
   Run: `git add app_pages.py tests/test_app_pages_governance_graph.py tests/test_agent_operations_rendering.py && git commit -m "feat: wire governance graph query and lineage callbacks"`
 
@@ -127,23 +127,32 @@
 - Consumes: Task 1–3 commits, Review PASS artifacts, approved E-2 spec and compact/read-model contracts.
 - Produces: final acceptance evidence, reconciled plan, clean branch ready for separately authorized push/PR/merge.
 
-- [ ] **Step 1: Run compile and focused E-2/E-1 verification.**
+- [x] **Step 1: Run compile and focused E-2/E-1 verification.**
 
   Run: `.venv/bin/python -m py_compile agent_operations_rendering.py governance_graph_rendering.py app_pages.py backend/services/agent_operations_service.py && .venv/bin/python -m pytest tests/test_agent_operations_service.py tests/test_agent_operations_rendering.py tests/test_governance_graph_rendering.py tests/test_app_pages_governance_graph.py tests/test_governance_graph_evidence_lineage_models.py tests/test_governance_graph_evidence_lineage_service.py tests/test_governance_graph_cli.py -q`
 
   Expected: compile succeeds and all focused suites PASS.
-- [ ] **Step 2: Run full project verification.**
+- [x] **Step 2: Run full project verification.**
 
   Run: `.venv/bin/python -m pytest -q && .venv/bin/python scripts/system_manager.py acceptance`
 
   Expected: full pytest and system acceptance PASS; any timeout/failure remains explicitly blocked.
-- [ ] **Step 3: Run strict final Review and Hermes.**
+- [x] **Step 3: Run strict final Review and Hermes.**
 
   Run the approved Review runner over the immutable Task 1–3 diff, preserve its findings-first PASS artifact, then run `.venv/bin/python scripts/hermes_post_change_check.py`.
 
   Expected: explicit Review PASS plus Hermes PASS; missing/unknown runner, timeout or degraded result blocks completion and is never relabeled PASS.
-- [ ] **Step 4: Verify invariants and clean worktree.** Confirm tracked worktree, runtime, Graph snapshots, canonical artifacts, SQLite integrity, baseline, formal revenue scope and Git state are unchanged except intended E-2 files. Separately verify Streamlit rerun/Refresh preserves dashboard、upload、AI、export session caches and only changes the approved snapshot/selection UX keys. Run `git diff --check` and `git status --short`.
-- [ ] **Step 5: Reconcile this plan against the E-2 spec.** Mark only completed tasks, record focused/full/system/Review/Hermes evidence, and leave D-2/D-3/D-4 adapter implementation out of scope. Do not push, create PR, merge or delete branch without separate authorization.
+- [x] **Step 4: Verify invariants and clean worktree.** Confirm tracked worktree, runtime, Graph snapshots, canonical artifacts, SQLite integrity, baseline, formal revenue scope and Git state are unchanged except intended E-2 files. Separately verify Streamlit rerun/Refresh preserves dashboard、upload、AI、export session caches and only changes the approved snapshot/selection UX keys. Run `git diff --check` and `git status --short`.
+- [x] **Step 5: Reconcile this plan against the E-2 spec.** Mark only completed tasks, record focused/full/system/Review/Hermes evidence, and leave D-2/D-3/D-4 adapter implementation out of scope. Do not push, create PR, merge or delete branch without separate authorization.
+
+## Reconciliation evidence
+
+- Task 1–3 implementation and focused reviews are complete in immutable commits `154eeb7`, `ef56984`, and `4b4f583`; each received strict Review PASS.
+- Focused E-2/E-1 verification: `182 passed`.
+- Full project verification: `1328 passed`; system acceptance status `passed` with Streamlit/API/Vue ready.
+- Final strict Review: PASS; `git diff --check` clean and no P0/P1/P2 findings.
+- Hermes: exit `0`, `Overall status: PASS`; 2026-05 baseline and formal scope matched; Governance Graph report remained read-only with `writes: 0`.
+- D-2/D-3/D-4 remain explicit unavailable without validated adapters; no Graph snapshot, SQLite, baseline, canonical artifact, runtime or Git writer was introduced.
 
 ## Agent and Review Protocol
 
