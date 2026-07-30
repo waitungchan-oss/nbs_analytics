@@ -384,8 +384,6 @@ class GovernanceGraphOwnerDependencyReadModel:
             "snapshotFingerprint": self.snapshot_fingerprint,
             "ownerCatalogFingerprint": self.owner_catalog_fingerprint,
             "dependencyCatalogFingerprint": self.dependency_catalog_fingerprint,
-            "ownerPolicyVersion": self.owner_policy_version,
-            "dependencyPolicyVersion": self.dependency_policy_version,
             "readModelFingerprint": self.read_model_fingerprint,
             "owners": [_thaw(item) for item in self.owners],
             "dependencies": [_thaw(item) for item in self.dependencies],

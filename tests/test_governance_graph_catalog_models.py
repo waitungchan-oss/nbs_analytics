@@ -152,6 +152,11 @@ def test_read_model_contract_has_deterministic_public_fingerprint() -> None:
     )
 
     assert model.to_dict()["schemaVersion"] == "governance-graph-owner-dependency-read-v1"
+    assert set(model.to_dict()) == {
+        "schemaVersion", "status", "snapshotFingerprint", "ownerCatalogFingerprint",
+        "dependencyCatalogFingerprint", "readModelFingerprint", "owners", "dependencies",
+        "coverage", "diagnostics",
+    }
     assert model.to_dict()["readModelFingerprint"] == model.read_model_fingerprint
     with pytest.raises(TypeError):
         model.coverage["ownerEntries"] = 2
