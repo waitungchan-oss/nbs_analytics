@@ -6,6 +6,7 @@ from pathlib import Path
 
 import scripts.governance_graph as cli
 from backend.agents.workflow_models import MANIFEST_SCHEMA, STATUS_SCHEMA, WorkflowManifest, WorkflowStatus
+from backend.agents.workflow_models import canonical_sha256
 from backend.agents.workflow_store import WorkflowStore
 from backend.agents.governance_graph_service import GovernanceGraphBuilder
 from backend.agents.governance_graph_comparison_models import GovernanceGraphComparisonResult
@@ -30,6 +31,15 @@ def _comparison_payload() -> dict:
     ).to_dict()
 
 
+def _catalog_input() -> dict:
+    fingerprint = "a" * 64
+    source = {"kind": "approved_catalog", "identity": "owner-catalog-v1", "fingerprint": fingerprint}
+    entry = {"subject": {"kind": "node", "id": "review"}, "owner": {"kind": "governance_role", "id": "review_owner"}, "source": source, "snapshotFingerprint": fingerprint, "status": "available"}
+    owner = {"schemaVersion": "governance-graph-owner-catalog-v1", "catalogPolicyVersion": "e3-owner-policy-v1", "catalogFingerprint": fingerprint, "snapshotFingerprint": fingerprint, "source": source, "entries": [entry], "diagnostics": []}
+    owner["catalogFingerprint"] = canonical_sha256({key: value for key, value in owner.items() if key != "catalogFingerprint"})
+    return {"snapshotFingerprint": fingerprint, "ownerCatalog": owner, "dependencyCatalog": None}
+
+
 def test_parser_exposes_only_projection_commands():
     parser = cli._parser()
 
@@ -38,6 +48,7 @@ def test_parser_exposes_only_projection_commands():
     assert parser.parse_args(["status", "--run-id", "run-123"]).command == "status"
     assert parser.parse_args(["risk-summary"]).command == "risk-summary"
     assert parser.parse_args(["evidence-lineage"]).command == "evidence-lineage"
+    assert parser.parse_args(["catalog-validate"]).command == "catalog-validate"
 
 
 def test_parser_exposes_query_with_exact_filters():
@@ -86,6 +97,42 @@ def test_cli_does_not_parse_control_or_runner_flags():
             assert exc.code == 2
         else:
             raise AssertionError(f"forbidden command accepted: {forbidden}")
+
+
+def test_catalog_validate_reads_stdin_and_does_not_write(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps(_catalog_input())))
+    before = _tree_bytes(tmp_path)
+
+    assert cli.main(["catalog-validate"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["schemaVersion"] == "governance-graph-catalog-cli-v1"
+    assert payload["command"] == "catalog-validate"
+    assert payload["result"]["status"] == "unavailable"
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_catalog_validate_rejects_path_and_writer_flags():
+    parser = cli._parser()
+
+    for args in (["catalog-validate", "--run-id", "run-123"], ["catalog-validate", "--writer", "x"], ["catalog-validate", "--approve"]):
+        try:
+            parser.parse_args(args)
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"catalog control flag accepted: {args}")
+
+
+def test_catalog_validate_malformed_stdin_is_bounded_invalid(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps({"snapshotFingerprint": "bad", "ownerCatalog": {"secret": "raw"}, "dependencyCatalog": None})))
+
+    assert cli.main(["catalog-validate"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["status"] == "invalid"
+    assert "raw" not in json.dumps(payload)
 
 
 def test_build_emits_cli_envelope_and_only_writes_projection(tmp_path, monkeypatch, capsys):
