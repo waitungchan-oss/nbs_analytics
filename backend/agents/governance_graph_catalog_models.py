@@ -142,7 +142,7 @@ DEPENDENCY_ENTRY_KEYS = frozenset({"from", "to", "relation", "relationKind", "so
 @dataclass(frozen=True)
 class GovernanceGraphOwnerCatalog:
     catalog_fingerprint: str
-    snapshot_fingerprint: str
+    snapshot_fingerprint: str | None
     source: Mapping[str, str]
     entries: tuple[Mapping[str, Any], ...]
     status: str
@@ -311,7 +311,10 @@ class GovernanceGraphOwnerDependencyReadModel:
     def from_parts(cls, *, status: str, snapshot_fingerprint: str, owner_catalog_fingerprint: str | None, dependency_catalog_fingerprint: str | None, owner_policy_version: str, dependency_policy_version: str, owners: Any, dependencies: Any, coverage: Mapping[str, Any], diagnostics: Any) -> "GovernanceGraphOwnerDependencyReadModel":
         if status not in READ_MODEL_STATUSES:
             raise GovernanceGraphCatalogSchemaError("read model status is invalid")
-        snapshot = _sha(snapshot_fingerprint, "snapshotFingerprint")
+        if snapshot_fingerprint is None and status in {"invalid", "unavailable"}:
+            snapshot = None
+        else:
+            snapshot = _sha(snapshot_fingerprint, "snapshotFingerprint")
         owner_fp = None if owner_catalog_fingerprint is None else _sha(owner_catalog_fingerprint, "ownerCatalogFingerprint")
         dependency_fp = None if dependency_catalog_fingerprint is None else _sha(dependency_catalog_fingerprint, "dependencyCatalogFingerprint")
         if owner_policy_version != OWNER_POLICY_VERSION or dependency_policy_version != DEPENDENCY_POLICY_VERSION:

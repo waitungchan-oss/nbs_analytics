@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from .governance_graph_catalog_models import (
@@ -14,6 +15,7 @@ from .governance_graph_catalog_models import (
 
 
 STATUS_PRECEDENCE = ("invalid", "stale", "blocked", "unknown", "missing", "unavailable", "available")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _highest_status(statuses: list[str]) -> str:
@@ -42,12 +44,23 @@ class OwnerDependencyReadService:
         owner_catalog: Mapping[str, Any] | None,
         dependency_catalog: Mapping[str, Any] | None,
     ) -> GovernanceGraphOwnerDependencyReadModel:
+        if not isinstance(snapshot_fingerprint, str) or not _SHA256_RE.fullmatch(snapshot_fingerprint):
+            return GovernanceGraphOwnerDependencyReadModel.from_parts(
+                status="invalid",
+                snapshot_fingerprint=None,
+                owner_catalog_fingerprint=None,
+                dependency_catalog_fingerprint=None,
+                owner_policy_version=OWNER_POLICY_VERSION,
+                dependency_policy_version=DEPENDENCY_POLICY_VERSION,
+                owners=(),
+                dependencies=(),
+                coverage={"ownerStatus": "invalid", "dependencyStatus": "invalid", "ownerEntries": 0, "dependencyEntries": 0, "unknownCount": 0, "missingCount": 0, "staleCount": 0, "blockedCount": 0},
+                diagnostics=[_diagnostic("snapshot_fingerprint_invalid", "Selected snapshot fingerprint is invalid.")],
+            )
         owner = self._parse_owner(owner_catalog, snapshot_fingerprint)
         dependency = self._parse_dependency(dependency_catalog, snapshot_fingerprint)
         statuses = [owner["status"], dependency["status"]]
         overall = _highest_status(statuses)
-        if owner["status"] == "stale" or dependency["status"] == "stale":
-            overall = "stale"
         diagnostics = [*owner["diagnostics"], *dependency["diagnostics"]]
         owners = owner["entries"] if owner["status"] not in {"invalid", "stale", "unavailable"} else ()
         dependencies = dependency["entries"] if dependency["status"] not in {"invalid", "stale", "unavailable"} else ()

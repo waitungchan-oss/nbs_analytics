@@ -130,6 +130,31 @@ def test_resolve_malformed_catalog_is_invalid_without_raw_error() -> None:
     assert "Traceback" not in str(result.to_dict())
 
 
+def test_resolve_invalid_takes_precedence_over_stale() -> None:
+    malformed = deepcopy(_owner_catalog())
+    malformed["source"] = {"kind": "arbitrary", "identity": "bad", "fingerprint": FINGERPRINT}
+
+    result = OwnerDependencyReadService().resolve(
+        snapshot_fingerprint=FINGERPRINT,
+        owner_catalog=malformed,
+        dependency_catalog=_dependency_catalog(snapshot="b" * 64),
+    )
+
+    assert result.status == "invalid"
+
+
+def test_resolve_malformed_selected_snapshot_returns_bounded_invalid_result() -> None:
+    result = OwnerDependencyReadService().resolve(
+        snapshot_fingerprint="not-a-fingerprint",
+        owner_catalog=None,
+        dependency_catalog=None,
+    )
+
+    assert result.status == "invalid"
+    assert result.to_dict()["snapshotFingerprint"] is None
+    assert result.read_model_fingerprint is None
+
+
 def test_resolve_repeated_input_is_byte_stable_and_does_not_write(tmp_path) -> None:
     before = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
     service = OwnerDependencyReadService()
