@@ -346,13 +346,16 @@ E-4 只投影既有 D-3／D-4 exact identity，不新增 rule：
 | E-1 missing/stale lineage | `evidence_coverage_gap` | `unknown` | `unknown` |
 | E-3 missing/unknown owner or dependency coverage | `catalog_coverage_gap` | `unknown` | `unknown` |
 
-D-3 mapping is closed by exact `ruleId`, not free-text matching: `D3-PROTECTED-NODE` and
-`D3-PROTECTED-SURFACE` map to protected; `D3-VERIFICATION-REGRESSION` maps to verification;
-`D3-BEHAVIORAL-CHANGE` maps to implementation; `D3-BLOCKED-COMPARISON` maps to blocked;
-`D3-UNKNOWN-COVERAGE`, `D3-INVALID-COMPARISON`, and `D3-UNAVAILABLE-COMPARISON` map to coverage gap;
+D-3 mapping is closed by the existing exact `ruleId` registry, not free-text matching:
+`D3-PROTECTED-NODE` and `D3-PROTECTED-SURFACE` map to protected;
+`D3-VERIFICATION-REGRESSION` maps to verification; `D3-BEHAVIORAL-CHANGE` maps to implementation;
+`D3-BLOCKED-COMPARISON` maps to blocked; `D3-UNKNOWN-COVERAGE` maps to coverage gap; and
 `D3-DOCUMENTATION-ONLY` produces no management attention item. Any other D-3 `ruleId` is `invalid` for
 E-4 attention projection. D-4 mapping uses only its exact `category` and `impactState` allowlists from
-`governance-graph-change-impact-v1`; unknown category/state is `invalid`, never approximated.
+`governance-graph-change-impact-v1`: `protected_governance_surface`、`verification_assurance`、
+`implementation_governance`、`workflow_observability_blocked` map to the same-named E-4 categories;
+`coverage_unknown` maps to `coverage_gap`; `documentation_only` produces no management attention item.
+Unknown category/state is `invalid`, never approximated.
 
 The allowed attention categories are exactly `protected_governance_surface`、`verification_assurance`、
 `implementation_governance`、`workflow_observability_blocked`、`coverage_gap`、
