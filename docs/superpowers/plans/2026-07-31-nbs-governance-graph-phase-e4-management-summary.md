@@ -44,11 +44,10 @@
   - `ManagementSummaryStatus` values: `available`, `partial`, `unknown`, `missing`, `unavailable`, `stale`, `blocked`, `invalid`.
   - `ManagementRiskLevel` values: `R2`, `R1`, `R0`, `unknown`.
   - `SourceRef`, `AttentionItem`, `CoverageSummary`, `TrendObservation`, `PresetDescriptor`.
-  - `GovernanceGraphManagementSummary` and `GovernanceGraphManagementSummaryExport`.
+  - `GovernanceGraphManagementSummary`.
   - `validate_management_summary_payload(payload: Mapping[str, Any]) -> ValidatedManagementSummary`.
   - `canonical_management_summary_payload(summary: Mapping[str, Any]) -> Mapping[str, Any]`.
   - `fingerprint_management_summary(summary: Mapping[str, Any]) -> str`.
-  - `fingerprint_management_summary_export(export: Mapping[str, Any]) -> str`.
 
 - [ ] **Step 1: Write failing tests for exact schema and bounded fields**
 
