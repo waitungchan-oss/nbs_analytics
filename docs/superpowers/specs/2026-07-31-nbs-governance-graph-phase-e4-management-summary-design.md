@@ -1,6 +1,6 @@
 # NBS Governance Graph Phase E-4 Management Summary Design
 
-狀態：approved for design review  
+狀態：approved；spec review 補強完成
 日期：2026-07-31  
 風險：R1 standard engineering（read-only management summary projection；不改正式資料）
 
@@ -382,23 +382,49 @@ do not run a new query, mutate state, or infer missing relations:
   no timestamp-based discovery。
 
 Preset `available=true` iff at least one validated item matches the exact preset predicate; an empty
-match is `available=false` and does not mean zero risk. Selecting no preset is represented as
-`selectedPresetId: null` in export. Selecting a preset stores at most a bounded UI selection identity
-`{presetId, snapshotFingerprint}`;
-run／snapshot mismatch clears it. No preset is an approval, dispatch, export, repair or writer action.
+match is `available=false` and does not mean zero risk. The canonical UI selection state is either
+`null` or the exact bounded object `{presetId, snapshotFingerprint}`. The selection is session-scoped,
+must match the currently selected snapshot, and is cleared on run／snapshot mismatch or invalid preset.
+The export maps this state to `selectedPresetId` (a string or `null`) and preserves the original
+`summaryFingerprint`; it does not serialize the session selection object. A preset export contains the
+filtered view plus original summary provenance, and computes a new `exportFingerprint`. No preset is an
+approval, dispatch, export-write, repair or writer action.
 
 ## 7. Trend contract
 
 Trend is optional and input-driven. Caller must provide at least two valid, same-schema summary snapshots
 with comparable snapshot fingerprints and explicit observation order. E-4 must not query history itself.
 
-Each trend envelope must include `schemaVersion`, `managementPolicyVersion`, `snapshotFamily`,
-`snapshotFingerprint`, `summaryFingerprint`, `overallRiskLevel`, `headline.attentionStatus`,
-`headline.ownerCoverage`, `headline.dependencyCoverage`, and `headline.evidenceCoverage`. Snapshots are
-comparable only when schema version, management policy version, and caller-supplied `snapshotFamily` are
-identical, each fingerprint is valid and unique, and the envelope itself passes the public contract. The
-caller-provided sequence is authoritative; E-4 preserves that order and compares the first and last
-observations without sorting or reversing them.
+Each trend envelope must include these exact keys and no others:
+
+```json
+{
+  "schemaVersion": "governance-graph-management-summary-v1",
+  "managementPolicyVersion": "e4-management-summary-v1",
+  "snapshotFamily": "family-identifier",
+  "snapshotFingerprint": "<sha256>",
+  "summaryFingerprint": "<sha256>",
+  "summary": {},
+  "overallRiskLevel": "R1",
+  "attentionCount": 2,
+  "unknownCount": 0,
+  "headline": {
+    "attentionStatus": "attention",
+    "ownerCoverage": "available",
+    "dependencyCoverage": "available",
+    "evidenceCoverage": "available"
+  }
+}
+```
+
+The nested `summary` must pass the complete `governance-graph-management-summary-v1` validator,
+must contain the same `snapshotFingerprint` and `summaryFingerprint` as the envelope, and its
+`headline` counts must exactly equal `attentionCount` and `unknownCount`. E-4 recomputes the canonical
+summary fingerprint and rejects a mismatch; `summaryFingerprint` is never treated as opaque caller
+evidence. Snapshots are comparable only when schema version, management policy version, and caller-
+supplied `snapshotFamily` are identical, each fingerprint is valid and unique, and the envelope passes
+these exact binding rules. The caller-provided sequence is authoritative; E-4 preserves that order and
+compares the first and last observations without sorting or reversing them.
 
 Output:
 
@@ -446,6 +472,18 @@ Required envelope:
 
 Export must preserve source statuses and diagnostics. It must never omit `unknown`, `missing`, `stale` or
 `blocked` labels merely to make the management output look complete.
+
+### 8.1 Diagnostic contract
+
+Invalid or rejected source inputs map only to the following closed diagnostic codes:
+`source_schema_invalid`, `source_fingerprint_invalid`, `source_snapshot_missing`,
+`source_snapshot_mismatch`, `source_status_invalid`, `source_binding_invalid`,
+`source_payload_forbidden`, `trend_envelope_invalid`, `trend_fingerprint_mismatch`,
+`preset_selection_invalid`, and `preset_snapshot_mismatch`. Each diagnostic contains only the exact
+keys `{code, summary, sourceKind}`; `sourceKind` is either one of the six closed source kinds or `null`.
+`summary` is a bounded label code, not raw exception text. Diagnostics are deduplicated by
+`(code, sourceKind, summary)` and sorted by `(code, sourceKind or "", summary)`. No other diagnostic
+code, free-form message, path, secret, command or raw payload is permitted.
 
 ## 9. Streamlit integration boundary
 

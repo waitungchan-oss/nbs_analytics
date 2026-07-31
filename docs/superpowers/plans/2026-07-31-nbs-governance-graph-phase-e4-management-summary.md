@@ -8,6 +8,21 @@
 
 **Tech Stack:** Python 3、dataclasses／typing、既有 `canonical_sha256`、pytest、Streamlit rendering、現有 Agent Operations service/rendering patterns、Hermes read-only acceptance。
 
+## Plan Reconciliation（2026-07-31）
+
+狀態：Implementation 尚未開始；E-4 Design Spec 已完成 findings-first review 與補強。Observation-only
+邊界已確認；下一步依本 plan 建立 implementation branch，逐 Task 執行 TDD、strict Review、full
+verification、system acceptance 與 Hermes。E-4 不建立 Graph snapshot、不新增 approval／risk decision／
+workflow control，亦不讀寫 SQLite、baseline 或 canonical artifacts。
+
+Spec review fixes carried into this plan：
+
+- Trend envelope requires exact nested validated `summary`, exact `attentionCount`／`unknownCount`,
+  and recomputed `summaryFingerprint` binding.
+- Preset selection is canonical session state `{presetId, snapshotFingerprint}` or `null`; export maps
+  it to `selectedPresetId` while preserving original summary provenance.
+- Invalid-source diagnostics use a closed code allowlist with deterministic dedupe and ordering.
+
 ## Global Constraints
 
 - Canonical artifacts 是唯一真相來源；E-4 只產生衍生、只讀 projection。
@@ -19,6 +34,11 @@
 - 不把 empty list 解讀為 complete、zero-risk、zero-impact、無 owner 或無 dependency。
 - Status precedence 固定為 `invalid > stale > blocked > unknown > missing > unavailable > available`。
 - Risk level 只允許 `R2`、`R1`、`R0`、`unknown`；不得計算 numeric risk score。
+- Trend envelope 必須使用 exact nested validated `summary`、`attentionCount`、`unknownCount` 與
+  recomputed `summaryFingerprint`；不得把 fingerprint 當作 opaque caller evidence。
+- Preset selection 只允許 `null` 或 `{presetId, snapshotFingerprint}`；export 只輸出 bounded
+  `selectedPresetId` 並保留原始 `summaryFingerprint`。
+- Diagnostics 只允許 spec §8.1 的 closed code allowlist、exact keys 與 deterministic ordering。
 - D-3 mapping 只接受既有 exact rule IDs：`D3-PROTECTED-NODE`、`D3-PROTECTED-SURFACE`、`D3-VERIFICATION-REGRESSION`、`D3-BEHAVIORAL-CHANGE`、`D3-DOCUMENTATION-ONLY`、`D3-BLOCKED-COMPARISON`、`D3-UNKNOWN-COVERAGE`。
 - D-4 mapping 只接受既有 exact categories/states；`coverage_unknown` → `coverage_gap`，`documentation_only` 不產生 management attention。
 - 所有 identity、reason code、preset id、sourceRef、drill-down identity 必須 bounded safe identifier；拒絕 path、URI、secret、prompt、command、raw payload、完整 log。
@@ -115,6 +135,8 @@
   - `adapt_e1_coverage(source) -> SourceCoverage`;
   - `adapt_e3_coverage(source) -> SourceCoverage`;
   - `GovernanceGraphManagementSummaryService.compose(...)-> GovernanceGraphManagementSummary`.
+- Adapters must emit only the closed diagnostics from spec §8.1 with exact keys and deterministic
+  dedupe/order; invalid source payloads never become empty valid defaults.
 - `compose` must accept the exact keyword interface from the spec:
   ```python
   compose(
@@ -199,11 +221,14 @@
   Cover:
   - zero/one snapshots → `unknown/insufficient_comparable_snapshots`;
   - same schema, policy and caller-supplied snapshot family with unique valid fingerprints → available trend;
+  - exact trend envelope keys, nested validated summary, matching summary fingerprint and headline counts;
   - duplicate fingerprint, family/policy/schema mismatch, malformed envelope → invalid;
   - caller order is preserved; reversing input reverses observations and first/last comparison;
   - exact preset predicates and `available=false` for empty matches;
+  - canonical `{presetId, snapshotFingerprint}` selection lifecycle and export mapping to `selectedPresetId`;
   - run/snapshot mismatch clears selection;
   - selected preset never changes summaryFingerprint;
+  - closed diagnostic code mapping, exact keys, dedupe and deterministic ordering;
   - export exact envelope, exportFingerprint self-exclusion and unknown/stale/blocked preservation;
   - no filesystem, runtime, SQLite, Git or browser-side file path writes.
 
