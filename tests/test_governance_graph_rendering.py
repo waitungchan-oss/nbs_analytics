@@ -193,3 +193,13 @@ def test_catalog_selection_clears_when_graph_is_unavailable(monkeypatch):
     rendering.render_governance_graph_workspace(_run({"status": "unavailable"}))
 
     assert rendering.SELECTED_CATALOG_KEY not in fake.session_state
+
+
+def test_management_summary_callback_invalid_isolated(monkeypatch):
+    fake = FakeStreamlit()
+    monkeypatch.setattr(rendering, "st", fake)
+    rendering.render_governance_graph_workspace(
+        _run(_graph()),
+        management_summary_lookup=lambda *_: {"schemaVersion": "wrong", "snapshotFingerprint": "x"},
+    )
+    assert any("Management Summary：invalid 或 stale" in str(args[0]) for name, args, _ in fake.calls if name == "caption")
