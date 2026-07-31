@@ -5,6 +5,7 @@ import re
 from typing import Any, Callable
 
 import streamlit as st
+from backend.agents.governance_graph_management_summary_models import validate_management_summary_payload, ManagementSummaryModelError
 
 
 SELECTED_EVIDENCE_KEY = "AGENT_OPERATIONS_SELECTED_EVIDENCE"
@@ -268,6 +269,7 @@ def render_governance_graph_workspace(
     risk_summary_lookup: Callable[..., dict[str, Any]] | None = None,
     impact_lookup: Callable[..., dict[str, Any]] | None = None,
     catalog_lookup: Callable[[str, str], dict[str, Any]] | None = None,
+    management_summary_lookup: Callable[[str, str, str | None], dict[str, Any]] | None = None,
     streamlit_module: Any | None = None,
 ) -> None:
     global st
@@ -283,6 +285,7 @@ def render_governance_graph_workspace(
             risk_summary_lookup=risk_summary_lookup,
             impact_lookup=impact_lookup,
             catalog_lookup=catalog_lookup,
+            management_summary_lookup=management_summary_lookup,
         )
     finally:
         st = original_streamlit
@@ -297,6 +300,7 @@ def _render_governance_graph_workspace(
     risk_summary_lookup: Callable[..., dict[str, Any]] | None,
     impact_lookup: Callable[..., dict[str, Any]] | None,
     catalog_lookup: Callable[[str, str], dict[str, Any]] | None,
+    management_summary_lookup: Callable[[str, str, str | None], dict[str, Any]] | None,
 ) -> None:
     graph = run.get("governanceGraph") if isinstance(run, dict) else None
     state = getattr(st, "session_state", None)
@@ -380,11 +384,44 @@ def _render_governance_graph_workspace(
                 }
                 _render_lineage_result(lineage_lookup(request))
     st.subheader("Derived analysis")
+    _render_management_summary(run_id, snapshot_fingerprint, management_summary_lookup)
     st.subheader("Owner / dependency catalog")
     _render_catalog_lookup(run, snapshot_fingerprint, catalog_lookup)
     _render_derived_status("Snapshot comparison", comparison_lookup, run)
     _render_derived_status("Risk summary", risk_summary_lookup, run)
     _render_derived_status("Change impact", impact_lookup, run)
+
+
+def _render_management_summary(run_id: str, snapshot_fingerprint: str, callback: Callable[[str, str, str | None], dict[str, Any]] | None) -> None:
+    st.subheader("Management Summary")
+    if callback is None:
+        st.caption("Management Summary：unavailable；目前沒有 validated read model。")
+        return
+    try:
+        result = callback(run_id, snapshot_fingerprint, None)
+    except Exception:
+        result = None
+    if not isinstance(result, dict) or result.get("schemaVersion") != "governance-graph-management-summary-v1" or result.get("snapshotFingerprint") != snapshot_fingerprint:
+        st.caption("Management Summary：invalid 或 stale")
+        return
+    try:
+        result = validate_management_summary_payload(result)
+    except (ManagementSummaryModelError, TypeError, ValueError):
+        st.caption("Management Summary：invalid")
+        return
+    headline = result.get("headline")
+    if not isinstance(headline, dict):
+        st.caption("Management Summary：invalid")
+        return
+    st.write({"Status": result.get("status", "unknown"), "Risk": result.get("overallRiskLevel", "unknown"), "Attention": headline.get("attentionStatus", "unknown"), "Protected": headline.get("protectedCount", 0), "Blocked": headline.get("blockedCount", 0), "Unknown": headline.get("unknownCount", 0)})
+    coverage = result.get("coverage")
+    if isinstance(coverage, dict):
+        st.caption("Coverage：" + " · ".join(f"{key}={value}" for key, value in sorted(coverage.items()) if isinstance(value, str)))
+    items = result.get("attentionItems")
+    if isinstance(items, list):
+        rows = [{"Category": item.get("category"), "State": item.get("state"), "Severity": item.get("severity"), "Summary": item.get("summaryCode")} for item in items[:12] if isinstance(item, dict)]
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 __all__ = ["SELECTED_EVIDENCE_KEY", "SELECTED_CATALOG_KEY", "render_governance_graph_workspace"]
