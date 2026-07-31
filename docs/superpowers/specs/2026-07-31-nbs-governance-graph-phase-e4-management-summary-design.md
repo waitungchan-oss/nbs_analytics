@@ -52,7 +52,8 @@ engine、business decision engine、approval gate 或 workflow control input。
   category 或文字內容推導 dependency、causal relation、business impact、responsible person 或
   remediation。
 - 不建立 Graph snapshot、不建立 catalog、不回填 canonical artifacts、不修改 workflow status、
-  approval、dispatch、rollback、baseline、revenue scope、business rules、cache 或 export schema。
+  approval、dispatch、rollback、baseline、revenue scope、business rules、cache 或既有 export schema；
+  E-4 只新增本 spec 定義的 management-summary/export contracts。
 - 不產生自動通知、recommendation action、approval decision、risk acceptance、blocking transition
   或 workflow state transition。
 - 不保證 trend；只有在來源 snapshot 明確可比時才輸出 trend，否則輸出 `unknown`。
@@ -85,8 +86,34 @@ projection。E-4 的 input authority 僅限 caller 提供、且已通過各自 p
 }
 ```
 
+`sourceRef` 的 exact keys 為 `kind`、`identity`、`fingerprint`、`status`；`status` 只允許
+`available`、`blocked`、`unknown`、`missing`、`unavailable`、`stale`、`invalid`。`fingerprint` 必須
+是 64 字元 lowercase SHA-256；`identity` 必須符合 bounded safe identifier。任何額外 key 或未列入
+allowlist 的 status 都是 `invalid`。
+
 `kind`、`identity`、reason code、preset id 與 drill-down identity 都必須是 bounded safe identifier；
 不得輸出 absolute path、URI、secret、prompt、command、stdout/stderr、raw payload 或完整 log。
+
+### 3.3 Required source schemas and snapshot binding
+
+E-4 只接受下列 exact public schemas；caller 必須先通過各 source 自己的 public parser，E-4 再做
+schema、status、fingerprint 與 snapshot binding 的二次檢查：
+
+| Input | Required `schemaVersion` | Required identity/binding |
+|---|---|---|
+| D-1 query | `governance-graph-query-v1` | `runId`、query fingerprint 或明確 query identity、selected snapshot fingerprint |
+| D-2 comparison | `governance-graph-comparison-v1` | `leftReference`、`rightReference`、comparison fingerprint；兩側 references 必須是 caller 明確提供的 immutable identities |
+| D-3 risk | `governance-graph-risk-summary-v1` | `comparisonFingerprint`、risk summary fingerprint、comparison status |
+| D-4 impact | `governance-graph-change-impact-v1` | `comparisonFingerprint`、`riskSummaryFingerprint`、impact summary fingerprint |
+| E-1 lineage | `governance-graph-evidence-lineage-v1` | `runId`、`snapshotFingerprint`、lineage fingerprint |
+| E-3 catalog | `governance-graph-owner-dependency-read-v1` | `snapshotFingerprint`、read-model fingerprint（available 時） |
+
+Source reference `kind` 使用 closed allowlist：`d1_query`、`d2_comparison`、`d3_risk_summary`、
+`d4_change_impact`、`e1_evidence_lineage`、`e3_owner_dependency_catalog`。不接受近似 kind、自由
+文字或未列入本表的 schema。`snapshotFingerprint` 必須與 compose 的 selected fingerprint 相同；
+缺少必要 binding 為 `unknown`，不同 binding 為 `stale`，schema／fingerprint／exact-key 失敗為
+`invalid`。一側 invalid 不得污染另一側的 validated fields，但 overall status 仍依 §5.1 precedence
+聚合。
 
 ### 3.2 Snapshot binding
 
@@ -129,6 +156,29 @@ GovernanceGraphManagementSummaryService.compose(
 服務必須 pure、deterministic、side-effect free：不讀檔、不寫檔、不啟動 subprocess、不連 network、
 不讀 SQLite、不呼叫 D-1～D-4 writer、不建立 Graph snapshot，不保留 session authority。
 
+### 4.1 Required inputs and partial isolation
+
+The required set for an `available` summary is D-2 comparison、D-3 risk、D-4 impact、E-1 lineage 與
+E-3 catalog；D-1 query is optional context and may be `unavailable` without invalidating an otherwise
+complete risk/impact summary. A missing required source yields `missing` or `unavailable`; an invalid
+required source yields `invalid`; a stale binding yields `stale`。No source is replaced by an empty
+default.
+
+Aggregation is field-preserving and fail-closed:
+
+1. Parse and validate each source independently.
+2. Retain only the valid source's bounded fields and source reference；discard invalid source payloads。
+3. Compute overall status using the precedence in §5.1 across all supplied sources, with `invalid` and
+   `stale` taking precedence over lower-confidence states。
+4. Build attention items only from validated source records; an invalid／unavailable source contributes
+   diagnostics and coverage, never inferred findings。
+5. `overallRiskLevel` is `unknown` whenever risk is missing／unknown／blocked without a safe level, or
+   required coverage is incomplete；otherwise it is the deterministic maximum of validated D-3 levels。
+
+Thus a valid D-3 finding remains visible when E-1 is missing, but the headline remains `unknown` and the
+evidence coverage records the gap. A D-3 invalid payload never produces risk findings, even when D-2 is
+available.
+
 ## 5. Public output contract
 
 Schema：`governance-graph-management-summary-v1`
@@ -136,6 +186,7 @@ Schema：`governance-graph-management-summary-v1`
 ```json
 {
   "schemaVersion": "governance-graph-management-summary-v1",
+  "managementPolicyVersion": "e4-management-summary-v1",
   "status": "available",
   "snapshotFingerprint": "<sha256>",
   "summaryFingerprint": "<sha256>",
@@ -201,6 +252,28 @@ Schema：`governance-graph-management-summary-v1`
 }
 ```
 
+### 5.0 Canonical serialization and fingerprint
+
+All E-4 fingerprints use the existing `canonical_sha256` algorithm: UTF-8 JSON, `ensure_ascii=false`,
+`sort_keys=true`, `separators=(",", ":")`, SHA-256 lowercase hex. Before hashing:
+
+- object keys are the exact public keys defined by this spec；unknown keys are invalid;
+- `attentionItems`、`sourceRefs`、`categories`、`observations` and `presets` are normalized by their
+  canonical identity and sorted; exact duplicates are deduplicated, conflicting identities are invalid;
+- `diagnostics` are retained, bounded, deduplicated by `(code, summary)` and sorted;
+- `summaryFingerprint` covers `schemaVersion`、`status`、`snapshotFingerprint`、`overallRiskLevel`、
+  `managementPolicyVersion`、
+  `headline`、`risk`、`impact`、`coverage`、`attentionItems`、`trend`、`presets`、`diagnostics` and
+  `sourceRefs`, while excluding `summaryFingerprint` itself;
+- `exportFingerprint` covers `schemaVersion`、`summarySchemaVersion`、`snapshotFingerprint`,
+  `summaryFingerprint`、`managementPolicyVersion`、`selectedPresetId` and the normalized `summary`, while excluding
+  `exportFingerprint` itself.
+
+The summary fingerprint is computed before export filtering. A preset export retains the original
+`summaryFingerprint` as provenance and computes a new `exportFingerprint`; it must not rewrite the
+summary's meaning or silently remove diagnostics. Same normalized input must produce byte-for-byte
+identical output regardless of mapping insertion order.
+
 ### 5.1 Status and risk semantics
 
 Status precedence：`invalid > stale > blocked > unknown > missing > unavailable > available`。
@@ -239,13 +312,20 @@ E-4 只投影既有 D-3／D-4 exact identity，不新增 rule：
 | D-3 protected finding / D-4 protected impact | `protected_governance_surface` | `R2` | `observed` |
 | D-3 verification regression / D-4 verification assurance | `verification_assurance` | `R1` | `observed` |
 | D-3 behavioral change / D-4 implementation governance | `implementation_governance` | `R1` | `observed` |
-| D-4 blocked impact | `workflow_observability_blocked` | `unknown` or source level | `blocked` |
+| D-4 blocked impact | `workflow_observability_blocked` | `unknown` | `blocked` |
 | D-3/D-4 unknown coverage | `coverage_gap` | `unknown` | `unknown` |
 | E-1 missing/stale lineage | `evidence_coverage_gap` | `unknown` | `unknown` |
 | E-3 missing/unknown owner or dependency coverage | `catalog_coverage_gap` | `unknown` | `unknown` |
 
-Unknown source rule／category／identity is `invalid`; approximate matching is forbidden. Attention items
-are bounded, deduplicated by canonical identity, and sorted by `(severity priority, state priority,
+The allowed attention categories are exactly `protected_governance_surface`、`verification_assurance`、
+`implementation_governance`、`workflow_observability_blocked`、`coverage_gap`、
+`evidence_coverage_gap`、`catalog_coverage_gap`。Severity is exactly `R2`、`R1`、`R0` or `unknown`;
+state is exactly `observed`、`blocked` or `unknown`。Drill-down `kind` is closed to `node`、`edge`、
+`evidence`、`finding`、`impact`、`owner`、`dependency`；identity must be a bounded safe identifier.
+Unknown source rule／category／identity is `invalid`; approximate matching is forbidden. `attentionId`
+is the canonical tuple `category:kind:identity:state`, with source finding／impact identity included when
+the source provides it. `sourceRefs` are deduplicated by `(kind, identity, fingerprint)` and sorted by
+`(kind, identity, fingerprint)`. Attention items are sorted by `(severity priority, state priority,
 attentionId)`.
 
 ### 6.2 Preset semantics
@@ -260,13 +340,24 @@ do not run a new query, mutate state, or infer missing relations:
 - `recent_changes`：only caller-supplied bounded D-2 changes within the selected summary boundary；
   no timestamp-based discovery。
 
-Selecting a preset stores at most a bounded UI selection identity `{presetId, snapshotFingerprint}`;
+Preset `available=true` iff at least one validated item matches the exact preset predicate; an empty
+match is `available=false` and does not mean zero risk. Selecting no preset is represented as
+`selectedPresetId: null` in export. Selecting a preset stores at most a bounded UI selection identity
+`{presetId, snapshotFingerprint}`;
 run／snapshot mismatch clears it. No preset is an approval, dispatch, export, repair or writer action.
 
 ## 7. Trend contract
 
 Trend is optional and input-driven. Caller must provide at least two valid, same-schema summary snapshots
 with comparable snapshot fingerprints and explicit observation order. E-4 must not query history itself.
+
+Each trend envelope must include `schemaVersion`, `managementPolicyVersion`, `snapshotFamily`,
+`snapshotFingerprint`, `summaryFingerprint`, `overallRiskLevel`, `headline.attentionStatus`,
+`headline.ownerCoverage`, `headline.dependencyCoverage`, and `headline.evidenceCoverage`. Snapshots are
+comparable only when schema version, management policy version, and caller-supplied `snapshotFamily` are
+identical, each fingerprint is valid and unique, and the envelope itself passes the public contract. The
+caller-provided sequence is authoritative; E-4 preserves that order and compares the first and last
+observations without sorting or reversing them.
 
 Output:
 
@@ -284,7 +375,8 @@ Output:
 Rules:
 
 - fewer than two comparable snapshots → `unknown` / `insufficient_comparable_snapshots`。
-- different schema、policy、snapshot family 或 invalid input → `invalid` / bounded diagnostic。
+- different schema、policy、snapshot family、duplicate fingerprints 或 invalid input → `invalid` /
+  bounded diagnostic；missing/unknown coverage remains `unknown`, not a zero value。
 - `changedDimensions` only lists exact field changes; no causal explanation, forecast or direction claim。
 - trend must not be used to declare improvement, deterioration, target attainment or risk acceptance。
 
@@ -302,6 +394,7 @@ Required envelope:
 {
   "schemaVersion": "governance-graph-management-summary-export-v1",
   "summarySchemaVersion": "governance-graph-management-summary-v1",
+  "managementPolicyVersion": "e4-management-summary-v1",
   "snapshotFingerprint": "<sha256>",
   "summaryFingerprint": "<sha256>",
   "selectedPresetId": "protected_surfaces",
@@ -335,6 +428,13 @@ Renderer requirements:
 - UI does not create snapshot、catalog、trend source、export file path or management decision。
 - existing D-1～D-4 panels remain independently readable; E-4 failure must not turn them into PASS or
   hide their diagnostics。
+- Within the existing Governance Graph section, render deterministically in this order: graph metadata and
+  canonical lineage, E-4 Management Summary, E-3 owner/dependency catalog, D-2 comparison, D-3 risk, then
+  D-4 impact. A malformed E-4 callback only replaces its own bounded panel message; it does not reorder,
+  suppress, or alter the other panels.
+- E-4 must remain independent of the P2-5 Management Decision Layer: tests must prove there is no import or
+  call to decision-layer services, target/forecast/attainment APIs, or revenue decision data, and no
+  `attainment`, `target`, `forecast gap`, or equivalent decision fields in the E-4 public schemas.
 
 No new FastAPI endpoint is required in E-4 v1. A future API may consume the same service contract only
 through a separately approved design.
@@ -361,10 +461,14 @@ through a separately approved design.
 - Protected／blocked／unknown attention mapping、dedupe、ordering 與 no-inference。
 - Coverage semantics：empty／missing 不得變成 complete 或 zero-risk。
 - Trend：zero／one／two comparable snapshots、reversed input order、schema mismatch、unknown coverage。
+- Trend：same-family/policy comparability、duplicate fingerprint rejection、first/last comparison and
+  explicit preservation of caller order。
 - Preset exact filtering、bounded selection cleanup、refresh preservation 與 no write。
 - Export exact envelope、fingerprint、secret/path/raw payload rejection、browser download only。
 - Streamlit callback malformed／exception isolation；不得呼叫 CLI、subprocess、network、SQLite、
   snapshot builder 或 writer。
+- Deterministic panel ordering and an executable static boundary test proving P2-5 decision-layer
+  separation (no decision service import/call or business-target fields).
 - Service、renderer、export serializer 前後 runtime／SQLite／Git／canonical artifact tree equality。
 
 ### 11.2 Acceptance sequence
