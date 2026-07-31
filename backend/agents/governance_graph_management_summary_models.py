@@ -65,6 +65,8 @@ def _exact_mapping(value: Any, keys: set[str], name: str) -> Mapping[str, Any]:
 
 
 def _source_ref(value: Any, name: str = "sourceRef") -> dict[str, Any]:
+    if value is None:
+        return None
     item = _exact_mapping(value, _SOURCE_REF_KEYS, name)
     kind = _safe(item["kind"], f"{name}.kind")
     if not isinstance(kind, str) or kind not in _SOURCE_KINDS:
