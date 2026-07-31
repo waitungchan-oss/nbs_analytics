@@ -480,10 +480,10 @@ Invalid or rejected source inputs map only to the following closed diagnostic co
 `source_snapshot_mismatch`, `source_status_invalid`, `source_binding_invalid`,
 `source_payload_forbidden`, `trend_envelope_invalid`, `trend_fingerprint_mismatch`,
 `preset_selection_invalid`, and `preset_snapshot_mismatch`. Each diagnostic contains only the exact
-keys `{code, summary, sourceKind}`; `sourceKind` is either one of the six closed source kinds or `null`.
-`summary` is a bounded label code, not raw exception text. Diagnostics are deduplicated by
-`(code, sourceKind, summary)` and sorted by `(code, sourceKind or "", summary)`. No other diagnostic
-code, free-form message, path, secret, command or raw payload is permitted.
+keys `{code, summary}`; the closed code itself identifies the rejected source boundary. `summary` is a
+bounded label code, not raw exception text. Diagnostics are deduplicated by `(code, summary)` and sorted
+by `(code, summary)`. No other diagnostic code, free-form message, path, secret, command or raw payload
+is permitted.
 
 ## 9. Streamlit integration boundary
 

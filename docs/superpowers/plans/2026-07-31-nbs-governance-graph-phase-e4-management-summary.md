@@ -21,7 +21,8 @@ Spec review fixes carried into this plan：
   and recomputed `summaryFingerprint` binding.
 - Preset selection is canonical session state `{presetId, snapshotFingerprint}` or `null`; export maps
   it to `selectedPresetId` while preserving original summary provenance.
-- Invalid-source diagnostics use a closed code allowlist with deterministic dedupe and ordering.
+- Invalid-source diagnostics use a closed code allowlist with exact `{code, summary}` keys and
+  deterministic dedupe/order.
 
 ## Global Constraints
 
