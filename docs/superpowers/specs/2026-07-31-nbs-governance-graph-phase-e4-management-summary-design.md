@@ -184,15 +184,29 @@ Thus a valid D-3 finding remains visible when E-1 is missing, but the headline r
 evidence coverage records the gap. A D-3 invalid payload never produces risk findings, even when D-2 is
 available.
 
-Coverage mapping is closed and source-driven. For every source, `available` means the source envelope is
-valid and its own `coverageStatus` is `complete`; `partial` means the envelope is valid and
-`coverageStatus` is `partial`; `unknown` means the envelope is valid but `coverageStatus` is `unknown`,
-`blocked` or `stale`; `missing` means the required envelope is absent. The only accepted source
-`coverageStatus` values are `complete`, `partial`, `unknown`, `blocked`, `stale`, and `missing`.
-E-4 does not calculate thresholds or treat an empty record list as complete. `comparison`, `risk`, and
-`impact` map directly to D-2/D-3/D-4 coverage; `lineage` maps from E-1; `catalog` maps from E-3; `query`
-maps from optional D-1 and may be `unavailable` without lowering required-source status. Required
-coverage is sufficient only when comparison, risk, impact, lineage, and catalog are all `available`.
+Coverage mapping is closed and source-driven. E-4 does not require a common `coverageStatus` key on the
+source schemas; it derives one deterministic canonical state from each existing exact schema, and never
+treats an empty record list as complete:
+
+- D-2 `comparison`: `available` + valid left/right snapshot identities + both `freshness=fresh` + valid
+  summary counts ⇒ `complete`; valid comparison with any non-fresh freshness ⇒ `partial`; explicit
+  `blocked`/`unknown`/`stale`/`invalid` status maps directly.
+- D-3 `risk`: `status=available` and `observedChanges == classifiedChanges` and all
+  `unknownChanges/invalidChanges/blockedChanges == 0` ⇒ `complete`; status available with any positive
+  unknown/invalid/blocked count or observed/classified mismatch ⇒ `partial`; other statuses map directly.
+- D-4 `impact`: `coverage.coverageStatus=available` ⇒ `complete`, `blocked` ⇒ `blocked`, `unknown` ⇒
+  `unknown`; any other status or invalid coverage is `invalid`.
+- E-1 `lineage`: `status=available` with valid `snapshotFingerprint`, lineage fingerprint and validated
+  evidence list ⇒ `complete`; valid `blocked`/`stale`/`unknown` status maps directly; missing evidence
+  entries yield `partial` only when the envelope explicitly remains available.
+- E-3 `catalog`: owner and dependency statuses both `available` with valid read-model fingerprint ⇒
+  `complete`; one available and one missing/unknown/stale/blocked ⇒ `partial`; overall invalid/stale/
+  blocked/unknown maps directly.
+
+The canonical summary states are `available`, `partial`, `unknown`, `missing`, `unavailable`, `stale`,
+`blocked`, and `invalid`. `comparison`, `risk`, `impact`, `lineage`, and `catalog` are sufficient only
+when all five map to `available`/`complete`; optional D-1 `query` may be `unavailable` without lowering
+required-source status.
 
 ## 5. Public output contract
 
@@ -331,6 +345,14 @@ E-4 只投影既有 D-3／D-4 exact identity，不新增 rule：
 | D-3/D-4 unknown coverage | `coverage_gap` | `unknown` | `unknown` |
 | E-1 missing/stale lineage | `evidence_coverage_gap` | `unknown` | `unknown` |
 | E-3 missing/unknown owner or dependency coverage | `catalog_coverage_gap` | `unknown` | `unknown` |
+
+D-3 mapping is closed by exact `ruleId`, not free-text matching: `D3-PROTECTED-NODE` and
+`D3-PROTECTED-SURFACE` map to protected; `D3-VERIFICATION-REGRESSION` maps to verification;
+`D3-BEHAVIORAL-CHANGE` maps to implementation; `D3-BLOCKED-COMPARISON` maps to blocked;
+`D3-UNKNOWN-COVERAGE`, `D3-INVALID-COMPARISON`, and `D3-UNAVAILABLE-COMPARISON` map to coverage gap;
+`D3-DOCUMENTATION-ONLY` produces no management attention item. Any other D-3 `ruleId` is `invalid` for
+E-4 attention projection. D-4 mapping uses only its exact `category` and `impactState` allowlists from
+`governance-graph-change-impact-v1`; unknown category/state is `invalid`, never approximated.
 
 The allowed attention categories are exactly `protected_governance_surface`、`verification_assurance`、
 `implementation_governance`、`workflow_observability_blocked`、`coverage_gap`、
