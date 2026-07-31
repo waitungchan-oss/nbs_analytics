@@ -1,0 +1,398 @@
+# NBS Governance Graph Phase E-4 Management Summary Design
+
+狀態：approved for design review  
+日期：2026-07-31  
+風險：R1 standard engineering（read-only management summary projection；不改正式資料）
+
+## 1. Goal
+
+在既有 Agent Operations → Governance Graph section 內，建立一個 bounded、deterministic、read-only
+的 Management Summary projection，讓管理層能快速回答：
+
+- 目前是否有 protected、blocked 或 unknown governance signal？
+- 哪些已驗證的 risk／impact／evidence coverage 需要下鑽？
+- owner／dependency catalog 是否完整到足以支援治理觀察？
+- 多個明確提供的 immutable summary snapshots 之間，風險與 coverage 是否有可驗證變化？
+
+E-4 只整合既有 D-1 query、D-2 comparison、D-3 risk summary、D-4 change impact、E-1 evidence
+lineage 與 E-3 owner/dependency read models。它是管理層可讀的 observation layer，不是新的 risk
+engine、business decision engine、approval gate 或 workflow control input。
+
+## 2. Product decision and scope
+
+### 2.1 Confirmed product choice
+
+- UI 位置：既有 Agent Operations → Governance Graph section 的 Management Summary 區塊。
+- 核心服務：獨立 `GovernanceGraphManagementSummaryService`，只接受 caller 提供的已驗證 read models。
+- UI boundary：optional、external、dependency-injected callback；`app_pages.py` 不建立 authority，
+  不讀取 catalog／snapshot path，也不呼叫 writer、CLI、subprocess 或 control-plane service。
+- 來源模型：每個 D-1～D-4、E-1、E-3 input 保留自己的 status、fingerprint、coverage 與 diagnostics；
+  summary 只做 deterministic aggregation 與 exact projection。
+- 缺少或不可信來源：fail closed 為 `unavailable`、`missing`、`unknown`、`blocked` 或 `invalid`；
+  不輸出「零風險」、「無影響」或「owner 已完整」等未被 evidence 支持的正面結論。
+
+### 2.2 In scope
+
+- Management Summary public read model 與 canonical fingerprint contract。
+- Protected／blocked／unknown attention counts 與 bounded attention items。
+- Risk／impact／evidence／owner／dependency coverage 的明確聚合。
+- 只基於明確提供的 summary snapshots 的 deterministic trend projection。
+- 固定、無寫入的 management query presets 與 bounded drill-down references。
+- `governance-graph-management-summary-export-v1` 的 in-memory／browser download payload contract。
+- Agent Operations rendering、strict callback validation、selection lifecycle 與 no-write tests。
+- schema、status、fingerprint、source provenance、raw/secret/path rejection 與 no-inference tests。
+
+### 2.3 Explicit non-goals
+
+- 不取代既有 P2-5 Management Decision Layer；不讀取或重算營收 target、attainment、forecast gap、
+  KPI、WAPE 或 management target configuration。
+- 不重新執行 D-1～D-4 rules，不重新讀取 Graph snapshot、canonical evidence、raw runtime、SQLite、
+  Git、network、business rules 或任意 filesystem path。
+- 不從 node 名稱、edge 順序、filename、timestamp、缺失資料、owner role、risk category、impact
+  category 或文字內容推導 dependency、causal relation、business impact、responsible person 或
+  remediation。
+- 不建立 Graph snapshot、不建立 catalog、不回填 canonical artifacts、不修改 workflow status、
+  approval、dispatch、rollback、baseline、revenue scope、business rules、cache 或 export schema。
+- 不產生自動通知、recommendation action、approval decision、risk acceptance、blocking transition
+  或 workflow state transition。
+- 不保證 trend；只有在來源 snapshot 明確可比時才輸出 trend，否則輸出 `unknown`。
+- 不以 UI table、display formatting 或 download payload 修正任何正式口徑。
+
+## 3. Authority and provenance
+
+### 3.1 Source-of-truth boundary
+
+Canonical artifacts 是治理事實的唯一真相來源；Governance Graph 與 E-4 summary 都是衍生、只讀
+projection。E-4 的 input authority 僅限 caller 提供、且已通過各自 public contract 的 read models：
+
+| Input | E-4 可消費 | E-4 禁止推導 |
+|---|---|---|
+| D-1 query result | bounded exact-match records、status、query fingerprint | 新增 relationship、risk 或 owner |
+| D-2 comparison result | explicit snapshot／node／edge／evidence changes、status、fingerprint | causal sequence、downstream traversal |
+| D-3 risk summary | validated findings、risk level、coverage、fingerprint | 新 risk rule、risk score、owner |
+| D-4 impact summary | exact impact categories、impact state、coverage、fingerprint | business impact、remediation、dependency |
+| E-1 evidence lineage | bounded evidence identity、lineage status、provenance | missing evidence 的補值或 PASS |
+| E-3 catalog read model | owner role、declared relation、coverage、fingerprint | 個人、authority、未宣告 dependency |
+
+每個 source reference 必須保留：
+
+```json
+{
+  "kind": "d3_risk_summary",
+  "identity": "risk-summary",
+  "fingerprint": "<lowercase-sha256>",
+  "status": "available"
+}
+```
+
+`kind`、`identity`、reason code、preset id 與 drill-down identity 都必須是 bounded safe identifier；
+不得輸出 absolute path、URI、secret、prompt、command、stdout/stderr、raw payload 或完整 log。
+
+### 3.2 Snapshot binding
+
+每個 summary input 必須帶有選定 Graph snapshot identity 或明確的 snapshot reference。若多個 input
+存在不同 snapshot fingerprint、缺少必要 binding 或無法證明同一 observation boundary，E-4 status
+必須是 `stale`、`unknown` 或 `invalid`，不可把不同 run／snapshot 混成單一摘要。
+
+Trend input 必須是 caller 明確提供的 immutable summary snapshot envelopes；E-4 不從 filesystem、
+runtime、Git history 或 database 查找前一個 snapshot。
+
+## 4. Architecture and data flow
+
+```text
+validated D1 query ─┐
+validated D2 compare ─┤
+validated D3 risk ────┤
+validated D4 impact ──┼─> GovernanceGraphManagementSummaryService
+validated E1 lineage ┤                 │
+validated E3 catalog ─┘                 ├─ management-summary-v1
+                                       ├─ export-v1 (in-memory)
+                                       └─ Agent Operations read-only section
+```
+
+Service contract：
+
+```python
+GovernanceGraphManagementSummaryService.compose(
+    *,
+    snapshot_fingerprint: str,
+    query: Mapping[str, Any] | None,
+    comparison: Mapping[str, Any] | None,
+    risk: Mapping[str, Any] | None,
+    impact: Mapping[str, Any] | None,
+    lineage: Mapping[str, Any] | None,
+    catalog: Mapping[str, Any] | None,
+    trend_snapshots: Sequence[Mapping[str, Any]] = (),
+) -> GovernanceGraphManagementSummary
+```
+
+服務必須 pure、deterministic、side-effect free：不讀檔、不寫檔、不啟動 subprocess、不連 network、
+不讀 SQLite、不呼叫 D-1～D-4 writer、不建立 Graph snapshot，不保留 session authority。
+
+## 5. Public output contract
+
+Schema：`governance-graph-management-summary-v1`
+
+```json
+{
+  "schemaVersion": "governance-graph-management-summary-v1",
+  "status": "available",
+  "snapshotFingerprint": "<sha256>",
+  "summaryFingerprint": "<sha256>",
+  "overallRiskLevel": "R1",
+  "headline": {
+    "attentionStatus": "attention",
+    "protectedCount": 1,
+    "blockedCount": 0,
+    "unknownCount": 1,
+    "evidenceCoverage": "partial",
+    "ownerCoverage": "available",
+    "dependencyCoverage": "unknown"
+  },
+  "risk": {
+    "status": "available",
+    "overallRiskLevel": "R1",
+    "findingCount": 2,
+    "levels": {"R2": 1, "R1": 1, "R0": 0, "unknown": 0},
+    "sourceRef": {"kind": "d3_risk_summary", "identity": "risk-summary", "fingerprint": "<sha256>", "status": "available"}
+  },
+  "impact": {
+    "status": "available",
+    "observedCount": 2,
+    "blockedCount": 0,
+    "unknownCount": 1,
+    "categories": ["protected_governance_surface", "verification_assurance"],
+    "sourceRef": {"kind": "d4_impact_summary", "identity": "change-impact", "fingerprint": "<sha256>", "status": "available"}
+  },
+  "coverage": {
+    "query": "available",
+    "comparison": "available",
+    "risk": "available",
+    "impact": "available",
+    "lineage": "partial",
+    "catalog": "unknown"
+  },
+  "attentionItems": [
+    {
+      "attentionId": "D3-PROTECTED-SURFACE:node:protected_incident:changed",
+      "severity": "R2",
+      "category": "protected_governance_surface",
+      "state": "observed",
+      "summaryCode": "protected_signal_requires_governance_review",
+      "sourceRefs": [],
+      "drillDown": {"kind": "node", "identity": "protected_incident"}
+    }
+  ],
+  "trend": {
+    "status": "unknown",
+    "basis": "insufficient_comparable_snapshots",
+    "observations": [],
+    "changedDimensions": []
+  },
+  "presets": [
+    {"presetId": "protected_surfaces", "labelCode": "protected_surfaces", "available": true},
+    {"presetId": "blocked_verification", "labelCode": "blocked_verification", "available": false},
+    {"presetId": "unknown_coverage", "labelCode": "unknown_coverage", "available": true},
+    {"presetId": "owner_dependency_gaps", "labelCode": "owner_dependency_gaps", "available": true},
+    {"presetId": "recent_changes", "labelCode": "recent_changes", "available": true}
+  ],
+  "diagnostics": [],
+  "sourceRefs": []
+}
+```
+
+### 5.1 Status and risk semantics
+
+Status precedence：`invalid > stale > blocked > unknown > missing > unavailable > available`。
+
+- `available`：required inputs valid、same snapshot、coverage sufficient。
+- `blocked`：source is validated but explicitly blocked; bounded attention may remain visible。
+- `unknown`：coverage or comparability insufficient；不得降級為 R0 或 no attention。
+- `missing`：required source envelope explicitly absent from the caller。
+- `unavailable`：callback／read model 尚未提供；不自行建立 empty model。
+- `stale`：snapshot／fingerprint mismatch。
+- `invalid`：schema、allowlist、fingerprint、boundedness 或 exact-key contract 失敗。
+
+`overallRiskLevel` precedence：`R2 > R1 > R0`；若 coverage 不足、source status 非 available 或
+無法安全分類，必須是 `unknown`。E-4 不計算 numeric risk score。
+
+### 5.2 Headline semantics
+
+`headline` 只能是 read-model aggregation：
+
+- `protectedCount`：只計入 D-3／D-4 已明確標示 protected 的 bounded items。
+- `blockedCount`：只計入 source 或 impact 已明確為 blocked 的 items。
+- `unknownCount`：只計入 source、coverage 或 trend 已明確為 unknown 的 items。
+- `evidenceCoverage`、`ownerCoverage`、`dependencyCoverage` 保留 `available`、`partial`、`unknown`、
+  `missing`，不得將空列表解讀為 complete。
+- `attentionStatus` 只允許 `clear`、`attention`、`unknown`；`clear` 只可在 required coverage
+  complete 且沒有 protected／blocked／unknown signal 時出現。
+
+## 6. Attention items and presets
+
+### 6.1 Attention item mapping
+
+E-4 只投影既有 D-3／D-4 exact identity，不新增 rule：
+
+| Source signal | Category | Severity | State |
+|---|---|---|---|
+| D-3 protected finding / D-4 protected impact | `protected_governance_surface` | `R2` | `observed` |
+| D-3 verification regression / D-4 verification assurance | `verification_assurance` | `R1` | `observed` |
+| D-3 behavioral change / D-4 implementation governance | `implementation_governance` | `R1` | `observed` |
+| D-4 blocked impact | `workflow_observability_blocked` | `unknown` or source level | `blocked` |
+| D-3/D-4 unknown coverage | `coverage_gap` | `unknown` | `unknown` |
+| E-1 missing/stale lineage | `evidence_coverage_gap` | `unknown` | `unknown` |
+| E-3 missing/unknown owner or dependency coverage | `catalog_coverage_gap` | `unknown` | `unknown` |
+
+Unknown source rule／category／identity is `invalid`; approximate matching is forbidden. Attention items
+are bounded, deduplicated by canonical identity, and sorted by `(severity priority, state priority,
+attentionId)`.
+
+### 6.2 Preset semantics
+
+Preset IDs are immutable code-owned identifiers. Presets only filter the already composed summary; they
+do not run a new query, mutate state, or infer missing relations:
+
+- `protected_surfaces`：explicit protected signals only。
+- `blocked_verification`：explicit blocked／verification signals only。
+- `unknown_coverage`：unknown／missing／stale coverage only。
+- `owner_dependency_gaps`：E-3 owner/dependency coverage gaps only。
+- `recent_changes`：only caller-supplied bounded D-2 changes within the selected summary boundary；
+  no timestamp-based discovery。
+
+Selecting a preset stores at most a bounded UI selection identity `{presetId, snapshotFingerprint}`;
+run／snapshot mismatch clears it. No preset is an approval, dispatch, export, repair or writer action.
+
+## 7. Trend contract
+
+Trend is optional and input-driven. Caller must provide at least two valid, same-schema summary snapshots
+with comparable snapshot fingerprints and explicit observation order. E-4 must not query history itself.
+
+Output:
+
+```json
+{
+  "status": "available",
+  "basis": "explicit_summary_snapshots",
+  "observations": [
+    {"snapshotFingerprint": "<sha256>", "overallRiskLevel": "R1", "attentionCount": 2, "unknownCount": 0}
+  ],
+  "changedDimensions": ["attentionCount", "ownerCoverage"]
+}
+```
+
+Rules:
+
+- fewer than two comparable snapshots → `unknown` / `insufficient_comparable_snapshots`。
+- different schema、policy、snapshot family 或 invalid input → `invalid` / bounded diagnostic。
+- `changedDimensions` only lists exact field changes; no causal explanation, forecast or direction claim。
+- trend must not be used to declare improvement, deterioration, target attainment or risk acceptance。
+
+## 8. Read-only export contract
+
+Schema：`governance-graph-management-summary-export-v1`。
+
+Export is a bounded serialization of the validated summary plus selected preset identity. It may be
+returned in-memory or offered through Streamlit browser download, but it must not write a canonical
+artifact, runtime file, SQLite row, Git object or approval record.
+
+Required envelope:
+
+```json
+{
+  "schemaVersion": "governance-graph-management-summary-export-v1",
+  "summarySchemaVersion": "governance-graph-management-summary-v1",
+  "snapshotFingerprint": "<sha256>",
+  "summaryFingerprint": "<sha256>",
+  "selectedPresetId": "protected_surfaces",
+  "summary": {},
+  "exportFingerprint": "<sha256>"
+}
+```
+
+Export must preserve source statuses and diagnostics. It must never omit `unknown`, `missing`, `stale` or
+`blocked` labels merely to make the management output look complete.
+
+## 9. Streamlit integration boundary
+
+The existing Agent Operations rendering receives an optional callback:
+
+```python
+management_summary_lookup(
+    run_id: str,
+    snapshot_fingerprint: str,
+    preset_id: str | None = None,
+) -> Mapping[str, Any]
+```
+
+Renderer requirements:
+
+- callback `None` → explicit `unavailable` message。
+- callback exceptions、schema mismatch、wrong snapshot、raw／secret／path fields → bounded `invalid` or
+  `unavailable` display without leaking payload。
+- UI accepts only exact public schema and canonical allowlists；it does not re-run aggregation。
+- selected preset／attention identity is bounded and cleared on run／snapshot mismatch。
+- UI does not create snapshot、catalog、trend source、export file path or management decision。
+- existing D-1～D-4 panels remain independently readable; E-4 failure must not turn them into PASS or
+  hide their diagnostics。
+
+No new FastAPI endpoint is required in E-4 v1. A future API may consume the same service contract only
+through a separately approved design.
+
+## 10. Local agent boundaries
+
+- Context Agent：只使用 `scripts/context_agent.py --collect-only`；輸出 compact bundle；不修改 spec、
+  source、runtime、SQLite、baseline 或 Git。
+- Review Agent：只讀 approved E-4 spec／plan、實際 diff 與 evidence；findings-first；不得修改檔案、
+  代替 Hermes 或作管理決策。
+- Hermes：只讀驗收 runtime、SQLite integrity、baseline、services、Git 與 E-4 artifacts；不得建立
+  summary、寫 export、修復 coverage 或呼叫 writer。
+- Implementation Agent（若另行批准）：一次只執行一個 allowlisted Task；不得 commit、merge、push、
+  啟停服務或修改正式資料。
+- Codex：負責 spec／plan、findings 修正、完整驗證、Hermes、final acceptance 與 integration。
+
+## 11. Testing and acceptance
+
+### 11.1 Required tests
+
+- Exact public keys、schema、status precedence、lowercase SHA-256 與 deterministic fingerprint。
+- Complete available inputs、single-side missing、unknown／blocked／stale／invalid isolation。
+- D-1～D-4、E-1、E-3 source fingerprint binding 與 wrong-snapshot rejection。
+- Protected／blocked／unknown attention mapping、dedupe、ordering 與 no-inference。
+- Coverage semantics：empty／missing 不得變成 complete 或 zero-risk。
+- Trend：zero／one／two comparable snapshots、reversed input order、schema mismatch、unknown coverage。
+- Preset exact filtering、bounded selection cleanup、refresh preservation 與 no write。
+- Export exact envelope、fingerprint、secret/path/raw payload rejection、browser download only。
+- Streamlit callback malformed／exception isolation；不得呼叫 CLI、subprocess、network、SQLite、
+  snapshot builder 或 writer。
+- Service、renderer、export serializer 前後 runtime／SQLite／Git／canonical artifact tree equality。
+
+### 11.2 Acceptance sequence
+
+```bash
+.venv/bin/python -m py_compile \
+  backend/agents/governance_graph_management_summary_models.py \
+  backend/agents/governance_graph_management_summary_service.py \
+  governance_graph_rendering.py \
+  agent_operations_rendering.py \
+  app_pages.py
+.venv/bin/python -m pytest \
+  tests/test_governance_graph_management_summary_models.py \
+  tests/test_governance_graph_management_summary_service.py \
+  tests/test_governance_graph_rendering.py \
+  tests/test_agent_operations_rendering.py -q
+.venv/bin/python -m pytest -q
+.venv/bin/python scripts/system_manager.py acceptance
+.venv/bin/python scripts/hermes_post_change_check.py
+```
+
+Completion requires Task-level TDD、strict Review PASS、full pytest PASS、system acceptance PASS、Hermes
+PASS、clean worktree，以及 proof that SQLite integrity、baseline `HKD 12,057,968`、正式口徑
+「不含掛賬核銷與TT退款轉團款」與 Graph snapshot writer boundary unchanged。
+
+## 12. Future compatibility
+
+Future versions may add explicitly approved management metrics、version comparison UI、risk trend
+visualization、owner/dependency drill-down or a FastAPI read endpoint only through a new schema/policy
+version. E-4 v1 remains a bounded observation and export layer; it cannot become an approval、dispatch、
+business target、risk acceptance or remediation engine.
