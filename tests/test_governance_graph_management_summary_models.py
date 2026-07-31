@@ -103,3 +103,9 @@ def test_attention_id_requires_source_identity_and_closed_drilldown_kind():
     }])
     with pytest.raises(ManagementSummaryModelError):
         validate_management_summary_payload(payload)
+
+
+def test_diagnostics_reject_unknown_code():
+    payload = _summary(diagnostics=[{"code": "free_form_error", "summary": "bad"}])
+    with pytest.raises(ManagementSummaryModelError):
+        validate_management_summary_payload(payload)

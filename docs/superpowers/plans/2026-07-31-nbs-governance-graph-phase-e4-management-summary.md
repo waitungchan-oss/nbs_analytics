@@ -20,7 +20,9 @@ Spec review fixes carried into this plan：
 - Trend envelope requires exact nested validated `summary`, exact `attentionCount`／`unknownCount`,
   and recomputed `summaryFingerprint` binding.
 - Preset selection is canonical session state `{presetId, snapshotFingerprint}` or `null`; export maps
-  it to `selectedPresetId` while preserving original summary provenance.
+  it to `selectedPresetId`, stores filtered-view `summaryFingerprint`, and preserves explicit
+  `originalSummaryFingerprint` provenance. Presets filter validated attention items only; coverage and
+  diagnostics remain complete provenance.
 - Invalid-source diagnostics use a closed code allowlist with exact `{code, summary}` keys and
   deterministic dedupe/order.
 

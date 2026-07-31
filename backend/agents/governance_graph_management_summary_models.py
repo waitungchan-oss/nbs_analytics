@@ -34,6 +34,12 @@ _ATTENTION_KEYS = {"attentionId", "severity", "category", "state", "summaryCode"
 _DRILLDOWN_KEYS = {"kind", "identity"}
 _SOURCE_REF_KEYS = {"kind", "identity", "fingerprint", "status"}
 _DIAGNOSTIC_KEYS = {"code", "summary"}
+_DIAGNOSTIC_CODES = {
+    "source_schema_invalid", "source_fingerprint_invalid", "source_snapshot_missing",
+    "source_snapshot_mismatch", "source_status_invalid", "source_binding_invalid",
+    "source_payload_forbidden", "trend_envelope_invalid", "trend_fingerprint_mismatch",
+    "preset_selection_invalid", "preset_snapshot_mismatch",
+}
 
 
 class ManagementSummaryModelError(ValueError):
@@ -83,7 +89,10 @@ def _diagnostics(value: Any) -> list[dict[str, str]]:
     result = []
     for item in value:
         record = _exact_mapping(item, _DIAGNOSTIC_KEYS, "diagnostic")
-        result.append({"code": _safe(record["code"], "diagnostic.code"), "summary": _safe(record["summary"], "diagnostic.summary")})
+        code = _safe(record["code"], "diagnostic.code")
+        if code not in _DIAGNOSTIC_CODES:
+            raise ManagementSummaryModelError("diagnostic.code is invalid")
+        result.append({"code": code, "summary": _safe(record["summary"], "diagnostic.summary")})
     return sorted({(item["code"], item["summary"]): item for item in result}.values(), key=lambda item: (item["code"], item["summary"]))
 
 

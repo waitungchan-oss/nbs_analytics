@@ -17,6 +17,33 @@ from .governance_graph_management_summary_models import fingerprint_management_s
 _PRECEDENCE = {"invalid": 0, "stale": 1, "blocked": 2, "unknown": 3, "missing": 4, "unavailable": 5, "partial": 6, "available": 7}
 
 
+def _coverage_diagnostic(source_kind: str, source: Mapping[str, Any] | None, coverage: SourceCoverage) -> dict[str, str] | None:
+    if coverage.diagnostics:
+        return None
+    if source is not None:
+        status = source.get("status")
+        if not isinstance(status, str) or status not in {"available", "partial", "unknown", "missing", "unavailable", "stale", "blocked", "invalid"}:
+            return {"code": "source_status_invalid", "summary": f"{source_kind}_status"}
+        schema = source.get("schemaVersion")
+        if schema is not None and not isinstance(schema, str):
+            return {"code": "source_schema_invalid", "summary": f"{source_kind}_schema"}
+        if any(key in source for key in ("path", "uri", "absolutePath", "rawPayload", "raw_payload", "secret", "command", "stdout", "stderr")):
+            return {"code": "source_payload_forbidden", "summary": f"{source_kind}_payload"}
+        for key in ("snapshotFingerprint", "comparisonFingerprint", "riskSummaryFingerprint", "impactSummaryFingerprint", "lineageFingerprint", "readModelFingerprint"):
+            if key in source and source[key] is not None and (not isinstance(source[key], str) or len(source[key]) != 64 or any(char not in "0123456789abcdef" for char in source[key])):
+                return {"code": "source_fingerprint_invalid", "summary": f"{source_kind}_{key}"}
+    mapping = {
+        "invalid": "source_schema_invalid",
+        "stale": "source_snapshot_mismatch",
+        "missing": "source_snapshot_missing",
+        "unknown": "source_binding_invalid",
+    }
+    code = mapping.get(coverage.status)
+    if code is None:
+        return None
+    return {"code": code, "summary": f"{source_kind}_{coverage.status}"}
+
+
 class GovernanceGraphManagementSummaryService:
     @staticmethod
     def build_trend(snapshots: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -71,8 +98,16 @@ class GovernanceGraphManagementSummaryService:
             "owner_dependency_gaps": lambda item: item.get("category") == "catalog_coverage_gap",
             "recent_changes": lambda item: item.get("category") in {"implementation_governance", "verification_assurance"},
         }
-        projected = dict(summary)
+        from copy import deepcopy
+
+        projected = deepcopy(dict(summary))
         projected["attentionItems"] = [item for item in summary.get("attentionItems", []) if predicates[preset_id](item)]
+        projected["headline"] = deepcopy(summary["headline"])
+        projected["headline"]["protectedCount"] = sum(item["category"] == "protected_governance_surface" for item in projected["attentionItems"])
+        projected["headline"]["blockedCount"] = sum(item["state"] == "blocked" for item in projected["attentionItems"])
+        projected["headline"]["unknownCount"] = sum(item["state"] == "unknown" for item in projected["attentionItems"])
+        projected["summaryFingerprint"] = fingerprint_management_summary(projected)
+        validate_management_summary_payload(projected)
         return {"selectedPresetId": preset_id, "summary": projected}
     @staticmethod
     def compose(*, snapshot_fingerprint: str, query: Mapping[str, Any] | None, comparison: Mapping[str, Any] | None, risk: Mapping[str, Any] | None, impact: Mapping[str, Any] | None, lineage: Mapping[str, Any] | None, catalog: Mapping[str, Any] | None, trend_snapshots: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
@@ -88,6 +123,17 @@ class GovernanceGraphManagementSummaryService:
             coverages["risk"] = SourceCoverage("stale")
         if impact and risk and (impact.get("riskSummaryFingerprint") != risk.get("riskSummaryFingerprint") or impact.get("comparisonFingerprint") != (comparison or {}).get("comparisonFingerprint")):
             coverages["impact"] = SourceCoverage("stale")
+        diagnostics: list[dict[str, str]] = []
+        sources = {"query": query, "comparison": comparison, "risk": risk, "impact": impact, "lineage": lineage, "catalog": catalog}
+        for source_kind, coverage in coverages.items():
+            diagnostics.extend(dict(item) for item in coverage.diagnostics)
+            fallback = _coverage_diagnostic(source_kind, sources[source_kind], coverage)
+            if fallback is not None:
+                diagnostics.append(fallback)
+        trend = GovernanceGraphManagementSummaryService.build_trend(trend_snapshots)
+        if trend["status"] == "invalid":
+            diagnostics.append({"code": "trend_envelope_invalid", "summary": trend["basis"]})
+        diagnostics = sorted({(item["code"], item["summary"]): item for item in diagnostics}.values(), key=lambda item: (item["code"], item["summary"]))
         required = [coverages[key] for key in ("comparison", "risk", "impact", "lineage", "catalog")]
         status_inputs = required + ([coverages["query"]] if coverages["query"].status != "unavailable" else [])
         status = min((item.status for item in status_inputs), key=lambda value: _PRECEDENCE.get(value, 0))
@@ -142,7 +188,7 @@ class GovernanceGraphManagementSummaryService:
                 severity = item.get("riskLevel", "unknown") if item.get("riskLevel") in {"R2", "R1", "R0", "unknown"} else "unknown"
                 attention.append({"attentionId": f"{category}:{kind}:{drill_identity}:{state}:{identity}", "severity": severity, "category": category, "state": state, "summaryCode": item.get("rationaleCode", "impact_signal"), "sourceRefs": [], "drillDown": {"kind": kind, "identity": drill_identity}})
         required_available = all(item.status == "available" for item in required)
-        summary = {"schemaVersion": "governance-graph-management-summary-v1", "managementPolicyVersion": "e4-management-summary-v1", "status": status, "snapshotFingerprint": snapshot_fingerprint, "summaryFingerprint": "0" * 64, "overallRiskLevel": overall_risk if required_available else "unknown", "headline": {"attentionStatus": "attention" if attention else ("clear" if required_available else "unknown"), "protectedCount": sum(item["category"] == "protected_governance_surface" for item in attention) + sum(item.get("category") == "protected_governance_surface" for item in impact_records), "blockedCount": sum(item["state"] == "blocked" for item in attention) + impact_blocked, "unknownCount": sum(item.status in {"unknown", "missing", "stale", "blocked"} for item in coverages.values()), "evidenceCoverage": coverages["lineage"].status, "ownerCoverage": coverages["catalog"].status, "dependencyCoverage": coverages["catalog"].status}, "risk": {"status": risk_status if risk_valid else coverages["risk"].status, "overallRiskLevel": overall_risk if required_available else "unknown", "findingCount": len(findings), "levels": levels, "sourceRef": {"kind": "d3_risk_summary", "identity": "risk-summary", "fingerprint": risk_fp, "status": risk_status} if risk_valid else None}, "impact": {"status": impact_status, "observedCount": len(impact_records), "blockedCount": impact_blocked, "unknownCount": impact_unknown, "categories": categories, "sourceRef": {"kind": "d4_change_impact", "identity": "impact-summary", "fingerprint": impact_fp, "status": impact_status} if impact_valid else None}, "coverage": {key: item.status for key, item in coverages.items()}, "attentionItems": attention, "trend": GovernanceGraphManagementSummaryService.build_trend(trend_snapshots), "presets": [{"presetId": value, "labelCode": value, "available": any((value == "protected_surfaces" and item["category"] == "protected_governance_surface") or (value == "blocked_verification" and item["state"] == "blocked") or (value == "unknown_coverage" and item["state"] == "unknown") for item in attention) or (value == "owner_dependency_gaps" and coverages["catalog"].status in {"missing", "unknown", "partial"}) or (value == "recent_changes" and coverages["comparison"].status == "available" and bool(comparison and comparison.get("nodeChanges"))),} for value in ("protected_surfaces", "blocked_verification", "unknown_coverage", "owner_dependency_gaps", "recent_changes")], "diagnostics": [], "sourceRefs": []}
+        summary = {"schemaVersion": "governance-graph-management-summary-v1", "managementPolicyVersion": "e4-management-summary-v1", "status": status, "snapshotFingerprint": snapshot_fingerprint, "summaryFingerprint": "0" * 64, "overallRiskLevel": overall_risk if required_available else "unknown", "headline": {"attentionStatus": "attention" if attention else ("clear" if required_available else "unknown"), "protectedCount": sum(item["category"] == "protected_governance_surface" for item in attention) + sum(item.get("category") == "protected_governance_surface" for item in impact_records), "blockedCount": sum(item["state"] == "blocked" for item in attention) + impact_blocked, "unknownCount": sum(item.status in {"unknown", "missing", "stale", "blocked"} for item in coverages.values()), "evidenceCoverage": coverages["lineage"].status, "ownerCoverage": coverages["catalog"].status, "dependencyCoverage": coverages["catalog"].status}, "risk": {"status": risk_status if risk_valid else coverages["risk"].status, "overallRiskLevel": overall_risk if required_available else "unknown", "findingCount": len(findings), "levels": levels, "sourceRef": {"kind": "d3_risk_summary", "identity": "risk-summary", "fingerprint": risk_fp, "status": risk_status} if risk_valid else None}, "impact": {"status": impact_status, "observedCount": len(impact_records), "blockedCount": impact_blocked, "unknownCount": impact_unknown, "categories": categories, "sourceRef": {"kind": "d4_change_impact", "identity": "impact-summary", "fingerprint": impact_fp, "status": impact_status} if impact_valid else None}, "coverage": {key: item.status for key, item in coverages.items()}, "attentionItems": attention, "trend": trend, "presets": [{"presetId": value, "labelCode": value, "available": any((value == "protected_surfaces" and item["category"] == "protected_governance_surface") or (value == "blocked_verification" and item["state"] == "blocked") or (value == "unknown_coverage" and item["state"] == "unknown") for item in attention) or (value == "owner_dependency_gaps" and coverages["catalog"].status in {"missing", "unknown", "partial"}) or (value == "recent_changes" and coverages["comparison"].status == "available" and bool(comparison and comparison.get("nodeChanges"))),} for value in ("protected_surfaces", "blocked_verification", "unknown_coverage", "owner_dependency_gaps", "recent_changes")], "diagnostics": diagnostics, "sourceRefs": []}
         summary["summaryFingerprint"] = fingerprint_management_summary(summary)
         validate_management_summary_payload(summary)
         return summary

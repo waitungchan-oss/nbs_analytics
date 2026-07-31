@@ -386,7 +386,9 @@ match is `available=false` and does not mean zero risk. The canonical UI selecti
 `null` or the exact bounded object `{presetId, snapshotFingerprint}`. The selection is session-scoped,
 must match the currently selected snapshot, and is cleared on run／snapshot mismatch or invalid preset.
 The export maps this state to `selectedPresetId` (a string or `null`) and preserves the original
-`summaryFingerprint`; it does not serialize the session selection object. A preset export contains the
+summary provenance; it does not serialize the session selection object. A preset is a bounded attention
+view: it filters only validated `attentionItems`; coverage, source references and diagnostics remain
+complete provenance, and no absent D-2 raw change record is inferred. A preset export contains the
 filtered view plus original summary provenance, and computes a new `exportFingerprint`. No preset is an
 approval, dispatch, export-write, repair or writer action.
 
@@ -464,12 +466,16 @@ Required envelope:
   "managementPolicyVersion": "e4-management-summary-v1",
   "snapshotFingerprint": "<sha256>",
   "summaryFingerprint": "<sha256>",
+  "originalSummaryFingerprint": "<sha256>",
   "selectedPresetId": "protected_surfaces",
   "summary": {},
   "exportFingerprint": "<sha256>"
 }
 ```
 
+`summaryFingerprint` identifies the filtered summary embedded in this export.
+`originalSummaryFingerprint` identifies the unfiltered composed summary supplied by the caller. When no
+preset is selected, the two fingerprints are equal; when a preset is selected, they are expected to differ.
 Export must preserve source statuses and diagnostics. It must never omit `unknown`, `missing`, `stale` or
 `blocked` labels merely to make the management output look complete.
 
