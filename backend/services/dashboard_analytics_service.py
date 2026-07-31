@@ -12,7 +12,13 @@ PRODUCT_COLUMNS = ("旅行團", "郵輪", "票務")
 
 def _filtered(frame: pd.DataFrame, filters: dict, text_filter: str, all_value: str) -> pd.DataFrame:
     if frame.empty:
-        return frame.copy()
+        empty = frame.copy()
+        for column in PRODUCT_COLUMNS:
+            if column not in empty.columns:
+                empty[column] = pd.Series(dtype=float)
+        empty["_date"] = pd.Series(dtype="datetime64[ns]")
+        empty["_total"] = pd.Series(dtype=float)
+        return empty
     work = frame.copy()
     dates = pd.to_datetime(work.get("日期"), errors="coerce")
     mask = pd.Series(True, index=work.index)
