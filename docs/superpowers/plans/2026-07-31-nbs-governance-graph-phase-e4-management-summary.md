@@ -10,10 +10,17 @@
 
 ## Plan Reconciliation（2026-07-31）
 
-狀態：Implementation 尚未開始；E-4 Design Spec 已完成 findings-first review 與補強。Observation-only
-邊界已確認；下一步依本 plan 建立 implementation branch，逐 Task 執行 TDD、strict Review、full
-verification、system acceptance 與 Hermes。E-4 不建立 Graph snapshot、不新增 approval／risk decision／
-workflow control，亦不讀寫 SQLite、baseline 或 canonical artifacts。
+狀態：Implementation completed；Task 1–5 已完成 TDD、strict Review、full verification、system
+acceptance 與 Hermes。Observation-only 邊界已確認；E-4 不建立 Graph snapshot、不新增 approval／
+risk decision／workflow control，亦不讀寫 SQLite、baseline 或 canonical artifacts。
+
+| Task | Status | Evidence |
+|---|---|---|
+| Task 1 — public models／strict validation | completed | `029370e`；model tests、strict Review PASS |
+| Task 2 — source adapters／deterministic aggregation | completed | `4acaaa7`；adapter/service tests、strict Review PASS |
+| Task 3 — trend／preset／export | completed | `8eb6c3f`、`fca8266`；targeted tests、strict Review PASS |
+| Task 4 — Agent Operations rendering | completed | `07ba831`；UI/boundary tests、strict Review PASS |
+| Task 5 — final boundary／acceptance | completed | `2e0b37b`、`fca8266`；full pytest 1413 passed、system acceptance PASS、Hermes PASS |
 
 Spec review fixes carried into this plan：
 
