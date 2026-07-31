@@ -103,15 +103,18 @@ schema、status、fingerprint 與 snapshot binding 的二次檢查：
 |---|---|---|
 | D-1 query | `governance-graph-query-v1` | `runId`、query fingerprint 或明確 query identity、selected snapshot fingerprint |
 | D-2 comparison | `governance-graph-comparison-v1` | `leftReference`、`rightReference`、comparison fingerprint；兩側 references 必須是 caller 明確提供的 immutable identities |
-| D-3 risk | `governance-graph-risk-summary-v1` | `comparisonFingerprint`、risk summary fingerprint、comparison status |
-| D-4 impact | `governance-graph-change-impact-v1` | `comparisonFingerprint`、`riskSummaryFingerprint`、impact summary fingerprint |
+| D-3 risk | `governance-graph-risk-summary-v1` | `comparisonFingerprint`、risk summary fingerprint、comparison status；透過 comparison 的 selected right reference 綁定 snapshot |
+| D-4 impact | `governance-graph-change-impact-v1` | `comparisonFingerprint`、`riskSummaryFingerprint`、impact summary fingerprint；透過 D-3 → comparison 的 selected right reference 綁定 snapshot |
 | E-1 lineage | `governance-graph-evidence-lineage-v1` | `runId`、`snapshotFingerprint`、lineage fingerprint |
 | E-3 catalog | `governance-graph-owner-dependency-read-v1` | `snapshotFingerprint`、read-model fingerprint（available 時） |
 
 Source reference `kind` 使用 closed allowlist：`d1_query`、`d2_comparison`、`d3_risk_summary`、
 `d4_change_impact`、`e1_evidence_lineage`、`e3_owner_dependency_catalog`。不接受近似 kind、自由
-文字或未列入本表的 schema。`snapshotFingerprint` 必須與 compose 的 selected fingerprint 相同；
-缺少必要 binding 為 `unknown`，不同 binding 為 `stale`，schema／fingerprint／exact-key 失敗為
+文字或未列入本表的 schema。Compose 的 `snapshot_fingerprint` 明確代表 D-2 `rightReference.snapshotFingerprint`；
+D-2 的 `leftReference` 仍保留為比較來源，但不會被當作 summary 的 selected snapshot。D-3 必須透過其
+`comparisonFingerprint` 指向同一個 D-2 comparison，D-4 必須同時通過 D-3 → D-2 的傳遞鏈；E-1
+與 E-3 的 `snapshotFingerprint` 必須直接等於 selected right snapshot。缺少必要 binding 為 `unknown`，
+不同 binding 為 `stale`，schema／fingerprint／exact-key 失敗為
 `invalid`。一側 invalid 不得污染另一側的 validated fields，但 overall status 仍依 §5.1 precedence
 聚合。
 
@@ -168,8 +171,10 @@ Aggregation is field-preserving and fail-closed:
 
 1. Parse and validate each source independently.
 2. Retain only the valid source's bounded fields and source reference；discard invalid source payloads。
-3. Compute overall status using the precedence in §5.1 across all supplied sources, with `invalid` and
-   `stale` taking precedence over lower-confidence states。
+3. Compute overall status using the precedence in §5.1 across all required sources and any supplied
+   optional source that is not `unavailable`; an omitted or `unavailable` optional D-1 query is excluded
+   from overall status and only reported in query coverage。`invalid` and `stale` take precedence over
+   lower-confidence states。
 4. Build attention items only from validated source records; an invalid／unavailable source contributes
    diagnostics and coverage, never inferred findings。
 5. `overallRiskLevel` is `unknown` whenever risk is missing／unknown／blocked without a safe level, or
@@ -178,6 +183,16 @@ Aggregation is field-preserving and fail-closed:
 Thus a valid D-3 finding remains visible when E-1 is missing, but the headline remains `unknown` and the
 evidence coverage records the gap. A D-3 invalid payload never produces risk findings, even when D-2 is
 available.
+
+Coverage mapping is closed and source-driven. For every source, `available` means the source envelope is
+valid and its own `coverageStatus` is `complete`; `partial` means the envelope is valid and
+`coverageStatus` is `partial`; `unknown` means the envelope is valid but `coverageStatus` is `unknown`,
+`blocked` or `stale`; `missing` means the required envelope is absent. The only accepted source
+`coverageStatus` values are `complete`, `partial`, `unknown`, `blocked`, `stale`, and `missing`.
+E-4 does not calculate thresholds or treat an empty record list as complete. `comparison`, `risk`, and
+`impact` map directly to D-2/D-3/D-4 coverage; `lineage` maps from E-1; `catalog` maps from E-3; `query`
+maps from optional D-1 and may be `unavailable` without lowering required-source status. Required
+coverage is sufficient only when comparison, risk, impact, lineage, and catalog are all `available`.
 
 ## 5. Public output contract
 
@@ -225,7 +240,7 @@ Schema：`governance-graph-management-summary-v1`
   },
   "attentionItems": [
     {
-      "attentionId": "D3-PROTECTED-SURFACE:node:protected_incident:changed",
+      "attentionId": "protected_governance_surface:node:protected_incident:observed:D3-PROTECTED-SURFACE",
       "severity": "R2",
       "category": "protected_governance_surface",
       "state": "observed",
@@ -323,10 +338,11 @@ The allowed attention categories are exactly `protected_governance_surface`、`v
 state is exactly `observed`、`blocked` or `unknown`。Drill-down `kind` is closed to `node`、`edge`、
 `evidence`、`finding`、`impact`、`owner`、`dependency`；identity must be a bounded safe identifier.
 Unknown source rule／category／identity is `invalid`; approximate matching is forbidden. `attentionId`
-is the canonical tuple `category:kind:identity:state`, with source finding／impact identity included when
-the source provides it. `sourceRefs` are deduplicated by `(kind, identity, fingerprint)` and sorted by
-`(kind, identity, fingerprint)`. Attention items are sorted by `(severity priority, state priority,
-attentionId)`.
+is always the canonical tuple `category:kind:identity:state:sourceIdentity`; when the source does not
+expose a finding／impact identity, `sourceIdentity` is the literal `none`. Two records with the same tuple
+are exact duplicates and are deduplicated; the same tuple with different payload is `invalid`. `sourceRefs`
+are deduplicated by `(kind, identity, fingerprint)` and sorted by `(kind, identity, fingerprint)`. Attention
+items are sorted by `(severity priority, state priority, attentionId)`.
 
 ### 6.2 Preset semantics
 
@@ -460,7 +476,9 @@ through a separately approved design.
 - D-1～D-4、E-1、E-3 source fingerprint binding 與 wrong-snapshot rejection。
 - Protected／blocked／unknown attention mapping、dedupe、ordering 與 no-inference。
 - Coverage semantics：empty／missing 不得變成 complete 或 zero-risk。
-- Trend：zero／one／two comparable snapshots、reversed input order、schema mismatch、unknown coverage。
+- Trend：zero／one／two comparable snapshots、reversed input order（輸出 observation 順序與
+  first/last `changedDimensions` 必須按 caller 順序相應改變，不得被 service 自動排序）、schema
+  mismatch、unknown coverage。
 - Trend：same-family/policy comparability、duplicate fingerprint rejection、first/last comparison and
   explicit preservation of caller order。
 - Preset exact filtering、bounded selection cleanup、refresh preservation 與 no write。
