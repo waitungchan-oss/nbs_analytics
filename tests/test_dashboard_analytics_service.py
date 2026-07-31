@@ -76,3 +76,22 @@ def test_product_drilldown_reconciles_each_channel():
     assert {row["product"] for row in branch_products} == {"旅行團", "郵輪", "票務"}
     assert round(sum(row["sharePct"] for row in branch_products), 1) == 100.0
 
+
+def test_empty_fact_frames_keep_analytics_schema_instead_of_raising_missing_date():
+    payload = dashboard_analytics_service.build_analytics_from_facts(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        {
+            "years": [2026],
+            "months": ["2026-06"],
+            "dateRange": ["2026-06-01", "2026-06-30"],
+            "branch": "全部分社",
+            "salesGroup": "全部銷售組",
+        },
+    )
+
+    assert payload["annualSummary"] == []
+    assert payload["monthlyTrend"] == []
+    assert payload["branchRanking"] == []
+    assert payload["specialistRanking"] == []
+    assert payload["reconciliation"]["status"] == "matched"
