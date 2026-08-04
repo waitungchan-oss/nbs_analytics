@@ -57,7 +57,7 @@ class CodexDocumentationRunner:
             return self._failure(started, "invalid codex documentation input")
 
         command = (
-            "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+            "codex", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
             "--ephemeral", "--ignore-user-config", CODEX_DOCUMENTATION_INSTRUCTION,
         )
         codex_home = self.project_root / ".nbs_agent_runtime" / "codex_home"

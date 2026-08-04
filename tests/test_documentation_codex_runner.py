@@ -69,7 +69,10 @@ def test_runner_passes_evidence_only_and_rejects_non_json(tmp_path):
 
     assert process.stdin_payload.decode() == _evidence()
     assert result.exit_code != 0
-    assert fake_subprocess.argv[:4] == ("codex", "exec", "--sandbox", "read-only")
+    assert fake_subprocess.argv[:5] == ("codex", "exec", "--json", "--sandbox", "read-only")
+    assert "--json" in fake_subprocess.argv
+    assert "--ephemeral" in fake_subprocess.argv
+    assert "--ignore-user-config" in fake_subprocess.argv
     assert CODEX_DOCUMENTATION_INSTRUCTION in fake_subprocess.argv
 
 
