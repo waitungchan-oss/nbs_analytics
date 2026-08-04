@@ -182,7 +182,7 @@ def test_runner_caps_stdout_and_stderr_without_persisting_command_or_paths(tmp_p
         input_text=_evidence(), timeout_seconds=120, max_output_bytes=64,
     )
 
-    assert len(result.stdout.encode()) == 65
+    assert len(result.stdout.encode()) == 64
     assert len(result.stderr_tail.encode()) <= 4096
     assert "/private/vault" not in " ".join(fake_subprocess.argv)
     assert "secret" not in " ".join(fake_subprocess.argv)
