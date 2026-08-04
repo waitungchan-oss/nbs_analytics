@@ -89,6 +89,20 @@ def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
     assert json.loads(result.stdout) == json.loads(_draft())
 
 
+def test_runner_uses_explicit_local_auth_home_without_serializing_it(tmp_path, monkeypatch):
+    auth_home = tmp_path / "codex-auth"
+    monkeypatch.setenv("NBS_DOCUMENTATION_CODEX_HOME", str(auth_home))
+    process = FakeProcess(stdout=_draft().encode())
+    fake_subprocess = FakeSubprocess(process)
+    result = CodexDocumentationRunner(fake_subprocess, project_root=tmp_path).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
+    )
+
+    assert result.exit_code == 0
+    assert fake_subprocess.kwargs["env"]["CODEX_HOME"] == str(auth_home.resolve())
+    assert str(auth_home) not in " ".join(fake_subprocess.argv)
+
+
 def test_runner_extracts_final_agent_message_from_codex_jsonl():
     stream = json.dumps({"type": "thread.started"}) + "\n" + json.dumps({
         "type": "item.completed",

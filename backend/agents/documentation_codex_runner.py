@@ -61,7 +61,8 @@ class CodexDocumentationRunner:
             "codex", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
             "--ephemeral", "--ignore-user-config", CODEX_DOCUMENTATION_INSTRUCTION,
         )
-        codex_home = self.project_root / ".nbs_agent_runtime" / "codex_home"
+        configured_home = os.environ.get("NBS_DOCUMENTATION_CODEX_HOME")
+        codex_home = Path(configured_home).expanduser().resolve() if configured_home else self.project_root / ".nbs_agent_runtime" / "codex_home"
         codex_home.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env["CODEX_HOME"] = str(codex_home)
