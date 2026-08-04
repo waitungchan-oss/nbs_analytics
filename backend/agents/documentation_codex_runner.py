@@ -87,7 +87,7 @@ class CodexDocumentationRunner:
         output = self._extract_agent_message(output)
         if len(output.encode("utf-8")) > max_output_bytes or not self._valid_draft(output, evidence):
             return DocumentationRunnerResult(
-                -2, output[: max_output_bytes + 1], stderr.decode("utf-8", errors="replace"), self._duration(started),
+                -2, self._bounded_text(output, max_output_bytes), stderr.decode("utf-8", errors="replace"), self._duration(started),
             )
         # A valid, fingerprint-bound draft is the contract boundary; CLI warnings
         # must not discard an otherwise safe structured result.
@@ -131,6 +131,11 @@ class CodexDocumentationRunner:
                 if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                     return item["text"]
         return output
+
+    @staticmethod
+    def _bounded_text(value: str, max_bytes: int) -> str:
+        raw = value.encode("utf-8")[: max_bytes + 1]
+        return raw.decode("utf-8", errors="ignore")
 
     @staticmethod
     def _duration(started: float) -> int:

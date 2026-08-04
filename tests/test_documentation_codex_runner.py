@@ -188,6 +188,16 @@ def test_runner_caps_stdout_and_stderr_without_persisting_command_or_paths(tmp_p
     assert "secret" not in " ".join(fake_subprocess.argv)
 
 
+def test_runner_caps_invalid_multibyte_output_by_utf8_bytes():
+    process = FakeProcess(stdout=("摘要" * 100).encode("utf-8"))
+    result = CodexDocumentationRunner(FakeSubprocess(process)).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=16,
+    )
+
+    assert result.exit_code == -2
+    assert len(result.stdout.encode("utf-8")) <= 17
+
+
 def test_runner_timeout_kills_process_and_returns_bounded_failure():
     process = FakeProcess(timeout=True)
     fake_subprocess = FakeSubprocess(process)
