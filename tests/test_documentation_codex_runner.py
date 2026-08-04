@@ -74,6 +74,7 @@ def test_runner_passes_evidence_only_and_rejects_non_json(tmp_path):
     assert "--ephemeral" in fake_subprocess.argv
     assert "--ignore-user-config" in fake_subprocess.argv
     assert CODEX_DOCUMENTATION_INSTRUCTION in fake_subprocess.argv
+    assert "final agent message" in CODEX_DOCUMENTATION_INSTRUCTION
 
 
 def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():

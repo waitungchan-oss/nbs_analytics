@@ -18,6 +18,7 @@ CODEX_DOCUMENTATION_INSTRUCTION = (
     "Each proposals item must contain only targetKind and content. Do not emit target paths, "
     "operations, hashes, evidence, proposal fingerprints, vault paths, or any other keys. "
     "The evidence includes a requiredTargets array; emit exactly those target kinds. "
+    "The process may emit JSONL events; the final agent message must contain only this object. "
     "Do not use tools, access files, "
     "network, Git, SQLite, or a vault. Do not include markdown fences, commentary, or any "
     "other output."
