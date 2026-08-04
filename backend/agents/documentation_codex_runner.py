@@ -82,12 +82,12 @@ class CodexDocumentationRunner:
 
         stdout = bytes(stdout or b"")
         stderr = bytes(stderr or b"")[-_STDERR_TAIL_BYTES:]
-        bounded_stdout = stdout[: max_output_bytes + 1]
-        output = bounded_stdout.decode("utf-8", errors="replace")
+        raw_output = stdout.decode("utf-8", errors="replace")
+        output = raw_output
         output = self._extract_agent_message(output)
-        if len(bounded_stdout) > max_output_bytes or not self._valid_draft(output, evidence):
+        if len(output.encode("utf-8")) > max_output_bytes or not self._valid_draft(output, evidence):
             return DocumentationRunnerResult(
-                -2, output, stderr.decode("utf-8", errors="replace"), self._duration(started),
+                -2, output[: max_output_bytes + 1], stderr.decode("utf-8", errors="replace"), self._duration(started),
             )
         # A valid, fingerprint-bound draft is the contract boundary; CLI warnings
         # must not discard an otherwise safe structured result.
