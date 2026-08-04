@@ -88,6 +88,20 @@ def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
     assert json.loads(result.stdout) == json.loads(_draft())
 
 
+def test_runner_extracts_final_agent_message_from_codex_jsonl():
+    stream = json.dumps({"type": "thread.started"}) + "\n" + json.dumps({
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": _draft()},
+    })
+    process = FakeProcess(stdout=stream.encode())
+    result = CodexDocumentationRunner(FakeSubprocess(process)).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == json.loads(_draft())
+
+
 def test_runner_accepts_valid_draft_when_cli_has_nonzero_exit():
     process = FakeProcess(stdout=_draft().encode(), returncode=1)
     fake_subprocess = FakeSubprocess(process)

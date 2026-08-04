@@ -84,6 +84,7 @@ class CodexDocumentationRunner:
         stderr = bytes(stderr or b"")[-_STDERR_TAIL_BYTES:]
         bounded_stdout = stdout[: max_output_bytes + 1]
         output = bounded_stdout.decode("utf-8", errors="replace")
+        output = self._extract_agent_message(output)
         if len(bounded_stdout) > max_output_bytes or not self._valid_draft(output, evidence):
             return DocumentationRunnerResult(
                 -2, output, stderr.decode("utf-8", errors="replace"), self._duration(started),
@@ -111,6 +112,25 @@ class CodexDocumentationRunner:
         except (TypeError, json.JSONDecodeError, DocumentationSchemaError):
             return False
         return draft.evidence_fingerprint == evidence["evidenceFingerprint"]
+
+    @staticmethod
+    def _extract_agent_message(output: str) -> str:
+        """Convert Codex JSONL events to the final structured message."""
+        try:
+            if isinstance(json.loads(output), dict):
+                return output
+        except json.JSONDecodeError:
+            pass
+        for line in reversed(output.splitlines()):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") if isinstance(event, dict) else None
+            if event.get("type") == "item.completed" and isinstance(item, dict):
+                if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                    return item["text"]
+        return output
 
     @staticmethod
     def _duration(started: float) -> int:

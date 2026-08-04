@@ -171,12 +171,35 @@ class SubprocessAgentRunner:
                 f"Agent command failed with exit {completed.returncode}: {completed.stderr[:1000]}"
             )
         try:
-            result = json.loads(completed.stdout)
+            result = _decode_json_or_codex_event_stream(completed.stdout)
         except json.JSONDecodeError as exc:
             raise ValueError("Agent output is not valid JSON") from exc
         if not isinstance(result, dict):
             raise ValueError("Agent output must be a JSON object")
         return result
+
+
+def _decode_json_or_codex_event_stream(output: str) -> dict:
+    """Accept plain JSON and the final agent_message from `codex exec --json`."""
+    try:
+        value = json.loads(output)
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        pass
+    for line in reversed(output.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if event.get("type") == "item.completed" and isinstance(item, dict):
+            text = item.get("text")
+            if item.get("type") == "agent_message" and isinstance(text, str):
+                value = json.loads(text)
+                if isinstance(value, dict):
+                    return value
+    raise json.JSONDecodeError("Agent output is not valid JSON", output, 0)
 
 
 class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
