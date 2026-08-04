@@ -195,7 +195,7 @@ def test_runner_caps_invalid_multibyte_output_by_utf8_bytes():
     )
 
     assert result.exit_code == -2
-    assert len(result.stdout.encode("utf-8")) <= 17
+    assert len(result.stdout.encode("utf-8")) <= 16
 
 
 def test_runner_timeout_kills_process_and_returns_bounded_failure():

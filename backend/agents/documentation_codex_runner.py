@@ -134,7 +134,7 @@ class CodexDocumentationRunner:
 
     @staticmethod
     def _bounded_text(value: str, max_bytes: int) -> str:
-        raw = value.encode("utf-8")[: max_bytes + 1]
+        raw = value.encode("utf-8")[:max_bytes]
         return raw.decode("utf-8", errors="ignore")
 
     @staticmethod
