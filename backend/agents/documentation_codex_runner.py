@@ -18,6 +18,7 @@ CODEX_DOCUMENTATION_INSTRUCTION = (
     "Each proposals item must contain only targetKind and content. Do not emit target paths, "
     "operations, hashes, evidence, proposal fingerprints, vault paths, or any other keys. "
     "The evidence includes a requiredTargets array; emit exactly those target kinds. "
+    "The process may emit JSONL events; the final agent message must contain only this object. "
     "Do not use tools, access files, "
     "network, Git, SQLite, or a vault. Do not include markdown fences, commentary, or any "
     "other output."
@@ -57,10 +58,11 @@ class CodexDocumentationRunner:
             return self._failure(started, "invalid codex documentation input")
 
         command = (
-            "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+            "codex", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
             "--ephemeral", "--ignore-user-config", CODEX_DOCUMENTATION_INSTRUCTION,
         )
-        codex_home = self.project_root / ".nbs_agent_runtime" / "codex_home"
+        configured_home = os.environ.get("NBS_DOCUMENTATION_CODEX_HOME")
+        codex_home = Path(configured_home).expanduser().resolve() if configured_home else self.project_root / ".nbs_agent_runtime" / "codex_home"
         codex_home.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env["CODEX_HOME"] = str(codex_home)
@@ -82,11 +84,12 @@ class CodexDocumentationRunner:
 
         stdout = bytes(stdout or b"")
         stderr = bytes(stderr or b"")[-_STDERR_TAIL_BYTES:]
-        bounded_stdout = stdout[: max_output_bytes + 1]
-        output = bounded_stdout.decode("utf-8", errors="replace")
-        if len(bounded_stdout) > max_output_bytes or not self._valid_draft(output, evidence):
+        raw_output = stdout.decode("utf-8", errors="replace")
+        output = raw_output
+        output = self._extract_agent_message(output)
+        if len(output.encode("utf-8")) > max_output_bytes or not self._valid_draft(output, evidence):
             return DocumentationRunnerResult(
-                -2, output, stderr.decode("utf-8", errors="replace"), self._duration(started),
+                -2, self._bounded_text(output, max_output_bytes), stderr.decode("utf-8", errors="replace"), self._duration(started),
             )
         # A valid, fingerprint-bound draft is the contract boundary; CLI warnings
         # must not discard an otherwise safe structured result.
@@ -111,6 +114,30 @@ class CodexDocumentationRunner:
         except (TypeError, json.JSONDecodeError, DocumentationSchemaError):
             return False
         return draft.evidence_fingerprint == evidence["evidenceFingerprint"]
+
+    @staticmethod
+    def _extract_agent_message(output: str) -> str:
+        """Convert Codex JSONL events to the final structured message."""
+        try:
+            if isinstance(json.loads(output), dict):
+                return output
+        except json.JSONDecodeError:
+            pass
+        for line in reversed(output.splitlines()):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") if isinstance(event, dict) else None
+            if event.get("type") == "item.completed" and isinstance(item, dict):
+                if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                    return item["text"]
+        return output
+
+    @staticmethod
+    def _bounded_text(value: str, max_bytes: int) -> str:
+        raw = value.encode("utf-8")[:max_bytes]
+        return raw.decode("utf-8", errors="ignore")
 
     @staticmethod
     def _duration(started: float) -> int:

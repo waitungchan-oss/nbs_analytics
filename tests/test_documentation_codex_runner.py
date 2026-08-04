@@ -69,8 +69,12 @@ def test_runner_passes_evidence_only_and_rejects_non_json(tmp_path):
 
     assert process.stdin_payload.decode() == _evidence()
     assert result.exit_code != 0
-    assert fake_subprocess.argv[:4] == ("codex", "exec", "--sandbox", "read-only")
+    assert fake_subprocess.argv[:5] == ("codex", "exec", "--json", "--sandbox", "read-only")
+    assert "--json" in fake_subprocess.argv
+    assert "--ephemeral" in fake_subprocess.argv
+    assert "--ignore-user-config" in fake_subprocess.argv
     assert CODEX_DOCUMENTATION_INSTRUCTION in fake_subprocess.argv
+    assert "final agent message" in CODEX_DOCUMENTATION_INSTRUCTION
 
 
 def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
@@ -83,6 +87,47 @@ def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
     assert result.exit_code == 0
     assert fake_subprocess.kwargs["env"]["CODEX_HOME"].endswith(".nbs_agent_runtime/codex_home")
     assert json.loads(result.stdout) == json.loads(_draft())
+
+
+def test_runner_uses_explicit_local_auth_home_without_serializing_it(tmp_path, monkeypatch):
+    auth_home = tmp_path / "codex-auth"
+    monkeypatch.setenv("NBS_DOCUMENTATION_CODEX_HOME", str(auth_home))
+    process = FakeProcess(stdout=_draft().encode())
+    fake_subprocess = FakeSubprocess(process)
+    result = CodexDocumentationRunner(fake_subprocess, project_root=tmp_path).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
+    )
+
+    assert result.exit_code == 0
+    assert fake_subprocess.kwargs["env"]["CODEX_HOME"] == str(auth_home.resolve())
+    assert str(auth_home) not in " ".join(fake_subprocess.argv)
+
+
+def test_runner_extracts_final_agent_message_from_codex_jsonl():
+    stream = json.dumps({"type": "thread.started"}) + "\n" + json.dumps({
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": _draft()},
+    })
+    process = FakeProcess(stdout=stream.encode())
+    result = CodexDocumentationRunner(FakeSubprocess(process)).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=65536,
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == json.loads(_draft())
+
+
+def test_runner_extracts_final_message_before_applying_output_cap():
+    stream = (json.dumps({"type": "turn.started", "padding": "x" * 200}) + "\n") * 10
+    stream += json.dumps({
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": _draft()},
+    })
+    result = CodexDocumentationRunner(FakeSubprocess(FakeProcess(stdout=stream.encode()))).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=256,
+    )
+
+    assert result.exit_code == 0
 
 
 def test_runner_accepts_valid_draft_when_cli_has_nonzero_exit():
@@ -152,10 +197,20 @@ def test_runner_caps_stdout_and_stderr_without_persisting_command_or_paths(tmp_p
         input_text=_evidence(), timeout_seconds=120, max_output_bytes=64,
     )
 
-    assert len(result.stdout.encode()) == 65
+    assert len(result.stdout.encode()) == 64
     assert len(result.stderr_tail.encode()) <= 4096
     assert "/private/vault" not in " ".join(fake_subprocess.argv)
     assert "secret" not in " ".join(fake_subprocess.argv)
+
+
+def test_runner_caps_invalid_multibyte_output_by_utf8_bytes():
+    process = FakeProcess(stdout=("摘要" * 100).encode("utf-8"))
+    result = CodexDocumentationRunner(FakeSubprocess(process)).run(
+        ("codex",), input_text=_evidence(), timeout_seconds=120, max_output_bytes=16,
+    )
+
+    assert result.exit_code == -2
+    assert len(result.stdout.encode("utf-8")) <= 16
 
 
 def test_runner_timeout_kills_process_and_returns_bounded_failure():

@@ -1,6 +1,6 @@
 # NBS Analytics 最新交接說明
 
-更新日期：2026-06-30  
+更新日期：2026-08-04
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`  
 正式收入口徑：`不含掛賬核銷與TT退款轉團款`
 
@@ -266,6 +266,14 @@ UI smoke checklist：
 - 深色 / 淺色切換後 sidebar、主畫布、cards、tables、charts 不應出現深淺背景混雜。
 
 ---
+
+## 8A. Governance Graph 與文件治理現況
+
+- Governance Graph Phase A–E-4 已合併至 `main`；E-4 Management Summary 維持 observation-only，不新增 approval、risk decision、workflow control 或自動 snapshot 建立。
+- Graph read model 已涵蓋 canonical evidence lineage、snapshot comparison、risk summary、change impact、owner/dependency catalog 與 management summary；Streamlit Agent Operations 只讀呈現。
+- Documentation sidecar 現採受控 non-interactive `codex exec --json` runner，解析 final `agent_message`，並以 UTF-8 byte cap、schema、fingerprint 與 explicit target approval 保護。
+- 最近 verified documentation backfill：`run-20e4bc6034714a4d969c9b4a17144a95`；Brief 與 System Map proposal 已通過 findings-first Review，並由 trusted Controller apply。
+- Obsidian NBS vault target：`NBS_Analytics_Knowledge/70_Codex_Briefs/verified-backfill-task2-brief.md`；正式口徑及 baseline 均未變更。
 
 ## 9. 下一輪建議工作
 

@@ -1,6 +1,8 @@
 # NBS 系統總覽
 
-更新日期：2026-07-02  
+> 文件更新：2026-08-04。Governance Graph Phase A–E-4 已完成合併；Graph 是 canonical artifacts 的只讀衍生 projection。
+
+更新日期：2026-08-04
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`  
 目的：讓後續 Codex 在接手 `nbs_analytics` 前，先建立正確系統地圖，避免把資料口徑、analysis layer、upload layer、Vue frontend 和 Streamlit baseline 混在一起。
 
@@ -179,6 +181,13 @@ Core drift 只應指：
 
 ---
 
+## 4A. Governance Graph 與文件治理
+
+- Graph 支援 evidence lineage、snapshot comparison、risk summary、change impact、owner/dependency catalog 與 management summary。
+- Streamlit Graph tab／Agent Operations 只讀消費 snapshot，不建立或更新 snapshot，也不成為 approval、dispatch、runtime、SQLite 或 Git 寫入入口。
+- Documentation sidecar 以 `documentation-evidence-v1` 產生 `documentation-proposal-v1`；System Map 與 ADR 仍需 explicit target approval，Obsidian apply 由 trusted Controller 執行。
+- 最近 backfill run：`run-20e4bc6034714a4d969c9b4a17144a95`；protected revenue scope 與 `HKD 12,057,968` baseline 維持不變。
+
 ## 4. 核心數字錨點
 
 第一個必守 baseline：
@@ -225,4 +234,3 @@ Core drift 只應指：
 ```
 
 答不清楚，不要動正式資料鏈路。
-

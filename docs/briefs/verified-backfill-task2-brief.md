@@ -1,7 +1,7 @@
 
 
 <!-- documentation-agent:implementation-evidence:start -->
-## Documentation Backfill: run-3b52b9d763c94b1a87f745909feeaf1f
+## Documentation Backfill: run-20e4bc6034714a4d969c9b4a17144a95
 
-Task run-3b52b9d763c94b1a87f745909feeaf1f completed documentation backfill after implementation changes to documentation agent service and Codex runner. Gates passed: Review PASS, full verification PASS, Hermes PASS. Guardrails preserved: May 2026 baseline HKD 12,057,968; revenue scope 不含掛賬核銷與TT退款轉團款.
+記錄本次變更：更新 Documentation Codex runner 及其測試。Review、完整驗證與 Hermes 均已通過。正式營收口徑維持「不含掛賬核銷與TT退款轉團款」，2026-05 baseline 維持 HKD 12,057,968。
 <!-- documentation-agent:implementation-evidence:end -->

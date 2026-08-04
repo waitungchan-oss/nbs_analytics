@@ -1,10 +1,10 @@
 # NBS Analytics 系統全景地圖導航
 
-更新日期：2026-07-14
+更新日期：2026-08-04
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`  
 正式收入口徑：`不含掛賬核銷與TT退款轉團款`
 
-目前正式版本節點：`main@ac40561`；P3-1 已在 `codex/p3-1-application-snapshot` 完成隔離驗收，尚未合併
+目前正式版本節點：`main@4683065`；Governance Graph Phase A–E-4 與 Documentation runner hardening 已完成本地合併，尚待後續 remote 整合。
 最新正式資料：Acceptance Record `15`；最新日期 `2026-07-13`
 
 ---
@@ -62,6 +62,10 @@ Agent 流程為：`Brief -> collect-only evidence -> Context/Review -> Codex imp
 ### Documentation Backfill: run-3b52b9d763c94b1a87f745909feeaf1f
 
 Documentation workflow now reflects updates involving the documentation agent service and documentation Codex runner. The verified flow consumes documentation-evidence-v1, preserves evidence fingerprints, emits documentation proposals for approved required targets, and remains gated by Review, full verification, and Hermes before documentation dispatch. The documented governance boundary remains read-only for documentation sidecar behavior and preserves the fixed revenue scope and May 2026 baseline.
+
+### Documentation Backfill: run-20e4bc6034714a4d969c9b4a17144a95
+
+Documentation dispatch 流程中的 Codex runner 位於 backend/agents/documentation_codex_runner.py，對應測試位於 tests/test_documentation_codex_runner.py。本次變更已通過 Review、完整驗證與 Hermes，未改變正式營收口徑或 2026-05 baseline。
 
 ## 2. 全景流程圖
 

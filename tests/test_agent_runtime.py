@@ -526,6 +526,19 @@ def test_subprocess_runner_uses_json_object_and_shell_false(tmp_path, monkeypatc
     assert calls[0]["timeout"] == 3
 
 
+def test_subprocess_runner_extracts_codex_jsonl_agent_message(tmp_path):
+    script = tmp_path / "agent.py"
+    script.write_text(
+        "import json; print(json.dumps({'type':'thread.started'})); "
+        "print(json.dumps({'type':'item.completed','item':{'type':'agent_message',"
+        "'text':json.dumps({'schemaVersion':'context-summary-v1','echo':'ok'})}}))",
+        encoding="utf-8",
+    )
+    runner = SubprocessAgentRunner([sys.executable, str(script)], allowed_executables=PYTHON_ALLOWLIST)
+
+    assert runner.run({})["echo"] == "ok"
+
+
 def test_runtime_caches_same_fingerprint_and_writes_telemetry(tmp_path):
     script = tmp_path / "agent.py"
     script.write_text(
