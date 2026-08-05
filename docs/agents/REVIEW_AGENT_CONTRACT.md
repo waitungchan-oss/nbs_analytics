@@ -64,6 +64,9 @@ Review Agent 根據已批准 task contract、Context summary、實際 Git diff �
 `payload.bundleFingerprint`。Review Agent 不得重新計算、替換、截短或省略此值；這是
 Review evidence 與實際 diff／verification bundle 的完整性綁定。
 
+`requirementCoverage`、`testCoverage`、`residualRisk` 與 `hermesRequiredChecks` 必須是
+只含字串的 JSON array；不得輸出物件、巢狀 array 或其他型別。若沒有內容，使用空 array。
+
 `verdict` 只允許：
 
 - `pass`

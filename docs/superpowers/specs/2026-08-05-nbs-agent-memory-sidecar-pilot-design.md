@@ -152,6 +152,7 @@ Recall 回傳給 Context Agent 的資料必須與 canonical evidence 分離：
       "memoryId": "sha256-derived-id",
       "summary": "bounded hint",
       "sourceRefs": ["run-.../verification.json"],
+      "sourceFingerprints": ["lowercase-sha256"],
       "freshness": "fresh|stale|unknown",
       "confidence": "high|medium"
     }
@@ -165,7 +166,7 @@ Recall 回傳給 Context Agent 的資料必須與 canonical evidence 分離：
 }
 ```
 
-Context Agent 必須將其標示為 `non_authoritative_memory`。`timeout`、`degraded`、`empty`、fingerprint mismatch 或任何 schema error 均等價於沒有 memory hints，不能阻塞 canonical collection。
+每個 `sourceRefs` 必須與等長的 `sourceFingerprints` 一一對應，並納入 `hintsFingerprint`，以維持 artifact provenance。Context Agent 必須將其標示為 `non_authoritative_memory`。`timeout`、`degraded`、`empty`、fingerprint mismatch 或任何 schema error 均等價於沒有 memory hints，不能阻塞 canonical collection。
 
 ## 8. 允許與禁止的資料來源
 
