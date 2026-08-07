@@ -60,6 +60,7 @@ TARGETED_TESTS = [
     "tests/test_agent_workflow_cli.py",
     "tests/test_agent_workflow_integration.py",
     "tests/test_documentation_agent_docs.py",
+    "tests/test_memory_sidecar_hermes_boundary.py",
     "tests/test_agent_operations_service.py",
     "tests/test_agent_operations_rendering.py",
     "tests/test_hermes_post_change_check.py",
@@ -133,6 +134,111 @@ def documentation_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
                 invalid = True
         if invalid and len(report["invalidRuns"]) < 100:
             report["invalidRuns"].append(run_dir.name)
+    return report
+
+
+def memory_sidecar_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
+    """Inspect bounded memory sidecar evidence without provider access or writes."""
+    from backend.agents.memory_sidecar_hint_models import MemoryHints, MemorySidecarSchemaError
+
+    root = Path(project_root) / ".nbs_agent_runtime"
+    runs_root = root / "runs"
+    telemetry_path = root / "telemetry" / "memory_sidecar.jsonl"
+    artifact_names = ("memory-hints.json", "memory_sidecar.jsonl")
+    hints_max_bytes = 6000
+    telemetry_max_bytes = 5 * 1024 * 1024
+    report = {
+        "schemaVersion": "memory-sidecar-hermes-report-v1",
+        "policy": "read-only",
+        "invocations": 0,
+        "writes": 0,
+        "status": "pass",
+        "artifactCounts": {name: 0 for name in artifact_names},
+        "fallbackChecks": {
+            "timeout": "fallback",
+            "degraded": "fallback",
+            "stale": "blocked",
+            "invalid": "blocked",
+            "permission": "blocked",
+        },
+        "diagnostics": [],
+    }
+
+    def diagnostic(code: str, run_id: str) -> None:
+        if len(report["diagnostics"]) < 100:
+            report["diagnostics"].append({"code": code, "runId": run_id})
+
+    telemetry_root = root / "telemetry"
+    if root.is_symlink():
+        diagnostic("permission_denied", "runtime")
+    else:
+        if runs_root.is_symlink():
+            diagnostic("permission_denied", "runs")
+        elif runs_root.is_dir():
+            try:
+                run_dirs = sorted(runs_root.iterdir(), key=lambda path: path.name)
+            except (OSError, PermissionError):
+                diagnostic("permission_denied", "runs")
+                run_dirs = ()
+            for run_dir in run_dirs:
+                if run_dir.is_symlink():
+                    diagnostic("permission_denied", run_dir.name)
+                    continue
+                if not run_dir.is_dir():
+                    continue
+                hints_path = run_dir / "memory-hints.json"
+                if not hints_path.exists():
+                    continue
+                if hints_path.is_symlink() or not hints_path.is_file():
+                    diagnostic("permission_denied", run_dir.name)
+                    continue
+                report["artifactCounts"]["memory-hints.json"] += 1
+                try:
+                    if hints_path.stat().st_size > hints_max_bytes:
+                        raise MemorySidecarSchemaError("memory hints exceed the Hermes cap")
+                    hints = MemoryHints.from_dict(json.loads(hints_path.read_text(encoding="utf-8")))
+                except (OSError, UnicodeError, json.JSONDecodeError, MemorySidecarSchemaError, ValueError):
+                    diagnostic("invalid_memory_hints", run_dir.name)
+                    continue
+                if hints.status == "stale" or any(item.freshness == "stale" for item in hints.hints):
+                    diagnostic("stale_memory_hints", run_dir.name)
+                elif hints.status in {"timeout", "degraded", "empty"}:
+                    diagnostic(f"fallback_{hints.status}", run_dir.name)
+
+        if telemetry_root.is_symlink() or telemetry_path.is_symlink():
+            diagnostic("permission_denied", "telemetry")
+        elif telemetry_path.exists() and telemetry_path.is_file():
+            report["artifactCounts"]["memory_sidecar.jsonl"] = 1
+            try:
+                if telemetry_path.stat().st_size > telemetry_max_bytes:
+                    raise ValueError("memory telemetry exceeds the Hermes cap")
+                for line in telemetry_path.read_text(encoding="utf-8").splitlines():
+                    event = json.loads(line)
+                    expected_keys = {
+                        "schemaVersion", "runId", "mode", "queryFingerprint", "status", "latencyMs",
+                        "hintCount", "inputBytes", "fallback", "redactionCount",
+                    }
+                    if not isinstance(event, dict) or set(event) != expected_keys:
+                        raise ValueError("memory telemetry schema is invalid")
+                    from backend.agents.memory_sidecar_telemetry import MemorySidecarTelemetryEvent
+                    if MemorySidecarTelemetryEvent.from_parts(
+                        run_id=event["runId"], mode=event["mode"], query_fingerprint=event["queryFingerprint"],
+                        status=event["status"], latency_ms=event["latencyMs"], hint_count=event["hintCount"],
+                        input_bytes=event["inputBytes"], fallback=event["fallback"], redaction_count=event["redactionCount"],
+                    ).to_dict() != event:
+                        raise ValueError("memory telemetry contents are invalid")
+                    if event.get("status") == "stale":
+                        diagnostic("stale_memory_hints", str(event.get("runId") or "telemetry"))
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                diagnostic("invalid_memory_telemetry", "telemetry")
+        elif telemetry_path.exists() or telemetry_path.is_symlink():
+            diagnostic("permission_denied", "telemetry")
+
+    codes = {item["code"] for item in report["diagnostics"]}
+    if any(code.startswith("invalid_") for code in codes):
+        report["status"] = "invalid"
+    elif any(code not in {"fallback_timeout", "fallback_degraded", "fallback_empty"} for code in codes):
+        report["status"] = "blocked"
     return report
 
 
@@ -239,6 +345,11 @@ def build_check_plan(
         "import json; "
         "print(json.dumps(governance_graph_artifact_report(), sort_keys=True))"
     )
+    memory_sidecar_artifact_report_code = (
+        "from scripts.hermes_post_change_check import memory_sidecar_artifact_report; "
+        "import json; "
+        "print(json.dumps(memory_sidecar_artifact_report(), sort_keys=True))"
+    )
     plan = [
         CheckStep("git-status", ["git", "status", "--short", "--branch"]),
         CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
@@ -266,6 +377,13 @@ def build_check_plan(
         CheckStep(
             "documentation-artifact-report",
             [py, "-c", documentation_artifact_report_code],
+            required=False,
+        )
+    )
+    plan.append(
+        CheckStep(
+            "memory-sidecar-artifact-report",
+            [py, "-c", memory_sidecar_artifact_report_code],
             required=False,
         )
     )
