@@ -853,8 +853,29 @@ class AgentRuntime:
             "result": telemetry_result if result else "context_overflow",
         }
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        self._append_bounded_telemetry(path, line)
+
+    def append_memory_sidecar_telemetry(self, event: object) -> None:
+        """Persist a bounded sidecar event beside existing ignored runtime telemetry."""
+        from backend.agents.memory_sidecar_telemetry import MemorySidecarTelemetryEvent
+
+        if not isinstance(event, MemorySidecarTelemetryEvent):
+            raise ValueError("Memory sidecar telemetry event is invalid")
+        record = event.to_dict()
+        if set(record) != {
+            "schemaVersion", "runId", "mode", "queryFingerprint", "status", "latencyMs",
+            "hintCount", "inputBytes", "fallback", "redactionCount",
+        }:
+            raise ValueError("Memory sidecar telemetry schema is invalid")
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        self._append_bounded_telemetry(
+            self.runtime_root / "telemetry" / "memory_sidecar.jsonl", line,
+        )
+
+    def _append_bounded_telemetry(self, path: Path, line: str) -> None:
         if len(line.encode("utf-8")) > _TELEMETRY_MAX_LINE_BYTES:
             raise ValueError("Agent telemetry record exceeds size limit")
+        path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.runtime_root / "locks" / "telemetry.lock"
         with self._locked(lock_path):
             if path.exists() and path.stat().st_size + len(line.encode("utf-8")) > _TELEMETRY_MAX_BYTES:

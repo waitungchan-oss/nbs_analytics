@@ -13,6 +13,7 @@ from backend.agents.evidence_models import (
     canonical_fingerprint,
     estimate_tokens,
 )
+from backend.agents.memory_sidecar_hint_models import MemoryHints, MemorySidecarSchemaError
 
 
 CONTEXT_EVIDENCE_SCHEMA = "context-evidence-v1"
@@ -21,6 +22,7 @@ _PUBLIC_KEYS = {
     "schemaVersion", "task", "repository", "guardrails", "documents", "symbols",
     "relatedTests", "recentChanges", "bundleFingerprint",
 }
+_MEMORY_HINTS_KEY = "memoryHints"
 _REPORT_KEYS = {
     "schemaVersion", "status", "taskUnderstanding", "systemBoundaries", "relevantFiles",
     "dependencies", "recommendedTests", "risks", "unknowns", "contextFingerprint",
@@ -45,7 +47,49 @@ def _semantic_symbol(item: EvidenceItem) -> dict:
     return {"queryId": item.source, "paths": item.content.splitlines()}
 
 
-def build_context_evidence_payload(bundle: EvidenceBundle) -> dict:
+def _memory_hints_payload(memory_hints: MemoryHints | dict | None) -> dict | None:
+    if memory_hints is None:
+        return None
+    envelope = {
+        "authority": "non_authoritative_memory",
+        "status": "ignored",
+        "hints": [],
+    }
+    try:
+        parsed = memory_hints if isinstance(memory_hints, MemoryHints) else MemoryHints.from_dict(memory_hints)
+        if parsed.status != "ready":
+            envelope["reason"] = parsed.status
+            return envelope
+        if any(item.freshness != "fresh" for item in parsed.hints):
+            envelope["reason"] = "stale"
+            return envelope
+        envelope = {"authority": "non_authoritative_memory", **parsed.to_dict()}
+        return envelope
+    except (MemorySidecarSchemaError, TypeError, ValueError):
+        envelope["reason"] = "invalid"
+        return envelope
+
+
+def _validate_memory_hints_payload(payload: object) -> None:
+    if not isinstance(payload, dict) or payload.get("authority") != "non_authoritative_memory":
+        raise ValueError("Context memory hints authority is invalid")
+    status = payload.get("status")
+    if status == "ignored":
+        if set(payload) != {"authority", "status", "hints", "reason"} or payload.get("hints") != [] or not isinstance(payload.get("reason"), str):
+            raise ValueError("Context ignored memory hints are invalid")
+        return
+    if status not in {"ready", "empty", "timeout", "degraded"}:
+        raise ValueError("Context memory hints status is invalid")
+    model_payload = {key: value for key, value in payload.items() if key != "authority"}
+    try:
+        MemoryHints.from_dict(model_payload)
+    except (MemorySidecarSchemaError, TypeError, ValueError) as exc:
+        raise ValueError("Context memory hints payload is invalid") from exc
+
+
+def build_context_evidence_payload(
+    bundle: EvidenceBundle, *, memory_hints: MemoryHints | dict | None = None,
+) -> dict:
     symbols: list[dict] = []
     for item in bundle.commands:
         if item.label.startswith("rg-query-"):
@@ -76,7 +120,13 @@ def build_context_evidence_payload(bundle: EvidenceBundle) -> dict:
         ],
         "recentChanges": recent_changes,
     }
-    return {**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)}
+    # Deliberately fingerprint only canonical collector evidence. Memory hints
+    # are an optional, non-authoritative read model appended after hashing.
+    result = {**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)}
+    hints_payload = _memory_hints_payload(memory_hints)
+    if hints_payload is not None:
+        result[_MEMORY_HINTS_KEY] = hints_payload
+    return result
 
 
 def context_bundle_from_payload(payload: dict) -> EvidenceBundle:
@@ -84,10 +134,14 @@ def context_bundle_from_payload(payload: dict) -> EvidenceBundle:
         raise ValueError("Context evidence payload must be an object")
     if payload.get("schemaVersion") != CONTEXT_EVIDENCE_SCHEMA:
         raise ValueError("Unexpected context evidence schema")
-    if set(payload) != _PUBLIC_KEYS:
+    keys_without_hints = set(payload) - {_MEMORY_HINTS_KEY}
+    if keys_without_hints != _PUBLIC_KEYS:
         raise ValueError("Context evidence payload has unexpected or missing keys")
     _validate_context_payload_shape(payload)
-    unsigned = {key: value for key, value in payload.items() if key != "bundleFingerprint"}
+    unsigned = {
+        key: value for key, value in payload.items()
+        if key not in {"bundleFingerprint", _MEMORY_HINTS_KEY}
+    }
     if canonical_fingerprint(unsigned) != payload.get("bundleFingerprint"):
         raise ValueError("Context evidence fingerprint does not match payload")
     documents = [
@@ -144,6 +198,8 @@ def context_summary_from_evidence_payload(payload: dict) -> dict:
         "unknowns": ["Context was collected without LLM summarization."],
         "contextFingerprint": payload["bundleFingerprint"],
     }
+    if _MEMORY_HINTS_KEY in payload:
+        summary[_MEMORY_HINTS_KEY] = payload[_MEMORY_HINTS_KEY]
     return _validate_report(summary, payload["bundleFingerprint"])
 
 
@@ -162,6 +218,8 @@ def _validate_context_payload_shape(payload: dict) -> None:
     for key in ("documents", "relatedTests", "symbols", "recentChanges"):
         if not isinstance(payload[key], list):
             raise ValueError(f"Context evidence {key} must be a list")
+    if _MEMORY_HINTS_KEY in payload:
+        _validate_memory_hints_payload(payload[_MEMORY_HINTS_KEY])
     for item in [*payload["documents"], *payload["relatedTests"]]:
         if not isinstance(item, dict) or set(item) != {"kind", "source", "content", "metadata"}:
             raise ValueError("Context evidence document item is invalid")
@@ -196,8 +254,10 @@ def _runtime_path(project_root: Path, runtime_root: Path) -> Path:
 def _validate_report(result: object, expected_fingerprint: str) -> dict:
     if not isinstance(result, dict):
         raise ValueError("Context Agent output must be an object")
-    if set(result) != _REPORT_KEYS:
+    if set(result) - {"memoryHints"} != _REPORT_KEYS:
         raise ValueError("Context Agent output schema is invalid")
+    if "memoryHints" in result:
+        _validate_memory_hints_payload(result["memoryHints"])
     if result["schemaVersion"] != CONTEXT_SUMMARY_SCHEMA:
         raise ValueError("Context Agent output schema is invalid")
     if result["status"] not in ALLOWED_CONTEXT_STATUSES:
@@ -215,6 +275,26 @@ def _validate_report(result: object, expected_fingerprint: str) -> dict:
     return result
 
 
+def _context_overflow_report(expected_fingerprint: str) -> dict:
+    return {
+        "schemaVersion": CONTEXT_SUMMARY_SCHEMA,
+        "status": "context_overflow",
+        "taskUnderstanding": [], "systemBoundaries": [], "relevantFiles": [],
+        "dependencies": [], "recommendedTests": [], "risks": [],
+        "unknowns": ["Collector must reduce evidence before LLM dispatch."],
+        "contextFingerprint": expected_fingerprint,
+    }
+
+
+def _finalize_report(result: dict, *, payload: dict, expected_fingerprint: str, output_token_limit: int) -> dict:
+    if _MEMORY_HINTS_KEY in payload:
+        result = {key: value for key, value in result.items() if key != _MEMORY_HINTS_KEY}
+        result[_MEMORY_HINTS_KEY] = payload[_MEMORY_HINTS_KEY]
+    if estimate_tokens(json.dumps(result, ensure_ascii=False)) > output_token_limit:
+        return _context_overflow_report(expected_fingerprint)
+    return result
+
+
 def build_context_report(
     bundle: EvidenceBundle,
     *,
@@ -225,9 +305,10 @@ def build_context_report(
     collect_only: bool = False,
     input_token_limit: int = 12000,
     output_token_limit: int = 1500,
+    memory_hints: MemoryHints | dict | None = None,
 ) -> dict:
     runtime_path = _runtime_path(project_root, runtime_root)
-    payload = build_context_evidence_payload(bundle)
+    payload = build_context_evidence_payload(bundle, memory_hints=memory_hints)
     if collect_only:
         return payload
     expected_fingerprint = agent_request_fingerprint(
@@ -236,16 +317,12 @@ def build_context_report(
     )
     request_text = json.dumps({"instructions": instructions, "evidence": payload}, ensure_ascii=False, sort_keys=True)
     if estimate_tokens(request_text) > input_token_limit:
-        return {
-            "schemaVersion": CONTEXT_SUMMARY_SCHEMA,
-            "status": "context_overflow",
-            "taskUnderstanding": [], "systemBoundaries": [], "relevantFiles": [],
-            "dependencies": [], "recommendedTests": [], "risks": [],
-            "unknowns": ["Collector must reduce evidence before LLM dispatch."],
-            "contextFingerprint": expected_fingerprint,
-        }
+        return _finalize_report(
+            _context_overflow_report(expected_fingerprint), payload=payload,
+            expected_fingerprint=expected_fingerprint, output_token_limit=output_token_limit,
+        )
     if runner is None:
-        return {
+        result = {
             "schemaVersion": CONTEXT_SUMMARY_SCHEMA,
             "status": "blocked_missing_evidence",
             "taskUnderstanding": [], "systemBoundaries": [], "relevantFiles": [],
@@ -253,6 +330,10 @@ def build_context_report(
             "unknowns": ["No AgentRunner was configured; use --collect-only or --agent-command."],
             "contextFingerprint": expected_fingerprint,
         }
+        return _finalize_report(
+            result, payload=payload, expected_fingerprint=expected_fingerprint,
+            output_token_limit=output_token_limit,
+        )
     result = AgentRuntime(
         runtime_path,
         input_token_limit=input_token_limit,
@@ -262,17 +343,19 @@ def build_context_report(
         instructions=instructions, evidence_payload=payload,
     )
     if isinstance(result, dict) and result.get("status") == "context_overflow":
-        return {
-            "schemaVersion": CONTEXT_SUMMARY_SCHEMA,
-            "status": "context_overflow",
-            "taskUnderstanding": [], "systemBoundaries": [], "relevantFiles": [],
-            "dependencies": [], "recommendedTests": [], "risks": [],
-            "unknowns": ["Collector must reduce evidence before LLM dispatch."],
-            "contextFingerprint": expected_fingerprint,
-        }
+        return _finalize_report(
+            _context_overflow_report(expected_fingerprint), payload=payload,
+            expected_fingerprint=expected_fingerprint, output_token_limit=output_token_limit,
+        )
     if estimate_tokens(json.dumps(result, ensure_ascii=False)) > output_token_limit:
         raise ValueError("Context Agent output token budget exceeded")
-    return _validate_report(result, expected_fingerprint)
+    return _validate_report(
+        _finalize_report(
+            result, payload=payload, expected_fingerprint=expected_fingerprint,
+            output_token_limit=output_token_limit,
+        ),
+        expected_fingerprint,
+    )
 
 
 def _markdown_list(values: list[Any]) -> str:

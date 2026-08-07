@@ -150,6 +150,11 @@ def test_context_payload_roundtrip_preserves_semantic_evidence_without_duplicate
     assert payload["recentChanges"] == [{"summary": "commit one"}]
 
 
+def test_context_payload_without_memory_hints_is_byte_for_byte_compatible():
+    payload = build_context_evidence_payload(make_bundle())
+    assert build_context_evidence_payload(make_bundle(), memory_hints=None) == payload
+
+
 def test_context_report_rejects_output_over_budget(tmp_path):
     class VerboseRunner(FakeRunner):
         def run(self, payload):

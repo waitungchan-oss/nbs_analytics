@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "memory-sidecar-policy-v1",
+  "maxItems": 3,
+  "maxBytes": 6000,
+  "timeoutMs": 800,
+  "summaryMaxBytes": 2048,
+  "ttlDays": 90,
+  "allowedKinds": ["decision", "sop", "failure_pattern", "verification_pattern", "preference"],
+  "deniedPatterns": [".env", "**/.env", "*.db", "*.sqlite", "*.csv", "*.xlsx", "*.log", "credentials/**", "**/credentials/**", "Secrets/**", "**/Secrets/**"]
+}

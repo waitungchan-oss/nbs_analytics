@@ -14,7 +14,9 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
     assert "implementation-agent-files" in labels
     assert "targeted-tests" in labels
     assert "documentation-artifact-report" in labels
+    assert "memory-sidecar-artifact-report" in labels
     targeted = next(step for step in plan if step.label == "targeted-tests")
+    assert "tests/test_memory_sidecar_hermes_boundary.py" in targeted.command
     assert "tests/test_monthly_baseline_service.py" in targeted.command
     assert "tests/test_monthly_baseline_check_cli.py" in targeted.command
     for test_name in [
@@ -128,6 +130,17 @@ def test_documentation_artifact_report_validates_schema_caps_and_writes_nothing(
     assert report["policy"] == "read-only"
     assert report["invocations"] == 0
     assert report["writes"] == 0
+
+
+def test_memory_sidecar_hermes_check_is_read_only_and_does_not_start_gateway():
+    plan = post_check.build_check_plan(include_monitor=False, include_tests=False)
+    step = next(item for item in plan if item.label == "memory-sidecar-artifact-report")
+    command = " ".join(step.command)
+
+    assert "memory_sidecar_artifact_report" in command
+    assert "gateway" not in command.lower()
+    assert "write_text" not in command
+    assert "append_memory_sidecar_telemetry" not in command
 
 
 def test_governance_graph_report_is_read_only_and_bounded(tmp_path):

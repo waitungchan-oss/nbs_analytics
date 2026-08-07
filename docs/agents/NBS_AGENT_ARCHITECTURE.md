@@ -108,6 +108,10 @@ flowchart TD
 
 Review Agent 的 `pass` 只代表可以進入完整驗證及 Hermes，不代表正式系統已完成驗收。
 
+### Memory Sidecar pilot boundary
+
+Memory Sidecar 是 provider-neutral、non-authoritative 的 bounded hint sidecar，不是 canonical artifacts、Governance Graph、Review、Hermes、approval、dispatch、SQLite、baseline、runtime 或 Git authority。NBS Hermes 不是 Tencent Hermes：它的 `memory-sidecar-hermes-report-v1` 只 read-only 檢查 bounded `memory-hints-v1` / telemetry evidence，固定 `policy=read-only`、`invocations=0`、`writes=0`，never starts Gateway 或呼叫 provider/network。詳細契約見 `MEMORY_SIDECAR_CONTRACT.md`。
+
 ## 10A. Documentation Dispatch Policy
 
 功能變更在 Review PASS、full verification PASS 與 Hermes PASS 後，Codex 才可針對同一 completed run 呼叫 `agent_workflow.py document`。Documentation Agent 必須是獨立、明確批准的 runner：輸入為 `documentation-evidence-v1`，輸出為 `documentation-proposal-v1`；缺少 runner 時必須 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。
