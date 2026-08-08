@@ -8,6 +8,7 @@ from typing import Callable, Iterable, TypeVar
 
 _SCHEMA_VERSION = "memory-sidecar-telemetry-v1"
 _AGGREGATE_SCHEMA_VERSION = "memory-sidecar-telemetry-aggregate-v1"
+_AB_EVIDENCE_SCHEMA_VERSION = "memory-sidecar-ab-evidence-v1"
 _MODES = ("recall_on", "recall_off", "shadow")
 _STATUSES = ("ready", "empty", "timeout", "degraded", "stale", "conflict")
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -84,6 +85,50 @@ class MemorySidecarTelemetryEvent:
             "inputBytes": self.input_bytes,
             "fallback": self.fallback,
             "redactionCount": self.redaction_count,
+        }
+
+
+@dataclass(frozen=True)
+class MemorySidecarAbEvidence:
+    """Bounded A/B acceptance evidence bound to a telemetry aggregate.
+
+    Holds only the immutable A/B report id, its fingerprint and bounded
+    aggregate counts. Never captures a secret, a raw query or a full prompt.
+    Any nonzero sensitive capture count fails closed at construction.
+    """
+
+    report_id: str
+    report_fingerprint: str
+    event_count: int
+    p95_latency_recall_on_ms: int
+    p95_latency_recall_off_ms: int
+    sensitive_capture_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.report_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", self.report_id):
+            raise ValueError("memory sidecar A/B evidence report id is invalid")
+        if not isinstance(self.report_fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", self.report_fingerprint):
+            raise ValueError("memory sidecar A/B evidence report fingerprint is invalid")
+        if isinstance(self.event_count, bool) or not isinstance(self.event_count, int) or not 0 <= self.event_count <= 1_000_000:
+            raise ValueError("memory sidecar A/B evidence event count is out of range")
+        if isinstance(self.p95_latency_recall_on_ms, bool) or not isinstance(self.p95_latency_recall_on_ms, int) or not 0 <= self.p95_latency_recall_on_ms <= 800:
+            raise ValueError("memory sidecar A/B evidence p95 (recall on) latency is out of range")
+        if isinstance(self.p95_latency_recall_off_ms, bool) or not isinstance(self.p95_latency_recall_off_ms, int) or not 0 <= self.p95_latency_recall_off_ms <= 800:
+            raise ValueError("memory sidecar A/B evidence p95 (recall off) latency is out of range")
+        if isinstance(self.sensitive_capture_count, bool) or not isinstance(self.sensitive_capture_count, int) or not 0 <= self.sensitive_capture_count <= 100:
+            raise ValueError("memory sidecar A/B evidence sensitive capture count is out of range")
+        if self.sensitive_capture_count != 0:
+            raise ValueError("memory sidecar A/B evidence sensitive capture is not permitted")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schemaVersion": _AB_EVIDENCE_SCHEMA_VERSION,
+            "reportId": self.report_id,
+            "reportFingerprint": self.report_fingerprint,
+            "eventCount": self.event_count,
+            "p95LatencyRecallOnMs": self.p95_latency_recall_on_ms,
+            "p95LatencyRecallOffMs": self.p95_latency_recall_off_ms,
+            "sensitiveCaptureCount": self.sensitive_capture_count,
         }
 
 

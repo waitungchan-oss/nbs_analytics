@@ -3,11 +3,13 @@ import json
 import pytest
 
 from backend.agents.memory_sidecar_telemetry import (
+    MemorySidecarAbEvidence,
     MemorySidecarFeatureFlags,
     MemorySidecarTelemetryAggregator,
     MemorySidecarTelemetryEvent,
     build_shadow_ab_fixture,
 )
+from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.agent_runtime import AgentRuntime
 
 
@@ -150,3 +152,59 @@ def test_agent_runtime_rejects_non_event_or_extra_raw_content(tmp_path):
 
     with pytest.raises(ValueError, match="telemetry event"):
         runtime.append_memory_sidecar_telemetry(RawTelemetry())
+
+
+# ---------------------------------------------------------------------------
+# A/B evidence reporting additions (Task 3). These must never leak a secret or
+# a full prompt, and must never flip the pilot feature-flag defaults.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_flag_defaults_stay_safe_pilot_posture():
+    flags = MemorySidecarFeatureFlags()
+    assert flags.recall_enabled is False
+    assert flags.writer_enabled is False
+    assert flags.shadow_mode is True
+    assert flags.recall_mode == "shadow"
+    assert flags.invoke_writer(lambda: 1) is False
+
+
+def test_ab_evidence_binds_report_and_aggregate_without_secrets():
+    report_id = "ab-report-" + "a" * 40
+    evidence = MemorySidecarAbEvidence(
+        report_id=report_id,
+        report_fingerprint=canonical_fingerprint({"reportId": report_id}),
+        event_count=10,
+        p95_latency_recall_on_ms=800,
+        p95_latency_recall_off_ms=0,
+        sensitive_capture_count=0,
+    )
+    payload = evidence.to_dict()
+    assert payload["schemaVersion"] == "memory-sidecar-ab-evidence-v1"
+    assert payload["reportId"] == report_id
+    assert payload["reportFingerprint"] == canonical_fingerprint({"reportId": report_id})
+    serialized = json.dumps(payload, ensure_ascii=False).lower()
+    assert "secret" not in serialized
+    assert "prompt" not in serialized
+    assert "query" not in serialized
+
+
+def test_ab_evidence_rejects_nonzero_sensitive_capture_or_invalid_latency():
+    with pytest.raises(ValueError, match="sensitive"):
+        MemorySidecarAbEvidence(
+            report_id="ab-report-1",
+            report_fingerprint=canonical_fingerprint({"reportId": "ab-report-1"}),
+            event_count=1,
+            p95_latency_recall_on_ms=800,
+            p95_latency_recall_off_ms=0,
+            sensitive_capture_count=1,
+        )
+    with pytest.raises(ValueError, match="latency"):
+        MemorySidecarAbEvidence(
+            report_id="ab-report-1",
+            report_fingerprint=canonical_fingerprint({"reportId": "ab-report-1"}),
+            event_count=1,
+            p95_latency_recall_on_ms=801,
+            p95_latency_recall_off_ms=0,
+            sensitive_capture_count=0,
+        )

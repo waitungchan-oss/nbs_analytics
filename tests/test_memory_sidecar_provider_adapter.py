@@ -40,6 +40,20 @@ def _request(path_allowlist: frozenset[str] | None = None) -> MemorySidecarRecal
     )
 
 
+def _request_with_limits(limits: RecallLimits) -> MemorySidecarRecallRequest:
+    base = _request()
+    return MemorySidecarRecallRequest(
+        query=QUERY,
+        query_fingerprint=canonical_fingerprint({"query": QUERY}),
+        task_fingerprint=base.task_fingerprint,
+        provider_metadata=MemorySidecarProviderMetadata(),
+        task_allowlist=base.task_allowlist,
+        payload_path_allowlist=base.payload_path_allowlist,
+        payload_paths=("review.json",),
+        limits=limits,
+    )
+
+
 def _hint_dict(*, path: str = "review.json", freshness: str = "fresh", fp: str = HINT_FINGERPRINT) -> dict:
     return {
         "memoryId": "a" * 64,
@@ -122,6 +136,9 @@ def test_adapter_fails_closed_on_model_unavailable():
         _StubProvider(error=MemorySidecarProviderError("model_unavailable", "model unreachable"))
     )
     assert result.status == "model_unavailable"
+    # Adapter-only failure status is not a memory-hints-v1 status, so the
+    # embedded hints object maps safely to the generic "empty" status.
+    assert result.hints.status == "empty"
     assert result.hints.hints == ()
 
 
@@ -131,6 +148,7 @@ def test_adapter_fails_closed_on_timeout():
         _StubProvider(error=MemorySidecarProviderError("timeout", "provider timed out"))
     )
     assert result.status == "timeout"
+    assert result.hints.status == "timeout"
     assert result.hints.hints == ()
     assert "timeout" in result.metadata.fallback_reason
 
@@ -158,6 +176,89 @@ def test_adapter_fails_closed_on_stale_hint():
     raw["hints"][0]["freshness"] = "stale"
     result = adapter.recall(_StubProvider(result=raw))
     assert result.status == "stale_hint"
+    assert result.hints.hints == ()
+
+
+def test_adapter_fails_closed_on_malformed_source_fingerprints():
+    adapter = MemorySidecarProviderAdapter(_request())
+    raw = _hints().to_dict()
+    raw["hints"][0]["sourceFingerprints"] = 123
+    result = adapter.recall(_StubProvider(result=raw))
+    assert result.status == "schema_mismatch"
+    assert result.hints.hints == ()
+
+
+def test_adapter_fails_closed_when_source_fingerprints_are_not_a_list():
+    adapter = MemorySidecarProviderAdapter(_request())
+    raw = _hints().to_dict()
+    raw["hints"][0]["sourceFingerprints"] = "b" * 64
+    result = adapter.recall(_StubProvider(result=raw))
+    assert result.status == "schema_mismatch"
+    assert result.hints.hints == ()
+
+
+def test_adapter_fails_closed_when_source_fingerprint_count_misaligns():
+    adapter = MemorySidecarProviderAdapter(_request())
+    raw = _hints().to_dict()
+    raw["hints"][0]["sourceFingerprints"] = ["b" * 64, "c" * 64]
+    result = adapter.recall(_StubProvider(result=raw))
+    assert result.status == "schema_mismatch"
+    assert result.hints.hints == ()
+
+
+def _non_ready_payload(*, status: str) -> dict:
+    base = _hints().to_dict()
+    base["status"] = status
+    base["hints"] = []
+    return base
+
+
+def test_adapter_preserves_explicit_timeout_non_ready_status():
+    adapter = MemorySidecarProviderAdapter(_request())
+    result = adapter.recall(_StubProvider(result=_non_ready_payload(status="timeout")))
+    assert result.status == "timeout"
+    assert result.hints.status == "timeout"
+    assert result.hints.hints == ()
+
+
+def test_adapter_preserves_explicit_degraded_non_ready_status():
+    adapter = MemorySidecarProviderAdapter(_request())
+    result = adapter.recall(_StubProvider(result=_non_ready_payload(status="degraded")))
+    assert result.status == "degraded"
+    assert result.hints.status == "degraded"
+    assert result.hints.hints == ()
+
+
+def test_adapter_preserves_explicit_empty_non_ready_status():
+    adapter = MemorySidecarProviderAdapter(_request())
+    result = adapter.recall(_StubProvider(result=_non_ready_payload(status="empty")))
+    assert result.status == "empty"
+    assert result.hints.status == "empty"
+    assert result.hints.hints == ()
+
+
+def test_adapter_fails_closed_on_unknown_non_ready_status():
+    adapter = MemorySidecarProviderAdapter(_request())
+    raw = _non_ready_payload(status="pending")
+    result = adapter.recall(_StubProvider(result=raw))
+    assert result.status == "schema_mismatch"
+    assert result.hints.hints == ()
+
+
+def test_adapter_fails_closed_when_non_ready_status_carries_items():
+    adapter = MemorySidecarProviderAdapter(_request())
+    raw = _hints().to_dict()
+    raw["status"] = "degraded"  # hints remain populated
+    result = adapter.recall(_StubProvider(result=raw))
+    assert result.status == "schema_mismatch"
+    assert result.hints.hints == ()
+
+
+def test_adapter_fails_closed_when_ready_status_carries_no_hints():
+    adapter = MemorySidecarProviderAdapter(_request())
+    raw = _non_ready_payload(status="ready")
+    result = adapter.recall(_StubProvider(result=raw))
+    assert result.status == "schema_mismatch"
     assert result.hints.hints == ()
 
 
@@ -205,6 +306,64 @@ def test_adapter_enforces_bounded_memory_hints_v1_caps():
     assert result.hints.max_items == 3
     assert result.hints.max_bytes == 6000
     assert result.hints.timeout_ms == 800
+
+
+def test_adapter_enforces_request_specific_recall_limits_on_item_count():
+    # A request that narrows the recall budget to a single hint must reject a
+    # ready response carrying two hints: the response exceeds the approved,
+    # request-specific max_items rather than just the global cap.
+    request = _request_with_limits(RecallLimits(max_items=1, max_bytes=3000, timeout_ms=800))
+    adapter = MemorySidecarProviderAdapter(request)
+    hint_two = MemoryHint("d" * 64, "two", ("verification.json",), "fresh", "high", ("c" * 64,))
+    oversized = MemoryHints(
+        query_fingerprint=canonical_fingerprint({"query": QUERY}),
+        status="ready",
+        hints=(_ready_hint(), hint_two),
+    )
+    result = adapter.recall(_StubProvider(result=oversized.to_dict()))
+    assert result.status == "schema_mismatch"
+    assert result.hints.hints == ()
+
+
+def test_adapter_rejects_response_that_widens_the_request_budget():
+    # A request that narrows max_items to one must not accept a ready response
+    # whose embedded memory-hints-v1 limits still declare the full three-item
+    # cap: the provider's declared limits would widen the approved request
+    # budget and must fail closed as a schema mismatch.
+    request = _request_with_limits(RecallLimits(max_items=1, max_bytes=6000, timeout_ms=800))
+    adapter = MemorySidecarProviderAdapter(request)
+    # A single, otherwise-valid hint is within the global caps but embeds
+    # maxItems=3, which exceeds the request's maxItems=1.
+    result = adapter.recall(_StubProvider(result=_hints()))
+    assert result.status == "schema_mismatch"
+    assert result.hints.hints == ()
+
+
+def test_adapter_accepts_ready_response_with_narrowed_request_limits():
+    request = _request_with_limits(RecallLimits(max_items=1, max_bytes=6000, timeout_ms=800))
+    raw = _hints().to_dict()
+    raw["limits"] = {"maxItems": 1, "maxBytes": 6000, "timeoutMs": 800}
+    raw["hintsFingerprint"] = canonical_fingerprint({
+        "schemaVersion": "memory-hints-v1",
+        "queryFingerprint": raw["queryFingerprint"],
+        "status": "ready",
+        "hints": raw["hints"],
+        "limits": raw["limits"],
+    })
+    result = MemorySidecarProviderAdapter(request).recall(_StubProvider(result=raw))
+    assert result.status == "ready"
+    assert result.hints.hints == (_ready_hint(),)
+
+
+def test_adapter_accepts_response_within_default_request_limits():
+    # The default request budget (3 items / 6000 bytes / 800 ms) must keep
+    # accepting an in-budget ready response: the request-specific enforcement
+    # must not reject responses that fit the default budget.
+    request = _request()
+    adapter = MemorySidecarProviderAdapter(request)
+    result = adapter.recall(_StubProvider(result=_hints()))
+    assert result.status == "ready"
+    assert result.hints.hints == (_ready_hint(),)
 
 
 def test_adapter_explicitly_rejects_write_candidate():
