@@ -147,6 +147,16 @@ def test_recall_request_rejects_absolute_and_traversal_paths():
         assert exc.value.code == "path_violation"
 
 
+@pytest.mark.parametrize("path", ("review.json\ninjected", "hint.json\x1f"))
+def test_payload_path_allowlist_and_recall_request_reject_control_characters(path):
+    with pytest.raises(MemorySidecarProviderError) as exc:
+        _path_allowlist(path)
+    assert exc.value.code == "path_violation"
+    with pytest.raises(MemorySidecarProviderError) as exc:
+        _request(paths=(path,))
+    assert exc.value.code == "path_violation"
+
+
 def test_recall_request_rejects_secret_sqlite_csv_log_payloads():
     for path in (".env", "nested/.env", "credentials/token.json", "Secrets/api_key", "exports/data.sqlite", "data.csv", "logs/api.log"):
         with pytest.raises(MemorySidecarProviderError) as exc:
@@ -159,6 +169,22 @@ def test_recall_request_rejects_undeclared_safe_looking_payload_path():
     with pytest.raises(MemorySidecarProviderError) as exc:
         _request(paths=("unrelated/context.json",), path_allowlist=allowlist)
     assert exc.value.code == "path_violation"
+
+
+def test_payload_path_allowlist_rejects_bare_string():
+    with pytest.raises(MemorySidecarProviderError) as exc:
+        MemorySidecarPayloadPathAllowlist("a")
+    assert exc.value.code == "schema_mismatch"
+
+
+def test_recall_request_from_dict_rejects_bare_string_payload_collections():
+    payload = _request(paths=("a",), path_allowlist=_path_allowlist("a")).to_dict()
+    payload["payloadPathAllowlist"] = "a"
+    payload["payloadPaths"] = "a"
+
+    with pytest.raises(MemorySidecarProviderError) as exc:
+        MemorySidecarRecallRequest.from_dict(payload)
+    assert exc.value.code == "schema_mismatch"
 
 
 def test_recall_limits_reject_non_int_and_bool_values():
@@ -205,4 +231,3 @@ def test_fake_provider_remains_deterministic_and_writer_disabled():
     assert provider.recall_calls == 2
     assert provider.writer_enabled is False
     assert MemorySidecarProviderMetadata().writer_enabled is False
-

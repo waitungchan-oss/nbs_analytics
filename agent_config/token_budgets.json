@@ -1,7 +1,7 @@
 {
   "schemaVersion": "token-budgets-v1",
   "context": {"inputTokens": 12000, "outputTokens": 1500},
-  "review": {"inputTokens": 16000, "outputTokens": 2000},
+  "review": {"inputTokens": 24000, "outputTokens": 3000, "maxCommandCharacters": 24000},
   "implementation": {"inputTokens": 12000, "outputTokens": 2000, "maxRepairLoops": 2},
   "documentationInput": 8000,
   "documentationOutput": 1500,

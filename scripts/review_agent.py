@@ -148,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=PROJECT_ROOT / ".nbs_agent_runtime",
                 instructions=instructions,
                 strict=args.strict,
+                input_token_limit=policy.review_input_tokens,
+                output_token_limit=policy.review_output_tokens,
             )
         rendered = (
             json.dumps(report, ensure_ascii=False, indent=2) + "\n"

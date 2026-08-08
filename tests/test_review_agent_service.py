@@ -36,7 +36,10 @@ def review_bundle(dirty=None, content="+change"):
     return EvidenceBundle(
         schema_version="review-evidence-v1",
         task={"id": "x", "objective": "approved", "scope": ["backend"], "forbidden": []},
-        repository={"branch": "feature", "head": "abc", "headRef": "WORKTREE", "base": "HEAD", "dirtyFiles": dirty or []},
+        repository={
+            "branch": "feature", "head": "abc", "headRef": "WORKTREE", "base": "HEAD",
+            "baseSha": "a" * 40, "dirtyFiles": dirty or [],
+        },
         guardrails={"mayBaseline": "HKD 12,057,968"},
         evidence=(EvidenceItem(kind="diff", source="x.py", content=content),),
     )
@@ -93,6 +96,30 @@ def test_review_payload_git_diff_fingerprint_is_deterministic_and_content_bound(
         review_bundle(content="+different"), context_summary=context_summary(), verification=verification(),
     )
     assert changed["gitDiff"]["diffFingerprint"] != git_diff["diffFingerprint"]
+
+
+def test_review_payload_uses_resolved_base_and_committed_head_identity():
+    bundle = review_bundle()
+    bundle = EvidenceBundle(
+        schema_version=bundle.schema_version,
+        task=bundle.task,
+        repository={
+            **bundle.repository,
+            "base": "d42c310",
+            "baseSha": "b" * 40,
+            "headRef": "bd03127",
+            "headSha": "c" * 40,
+        },
+        guardrails=bundle.guardrails,
+        evidence=bundle.evidence,
+    )
+
+    git_diff = build_review_evidence_payload(
+        bundle, context_summary=context_summary(), verification=verification(),
+    )["gitDiff"]
+
+    assert git_diff["base"] == "b" * 40
+    assert git_diff["head"] == "c" * 40
 
 
 def test_review_runtime_instructions_bind_output_fingerprint_to_input_bundle(tmp_path):
@@ -211,6 +238,51 @@ def test_large_review_bundle_splits_only_between_files():
     batches = split_review_bundle_by_file(bundle, patch_token_budget=10)
     assert len(batches) == 3
     assert [batch.evidence[0].source for batch in batches] == ["file-0.py", "file-1.py", "file-2.py"]
+
+
+def test_strict_review_batches_scope_known_dirty_files_and_keep_unattributed_dirty_blocked(tmp_path):
+    bundle = EvidenceBundle(
+        schema_version="review-evidence-v1",
+        task={"id": "x", "objective": "approved", "scope": [], "forbidden": []},
+        repository={
+            "branch": "feature", "head": "abc", "headRef": "WORKTREE", "base": "HEAD",
+            "dirtyFiles": ["one.py", "two.py"],
+        },
+        guardrails={"mayBaseline": "HKD 12,057,968"},
+        evidence=(
+            EvidenceItem(kind="diff", source="one.py", content="x" * 40),
+            EvidenceItem(kind="diff", source="two.py", content="x" * 40),
+        ),
+    )
+
+    batches = split_review_bundle_by_file(bundle, patch_token_budget=10)
+    reports = [
+        build_review_report(
+            batch, context_summary=context_summary(), verification=verification(),
+            project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
+            instructions="contract", strict=True,
+        )
+        for batch in batches
+    ]
+
+    assert [report["verdict"] for report in reports] == ["pass", "pass"]
+
+    unsafe_bundle = EvidenceBundle(
+        schema_version=bundle.schema_version,
+        task=bundle.task,
+        repository={**bundle.repository, "dirtyFiles": ["one.py", "two.py", "unrelated.py"]},
+        guardrails=bundle.guardrails,
+        evidence=bundle.evidence,
+    )
+    unsafe_batch = split_review_bundle_by_file(unsafe_bundle, patch_token_budget=10)[0]
+    unsafe_report = build_review_report(
+        unsafe_batch, context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
+        instructions="contract", strict=True,
+    )
+
+    assert unsafe_report["verdict"] == "blocked"
+    assert "unrelated.py" in unsafe_report["residualRisk"][0]
 
 
 def test_single_file_over_budget_returns_overflow_before_runner(tmp_path):

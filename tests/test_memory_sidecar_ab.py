@@ -125,6 +125,18 @@ def test_ab_run_is_immutable_and_bounded():
     assert run.commands == COMMANDS
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("allowedFiles", "abc.py"), ("commands", "pytest")],
+)
+def test_ab_run_from_dict_rejects_bare_string_collections(field, value):
+    payload = _off_run().to_dict()
+    payload[field] = value
+
+    with pytest.raises(AbInvariantMismatch, match="schema"):
+        MemorySidecarAbRun.from_dict(payload)
+
+
 def test_ab_run_rejects_invalid_head_or_fingerprints():
     with pytest.raises(ValueError, match="head"):
         _off_run(head="short")
@@ -246,11 +258,13 @@ def test_ab_report_pairs_one_off_and_one_on_cohort():
         build_ab_report(_on_run(), _on_run(run_id="run-ab-task3-on-2"))
 
 
-def test_ab_report_provider_model_identity_matches():
-    with pytest.raises(AbInvariantMismatch, match="provider"):
-        build_ab_report(_off_run(provider="openai"), _on_run())
-    with pytest.raises(AbInvariantMismatch, match="model"):
-        build_ab_report(_off_run(model="gpt-4o"), _on_run())
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("provider", "openai"), ("model", "gpt-4o")],
+)
+def test_ab_run_rejects_unapproved_provider_model_identity(field, value):
+    with pytest.raises(AbInvariantMismatch, match="allowlisted"):
+        _off_run(**{field: value})
 
 
 # ---------------------------------------------------------------------------

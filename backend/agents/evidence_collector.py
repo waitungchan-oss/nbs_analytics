@@ -40,6 +40,9 @@ class EvidencePolicy:
     max_command_characters: int
     agent_executables: tuple[str, ...]
     context_input_tokens: int = 12000
+    review_input_tokens: int = 16000
+    review_output_tokens: int = 2000
+    review_max_command_characters: int | None = None
 
     @classmethod
     def from_project(cls, project_root: Path) -> "EvidencePolicy":
@@ -48,6 +51,8 @@ class EvidencePolicy:
         budgets = load_json_config(root, "agent_config/token_budgets.json")
         excerpt = budgets["excerpt"]
         context = budgets["context"]
+        review = budgets["review"]
+        command_limit = int(excerpt["maxCommandCharacters"])
         return cls(
             project_root=root,
             read_roots=tuple(allow["readRoots"]),
@@ -56,9 +61,14 @@ class EvidencePolicy:
             extensions=tuple(allow["extensions"]),
             deny_patterns=tuple(allow["denyPatterns"]),
             max_file_lines=int(excerpt["maxFileLines"]),
-            max_command_characters=int(excerpt["maxCommandCharacters"]),
+            max_command_characters=command_limit,
             agent_executables=tuple(allow["agentExecutables"]),
             context_input_tokens=int(context["inputTokens"]),
+            review_input_tokens=int(review["inputTokens"]),
+            review_output_tokens=int(review["outputTokens"]),
+            review_max_command_characters=int(
+                review.get("maxCommandCharacters", command_limit)
+            ),
         )
 
     def resolve_read_path(self, path: Path) -> Path:
@@ -142,7 +152,13 @@ class EvidenceCollector:
         self.project_root = project_root.resolve()
         self.policy = policy or EvidencePolicy.from_project(self.project_root)
 
-    def _run(self, label: str, argv: list[str]) -> CommandEvidence:
+    def _run(
+        self,
+        label: str,
+        argv: list[str],
+        *,
+        command_character_limit: int | None = None,
+    ) -> CommandEvidence:
         if not argv or argv[0] not in self._COMMAND_EXECUTABLES:
             raise PermissionError(f"Command is not allowlisted: {argv[0] if argv else '<empty>'}")
         completed = subprocess.run(
@@ -154,7 +170,11 @@ class EvidenceCollector:
             check=False,
             shell=False,
         )
-        limit = self.policy.max_command_characters
+        limit = (
+            self.policy.max_command_characters
+            if command_character_limit is None
+            else command_character_limit
+        )
         return CommandEvidence(
             label=label,
             argv=tuple(argv),
@@ -363,6 +383,7 @@ class EvidenceCollector:
         changed = self._run(
             "git-diff-name-only",
             ["git", "diff", *diff_options, "--name-only", diff_range],
+            command_character_limit=self.policy.review_max_command_characters,
         )
         untracked_command = None
         untracked_paths: list[str] = []
@@ -370,6 +391,7 @@ class EvidenceCollector:
             untracked_command = self._run(
                 "git-untracked-files",
                 ["git", "ls-files", "--others", "--exclude-standard"],
+                command_character_limit=self.policy.review_max_command_characters,
             )
             for relative in untracked_command.stdout.splitlines():
                 if not relative or relative.startswith("/") or ".." in Path(relative).parts:
@@ -398,11 +420,13 @@ class EvidenceCollector:
                 patch = self._run(
                     f"git-diff-untracked-file-{index}",
                     ["git", "diff", *diff_options, "--no-index", "--", "/dev/null", relative],
+                    command_character_limit=self.policy.review_max_command_characters,
                 )
             else:
                 patch = self._run(
                     f"git-diff-file-{index}",
                     ["git", "diff", *diff_options, diff_range, "--", relative],
+                    command_character_limit=self.policy.review_max_command_characters,
                 )
             patch_commands.append(patch)
             patches.append(

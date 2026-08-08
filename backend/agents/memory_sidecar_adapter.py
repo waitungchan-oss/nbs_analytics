@@ -71,6 +71,8 @@ def _sha256_fingerprint(value: Any, key: str) -> str:
 def _validate_payload_path(path: Any) -> str:
     if not isinstance(path, str) or not path or len(path) > 256:
         raise MemorySidecarProviderError("path_violation", "payload path is invalid or unbounded")
+    if any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in path):
+        raise MemorySidecarProviderError("path_violation", "payload path contains control characters")
     if (
         path.startswith("/")
         or "\\" in path
@@ -122,6 +124,8 @@ class MemorySidecarPayloadPathAllowlist:
     paths: frozenset[str]
 
     def __post_init__(self) -> None:
+        if isinstance(self.paths, str) or not isinstance(self.paths, (frozenset, set, tuple, list)):
+            raise MemorySidecarProviderError("schema_mismatch", "payload path allowlist must be a collection")
         if not isinstance(self.paths, frozenset):
             object.__setattr__(self, "paths", frozenset(self.paths))
         if not self.paths or len(self.paths) > PAYLOAD_PATH_ALLOWLIST_MAX_ITEMS:
@@ -221,6 +225,11 @@ class MemorySidecarRecallRequest:
         }
         if not isinstance(payload, Mapping) or set(payload) != expected or payload.get("schemaVersion") != MEMORY_RECALL_REQUEST_SCHEMA:
             raise MemorySidecarProviderError("schema_mismatch", "recall request envelope is invalid")
+        if any(
+            not isinstance(payload[field], list)
+            for field in ("payloadPathAllowlist", "payloadPaths")
+        ):
+            raise MemorySidecarProviderError("schema_mismatch", "payload path collections must be lists")
         limits_payload = payload["limits"]
         if not isinstance(limits_payload, Mapping) or set(limits_payload) != {"maxItems", "maxBytes", "timeoutMs"}:
             raise MemorySidecarProviderError("schema_mismatch", "limits are invalid")
@@ -273,4 +282,3 @@ class FakeMemorySidecarProvider:
         if not self.writer_enabled:
             return WriteResult(status="disabled", error_code="writer_disabled")
         return self.write_results.get(candidate.memory_id, WriteResult(status="written", memory_id=candidate.memory_id))
-

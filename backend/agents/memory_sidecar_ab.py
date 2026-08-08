@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 from .evidence_models import canonical_fingerprint
+from .memory_sidecar_models import MODEL_ALLOWLIST, PROVIDER_ALLOWLIST
 
 AB_RUN_SCHEMA = "memory-sidecar-ab-run-v1"
 AB_REPORT_SCHEMA = "memory-sidecar-ab-report-v1"
@@ -168,6 +169,10 @@ class MemorySidecarAbRun:
             raise ValueError("memory sidecar A/B model is invalid")
         _safe_string_element(self.provider, name="provider", max_chars=AB_MAX_IDENTITY_CHARS)
         _safe_string_element(self.model, name="model", max_chars=AB_MAX_IDENTITY_CHARS)
+        if self.provider not in PROVIDER_ALLOWLIST:
+            raise AbInvariantMismatch("provider_identity", "A/B provider is not allowlisted")
+        if self.model not in MODEL_ALLOWLIST:
+            raise AbInvariantMismatch("model_identity", "A/B model is not allowlisted")
         if not isinstance(self.fallback, bool) or not isinstance(self.review_no_regression, bool) or not isinstance(self.baseline_scope_unchanged, bool) or not isinstance(self.alternative_evidence, bool):
             raise ValueError("memory sidecar A/B boolean flags must be booleans")
         object.__setattr__(self, "estimated_input_tokens", _positive_int(self.estimated_input_tokens, name="input tokens", maximum=AB_MAX_INPUT_TOKENS))
@@ -207,6 +212,8 @@ class MemorySidecarAbRun:
         }
         if not isinstance(payload, dict) or set(payload) != expected or payload.get("schemaVersion") != AB_RUN_SCHEMA:
             raise AbInvariantMismatch("schema", "A/B run envelope is invalid")
+        if any(not isinstance(payload[field], list) for field in ("allowedFiles", "commands")):
+            raise AbInvariantMismatch("schema", "A/B run collection fields must be lists")
         return cls(
             run_id=payload["runId"],
             cohort=AbCohort(payload["cohort"]),
