@@ -112,6 +112,62 @@ def test_review_cli_strict_without_verification_exits_two(tmp_path):
     context.unlink()
 
 
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens"),
+    [(1, 2000), (24000, 1)],
+)
+def test_review_cli_uses_configured_review_token_budgets(
+    monkeypatch, tmp_path, input_tokens, output_tokens,
+):
+    from scripts import review_agent
+
+    (tmp_path / "agent_config").mkdir()
+    (tmp_path / "docs" / "agents").mkdir(parents=True)
+    (tmp_path / ".nbs_agent_runtime" / "test-inputs").mkdir(parents=True)
+    (tmp_path / "agent_config" / "evidence_allowlist.json").write_text(
+        json.dumps({
+            "readRoots": ["docs"], "rootFiles": [], "defaultContextFiles": [],
+            "extensions": [".md", ".json"], "denyPatterns": ["*.db", ".env"],
+            "agentExecutables": ["codex"],
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "agent_config" / "token_budgets.json").write_text(
+        json.dumps({
+            "context": {"inputTokens": 12000, "outputTokens": 1500},
+            "review": {"inputTokens": input_tokens, "outputTokens": output_tokens},
+            "excerpt": {"maxFileLines": 5, "symbolContextLines": 2, "maxCommandCharacters": 200},
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "docs" / "brief.md").write_text("objective", encoding="utf-8")
+    (tmp_path / "docs" / "agents" / "REVIEW_AGENT_CONTRACT.md").write_text(
+        "contract", encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    context = tmp_path / ".nbs_agent_runtime" / "test-inputs" / "context.json"
+    context.write_text(json.dumps(valid_context_summary()), encoding="utf-8")
+    verification = tmp_path / ".nbs_agent_runtime" / "test-inputs" / "verification.json"
+    verification.write_text(json.dumps({"commands": [{
+        "label": "targeted", "argv": ["pytest"], "exitCode": 0,
+        "stdoutTail": "passed", "stderrTail": "",
+    }]}), encoding="utf-8")
+    subprocess.run(["git", "add", ".nbs_agent_runtime/test-inputs"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--amend", "-qm", "initial"], cwd=tmp_path, check=True)
+    monkeypatch.setattr(review_agent, "PROJECT_ROOT", tmp_path)
+
+    result = review_agent.main([
+        "--brief", "docs/brief.md", "--base", "HEAD", "--head", "HEAD",
+        "--context", str(context), "--verification", str(verification), "--strict",
+    ])
+
+    assert result == 4
+
+
 @pytest.mark.parametrize("filename", ["outside.json", "secret.env", "data.db", "report.xlsx", "events.log"])
 def test_review_cli_rejects_unsafe_input_paths(tmp_path, filename):
     candidate = tmp_path / filename

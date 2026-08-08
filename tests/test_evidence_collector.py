@@ -15,7 +15,12 @@ def init_repo(root: Path) -> None:
     subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
 
 
-def write_configs(root: Path, *, context_input_tokens: int = 12000) -> None:
+def write_configs(
+    root: Path,
+    *,
+    context_input_tokens: int = 12000,
+    review_command_characters: int | None = None,
+) -> None:
     (root / "agent_config").mkdir()
     (root / "agent_config/evidence_allowlist.json").write_text(
         '{"readRoots":["docs","backend","tests"],"rootFiles":["AGENTS.md",".gitignore"],'
@@ -25,7 +30,13 @@ def write_configs(root: Path, *, context_input_tokens: int = 12000) -> None:
     )
     (root / "agent_config/token_budgets.json").write_text(
         f'{{"context":{{"inputTokens":{context_input_tokens},"outputTokens":1500}},'
-        '"review":{"inputTokens":16000,"outputTokens":2000},'
+        '"review":{"inputTokens":16000,"outputTokens":2000'
+        + (
+            f',"maxCommandCharacters":{review_command_characters}'
+            if review_command_characters is not None
+            else ""
+        )
+        + '},'
         '"excerpt":{"maxFileLines":5,"symbolContextLines":2,"maxCommandCharacters":200}}',
         encoding="utf-8",
     )
@@ -225,6 +236,84 @@ def test_review_collection_uses_argv_and_captures_changed_files(tmp_path):
     base = next(item for item in bundle.commands if item.label == "git-base")
     assert base.argv[:4] == ("git", "rev-parse", "--verify", "--end-of-options")
     assert len(bundle.repository["baseSha"]) == 40
+
+
+def test_review_diff_uses_review_only_excerpt_budget_without_broadening_context(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path, review_command_characters=1200)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    changed = tmp_path / "docs/changed.md"
+    changed.write_text("before", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    changed.write_text("x" * 500, encoding="utf-8")
+
+    collector = EvidenceCollector(tmp_path)
+    review = collector.collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+    ordinary = collector._run("git-diff-ordinary", ["git", "diff", "--", "docs/changed.md"])
+
+    patch = next(item for item in review.evidence if item.source == "docs/changed.md")
+    assert patch.metadata["truncated"] is False
+    assert "x" * 500 in patch.content
+    assert ordinary.truncated is True
+    assert len(ordinary.stdout) == 200
+
+
+def test_review_file_lists_use_review_excerpt_budget_for_tracked_and_untracked_paths(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path, review_command_characters=1200)
+    (tmp_path / "docs" / "tracked").mkdir(parents=True)
+    brief = tmp_path / "docs" / "brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    tracked = []
+    for index in range(20):
+        path = tmp_path / "docs" / "tracked" / f"entry-{index:02d}.md"
+        path.write_text("before", encoding="utf-8")
+        tracked.append(path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    for path in tracked:
+        path.write_text("after", encoding="utf-8")
+    (tmp_path / "docs" / "untracked").mkdir()
+    for index in range(20):
+        (tmp_path / "docs" / "untracked" / f"entry-{index:02d}.md").write_text(
+            "new", encoding="utf-8",
+        )
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief, base_ref="HEAD", head_ref="WORKTREE",
+    )
+
+    changed = next(item for item in bundle.commands if item.label == "git-diff-name-only")
+    untracked = next(item for item in bundle.commands if item.label == "git-untracked-files")
+    assert len(changed.stdout) > 200
+    assert len(untracked.stdout) > 200
+    assert changed.truncated is False
+    assert untracked.truncated is False
+    assert len(bundle.evidence) == 40
+
+
+def test_review_diff_falls_back_to_ordinary_excerpt_budget_when_config_omits_review_limit(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    changed = tmp_path / "docs/changed.md"
+    changed.write_text("before", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    changed.write_text("x" * 500, encoding="utf-8")
+
+    review = EvidenceCollector(tmp_path).collect_review(
+        brief, base_ref="HEAD", head_ref="WORKTREE",
+    )
+
+    patch = next(item for item in review.evidence if item.source == "docs/changed.md")
+    assert patch.metadata["truncated"] is True
+    assert len(patch.content) == 200
 
 
 @pytest.mark.parametrize("head_ref", ["worktree", "working-tree", "working_tree", "WORKTREE"])

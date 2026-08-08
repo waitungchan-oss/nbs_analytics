@@ -139,17 +139,26 @@ def split_review_bundle_by_file(
         current_tokens += patch_tokens
     if current:
         groups.append(current)
-    return tuple(
-        EvidenceBundle(
+    diff_sources = {patch.source for patch in patches}
+    dirty_files = bundle.repository.get("dirtyFiles")
+    batches: list[EvidenceBundle] = []
+    for group in groups:
+        repository = dict(bundle.repository)
+        if isinstance(dirty_files, list) and all(isinstance(item, str) for item in dirty_files):
+            group_sources = {patch.source for patch in group}
+            repository["dirtyFiles"] = [
+                item for item in dirty_files
+                if item in group_sources or item not in diff_sources
+            ]
+        batches.append(EvidenceBundle(
             schema_version=bundle.schema_version,
             task=bundle.task,
-            repository=bundle.repository,
+            repository=repository,
             guardrails=bundle.guardrails,
             evidence=tuple(group),
             commands=bundle.commands,
-        )
-        for group in groups
-    )
+        ))
+    return tuple(batches)
 
 
 def build_review_evidence_payload(
@@ -165,9 +174,10 @@ def build_review_evidence_payload(
         validate_context_summary(context_summary)
     _validate_verification(verification)
     patches = [item for item in bundle.evidence if item.kind == "diff"]
+    head_ref = bundle.repository.get("headRef")
     git_diff = {
-        "base": bundle.repository.get("base"),
-        "head": bundle.repository.get("headRef"),
+        "base": bundle.repository.get("baseSha"),
+        "head": head_ref if head_ref == "WORKTREE" else bundle.repository.get("headSha"),
         "files": [item.source for item in patches],
         "patches": [item.to_dict() for item in patches],
         "truncated": bool(bundle.repository.get("diffFileLimitExceeded"))

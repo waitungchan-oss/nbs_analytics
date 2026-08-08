@@ -55,5 +55,20 @@ def test_report_envelope_fields_cannot_be_overwritten_by_payload():
 
 def test_configs_are_valid_json_and_runtime_is_ignored():
     root = Path(__file__).resolve().parents[1]
-    assert load_json_config(root, "agent_config/token_budgets.json")["context"]["inputTokens"] == 12000
+    budgets = load_json_config(root, "agent_config/token_budgets.json")
+    assert budgets["context"]["inputTokens"] == 12000
+    assert budgets["review"]["inputTokens"] > budgets["context"]["inputTokens"]
+    assert budgets["review"]["outputTokens"] >= 2000
+    assert budgets["review"]["maxCommandCharacters"] > budgets["excerpt"]["maxCommandCharacters"]
     assert ".nbs_agent_runtime/" in (root / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_review_token_contract_documents_configured_budget_authority():
+    root = Path(__file__).resolve().parents[1]
+    review = load_json_config(root, "agent_config/token_budgets.json")["review"]
+    contract = (root / "docs/agents/REVIEW_AGENT_CONTRACT.md").read_text(encoding="utf-8")
+
+    assert "`agent_config/token_budgets.json`" in contract
+    assert f"{review['inputTokens']:,} estimated tokens" in contract
+    assert f"{review['outputTokens']:,} tokens" in contract
+    assert f"{review['maxCommandCharacters']:,} characters" in contract

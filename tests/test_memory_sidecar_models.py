@@ -4,6 +4,7 @@ import pytest
 
 from backend.agents.memory_sidecar_models import (
     MemoryCandidate,
+    MemorySidecarProviderMetadata,
     MemorySidecarSchemaError,
     MemorySourceRef,
 )
@@ -225,3 +226,69 @@ def test_direct_collection_inputs_are_normalized_immutable():
     assert paired.source_fingerprints == ("c" * 64, "b" * 64)
     with pytest.raises(MemorySidecarSchemaError):
         MemoryHint("a" * 64, "summary", ["z.json", "a.json"], "fresh", "high", [None, "b" * 64])
+
+
+# --- Hermes + DeepSeek integration: provider metadata contract (Plan Task 1) ---
+
+
+def test_provider_metadata_defaults_are_safe_immutable_and_identified():
+    meta = MemorySidecarProviderMetadata()
+    assert meta.provider == "hermes"
+    assert meta.model == "deepseek-v4-flash"
+    assert meta.schema_version == "memory-hints-v1"
+    assert meta.recall_enabled is False
+    assert meta.writer_enabled is False
+    assert meta.shadow_mode is True
+    assert meta.identity == "hermes/deepseek-v4-flash"
+    with pytest.raises(AttributeError):
+        meta.writer_enabled = True
+
+
+def test_provider_metadata_rejects_unknown_provider_model_and_unsafe_flags():
+    for provider in ("openai", "", "hermes "):
+        with pytest.raises(MemorySidecarSchemaError):
+            MemorySidecarProviderMetadata(provider=provider)
+    for model in ("gpt-5.5", "", "deepseek-v4-flash-2"):
+        with pytest.raises(MemorySidecarSchemaError):
+            MemorySidecarProviderMetadata(model=model)
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata(schema_version="memory-hints-v2")
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata(recall_enabled="yes")
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata(shadow_mode=1)
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata(writer_enabled=True)
+
+
+def test_provider_metadata_rejects_non_string_unhashable_provider_and_model():
+    for provider in ([], {}, None, 123, True):
+        with pytest.raises(MemorySidecarSchemaError):
+            MemorySidecarProviderMetadata(provider=provider)
+    for model in ([], {}, None, 123, False):
+        with pytest.raises(MemorySidecarSchemaError):
+            MemorySidecarProviderMetadata(model=model)
+
+
+def test_provider_metadata_from_dict_rejects_non_string_provider_and_model():
+    payload = MemorySidecarProviderMetadata().to_dict()
+    payload["provider"] = []
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata.from_dict(payload)
+    payload = MemorySidecarProviderMetadata().to_dict()
+    payload["model"] = {}
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata.from_dict(payload)
+
+
+def test_provider_metadata_round_trip_preserves_strict_envelope():
+    meta = MemorySidecarProviderMetadata()
+    assert MemorySidecarProviderMetadata.from_dict(meta.to_dict()).to_dict() == meta.to_dict()
+    payload = meta.to_dict()
+    payload["unexpected"] = True
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata.from_dict(payload)
+    payload = meta.to_dict()
+    payload["model"] = "gpt-5.5"
+    with pytest.raises(MemorySidecarSchemaError):
+        MemorySidecarProviderMetadata.from_dict(payload)

@@ -141,11 +141,24 @@ Validation Runner 可以執行會在 Git ignored 或 temporary path 產生測試
 
 ## Token Contract
 
-- 單批 input 上限：16k estimated tokens。
-- Output 上限：2k tokens。
+- Review token 與 command excerpt 的正式設定來源是 `agent_config/token_budgets.json` 的 `review` section；本文件不另行建立可覆蓋 runtime 的預算。
+- 單批 input 上限：24,000 estimated tokens。
+- Output 上限：3,000 tokens。
+- 每個 allowlisted Review diff command excerpt 上限：24,000 characters；Context 與 Implementation 仍使用其既有 ordinary excerpt limit。
 - 大 diff 按 backend、frontend、tests、docs 或 dependency group 分批。
 - 分批結果由 deterministic aggregator 合併，critical/high finding 不得被摘要移除。
 - 相同 review fingerprint 優先重用 cache。
+
+### Review batching semantics
+
+當 runtime 將大 diff 拆成多個 Review requests 時，每一個 request 的
+`gitDiff.files` 與 `gitDiff.patches` 都是同一個 immutable base/head bundle 的
+有意識子集。Review Agent 必須只審查該 request 實際提供的 patch；不可因其他 patch
+出現在 verification 的全量檔案清單、或不在目前 batch 中，而回報
+`invalid_bundle`、`omitted patches` 或 `incomplete diff`。Runtime 會以 deterministic
+aggregator 合併各 batch，並在合併層確認所有 changed files、dirty-file attribution、
+fingerprint 與 truncation semantics；只有真正缺少該 batch 宣稱要提供的 patch，或
+bundle identity／fingerprint 不一致時，才可提出 evidence completeness finding。
 
 ## PASS Gate
 

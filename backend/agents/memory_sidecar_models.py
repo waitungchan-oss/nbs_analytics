@@ -11,6 +11,8 @@ from .evidence_models import canonical_fingerprint
 
 MEMORY_CANDIDATE_SCHEMA = "memory-candidate-v1"
 MEMORY_HINTS_SCHEMA = "memory-hints-v1"
+PROVIDER_ALLOWLIST = frozenset({"hermes"})
+MODEL_ALLOWLIST = frozenset({"deepseek-v4-flash"})
 MEMORY_KINDS = frozenset({"decision", "sop", "failure_pattern", "verification_pattern", "preference"})
 MEMORY_CANDIDATE_STATUSES = frozenset({"completed"})
 MEMORY_HINT_STATUSES = frozenset({"ready", "empty", "timeout", "degraded"})
@@ -122,6 +124,66 @@ class MemorySourceRef:
 
 
 @dataclass(frozen=True)
+class MemorySidecarProviderMetadata:
+    """Immutable provider/model identity for the controlled Hermes + DeepSeek integration.
+
+    Defaults are the safe pilot posture: recall off, writer permanently disabled,
+    shadow mode on. The provider/model pair is allowlisted so the integration
+    identity can never be forged from arbitrary strings.
+    """
+
+    provider: str = "hermes"
+    model: str = "deepseek-v4-flash"
+    schema_version: str = MEMORY_HINTS_SCHEMA
+    recall_enabled: bool = False
+    writer_enabled: bool = False
+    shadow_mode: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provider, str) or not self.provider:
+            raise MemorySidecarSchemaError("provider must be a non-empty string")
+        if not isinstance(self.model, str) or not self.model:
+            raise MemorySidecarSchemaError("model must be a non-empty string")
+        if self.provider not in PROVIDER_ALLOWLIST:
+            raise MemorySidecarSchemaError("provider is not allowlisted")
+        if self.model not in MODEL_ALLOWLIST:
+            raise MemorySidecarSchemaError("model is not allowlisted")
+        if self.schema_version != MEMORY_HINTS_SCHEMA:
+            raise MemorySidecarSchemaError("schemaVersion is invalid")
+        if not all(isinstance(flag, bool) for flag in (self.recall_enabled, self.writer_enabled, self.shadow_mode)):
+            raise MemorySidecarSchemaError("feature flags must be booleans")
+        if self.writer_enabled:
+            raise MemorySidecarSchemaError("writer_enabled must remain False in this phase")
+
+    @property
+    def identity(self) -> str:
+        return f"{self.provider}/{self.model}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "schemaVersion": self.schema_version,
+            "recallEnabled": self.recall_enabled,
+            "writerEnabled": self.writer_enabled,
+            "shadowMode": self.shadow_mode,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MemorySidecarProviderMetadata":
+        if not isinstance(payload, Mapping) or set(payload) != {"provider", "model", "schemaVersion", "recallEnabled", "writerEnabled", "shadowMode"}:
+            raise MemorySidecarSchemaError("provider metadata keys are invalid")
+        return cls(
+            provider=payload["provider"],
+            model=payload["model"],
+            schema_version=payload["schemaVersion"],
+            recall_enabled=payload["recallEnabled"],
+            writer_enabled=payload["writerEnabled"],
+            shadow_mode=payload["shadowMode"],
+        )
+
+
+@dataclass(frozen=True)
 class MemoryCandidate:
     kind: str
     summary: str
@@ -226,5 +288,8 @@ class MemoryCandidate:
         return {**self._unsigned(), "memoryId": self.memory_id, "memoryFingerprint": self.memory_fingerprint}
 
 __all__ = [
-    "MemoryCandidate", "MemorySidecarSchemaError", "MemorySourceRef",
+    "MemoryCandidate",
+    "MemorySidecarProviderMetadata",
+    "MemorySidecarSchemaError",
+    "MemorySourceRef",
 ]
