@@ -6,10 +6,12 @@ import pytest
 
 from backend.agents.runner_capability_evidence import (
     RUNNER_CAPABILITY_SCHEMA,
+    RunnerCapabilityComparison,
     RunnerCapabilityEvidence,
     RunnerCapabilityEvidenceError,
     build_capability_evidence,
 )
+from backend.agents.evidence_models import canonical_fingerprint
 
 
 GIT_HEAD = "a" * 40
@@ -113,3 +115,43 @@ def test_run_rejects_unknown_raw_content_and_unbounded_values(field: str, value:
             control, _run(run_id="treatment-002", sequence=2, recall_mode="on"),
             expected_git_head=GIT_HEAD, expected_task_fingerprint=TASK_FINGERPRINT,
         )
+
+
+@pytest.mark.parametrize("field, value", [
+    ("gitHead", "0" * 40),
+    ("projectId", "other-project"),
+    ("workspaceKind", "repo"),
+    ("workspaceFingerprint", "0" * 64),
+    ("taskFingerprint", "0" * 64),
+    ("briefFingerprint", "0" * 64),
+    ("allowedFilesFingerprint", "0" * 64),
+    ("commandsFingerprint", "0" * 64),
+])
+def test_evidence_rejects_top_level_identity_that_differs_from_runs(field: str, value: str):
+    payload = _evidence().to_dict()
+    payload[field] = value
+    payload["evidenceId"] = canonical_fingerprint({key: item for key, item in payload.items() if key != "evidenceId"})
+
+    with pytest.raises(RunnerCapabilityEvidenceError):
+        RunnerCapabilityEvidence.from_dict(payload)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("sameImmutableInputs", False),
+    ("distinctRunIds", False),
+    ("cacheReplayDetected", True),
+    ("tokenReductionRatio", 0.25),
+])
+def test_evidence_rejects_tampered_comparison_claims(field: str, value: object):
+    payload = _evidence().to_dict()
+    payload["comparison"][field] = value
+    payload["evidenceId"] = canonical_fingerprint({key: item for key, item in payload.items() if key != "evidenceId"})
+
+    with pytest.raises(RunnerCapabilityEvidenceError):
+        RunnerCapabilityEvidence.from_dict(payload)
+
+
+@pytest.mark.parametrize("ratio", [float("nan"), float("inf"), float("-inf"), -0.1, 1.1, 10 ** 100])
+def test_comparison_rejects_non_finite_or_out_of_bounds_token_reduction(ratio: float):
+    with pytest.raises(RunnerCapabilityEvidenceError):
+        RunnerCapabilityComparison(True, True, False, ratio)

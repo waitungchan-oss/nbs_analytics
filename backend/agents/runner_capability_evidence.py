@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import re
 from typing import Any, Mapping
 
@@ -188,8 +189,12 @@ class RunnerCapabilityComparison:
     def __post_init__(self) -> None:
         for name in ("same_immutable_inputs", "distinct_run_ids", "cache_replay_detected", "alternative_evidence"):
             _require_bool(getattr(self, name), field_name=name)
-        if self.token_reduction_ratio is not None and (isinstance(self.token_reduction_ratio, bool) or not isinstance(self.token_reduction_ratio, (int, float))):
-            raise RunnerCapabilityEvidenceError("tokenReductionRatio must be numeric or null")
+        if self.token_reduction_ratio is not None:
+            if (isinstance(self.token_reduction_ratio, bool)
+                    or not isinstance(self.token_reduction_ratio, (int, float))
+                    or not math.isfinite(self.token_reduction_ratio)
+                    or not 0.0 <= self.token_reduction_ratio <= 1.0):
+                raise RunnerCapabilityEvidenceError("tokenReductionRatio must be a finite ratio between 0 and 1")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -199,11 +204,26 @@ class RunnerCapabilityComparison:
         }
 
 
+def _derived_comparison(control: RunnerCapabilityRun, treatment: RunnerCapabilityRun) -> RunnerCapabilityComparison:
+    immutable = (
+        "git_head", "project_id", "workspace_kind", "workspace_fingerprint", "task_fingerprint",
+        "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint", "provider", "model",
+    )
+    ratio = None if control.input_tokens == 0 else (control.input_tokens - treatment.input_tokens) / control.input_tokens
+    return RunnerCapabilityComparison(
+        same_immutable_inputs=all(getattr(control, name) == getattr(treatment, name) for name in immutable),
+        distinct_run_ids=control.run_id != treatment.run_id,
+        cache_replay_detected=control.cache_replay_detected or treatment.cache_replay_detected,
+        token_reduction_ratio=ratio,
+    )
+
+
 @dataclass(frozen=True)
 class RunnerCapabilityEvidence:
     git_head: str
     project_id: str
     workspace_kind: str
+    workspace_fingerprint: str
     task_fingerprint: str
     brief_fingerprint: str
     allowed_files_fingerprint: str
@@ -224,16 +244,25 @@ class RunnerCapabilityEvidence:
         _require_identifier(self.project_id, field_name="projectId")
         if self.workspace_kind not in {"repo", "isolated_worktree"} or self.provider != ALLOWED_PROVIDER or self.model != ALLOWED_MODEL:
             raise RunnerCapabilityEvidenceError("invalid evidence identity")
-        for name in ("task_fingerprint", "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint"):
+        for name in ("workspace_fingerprint", "task_fingerprint", "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint"):
             _require_sha256(getattr(self, name), field_name=name)
         if not isinstance(self.control, RunnerCapabilityRun) or not isinstance(self.treatment, RunnerCapabilityRun) or not isinstance(self.comparison, RunnerCapabilityComparison):
             raise RunnerCapabilityEvidenceError("evidence must contain bounded typed records")
+        identity = (
+            "git_head", "project_id", "workspace_kind", "workspace_fingerprint", "task_fingerprint",
+            "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint", "provider", "model",
+        )
+        if any(getattr(self, name) != getattr(run, name) for run in (self.control, self.treatment) for name in identity):
+            raise RunnerCapabilityEvidenceError("top-level evidence identity must match both runs")
+        if self.comparison != _derived_comparison(self.control, self.treatment):
+            raise RunnerCapabilityEvidenceError("comparison must be derived from typed runs")
         object.__setattr__(self, "evidence_id", canonical_fingerprint(self.unsigned_dict()))
 
     def unsigned_dict(self) -> dict[str, Any]:
         return {
             "schemaVersion": self.schema_version, "gitHead": self.git_head, "projectId": self.project_id,
-            "workspaceKind": self.workspace_kind, "taskFingerprint": self.task_fingerprint,
+            "workspaceKind": self.workspace_kind, "workspaceFingerprint": self.workspace_fingerprint,
+            "taskFingerprint": self.task_fingerprint,
             "briefFingerprint": self.brief_fingerprint, "allowedFilesFingerprint": self.allowed_files_fingerprint,
             "commandsFingerprint": self.commands_fingerprint, "provider": self.provider, "model": self.model,
             "control": self.control.to_dict(), "treatment": self.treatment.to_dict(),
@@ -250,13 +279,14 @@ class RunnerCapabilityEvidence:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "RunnerCapabilityEvidence":
-        fields = frozenset({"schemaVersion", "evidenceId", "gitHead", "projectId", "workspaceKind", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider", "model", "control", "treatment", "comparison", "provenance", "latency", "result"})
+        fields = frozenset({"schemaVersion", "evidenceId", "gitHead", "projectId", "workspaceKind", "workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider", "model", "control", "treatment", "comparison", "provenance", "latency", "result"})
         _require_exact_fields(value, fields, kind="runner capability evidence")
         comparison = value["comparison"]
         if not isinstance(comparison, Mapping) or set(comparison) != {"sameImmutableInputs", "distinctRunIds", "cacheReplayDetected", "tokenReductionRatio", "alternativeEvidence"}:
             raise RunnerCapabilityEvidenceError("comparison has unknown or missing fields")
         evidence = cls(
             git_head=value["gitHead"], project_id=value["projectId"], workspace_kind=value["workspaceKind"],
+            workspace_fingerprint=value["workspaceFingerprint"],
             task_fingerprint=value["taskFingerprint"], brief_fingerprint=value["briefFingerprint"],
             allowed_files_fingerprint=value["allowedFilesFingerprint"], commands_fingerprint=value["commandsFingerprint"],
             provider=value["provider"], model=value["model"], control=RunnerCapabilityRun.from_dict(value["control"]),
@@ -280,12 +310,10 @@ def build_capability_evidence(control: Mapping[str, Any], treatment: Mapping[str
         raise RunnerCapabilityEvidenceError("run gitHead does not match expected immutable head")
     if control_run.task_fingerprint != expected_task_fingerprint or treatment_run.task_fingerprint != expected_task_fingerprint:
         raise RunnerCapabilityEvidenceError("run taskFingerprint does not match expected task")
-    immutable = ("git_head", "project_id", "workspace_kind", "workspace_fingerprint", "task_fingerprint", "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint", "provider", "model")
-    same_immutable_inputs = all(getattr(control_run, name) == getattr(treatment_run, name) for name in immutable)
-    ratio = None if control_run.input_tokens == 0 else (control_run.input_tokens - treatment_run.input_tokens) / control_run.input_tokens
-    comparison = RunnerCapabilityComparison(same_immutable_inputs, control_run.run_id != treatment_run.run_id, control_run.cache_replay_detected or treatment_run.cache_replay_detected, ratio)
+    comparison = _derived_comparison(control_run, treatment_run)
     return RunnerCapabilityEvidence(
         git_head=control_run.git_head, project_id=control_run.project_id, workspace_kind=control_run.workspace_kind,
+        workspace_fingerprint=control_run.workspace_fingerprint,
         task_fingerprint=control_run.task_fingerprint, brief_fingerprint=control_run.brief_fingerprint,
         allowed_files_fingerprint=control_run.allowed_files_fingerprint, commands_fingerprint=control_run.commands_fingerprint,
         provider=control_run.provider, model=control_run.model, control=control_run, treatment=treatment_run,
