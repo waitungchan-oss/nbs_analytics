@@ -121,6 +121,19 @@ def _safe_element_iterable(values: object, *, name: str, max_chars: int, max_ite
     return normalized
 
 
+def _alternative_evidence_binding(*, head: str, task_fingerprint: str, brief_fingerprint: str, allowed_files: tuple[str, ...], commands: tuple[str, ...], provider: str, model: str) -> str:
+    return canonical_fingerprint({
+        "schemaVersion": AB_RUN_SCHEMA,
+        "head": head,
+        "taskFingerprint": task_fingerprint,
+        "briefFingerprint": brief_fingerprint,
+        "allowedFiles": list(allowed_files),
+        "commands": list(commands),
+        "provider": provider,
+        "model": model,
+    })
+
+
 @dataclass(frozen=True)
 class MemorySidecarAbRun:
     """Immutable record of one controlled A/B execution.
@@ -150,6 +163,7 @@ class MemorySidecarAbRun:
     review_no_regression: bool
     baseline_scope_unchanged: bool
     alternative_evidence: bool = False
+    alternative_evidence_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.run_id, str) or not _RUN_ID_RE.fullmatch(self.run_id):
@@ -181,6 +195,15 @@ class MemorySidecarAbRun:
         object.__setattr__(self, "sensitive_capture_count", _positive_int(self.sensitive_capture_count, name="sensitive capture count", maximum=AB_MAX_SENSITIVE_CAPTURE_COUNT))
         object.__setattr__(self, "evidence_coverage", _fraction(self.evidence_coverage, name="evidence coverage"))
         object.__setattr__(self, "latency_ms", _positive_int(self.latency_ms, name="latency", maximum=AB_MAX_LATENCY_MS))
+        expected_ref = _alternative_evidence_binding(
+            head=self.head, task_fingerprint=self.task_fingerprint, brief_fingerprint=self.brief_fingerprint,
+            allowed_files=self.allowed_files, commands=self.commands, provider=self.provider, model=self.model,
+        )
+        if self.alternative_evidence:
+            if not isinstance(self.alternative_evidence_ref, str) or self.alternative_evidence_ref != expected_ref:
+                raise AbInvariantMismatch("alternative_evidence_ref", "alternative evidence requires the immutable binding reference")
+        elif self.alternative_evidence_ref is not None:
+            raise AbInvariantMismatch("alternative_evidence_ref", "alternative evidence reference requires the flag")
 
         if self.cohort == AbCohort.RECALL_OFF:
             # The recall-off control must be a pristine canonical baseline: no
@@ -208,7 +231,7 @@ class MemorySidecarAbRun:
             "allowedFiles", "commands", "provider", "model", "estimatedInputTokens",
             "explorationCount", "findings", "sensitiveCaptureCount", "fallback",
             "evidenceCoverage", "latencyMs", "reviewNoRegression", "baselineScopeUnchanged",
-            "alternativeEvidence",
+            "alternativeEvidence", "alternativeEvidenceRef",
         }
         if not isinstance(payload, dict) or set(payload) != expected or payload.get("schemaVersion") != AB_RUN_SCHEMA:
             raise AbInvariantMismatch("schema", "A/B run envelope is invalid")
@@ -234,6 +257,7 @@ class MemorySidecarAbRun:
             review_no_regression=payload["reviewNoRegression"],
             baseline_scope_unchanged=payload["baselineScopeUnchanged"],
             alternative_evidence=payload["alternativeEvidence"],
+            alternative_evidence_ref=payload["alternativeEvidenceRef"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -258,7 +282,17 @@ class MemorySidecarAbRun:
             "reviewNoRegression": self.review_no_regression,
             "baselineScopeUnchanged": self.baseline_scope_unchanged,
             "alternativeEvidence": self.alternative_evidence,
+            "alternativeEvidenceRef": self.alternative_evidence_ref,
         }
+
+
+def alternative_evidence_binding_fingerprint(run: MemorySidecarAbRun) -> str:
+    if not isinstance(run, MemorySidecarAbRun):
+        raise AbInvariantMismatch("run", "alternative evidence binding requires a valid A/B run")
+    return _alternative_evidence_binding(
+        head=run.head, task_fingerprint=run.task_fingerprint, brief_fingerprint=run.brief_fingerprint,
+        allowed_files=run.allowed_files, commands=run.commands, provider=run.provider, model=run.model,
+    )
 
 
 def p95_latency_ms(latencies: Iterable[int]) -> int:
@@ -332,6 +366,12 @@ def build_ab_report(off_run: MemorySidecarAbRun, on_run: MemorySidecarAbRun) -> 
         raise AbInvariantMismatch("provider_identity", "A/B cohorts must share the same provider")
     if off_run.model != on_run.model:
         raise AbInvariantMismatch("model_identity", "A/B cohorts must share the same model")
+    if off_run.alternative_evidence != on_run.alternative_evidence or off_run.alternative_evidence_ref != on_run.alternative_evidence_ref:
+        raise AbInvariantMismatch("alternative_evidence_ref", "A/B cohorts must share the same alternative evidence reference")
+    if off_run.alternative_evidence:
+        expected_ref = alternative_evidence_binding_fingerprint(off_run)
+        if off_run.alternative_evidence_ref != expected_ref or on_run.alternative_evidence_ref != alternative_evidence_binding_fingerprint(on_run):
+            raise AbInvariantMismatch("alternative_evidence_ref", "alternative evidence reference must bind immutable inputs")
 
     token_delta = on_run.estimated_input_tokens - off_run.estimated_input_tokens
     input_reduction_fraction = (
@@ -380,6 +420,7 @@ def build_ab_report(off_run: MemorySidecarAbRun, on_run: MemorySidecarAbRun) -> 
         "sensitiveCaptureCount": on_run.sensitive_capture_count,
         "fallback": on_run.fallback,
         "alternativeEvidence": on_run.alternative_evidence,
+        "alternativeEvidenceRef": on_run.alternative_evidence_ref,
     })
 
     return MemorySidecarAbReport(
