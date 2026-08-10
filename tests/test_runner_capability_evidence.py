@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+import json
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,7 @@ from backend.agents.runner_capability_evidence import (
     RunnerCapabilityComparison,
     RunnerCapabilityEvidence,
     RunnerCapabilityEvidenceError,
+    RunnerCapabilityRun,
     build_capability_evidence,
     compare_capability_runs,
 )
@@ -17,6 +20,8 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 GIT_HEAD = "a" * 40
 TASK_FINGERPRINT = "b" * 64
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FIXTURE_ROOT = PROJECT_ROOT / "tests/fixtures/memory_sidecar/runner_capability"
 
 
 def _run(*, run_id: str, sequence: int, recall_mode: str, **overrides: object) -> dict:
@@ -222,3 +227,55 @@ def test_capability_comparison_rejects_proven_capability_with_failed_metrics(tre
 
     assert comparison.result == "acceptance_rejected"
     assert expected_reason in comparison.reasons
+
+
+def _fixture(name: str) -> dict:
+    return json.loads((FIXTURE_ROOT / name).read_text(encoding="utf-8"))
+
+
+def test_ready_runner_capability_fixtures_are_bounded_and_prove_ready_pair():
+    control_payload = _fixture("control-ready.json")
+    treatment_payload = _fixture("treatment-ready.json")
+    control = RunnerCapabilityRun.from_dict(control_payload)
+    treatment = RunnerCapabilityRun.from_dict(treatment_payload)
+    evidence = build_capability_evidence(
+        control.unsigned_dict(), treatment.unsigned_dict(),
+        expected_git_head=control.git_head, expected_task_fingerprint=control.task_fingerprint,
+    )
+
+    assert (control.provider, control.model) == ("hermes", "deepseek-v4-flash")
+    assert (control.sequence, treatment.sequence) == (1, 2)
+    assert control.run_id != treatment.run_id
+    assert not control.cache_replay_detected and not treatment.cache_replay_detected
+    assert control.provenance_coverage == treatment.provenance_coverage == 1.0
+    assert evidence.comparison.token_reduction_ratio >= 0.20
+    assert evidence.result == "ready"
+    serialized = json.dumps([control_payload, treatment_payload])
+    for forbidden in ("rawPrompt", "rawModelOutput", "secret", "absolutePath", "runnerCommand", "rawHints"):
+        assert forbidden not in serialized
+
+
+def test_cache_replay_fixture_is_blocked_runner_capability():
+    control = RunnerCapabilityRun.from_dict(_fixture("control-ready.json"))
+    replay = RunnerCapabilityRun.from_dict(_fixture("blocked-cache-replay.json"))
+
+    evidence = build_capability_evidence(
+        control.unsigned_dict(), replay.unsigned_dict(),
+        expected_git_head=control.git_head, expected_task_fingerprint=control.task_fingerprint,
+    )
+
+    assert evidence.result == "blocked_runner_capability"
+    assert "cache_replay_detected" in evidence.comparison.reasons
+
+
+def test_memory_sidecar_contract_limits_task5_to_ready_capability_evidence():
+    contract = (PROJECT_ROOT / "docs/agents/MEMORY_SIDECAR_CONTRACT.md").read_text(encoding="utf-8")
+
+    for result in ("ready", "blocked_runner_capability", "acceptance_rejected"):
+        assert result in contract
+    assert "Task 5 only consumes `result=ready`" in contract
+    assert "memory-sidecar-ab-acceptance-v1" in contract
+    assert "same immutable inputs" in contract
+    assert "recall_enabled=false" in contract
+    assert "no auto-enable" in contract
+    assert "cannot be reused as acceptance proof" in contract
