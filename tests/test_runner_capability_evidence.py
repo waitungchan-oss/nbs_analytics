@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -10,6 +10,7 @@ from backend.agents.runner_capability_evidence import (
     RunnerCapabilityEvidence,
     RunnerCapabilityEvidenceError,
     build_capability_evidence,
+    compare_capability_runs,
 )
 from backend.agents.evidence_models import canonical_fingerprint
 
@@ -18,8 +19,8 @@ GIT_HEAD = "a" * 40
 TASK_FINGERPRINT = "b" * 64
 
 
-def _run(*, run_id: str, sequence: int, recall_mode: str) -> dict:
-    return {
+def _run(*, run_id: str, sequence: int, recall_mode: str, **overrides: object) -> dict:
+    result = {
         "runId": run_id,
         "sequence": sequence,
         "recallMode": recall_mode,
@@ -46,6 +47,7 @@ def _run(*, run_id: str, sequence: int, recall_mode: str) -> dict:
         "reviewNoRegression": True,
         "hermesNoRegression": True,
     }
+    return {**result, **overrides}
 
 
 def _evidence() -> RunnerCapabilityEvidence:
@@ -161,3 +163,62 @@ def test_comparison_accepts_finite_negative_token_reduction_for_later_rejection_
 def test_comparison_rejects_non_finite_or_out_of_bounds_token_reduction(ratio: float):
     with pytest.raises(RunnerCapabilityEvidenceError):
         RunnerCapabilityComparison(True, True, False, ratio)
+
+
+def _runs(**treatment_overrides: object):
+    control = _evidence().control
+    treatment = replace(_evidence().treatment, **treatment_overrides)
+    return control, treatment
+
+
+def test_capability_comparison_marks_valid_off_on_protocol_ready():
+    control, treatment = _runs(input_tokens=700)
+
+    comparison = compare_capability_runs(control, treatment)
+
+    assert comparison.result == "ready"
+    assert comparison.reasons == ()
+    assert comparison.token_reduction_ratio == 0.3
+
+
+@pytest.mark.parametrize("treatment_overrides, expected_reason", [
+    ({"git_head": "0" * 40}, "immutable_inputs_mismatch"),
+    ({"task_fingerprint": "0" * 64}, "immutable_inputs_mismatch"),
+    ({"sequence": 1}, "invalid_sequence"),
+    ({"run_id": "control-001"}, "reused_run_id"),
+    ({"cache_replay_detected": True}, "cache_replay_detected"),
+    ({"status": "incomplete"}, "completion_missing"),
+    ({"input_tokens": None}, "token_usage_missing"),
+])
+def test_capability_comparison_blocks_unprovable_capability(treatment_overrides: dict, expected_reason: str):
+    control, treatment = _runs(**treatment_overrides)
+
+    comparison = compare_capability_runs(control, treatment)
+
+    assert comparison.result == "blocked_runner_capability"
+    assert expected_reason in comparison.reasons
+
+
+def test_capability_comparison_blocks_live_identity_mismatch():
+    control, treatment = _runs()
+    object.__setattr__(treatment, "model", "unverified-model")
+
+    comparison = compare_capability_runs(control, treatment)
+
+    assert comparison.result == "blocked_runner_capability"
+    assert "live_identity_mismatch" in comparison.reasons
+
+
+@pytest.mark.parametrize("treatment_overrides, expected_reason", [
+    ({"input_tokens": 900}, "token_reduction_below_threshold"),
+    ({"provenance_coverage": 0.9}, "provenance_coverage_below_full"),
+    ({"sensitive_capture_count": 1}, "sensitive_capture_detected"),
+    ({"p95_ms": 801}, "latency_exceeds_limit"),
+])
+def test_capability_comparison_rejects_proven_capability_with_failed_metrics(treatment_overrides: dict, expected_reason: str):
+    control, treatment = _runs(**treatment_overrides)
+
+    comparison = compare_capability_runs(control, treatment)
+
+    assert comparison.result == "acceptance_rejected"
+    assert expected_reason in comparison.reasons
