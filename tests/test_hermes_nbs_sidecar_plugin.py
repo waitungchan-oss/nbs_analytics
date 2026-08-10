@@ -48,6 +48,8 @@ def _provider(tmp_path, monkeypatch, envelope: dict | None, *, query: str = "rev
 def test_provider_is_disabled_without_explicit_activation(tmp_path, monkeypatch):
     provider = _provider(tmp_path, monkeypatch, None)
 
+    assert provider.name == "nbs_sidecar"
+    assert provider.get_tool_schemas() == []
     assert provider.is_available() is False
     assert provider.prefetch("review runtime") == ""
 

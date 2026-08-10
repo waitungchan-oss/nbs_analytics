@@ -15,6 +15,11 @@ class _MemoryProviderFallback:
     """Compatible no-op base when the external Hermes package is unavailable."""
 
 
+try:  # Hermes is optional for local NBS tests and ordinary development.
+    from agent.memory_provider import MemoryProvider as _MemoryProviderBase
+except ImportError:  # pragma: no cover - exercised when Hermes is installed.
+    _MemoryProviderBase = _MemoryProviderFallback
+
 ACTIVATION_SCHEMA = "hermes-nbs-sidecar-activation-v1"
 MAX_HINTS_BYTES = 6000
 MAX_QUERY_CHARS = 512
@@ -32,7 +37,7 @@ def activation_binding_fingerprint(envelope: Mapping[str, Any]) -> str:
     return canonical_fingerprint({key: envelope[key] for key in sorted(_ENVELOPE_FIELDS - {"activationId"})})
 
 
-class NbsHermesSidecarProvider(_MemoryProviderFallback):
+class NbsHermesSidecarProvider(_MemoryProviderBase):
     def __init__(self, project_root: str | Path, activation_envelope: Mapping[str, Any] | None = None) -> None:
         self.project_root = Path(project_root)
         self.activation_envelope = dict(activation_envelope) if isinstance(activation_envelope, Mapping) else None
@@ -110,6 +115,13 @@ class NbsHermesSidecarProvider(_MemoryProviderFallback):
 
     def initialize(self, session_id: str, **_: Any) -> None:
         self.session_id = session_id if isinstance(session_id, str) else ""
+
+    @property
+    def name(self) -> str:
+        return "nbs_sidecar"
+
+    def get_tool_schemas(self) -> list[object]:
+        return []
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if session_id and session_id != self.session_id:

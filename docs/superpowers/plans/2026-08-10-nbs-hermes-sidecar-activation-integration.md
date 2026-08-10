@@ -34,7 +34,7 @@
 - [ ] Step 3: Implement minimal provider adapter using existing `MemoryHints.from_dict`; require matching initialized Hermes session, recompute workspace fingerprint from current project root, and reject symlink/out-of-root/over-cap files and canonical-bound activation mismatch.
 - [ ] Step 4: Run focused tests, py_compile and diff check.
 
-### Task 2: Add one-run activation envelope and live Hermes wiring
+### Task 2: Add one-run activation envelope and Hermes runner compatibility hook
 
 **Files:**
 - Create: `scripts/hermes_sidecar_activation.py`
@@ -43,14 +43,14 @@
 
 - [ ] Step 1: Add CLI to create/validate per-run envelope from existing runner manifest/activation receipt; reject dirty HEAD, mismatched fingerprints and non-medium reasoning.
 - [ ] Step 2: Add deterministic bounded hints fixture for the live probe; do not write canonical data or source files.
-- [ ] Step 3: Install/load the project-local plugin only for the Hermes treatment session; keep control session provider unset.
-- [ ] Step 4: Execute Hermes `deepseek-v4-flash` medium treatment and verify provider activation, hint provenance, `sync_turn` no-op and runtime telemetry.
+- [ ] Step 3: Add an explicit `probe` path that loads Hermes' real `MemoryProvider` ABC and executes `initialize → prefetch → sync_turn(no-op)` against the envelope; keep control session provider unset.
+- [ ] Step 4: Emit bounded probe telemetry. A real DeepSeek model turn is deferred to the separate operator-controlled acceptance gate; this task must not alter global Hermes config or auto-enable recall.
 
-### Task 3: Strict review and acceptance
+### Task 3: Strict review and live acceptance
 
 - [ ] Run focused plugin/activation tests, relevant sidecar tests, py_compile and diff check.
 - [ ] Run findings-first Review Agent on tracked integration files.
-- [ ] Run Hermes read-only acceptance; classify live A/B as ready, rejected or blocked. Never auto-enable ordinary recall.
+- [ ] Run Hermes read-only acceptance and, only with an explicitly staged treatment runner, classify live A/B as ready, rejected or blocked. Never auto-enable ordinary recall.
 
 ## Rollback
 
