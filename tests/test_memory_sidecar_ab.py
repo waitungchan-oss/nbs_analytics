@@ -7,6 +7,7 @@ from backend.agents.memory_sidecar_ab import (
     AbInvariantMismatch,
     MemorySidecarAbRun,
     MemorySidecarAbReport,
+    alternative_evidence_binding_fingerprint,
     build_ab_report,
     p95_latency_ms,
 )
@@ -307,9 +308,12 @@ def test_gate_accepts_when_strong_input_reduction_and_all_gates_pass():
 def test_gate_accepts_when_alternative_evidence_present_even_under_reduction_threshold():
     # Input reduction below the 20% threshold but explicit alternative evidence
     # is present: the gate must accept on the alternative-evidence branch.
+    binding_ref = alternative_evidence_binding_fingerprint(_off_run())
+    off = _off_run(alternative_evidence=True, alternative_evidence_ref=binding_ref)
     on = _on_run(
         estimated_input_tokens=9200,  # 8% reduction: under the 20% threshold
         alternative_evidence=True,
+        alternative_evidence_ref=binding_ref,
         evidence_coverage=1.0,
         review_no_regression=True,
         baseline_scope_unchanged=True,
@@ -317,8 +321,25 @@ def test_gate_accepts_when_alternative_evidence_present_even_under_reduction_thr
         latency_ms=320,
         findings=1,
     )
-    report = build_ab_report(_off_run(), on)
+    report = build_ab_report(off, on)
     assert report.decision == "accepted"
+
+
+def test_alternative_evidence_requires_immutable_binding_reference():
+    with pytest.raises(AbInvariantMismatch, match="alternative evidence"):
+        _on_run(alternative_evidence=True)
+    with pytest.raises(AbInvariantMismatch, match="alternative evidence"):
+        _on_run(alternative_evidence=True, alternative_evidence_ref="0" * 64)
+
+
+def test_alternative_evidence_pair_requires_same_binding_reference():
+    binding_ref = alternative_evidence_binding_fingerprint(_off_run())
+    off = _off_run(alternative_evidence=True, alternative_evidence_ref=binding_ref)
+    on = _on_run(alternative_evidence=True, alternative_evidence_ref=binding_ref)
+    object.__setattr__(on, "alternative_evidence_ref", "0" * 64)
+
+    with pytest.raises(AbInvariantMismatch, match="alternative evidence"):
+        build_ab_report(off, on)
 
 
 def test_gate_rejects_when_coverage_below_100():
@@ -475,7 +496,11 @@ def test_ab_report_id_differs_on_review_no_regression_failure():
 def test_ab_report_id_differs_on_alternative_evidence_flag():
     # Same accepted-reduction run but alternative_evidence toggled must change
     # the report identity even when the decision happens to be identical.
-    with_alt = build_ab_report(_off_run(), _on_run(estimated_input_tokens=9200, alternative_evidence=True))
+    binding_ref = alternative_evidence_binding_fingerprint(_off_run())
+    with_alt = build_ab_report(
+        _off_run(alternative_evidence=True, alternative_evidence_ref=binding_ref),
+        _on_run(estimated_input_tokens=9200, alternative_evidence=True, alternative_evidence_ref=binding_ref),
+    )
     without_alt = build_ab_report(_off_run(), _on_run(estimated_input_tokens=9200))
     assert with_alt.decision == "accepted"
     assert without_alt.decision == "acceptance_rejected"
