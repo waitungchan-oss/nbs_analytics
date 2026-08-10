@@ -17,3 +17,9 @@ Hermes only reports bounded artifact counts, fallback checks and diagnostics. It
 ## Failure fallback
 
 Timeout and degraded recalls fall back to canonical evidence. Stale, invalid or permission-denied evidence is blocked and must not be injected into context. No sidecar state may override a canonical artifact or turn a blocked workflow into an approved one.
+
+## Runner capability evidence consumption
+
+Task 5 only consumes `result=ready` from bounded `runner-capability-evidence-v1` records. Before any Task 5 evaluation, it must create and bind its own `memory-sidecar-ab-acceptance-v1` record to the same immutable inputs: Git head, project/workspace identity, task, brief, allowed-files, and commands fingerprints.
+
+The only runner capability outcomes are `ready`, `blocked_runner_capability`, and `acceptance_rejected`. For `blocked_runner_capability` or `acceptance_rejected`, `recall_enabled=false` remains mandatory: there is no auto-enable and the evidence cannot be reused as acceptance proof. This consumption rule does not authorize a runner invocation, change the existing writer-disabled/shadow-mode defaults, or alter any canonical authority.
