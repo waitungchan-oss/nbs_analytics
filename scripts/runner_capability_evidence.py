@@ -3,7 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.runner_capability_evidence import (
     RunnerCapabilityEvidenceError,
@@ -12,7 +17,6 @@ from backend.agents.runner_capability_evidence import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MAX_INPUT_BYTES = 64 * 1024
 
 

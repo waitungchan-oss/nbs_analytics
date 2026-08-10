@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -10,6 +13,20 @@ from scripts.runner_capability_evidence import MAX_INPUT_BYTES, main
 
 GIT_HEAD = "a" * 40
 TASK_FINGERPRINT = "b" * 64
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_cli_script_is_standalone_importable():
+    result = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "scripts/runner_capability_evidence.py"), "--help"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Build bounded runner capability evidence" in result.stdout
 
 
 def _run(*, run_id: str, sequence: int, recall_mode: str, input_tokens: int = 1000) -> dict:
