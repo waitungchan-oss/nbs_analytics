@@ -31,6 +31,7 @@ _RAW_CONTENT_FIELDS = frozenset({
 })
 _MAX_TOKENS = 10_000_000
 _MAX_LATENCY_MS = 3_600_000
+_MIN_TOKEN_REDUCTION_RATIO = -float(_MAX_TOKENS)
 
 
 class RunnerCapabilityEvidenceError(ValueError):
@@ -193,8 +194,11 @@ class RunnerCapabilityComparison:
             if (isinstance(self.token_reduction_ratio, bool)
                     or not isinstance(self.token_reduction_ratio, (int, float))
                     or not math.isfinite(self.token_reduction_ratio)
-                    or not 0.0 <= self.token_reduction_ratio <= 1.0):
-                raise RunnerCapabilityEvidenceError("tokenReductionRatio must be a finite ratio between 0 and 1")
+                    or not _MIN_TOKEN_REDUCTION_RATIO <= self.token_reduction_ratio <= 1.0):
+                raise RunnerCapabilityEvidenceError(
+                    "tokenReductionRatio must be finite and between "
+                    f"{_MIN_TOKEN_REDUCTION_RATIO} and 1.0"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {

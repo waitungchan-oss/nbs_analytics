@@ -151,7 +151,13 @@ def test_evidence_rejects_tampered_comparison_claims(field: str, value: object):
         RunnerCapabilityEvidence.from_dict(payload)
 
 
-@pytest.mark.parametrize("ratio", [float("nan"), float("inf"), float("-inf"), -0.1, 1.1, 10 ** 100])
+def test_comparison_accepts_finite_negative_token_reduction_for_later_rejection_classification():
+    comparison = RunnerCapabilityComparison(True, True, False, -0.1)
+
+    assert comparison.token_reduction_ratio == -0.1
+
+
+@pytest.mark.parametrize("ratio", [float("nan"), float("inf"), float("-inf"), -10_000_001, 1.1, 10 ** 100])
 def test_comparison_rejects_non_finite_or_out_of_bounds_token_reduction(ratio: float):
     with pytest.raises(RunnerCapabilityEvidenceError):
         RunnerCapabilityComparison(True, True, False, ratio)
