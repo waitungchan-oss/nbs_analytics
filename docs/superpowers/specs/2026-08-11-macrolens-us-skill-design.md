@@ -21,6 +21,7 @@ MacroLens US 不執行交易、不連接券商帳戶、不管理資金、不保�
 - 事件驅動研究，包括財報、FOMC、經濟數據、公司公告、併購與監管事件。
 - 中文、英文或中英雙語報告。
 - 使用者主動查詢，以及每日／每週報告工作流；若 Capafy runtime 不提供可用排程或通知能力，保留相同流程的手動觸發備援。
+- 第一版以 DeepSeek API 加 Web Search 取得資料，不要求獨立市場資料 API 作為必要依賴。
 
 ### 明確非目標
 
@@ -93,11 +94,11 @@ Scope
 
 ### Data retrieval
 
-依研究問題取得宏觀數據、公司申報／財報、公司公告、價格、估值與產業資料。資料來源與 API provider 由實作階段決定，但必須具備商業使用權與可追溯的來源 identity。
+依研究問題使用 Web Search 找尋宏觀數據、公司申報／財報、公司公告、價格、估值與產業資料。搜尋時優先限定官方或第一手來源，例如 BLS、FRED、BEA、Federal Reserve、SEC filings 與公司 Investor Relations。第一版不把獨立市場資料 API 作為必要依賴，但可在後續版本增加具商業授權的結構化資料 provider。
 
 ### Validation
 
-每項重要數據必須保留資料日期、發布日期、來源、單位、期間與是否可能修訂。遇到資料過期、缺失、互相矛盾或 API 失敗時，報告必須明確標示，不得靜默補值或猜測。
+每項重要數據必須保留資料日期、發布日期、原始來源 URL、單位、期間與是否可能修訂。搜尋結果摘要只能作為發現線索，不能單獨作為重要數字的證據；Agent 必須打開並核對原始頁面或原始文件。遇到資料過期、缺失、互相矛盾、搜尋失敗或官方來源不可讀時，報告必須明確標示，不得靜默補值或猜測。
 
 ### Analysis
 
@@ -148,12 +149,12 @@ Scope
 ## 8. 技術與資料依賴
 
 - LLM：DeepSeek API，使用其當時有效且支援的 model identifier。
-- 宏觀資料：優先使用 BLS、FRED、BEA、Federal Reserve 等官方或授權來源。
-- 公司資料：優先使用 SEC filings、公司 investor relations 與具商業授權的資料 provider。
-- 市場資料：使用具商業使用權的價格與估值 API。
+- Web Search：用於搜尋最新新聞、宏觀數據、公司申報／財報、公司公告、價格、估值與產業資料；搜尋工具必須能回傳可開啟、可引用的來源 identity。
+- 官方來源：優先使用 BLS、FRED、BEA、Federal Reserve、SEC filings 與公司 Investor Relations 頁面。
+- 結構化市場資料 API：v1 非必要依賴；只有在 Web Search 無法可靠取得價格或估值、且 provider 具備商業授權時，才進入後續版本。
 - Secret storage：API credential 只能透過 Capafy credential mechanism 或等效 secret store 注入，不能硬編碼在 Skill、報告、log 或範例中。
 
-DeepSeek 只負責語言理解與分析，不是宏觀、財報、價格或估值資料來源。資料 API 與其商業授權、rate limit、費用、保留期限及可否再分發，必須在實作前逐一確認。
+DeepSeek 負責語言理解、工具呼叫決策與分析；Web Search 負責發現及取得外部資料。DeepSeek API 的 Tool Calls 需要由執行環境提供實際搜尋工具，模型本身不會自動執行任意函式。搜尋摘要不得取代官方原始頁面或原始文件的驗證。第一版不需要額外市場資料 API key，但必須確認 Capafy publisher runtime 的 Web Search、來源擷取、引用與排程能力。
 
 ## 9. Capafy packaging and monetization
 
@@ -198,8 +199,8 @@ Capafy Agent Card 暫定文案：
 
 以下事項不是產品方向問題，但必須在進入實作前明確化：
 
-1. 最終採用哪些市場資料 provider，以及每個 provider 的商業授權。
-2. Capafy publisher runtime 是否能執行可靠的 daily／weekly scheduler、通知與必要的外部 API calls。
+1. Capafy publisher runtime 是否能執行可靠的 Web Search、開啟原始來源、保存來源 identity 與產生引用。
+2. Capafy publisher runtime 是否能執行可靠的 daily／weekly scheduler、通知與必要的外部工具 calls。
 3. 第一版是否輸出 HTML／PDF，或只輸出 Markdown。
 4. 每日／每週報告的預設時區、交付時間與 watchlist 儲存方式。
 5. DeepSeek 的預設 model、token budget、fallback 與成本上限。
