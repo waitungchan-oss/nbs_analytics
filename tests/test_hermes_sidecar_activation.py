@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 from backend.agents.evidence_models import canonical_fingerprint
 from integrations.hermes_nbs_sidecar.plugin import activation_binding_fingerprint
@@ -17,7 +18,7 @@ def _manifest(root) -> dict:
         "gitHead": HEAD, "projectId": "nbs_analytics", "workspaceKind": "repo", "workspaceFingerprint": canonical_fingerprint({"projectRoot": str(root.resolve()), "projectId": "nbs_analytics", "workspaceKind": "repo"}),
         "taskFingerprint": "c" * 64, "briefFingerprint": "d" * 64, "allowedFilesFingerprint": "e" * 64,
         "commandsFingerprint": "f" * 64, "provider": "hermes", "model": "deepseek-v4-flash",
-        "reasoning": "medium", "writerDisabled": True,
+        "reasoningProfile": "max", "cleanWorktreeFingerprint": canonical_fingerprint({"gitHead": HEAD, "gitStatusPorcelain": ""}), "writerDisabled": True,
     }
     return {**value, "manifestId": canonical_fingerprint(value)}
 
@@ -27,8 +28,9 @@ def _receipt(manifest: dict) -> dict:
     return {
         "schemaVersion": "hermes-runner-capability-receipt-v1", "manifestId": manifest["manifestId"],
         "runId": run_id, "sessionId": session_id, "provider": "hermes", "model": "deepseek-v4-flash",
-        "reasoning": "medium", "recallMode": "on", "sequence": 2, "status": "completed",
+        "reasoningProfile": "max", "cleanWorktreeFingerprint": manifest["cleanWorktreeFingerprint"], "recallMode": "on", "sequence": 2, "status": "completed",
         "inputTokens": 700, "outputTokens": 100, "p95Ms": 200, "provenanceCoverage": 1.0,
+        "provenanceSourceCount": 1, "provenanceCoveredCount": 1, "responseId": "response-treatment-002", "priorResponseIds": [],
         "sensitiveCaptureCount": 0, "cacheReplayDetected": False, "writerDisabled": True,
         "baselineUnchanged": True, "formalScopeUnchanged": True, "reviewNoRegression": True,
         "hermesNoRegression": True,
@@ -61,7 +63,7 @@ def test_create_writes_bound_envelope_and_bounded_hints(tmp_path, monkeypatch):
     envelope = json.loads((tmp_path / ".nbs_agent_runtime/runs/run-treatment/sidecar-activation.json").read_text(encoding="utf-8"))
     hints = json.loads((tmp_path / ".nbs_agent_runtime/runs/run-treatment/memory-hints.json").read_text(encoding="utf-8"))
     assert envelope["activationId"] == activation_binding_fingerprint(envelope)
-    assert envelope["reasoning"] == "medium"
+    assert envelope["reasoningProfile"] == "max"
     assert hints["schemaVersion"] == "memory-hints-v1"
     assert len(json.dumps(hints).encode("utf-8")) <= 6000
 
@@ -95,7 +97,7 @@ def _probe_envelope(root, *, session_id: str = "session-probe") -> dict:
         "sessionId": session_id, "recallMode": "on", "gitHead": HEAD, "projectId": "nbs_analytics",
         "workspaceKind": "repo", "workspaceFingerprint": canonical_fingerprint({"projectRoot": str(root.resolve()), "projectId": "nbs_analytics", "workspaceKind": "repo"}),
         "taskFingerprint": "b" * 64, "briefFingerprint": "c" * 64, "allowedFilesFingerprint": "d" * 64,
-        "commandsFingerprint": "e" * 64, "provider": "hermes", "model": "deepseek-v4-flash", "reasoning": "medium",
+        "commandsFingerprint": "e" * 64, "provider": "hermes", "model": "deepseek-v4-flash", "reasoningProfile": "max",
         "hintsPath": "runs/run-probe/memory-hints.json", "writerDisabled": True,
     }
     value["activationId"] = activation_binding_fingerprint(value)
@@ -104,7 +106,10 @@ def _probe_envelope(root, *, session_id: str = "session-probe") -> dict:
 
 def _probe_files(root, envelope: dict) -> None:
     _write(root, "runs/run-probe/sidecar-activation.json", envelope)
-    hints = MemoryHints(canonical_fingerprint({"query": "review runtime"}), "ready", (MemoryHint("f" * 64, "Bounded probe hint.", ("verification.json",), "fresh", "high", ("a" * 64,)),))
+    source = b"bounded verification evidence\n"
+    _write(root, "runs/run-probe/verification.json", {"evidence": source.decode()})
+    source_hash = hashlib.sha256((root / ".nbs_agent_runtime/runs/run-probe/verification.json").read_bytes()).hexdigest()
+    hints = MemoryHints(canonical_fingerprint({"query": "review runtime"}), "ready", (MemoryHint("f" * 64, "Bounded probe hint.", ("runs/run-probe/verification.json",), "fresh", "high", (source_hash,)),))
     _write(root, envelope["hintsPath"], hints.to_dict())
 
 

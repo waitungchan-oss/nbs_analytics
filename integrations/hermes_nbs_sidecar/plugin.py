@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -23,13 +24,14 @@ except ImportError:  # pragma: no cover - exercised when Hermes is installed.
 ACTIVATION_SCHEMA = "hermes-nbs-sidecar-activation-v1"
 MAX_HINTS_BYTES = 6000
 MAX_QUERY_CHARS = 512
+MAX_SOURCE_BYTES = 64 * 1024
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 _ENVELOPE_FIELDS = frozenset({
     "schemaVersion", "manifestId", "activationId", "sessionId", "recallMode", "gitHead", "projectId", "workspaceKind", "workspaceFingerprint",
     "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider",
-    "model", "reasoning", "hintsPath", "writerDisabled",
+    "model", "reasoningProfile", "hintsPath", "writerDisabled",
 })
 
 
@@ -42,6 +44,7 @@ class NbsHermesSidecarProvider(_MemoryProviderBase):
         self.project_root = Path(project_root)
         self.activation_envelope = dict(activation_envelope) if isinstance(activation_envelope, Mapping) else None
         self.session_id = ""
+        self.consumed_source_refs: tuple[str, ...] = ()
 
     def _current_git_head(self) -> str:
         result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.project_root, capture_output=True, text=True, check=False)
@@ -85,7 +88,7 @@ class NbsHermesSidecarProvider(_MemoryProviderBase):
         envelope = self.activation_envelope
         if envelope is None or set(envelope) != _ENVELOPE_FIELDS:
             return None
-        if envelope.get("schemaVersion") != ACTIVATION_SCHEMA or envelope.get("recallMode") != "on" or envelope.get("provider") != "hermes" or envelope.get("model") != "deepseek-v4-flash" or envelope.get("reasoning") != "medium" or envelope.get("writerDisabled") is not True:
+        if envelope.get("schemaVersion") != ACTIVATION_SCHEMA or envelope.get("recallMode") != "on" or envelope.get("provider") != "hermes" or envelope.get("model") != "deepseek-v4-flash" or envelope.get("reasoningProfile") != "max" or envelope.get("writerDisabled") is not True:
             return None
         if not isinstance(envelope.get("sessionId"), str) or not _IDENTIFIER.fullmatch(envelope["sessionId"]) or not isinstance(envelope.get("projectId"), str) or not _IDENTIFIER.fullmatch(envelope["projectId"]) or envelope.get("workspaceKind") not in {"repo", "isolated_worktree"} or not isinstance(envelope.get("hintsPath"), str) or not _SHA40.fullmatch(envelope.get("gitHead", "")):
             return None
@@ -107,7 +110,33 @@ class NbsHermesSidecarProvider(_MemoryProviderBase):
             hints = MemoryHints.from_dict(json.loads(path.read_bytes()))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, MemorySidecarSchemaError):
             return None
-        return hints if hints.status == "ready" else None
+        if hints.status != "ready" or any(hint.freshness != "fresh" for hint in hints.hints):
+            return None
+        return hints
+
+    def _consumable_source_refs(self, hints: MemoryHints) -> tuple[str, ...] | None:
+        root = self.project_root.resolve(strict=False) / ".nbs_agent_runtime"
+        if root.is_symlink():
+            return None
+        consumed: list[str] = []
+        for hint in hints.hints:
+            for source_ref, expected_fingerprint in zip(hint.source_refs, hint.source_fingerprints):
+                path = root / source_ref
+                current = root
+                for part in Path(source_ref).parts:
+                    current = current / part
+                    if current.exists() and current.is_symlink():
+                        return None
+                try:
+                    path.resolve(strict=True).relative_to(root.resolve(strict=True))
+                except (OSError, ValueError):
+                    return None
+                if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_SOURCE_BYTES:
+                    return None
+                if hashlib.sha256(path.read_bytes()).hexdigest() != expected_fingerprint:
+                    return None
+                consumed.append(source_ref)
+        return tuple(consumed)
 
     def is_available(self) -> bool:
         envelope = self._valid_envelope()
@@ -124,6 +153,7 @@ class NbsHermesSidecarProvider(_MemoryProviderBase):
         return []
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        self.consumed_source_refs = ()
         if session_id and session_id != self.session_id:
             return ""
         if not isinstance(query, str) or not query or len(query) > MAX_QUERY_CHARS or not self.is_available():
@@ -131,7 +161,13 @@ class NbsHermesSidecarProvider(_MemoryProviderBase):
         hints = self._load_hints()
         if hints is None or hints.query_fingerprint != canonical_fingerprint({"query": query}):
             return ""
-        result = "non_authoritative_memory\n" + "\n".join(f"- {hint.summary}" for hint in hints.hints)
+        consumed = self._consumable_source_refs(hints)
+        if consumed is None:
+            return ""
+        self.consumed_source_refs = consumed
+        source_lines = "\n".join(f"- sourceRef: {ref}" for ref in self.consumed_source_refs)
+        summaries = "\n".join(f"- {hint.summary}" for hint in hints.hints)
+        result = "non_authoritative_memory\n" + source_lines + "\n" + summaries
         return result if len(result.encode("utf-8")) <= MAX_HINTS_BYTES else ""
 
     def sync_turn(self, *_: Any, **__: Any) -> None:

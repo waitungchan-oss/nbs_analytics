@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.memory_sidecar_hint_models import MemoryHint, MemoryHints
@@ -12,10 +13,10 @@ TASK = "c" * 64
 PROJECT_ID = "nbs_analytics"
 
 
-def _hints(query: str, *, status: str = "ready") -> dict:
+def _hints(query: str, *, status: str = "ready", freshness: str = "fresh", source_fingerprint: str = "e" * 64) -> dict:
     hints = MemoryHints(
         query_fingerprint=canonical_fingerprint({"query": query}), status=status,
-        hints=() if status != "ready" else (MemoryHint("d" * 64, "Use bounded verification evidence.", ("verification.json",), "fresh", "high", ("e" * 64,)),),
+        hints=() if status != "ready" else (MemoryHint("d" * 64, "Use bounded verification evidence.", ("verification.json",), freshness, "high", (source_fingerprint,)),),
     )
     return hints.to_dict()
 
@@ -27,7 +28,7 @@ def _envelope(project_root, *, hints_path: str = "runs/run-sidecar/memory-hints.
         "projectId": PROJECT_ID, "workspaceKind": "repo", "workspaceFingerprint": canonical_fingerprint({"projectRoot": str(project_root.resolve()), "projectId": PROJECT_ID, "workspaceKind": "repo"}),
         "taskFingerprint": TASK, "briefFingerprint": "d" * 64, "allowedFilesFingerprint": "e" * 64,
         "commandsFingerprint": "f" * 64, "provider": "hermes", "model": "deepseek-v4-flash",
-        "reasoning": "medium", "hintsPath": hints_path, "writerDisabled": True,
+        "reasoningProfile": "max", "hintsPath": hints_path, "writerDisabled": True,
     }
     value.update(changes)
     value["activationId"] = activation_binding_fingerprint(value)
@@ -36,9 +37,12 @@ def _envelope(project_root, *, hints_path: str = "runs/run-sidecar/memory-hints.
 
 def _provider(tmp_path, monkeypatch, envelope: dict | None, *, query: str = "review runtime") -> NbsHermesSidecarProvider:
     if envelope is not None:
+        source = tmp_path / ".nbs_agent_runtime" / "verification.json"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("bounded verification evidence", encoding="utf-8")
         path = tmp_path / ".nbs_agent_runtime" / envelope["hintsPath"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_hints(query)), encoding="utf-8")
+        path.write_text(json.dumps(_hints(query, source_fingerprint=hashlib.sha256(source.read_bytes()).hexdigest())), encoding="utf-8")
     provider = NbsHermesSidecarProvider(tmp_path, envelope)
     monkeypatch.setattr(provider, "_current_git_head", lambda: HEAD)
     monkeypatch.setattr(provider, "_git_status_porcelain", lambda: "")
@@ -61,14 +65,16 @@ def test_valid_activation_prefetches_bounded_non_authoritative_hints(tmp_path, m
     assert provider.is_available() is True
     value = provider.prefetch("review runtime", session_id="session-1")
     assert "non_authoritative_memory" in value
+    assert "- sourceRef: verification.json" in value
     assert "Use bounded verification evidence." in value
+    assert provider.consumed_source_refs == ("verification.json",)
     assert provider.sync_turn("session-1", "input", "output") is None
 
 
 def test_activation_rejects_identity_model_reasoning_and_fingerprint_mismatches(tmp_path, monkeypatch):
     for changes in (
         {"gitHead": "0" * 40}, {"workspaceFingerprint": "0" * 64}, {"model": "other"},
-        {"reasoning": "high"}, {"activationId": "0" * 64},
+        {"reasoningProfile": "medium"}, {"activationId": "0" * 64},
     ):
         envelope = _envelope(tmp_path)
         envelope.update(changes)
@@ -96,12 +102,37 @@ def test_provider_rejects_hints_path_escape_symlink_oversize_malformed_and_stale
     assert stale.is_available() is False
 
 
+def test_provider_fails_closed_for_stale_or_unknown_ready_hint_freshness(tmp_path, monkeypatch):
+    for freshness in ("stale", "unknown"):
+        envelope = _envelope(tmp_path)
+        provider = _provider(tmp_path, monkeypatch, envelope)
+        path = tmp_path / ".nbs_agent_runtime" / envelope["hintsPath"]
+        path.write_text(json.dumps(_hints("review runtime", freshness=freshness)), encoding="utf-8")
+        provider.initialize("session-1")
+        assert provider.is_available() is False
+        assert provider.prefetch("review runtime", session_id="session-1") == ""
+
+
 def test_prefetch_is_bounded_and_returns_empty_for_unbounded_or_query_mismatch(tmp_path, monkeypatch):
     provider = _provider(tmp_path, monkeypatch, _envelope(tmp_path))
     provider.initialize("session-1")
 
     assert provider.prefetch("x" * 513) == ""
+    assert provider.consumed_source_refs == ()
     assert provider.prefetch("different query") == ""
+    assert provider.consumed_source_refs == ()
+
+
+def test_prefetch_fails_closed_and_clears_consumed_refs_when_a_source_ref_changes(tmp_path, monkeypatch):
+    provider = _provider(tmp_path, monkeypatch, _envelope(tmp_path))
+    provider.initialize("session-1")
+    assert provider.prefetch("review runtime")
+    assert provider.consumed_source_refs == ("verification.json",)
+
+    (tmp_path / ".nbs_agent_runtime/verification.json").write_text("changed", encoding="utf-8")
+
+    assert provider.prefetch("review runtime") == ""
+    assert provider.consumed_source_refs == ()
 
 
 def test_provider_requires_matching_initialized_session_and_workspace(tmp_path, monkeypatch):

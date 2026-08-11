@@ -39,6 +39,8 @@ def _run(*, run_id: str, sequence: int, recall_mode: str, **overrides: object) -
         "commandsFingerprint": "f" * 64,
         "provider": "hermes",
         "model": "deepseek-v4-flash",
+        "reasoningProfile": "max",
+        "cleanWorktreeFingerprint": "1" * 64,
         "status": "completed",
         "cacheReplayDetected": False,
         "inputTokens": 1000,
@@ -93,6 +95,8 @@ def test_evidence_identity_is_canonical_and_input_bound():
     ("gitHead", "codex/runner-capability-evidence"),
     ("provider", None),
     ("model", None),
+    ("reasoningProfile", "medium"),
+    ("cleanWorktreeFingerprint", "not-a-fingerprint"),
     ("cacheReplayDetected", "false"),
 ])
 def test_run_rejects_unsafe_identity_and_types(field: str, value: object):
@@ -133,6 +137,8 @@ def test_run_rejects_unknown_raw_content_and_unbounded_values(field: str, value:
     ("briefFingerprint", "0" * 64),
     ("allowedFilesFingerprint", "0" * 64),
     ("commandsFingerprint", "0" * 64),
+    ("reasoningProfile", "medium"),
+    ("cleanWorktreeFingerprint", "0" * 64),
 ])
 def test_evidence_rejects_top_level_identity_that_differs_from_runs(field: str, value: str):
     payload = _evidence().to_dict()
@@ -230,7 +236,14 @@ def test_capability_comparison_rejects_proven_capability_with_failed_metrics(tre
 
 
 def _fixture(name: str) -> dict:
-    return json.loads((FIXTURE_ROOT / name).read_text(encoding="utf-8"))
+    # These pre-live fixtures deliberately contain no runner identity.  Supply
+    # the Task 1 immutable identity at the test boundary rather than allowing
+    # the production parser to retain a legacy fallback.
+    payload = json.loads((FIXTURE_ROOT / name).read_text(encoding="utf-8"))
+    payload["reasoningProfile"] = "max"
+    payload["cleanWorktreeFingerprint"] = "1" * 64
+    payload["runFingerprint"] = canonical_fingerprint({key: value for key, value in payload.items() if key != "runFingerprint"})
+    return payload
 
 
 def test_ready_runner_capability_fixtures_are_bounded_and_prove_ready_pair():

@@ -36,9 +36,11 @@ def _receipt(manifest: dict, *, run_id: str = "run-control-001", session_id: str
         "schemaVersion": hook.RECEIPT_SCHEMA,
         "manifestId": manifest["manifestId"], "runId": run_id, "sessionId": session_id,
         "provider": "hermes", "model": "deepseek-v4-flash", "recallMode": manifest["recallMode"],
-        "reasoning": "medium",
+        "reasoningProfile": "max", "cleanWorktreeFingerprint": manifest["cleanWorktreeFingerprint"],
         "sequence": manifest["sequence"], "status": "completed", "inputTokens": 1000,
         "outputTokens": 100, "p95Ms": 200, "provenanceCoverage": 1.0,
+        "provenanceSourceCount": 1, "provenanceCoveredCount": 1,
+        "responseId": "response-control-001", "priorResponseIds": [],
         "sensitiveCaptureCount": 0, "cacheReplayDetected": False, "writerDisabled": True,
         "baselineUnchanged": True, "formalScopeUnchanged": True, "reviewNoRegression": True,
         "hermesNoRegression": True, "activationReceipt": activation_receipt,
@@ -46,11 +48,12 @@ def _receipt(manifest: dict, *, run_id: str = "run-control-001", session_id: str
 
 
 def _activation(manifest: dict, *, run_id: str, session_id: str) -> dict:
+    status = "activated" if manifest["recallMode"] == "on" else "disabled"
     return {
         "schemaVersion": hook.ACTIVATION_SCHEMA,
-        "activationId": canonical_fingerprint({"manifestId": manifest["manifestId"], "runId": run_id, "sessionId": session_id, "recallMode": "on", "status": "activated"}),
-        "recallMode": "on",
-        "status": "activated",
+        "activationId": canonical_fingerprint({"manifestId": manifest["manifestId"], "runId": run_id, "sessionId": session_id, "recallMode": manifest["recallMode"], "status": status}),
+        "recallMode": manifest["recallMode"],
+        "status": status,
     }
 
 
@@ -70,8 +73,9 @@ def test_prepare_binds_live_head_and_writes_bounded_manifest(tmp_path, monkeypat
     assert manifest["gitHead"] == HEAD
     assert manifest["provider"] == "hermes"
     assert manifest["model"] == "deepseek-v4-flash"
-    assert manifest["reasoning"] == "medium"
+    assert manifest["reasoningProfile"] == "max"
     assert manifest["workspaceFingerprint"] == WORKSPACE
+    assert len(manifest["cleanWorktreeFingerprint"]) == 64
     assert len(manifest["manifestId"]) == 64
 
 
@@ -97,7 +101,7 @@ def test_prepare_rejects_head_mismatch_unsafe_output_and_invalid_mode_sequence(t
 
 def test_record_emits_exact_runner_capability_run_with_stable_identity(tmp_path, monkeypatch):
     manifest = _prepare(tmp_path, monkeypatch)
-    receipt = _receipt(manifest)
+    receipt = _receipt(manifest, activation_receipt=_activation(manifest, run_id="run-control-001", session_id="session-control-001"))
     _write(tmp_path, "runs/control/receipt.json", receipt)
 
     assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/capability-input.json"), project_root=tmp_path) == 0
@@ -105,19 +109,20 @@ def test_record_emits_exact_runner_capability_run_with_stable_identity(tmp_path,
     run = RunnerCapabilityRun.from_dict(payload)
     assert run.run_id == "run-control-001"
     assert run.workspace_fingerprint == WORKSPACE
+    assert run.reasoning_profile == "max"
+    assert run.clean_worktree_fingerprint == manifest["cleanWorktreeFingerprint"]
     assert run.to_dict() == payload
     assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/capability-input.json"), project_root=tmp_path) == 0
     assert json.loads((tmp_path / ".nbs_agent_runtime/runs/control/capability-input.json").read_text(encoding="utf-8")) == payload
     assert not {"rawPrompt", "rawModelOutput", "credentials", "absolutePath", "runnerCommand", "rawHints"} & set(payload)
 
 
-def test_record_blocks_recall_on_without_explicit_activation_receipt(tmp_path, monkeypatch):
+def test_record_fails_closed_without_explicit_activation_receipt(tmp_path, monkeypatch):
     manifest = _prepare(tmp_path, monkeypatch, mode="on", sequence="2", output="runs/treatment/manifest.json")
     _write(tmp_path, "runs/treatment/receipt.json", _receipt(manifest, run_id="run-treatment-002", session_id="session-treatment-002"))
 
-    assert hook.main(_record_args("runs/treatment/manifest.json", "runs/treatment/receipt.json", "runs/treatment/capability-input.json"), project_root=tmp_path) == 0
-    payload = json.loads((tmp_path / ".nbs_agent_runtime/runs/treatment/capability-input.json").read_text(encoding="utf-8"))
-    assert payload["status"] == "incomplete"
+    assert hook.main(_record_args("runs/treatment/manifest.json", "runs/treatment/receipt.json", "runs/treatment/capability-input.json"), project_root=tmp_path) == 2
+    assert not (tmp_path / ".nbs_agent_runtime/runs/treatment/capability-input.json").exists()
 
 
 def test_record_blocks_forged_activation_and_accepts_canonical_activation(tmp_path, monkeypatch):
@@ -125,8 +130,7 @@ def test_record_blocks_forged_activation_and_accepts_canonical_activation(tmp_pa
     run_id, session_id = "run-treatment-002", "session-treatment-002"
     forged = _receipt(manifest, run_id=run_id, session_id=session_id, activation_receipt={"schemaVersion": hook.ACTIVATION_SCHEMA, "activationId": "0" * 64, "recallMode": "on", "status": "activated"})
     _write(tmp_path, "runs/treatment/receipt.json", forged)
-    assert hook.main(_record_args("runs/treatment/manifest.json", "runs/treatment/receipt.json", "runs/treatment/capability-input.json"), project_root=tmp_path) == 0
-    assert json.loads((tmp_path / ".nbs_agent_runtime/runs/treatment/capability-input.json").read_text(encoding="utf-8"))["status"] == "incomplete"
+    assert hook.main(_record_args("runs/treatment/manifest.json", "runs/treatment/receipt.json", "runs/treatment/capability-input.json"), project_root=tmp_path) == 2
     _write(tmp_path, "runs/treatment/receipt.json", _receipt(manifest, run_id=run_id, session_id=session_id, activation_receipt=_activation(manifest, run_id=run_id, session_id=session_id)))
     assert hook.main(_record_args("runs/treatment/manifest.json", "runs/treatment/receipt.json", "runs/treatment/capability-input.json"), project_root=tmp_path) == 0
     assert json.loads((tmp_path / ".nbs_agent_runtime/runs/treatment/capability-input.json").read_text(encoding="utf-8"))["status"] == "completed"
@@ -156,11 +160,43 @@ def test_record_rejects_out_of_bounds_metrics_and_wrong_identity(tmp_path, monke
 def test_record_rejects_reasoning_mismatch(tmp_path, monkeypatch):
     manifest = _prepare(tmp_path, monkeypatch)
     receipt = _receipt(manifest)
-    receipt["reasoning"] = "high"
+    receipt["reasoningProfile"] = "medium"
     _write(tmp_path, "runs/control/receipt.json", receipt)
 
     assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/out.json"), project_root=tmp_path) == 2
+
+
+def test_record_rechecks_clean_head_and_clean_worktree_fingerprint(tmp_path, monkeypatch):
+    manifest = _prepare(tmp_path, monkeypatch)
+    receipt = _receipt(manifest, activation_receipt=_activation(manifest, run_id="run-control-001", session_id="session-control-001"))
+    _write(tmp_path, "runs/control/receipt.json", receipt)
+    monkeypatch.setattr(hook, "_git_status_porcelain", lambda project_root: " M tracked.py\n")
+    assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/out.json"), project_root=tmp_path) == 2
+    monkeypatch.setattr(hook, "_git_status_porcelain", lambda project_root: "")
+    monkeypatch.setattr(hook, "_current_git_head", lambda project_root: "0" * 40)
+    assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/out.json"), project_root=tmp_path) == 2
+
+
+def test_record_rejects_forged_replay_and_clean_worktree_evidence(tmp_path, monkeypatch):
+    manifest = _prepare(tmp_path, monkeypatch)
+    receipt = _receipt(manifest, activation_receipt=_activation(manifest, run_id="run-control-001", session_id="session-control-001"))
+    receipt["cacheReplayDetected"] = True
+    _write(tmp_path, "runs/control/receipt.json", receipt)
+    assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/out.json"), project_root=tmp_path) == 2
+    receipt["cacheReplayDetected"] = False
+    receipt["cleanWorktreeFingerprint"] = "0" * 64
+    _write(tmp_path, "runs/control/receipt.json", receipt)
+    assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/out.json"), project_root=tmp_path) == 2
     receipt = _receipt(manifest)
     receipt["manifestId"] = canonical_fingerprint({"wrong": True})
+    _write(tmp_path, "runs/control/receipt.json", receipt)
+    assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/out.json"), project_root=tmp_path) == 2
+
+
+@pytest.mark.parametrize("field,value", [("inputTokens", 0), ("outputTokens", "100"), ("p95Ms", -1), ("sensitiveCaptureCount", 1), ("writerDisabled", False)])
+def test_record_rejects_missing_or_unsafe_completed_metrics(tmp_path, monkeypatch, field, value):
+    manifest = _prepare(tmp_path, monkeypatch)
+    receipt = _receipt(manifest, activation_receipt=_activation(manifest, run_id="run-control-001", session_id="session-control-001"))
+    receipt[field] = value
     _write(tmp_path, "runs/control/receipt.json", receipt)
     assert hook.main(_record_args("runs/control/manifest.json", "runs/control/receipt.json", "runs/control/out.json"), project_root=tmp_path) == 2

@@ -11,6 +11,7 @@ from backend.agents.evidence_models import canonical_fingerprint
 RUNNER_CAPABILITY_SCHEMA = "runner-capability-evidence-v1"
 ALLOWED_PROVIDER = "hermes"
 ALLOWED_MODEL = "deepseek-v4-flash"
+ALLOWED_REASONING_PROFILE = "max"
 RECALL_MODES = frozenset({"off", "on"})
 CAPABILITY_RESULTS = frozenset({"ready", "blocked_runner_capability", "acceptance_rejected"})
 
@@ -20,10 +21,15 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 _RUN_FIELDS = frozenset({
     "runId", "sequence", "recallMode", "gitHead", "projectId", "workspaceKind",
     "workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint",
-    "commandsFingerprint", "provider", "model", "status", "cacheReplayDetected",
+    "commandsFingerprint", "provider", "model", "reasoningProfile", "cleanWorktreeFingerprint",
+    "status", "cacheReplayDetected",
     "inputTokens", "outputTokens", "p95Ms", "provenanceCoverage", "sensitiveCaptureCount",
     "writerDisabled", "baselineUnchanged", "formalScopeUnchanged", "reviewNoRegression",
     "hermesNoRegression",
+})
+_LIVE_RECEIPT_FIELDS = _RUN_FIELDS | frozenset({
+    "schemaVersion", "manifestId", "sessionId", "activationReceipt",
+    "provenanceSourceCount", "provenanceCoveredCount", "responseId", "priorResponseIds",
 })
 _RAW_CONTENT_FIELDS = frozenset({
     "prompt", "rawPrompt", "output", "rawModelOutput", "runnerCommand", "command", "logs",
@@ -106,6 +112,8 @@ class RunnerCapabilityRun:
     commands_fingerprint: str
     provider: str
     model: str
+    reasoning_profile: str
+    clean_worktree_fingerprint: str
     status: str
     cache_replay_detected: bool
     input_tokens: int | None
@@ -130,10 +138,12 @@ class RunnerCapabilityRun:
         _require_identifier(self.project_id, field_name="projectId")
         if self.workspace_kind not in {"repo", "isolated_worktree"}:
             raise RunnerCapabilityEvidenceError("workspaceKind is unsupported")
-        for name in ("workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint"):
+        for name in ("workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "cleanWorktreeFingerprint"):
             _require_sha256(getattr(self, _snake_case(name)), field_name=name)
         if self.provider != ALLOWED_PROVIDER or self.model != ALLOWED_MODEL:
             raise RunnerCapabilityEvidenceError("provider and model must be live allowed identities")
+        if self.reasoning_profile != ALLOWED_REASONING_PROFILE:
+            raise RunnerCapabilityEvidenceError("reasoningProfile must be max")
         if self.status not in {"completed", "incomplete", "failed"}:
             raise RunnerCapabilityEvidenceError("status is unsupported")
         _require_bool(self.cache_replay_detected, field_name="cacheReplayDetected")
@@ -154,6 +164,7 @@ class RunnerCapabilityRun:
             "workspaceFingerprint": self.workspace_fingerprint, "taskFingerprint": self.task_fingerprint,
             "briefFingerprint": self.brief_fingerprint, "allowedFilesFingerprint": self.allowed_files_fingerprint,
             "commandsFingerprint": self.commands_fingerprint, "provider": self.provider, "model": self.model,
+            "reasoningProfile": self.reasoning_profile, "cleanWorktreeFingerprint": self.clean_worktree_fingerprint,
             "status": self.status, "cacheReplayDetected": self.cache_replay_detected,
             "inputTokens": self.input_tokens, "outputTokens": self.output_tokens, "p95Ms": self.p95_ms,
             "provenanceCoverage": self.provenance_coverage, "sensitiveCaptureCount": self.sensitive_capture_count,
@@ -175,6 +186,7 @@ class RunnerCapabilityRun:
             "workspace_fingerprint": value["workspaceFingerprint"], "task_fingerprint": value["taskFingerprint"],
             "brief_fingerprint": value["briefFingerprint"], "allowed_files_fingerprint": value["allowedFilesFingerprint"],
             "commands_fingerprint": value["commandsFingerprint"], "provider": value["provider"], "model": value["model"],
+            "reasoning_profile": value["reasoningProfile"], "clean_worktree_fingerprint": value["cleanWorktreeFingerprint"],
             "status": value["status"], "cache_replay_detected": value["cacheReplayDetected"],
             "input_tokens": value["inputTokens"], "output_tokens": value["outputTokens"], "p95_ms": value["p95Ms"],
             "provenance_coverage": value["provenanceCoverage"], "sensitive_capture_count": value["sensitiveCaptureCount"],
@@ -189,6 +201,48 @@ class RunnerCapabilityRun:
 
 def _snake_case(name: str) -> str:
     return re.sub(r"([A-Z])", lambda match: "_" + match.group(1).lower(), name).lstrip("_")
+
+
+def live_receipt_to_run(value: Mapping[str, Any]) -> tuple[RunnerCapabilityRun, str]:
+    """Validate bounded live receipt metadata and return its typed run/session.
+
+    This deliberately accepts neither raw content nor a precomputed run
+    fingerprint: acceptance derives the fingerprint from receipt metadata.
+    """
+    _require_exact_fields(value, _LIVE_RECEIPT_FIELDS, kind="live capability receipt")
+    if value["schemaVersion"] != "hermes-runner-capability-receipt-v1":
+        raise RunnerCapabilityEvidenceError("live receipt schema is invalid")
+    manifest_id = _require_sha256(value["manifestId"], field_name="manifestId")
+    session_id = _require_identifier(value["sessionId"], field_name="sessionId")
+    source_count = _require_int(value["provenanceSourceCount"], field_name="provenanceSourceCount", maximum=_MAX_TOKENS)
+    covered_count = _require_int(value["provenanceCoveredCount"], field_name="provenanceCoveredCount", maximum=_MAX_TOKENS)
+    response_id = _require_identifier(value["responseId"], field_name="responseId")
+    prior_response_ids = value["priorResponseIds"]
+    if (source_count == 0 or covered_count > source_count or value["provenanceCoverage"] != covered_count / source_count
+            or not isinstance(prior_response_ids, list) or len(prior_response_ids) > 128
+            or any(not isinstance(item, str) or not _IDENTIFIER.fullmatch(item) for item in prior_response_ids)
+            or value["cacheReplayDetected"] != (response_id in set(prior_response_ids))):
+        raise RunnerCapabilityEvidenceError("live receipt evidence is invalid")
+    run = RunnerCapabilityRun.from_dict({
+        **{field: value[field] for field in _RUN_FIELDS},
+        "runFingerprint": canonical_fingerprint({field: value[field] for field in _RUN_FIELDS}),
+    })
+    if run.run_id == session_id:
+        raise RunnerCapabilityEvidenceError("sessionId must differ from runId")
+    activation = value["activationReceipt"]
+    expected_status = "disabled" if run.recall_mode == "off" else "activated"
+    expected_id = canonical_fingerprint({
+        "manifestId": manifest_id, "runId": run.run_id, "sessionId": session_id,
+        "recallMode": run.recall_mode, "status": expected_status,
+    })
+    if (not isinstance(activation, Mapping)
+            or set(activation) != {"schemaVersion", "activationId", "recallMode", "status"}
+            or activation.get("schemaVersion") != "hermes-recall-activation-receipt-v1"
+            or activation.get("activationId") != expected_id
+            or activation.get("recallMode") != run.recall_mode
+            or activation.get("status") != expected_status):
+        raise RunnerCapabilityEvidenceError("activation receipt is missing or invalid")
+    return run, session_id
 
 
 @dataclass(frozen=True)
@@ -236,6 +290,7 @@ def compare_capability_runs(control: RunnerCapabilityRun, treatment: RunnerCapab
     immutable = (
         "git_head", "project_id", "workspace_kind", "workspace_fingerprint", "task_fingerprint",
         "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint", "provider", "model",
+        "reasoning_profile", "clean_worktree_fingerprint",
     )
     same_immutable_inputs = all(getattr(control, name) == getattr(treatment, name) for name in immutable)
     distinct_run_ids = control.run_id != treatment.run_id
@@ -292,6 +347,8 @@ class RunnerCapabilityEvidence:
     commands_fingerprint: str
     provider: str
     model: str
+    reasoning_profile: str
+    clean_worktree_fingerprint: str
     control: RunnerCapabilityRun
     treatment: RunnerCapabilityRun
     comparison: RunnerCapabilityComparison
@@ -304,15 +361,16 @@ class RunnerCapabilityEvidence:
             raise RunnerCapabilityEvidenceError("unsupported evidence schema or result")
         _require_git_head(self.git_head)
         _require_identifier(self.project_id, field_name="projectId")
-        if self.workspace_kind not in {"repo", "isolated_worktree"} or self.provider != ALLOWED_PROVIDER or self.model != ALLOWED_MODEL:
+        if self.workspace_kind not in {"repo", "isolated_worktree"} or self.provider != ALLOWED_PROVIDER or self.model != ALLOWED_MODEL or self.reasoning_profile != ALLOWED_REASONING_PROFILE:
             raise RunnerCapabilityEvidenceError("invalid evidence identity")
-        for name in ("workspace_fingerprint", "task_fingerprint", "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint"):
+        for name in ("workspace_fingerprint", "task_fingerprint", "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint", "clean_worktree_fingerprint"):
             _require_sha256(getattr(self, name), field_name=name)
         if not isinstance(self.control, RunnerCapabilityRun) or not isinstance(self.treatment, RunnerCapabilityRun) or not isinstance(self.comparison, RunnerCapabilityComparison):
             raise RunnerCapabilityEvidenceError("evidence must contain bounded typed records")
         identity = (
             "git_head", "project_id", "workspace_kind", "workspace_fingerprint", "task_fingerprint",
             "brief_fingerprint", "allowed_files_fingerprint", "commands_fingerprint", "provider", "model",
+            "reasoning_profile", "clean_worktree_fingerprint",
         )
         if any(getattr(self, name) != getattr(run, name) for run in (self.control, self.treatment) for name in identity):
             raise RunnerCapabilityEvidenceError("top-level evidence identity must match both runs")
@@ -329,6 +387,7 @@ class RunnerCapabilityEvidence:
             "taskFingerprint": self.task_fingerprint,
             "briefFingerprint": self.brief_fingerprint, "allowedFilesFingerprint": self.allowed_files_fingerprint,
             "commandsFingerprint": self.commands_fingerprint, "provider": self.provider, "model": self.model,
+            "reasoningProfile": self.reasoning_profile, "cleanWorktreeFingerprint": self.clean_worktree_fingerprint,
             "control": self.control.to_dict(), "treatment": self.treatment.to_dict(),
             "comparison": self.comparison.to_dict(),
             "provenance": {"coverage": self.treatment.provenance_coverage, "sensitiveCaptureCount": self.treatment.sensitive_capture_count},
@@ -343,7 +402,7 @@ class RunnerCapabilityEvidence:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "RunnerCapabilityEvidence":
-        fields = frozenset({"schemaVersion", "evidenceId", "gitHead", "projectId", "workspaceKind", "workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider", "model", "control", "treatment", "comparison", "provenance", "latency", "result"})
+        fields = frozenset({"schemaVersion", "evidenceId", "gitHead", "projectId", "workspaceKind", "workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider", "model", "reasoningProfile", "cleanWorktreeFingerprint", "control", "treatment", "comparison", "provenance", "latency", "result"})
         _require_exact_fields(value, fields, kind="runner capability evidence")
         comparison = value["comparison"]
         if not isinstance(comparison, Mapping) or set(comparison) != {"sameImmutableInputs", "distinctRunIds", "cacheReplayDetected", "tokenReductionRatio", "alternativeEvidence", "result", "reasons"}:
@@ -353,7 +412,7 @@ class RunnerCapabilityEvidence:
             workspace_fingerprint=value["workspaceFingerprint"],
             task_fingerprint=value["taskFingerprint"], brief_fingerprint=value["briefFingerprint"],
             allowed_files_fingerprint=value["allowedFilesFingerprint"], commands_fingerprint=value["commandsFingerprint"],
-            provider=value["provider"], model=value["model"], control=RunnerCapabilityRun.from_dict(value["control"]),
+            provider=value["provider"], model=value["model"], reasoning_profile=value["reasoningProfile"], clean_worktree_fingerprint=value["cleanWorktreeFingerprint"], control=RunnerCapabilityRun.from_dict(value["control"]),
             treatment=RunnerCapabilityRun.from_dict(value["treatment"]),
             comparison=RunnerCapabilityComparison(comparison["sameImmutableInputs"], comparison["distinctRunIds"], comparison["cacheReplayDetected"], comparison["tokenReductionRatio"], comparison["alternativeEvidence"], comparison["result"], comparison["reasons"]),
             result=value["result"], schema_version=value["schemaVersion"],
@@ -380,6 +439,6 @@ def build_capability_evidence(control: Mapping[str, Any], treatment: Mapping[str
         workspace_fingerprint=control_run.workspace_fingerprint,
         task_fingerprint=control_run.task_fingerprint, brief_fingerprint=control_run.brief_fingerprint,
         allowed_files_fingerprint=control_run.allowed_files_fingerprint, commands_fingerprint=control_run.commands_fingerprint,
-        provider=control_run.provider, model=control_run.model, control=control_run, treatment=treatment_run,
+        provider=control_run.provider, model=control_run.model, reasoning_profile=control_run.reasoning_profile, clean_worktree_fingerprint=control_run.clean_worktree_fingerprint, control=control_run, treatment=treatment_run,
         comparison=comparison, result=comparison.result,
     )

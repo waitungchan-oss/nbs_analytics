@@ -122,12 +122,14 @@ def _manifest_unsigned(args: argparse.Namespace) -> dict[str, Any]:
         "gitHead": args.git_head, "projectId": args.project_id, "workspaceKind": args.workspace_kind, "workspaceFingerprint": args.workspace_fingerprint,
         "taskFingerprint": args.task_fingerprint, "briefFingerprint": args.brief_fingerprint,
         "allowedFilesFingerprint": args.allowed_files_fingerprint, "commandsFingerprint": args.commands_fingerprint,
-        "provider": "hermes", "model": "deepseek-v4-flash", "reasoning": "medium", "writerDisabled": True,
+        "provider": "hermes", "model": "deepseek-v4-flash", "reasoningProfile": "max",
+        "cleanWorktreeFingerprint": canonical_fingerprint({"gitHead": args.git_head, "gitStatusPorcelain": ""}),
+        "writerDisabled": True,
     }
 
 
 def _validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
-    fields = {"schemaVersion", "manifestId", "recallMode", "sequence", "gitHead", "projectId", "workspaceKind", "workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider", "model", "reasoning", "writerDisabled"}
+    fields = {"schemaVersion", "manifestId", "recallMode", "sequence", "gitHead", "projectId", "workspaceKind", "workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider", "model", "reasoningProfile", "cleanWorktreeFingerprint", "writerDisabled"}
     if set(value) != fields or value.get("schemaVersion") != MANIFEST_SCHEMA or not isinstance(value.get("manifestId"), str):
         raise RunnerCapabilityEvidenceError("manifest schema is invalid")
     unsigned = {key: item for key, item in value.items() if key != "manifestId"}
@@ -135,8 +137,11 @@ def _validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
         raise RunnerCapabilityEvidenceError("manifest fingerprint is invalid")
     if value["recallMode"] not in {"off", "on"} or value["sequence"] not in {1, 2} or not _SHA40.fullmatch(value["gitHead"]):
         raise RunnerCapabilityEvidenceError("manifest identity is invalid")
-    if value["provider"] != "hermes" or value["model"] != "deepseek-v4-flash" or value["reasoning"] != "medium" or value["writerDisabled"] is not True:
+    if value["provider"] != "hermes" or value["model"] != "deepseek-v4-flash" or value["reasoningProfile"] != "max" or value["writerDisabled"] is not True:
         raise RunnerCapabilityEvidenceError("manifest runner identity is invalid")
+    expected_clean = canonical_fingerprint({"gitHead": value["gitHead"], "gitStatusPorcelain": ""})
+    if value["cleanWorktreeFingerprint"] != expected_clean:
+        raise RunnerCapabilityEvidenceError("manifest clean worktree fingerprint is invalid")
     _manifest_unsigned(argparse.Namespace(
         recall_mode=value["recallMode"], sequence=value["sequence"], git_head=value["gitHead"], project_id=value["projectId"], workspace_kind=value["workspaceKind"], workspace_fingerprint=value["workspaceFingerprint"],
         task_fingerprint=value["taskFingerprint"], brief_fingerprint=value["briefFingerprint"], allowed_files_fingerprint=value["allowedFilesFingerprint"], commands_fingerprint=value["commandsFingerprint"],
@@ -146,20 +151,39 @@ def _validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
 
 def _activation_is_valid(manifest: dict[str, Any], receipt: dict[str, Any]) -> bool:
     value = receipt["activationReceipt"]
-    expected = canonical_fingerprint({"manifestId": manifest["manifestId"], "runId": receipt["runId"], "sessionId": receipt["sessionId"], "recallMode": "on", "status": "activated"})
-    return isinstance(value, dict) and set(value) == {"schemaVersion", "activationId", "recallMode", "status"} and value.get("schemaVersion") == ACTIVATION_SCHEMA and value.get("activationId") == expected and value.get("recallMode") == "on" and value.get("status") == "activated"
+    status = "activated" if manifest["recallMode"] == "on" else "disabled"
+    expected = canonical_fingerprint({"manifestId": manifest["manifestId"], "runId": receipt["runId"], "sessionId": receipt["sessionId"], "recallMode": manifest["recallMode"], "status": status})
+    return isinstance(value, dict) and set(value) == {"schemaVersion", "activationId", "recallMode", "status"} and value.get("schemaVersion") == ACTIVATION_SCHEMA and value.get("activationId") == expected and value.get("recallMode") == manifest["recallMode"] and value.get("status") == status
 
 
 def _validate_receipt(manifest: dict[str, Any], receipt: dict[str, Any]) -> bool:
-    fields = {"schemaVersion", "manifestId", "runId", "sessionId", "provider", "model", "reasoning", "recallMode", "sequence", "status", "inputTokens", "outputTokens", "p95Ms", "provenanceCoverage", "sensitiveCaptureCount", "cacheReplayDetected", "writerDisabled", "baselineUnchanged", "formalScopeUnchanged", "reviewNoRegression", "hermesNoRegression", "activationReceipt"}
+    fields = {"schemaVersion", "manifestId", "runId", "sessionId", "provider", "model", "reasoningProfile", "cleanWorktreeFingerprint", "recallMode", "sequence", "status", "inputTokens", "outputTokens", "p95Ms", "provenanceCoverage", "provenanceSourceCount", "provenanceCoveredCount", "responseId", "priorResponseIds", "sensitiveCaptureCount", "cacheReplayDetected", "writerDisabled", "baselineUnchanged", "formalScopeUnchanged", "reviewNoRegression", "hermesNoRegression", "activationReceipt"}
     if set(receipt) != fields or receipt.get("schemaVersion") != RECEIPT_SCHEMA:
         raise RunnerCapabilityEvidenceError("receipt schema is invalid")
     for field in ("manifestId", "runId", "sessionId", "provider", "model", "recallMode", "status"):
         if not isinstance(receipt.get(field), str):
             raise RunnerCapabilityEvidenceError("receipt identity is invalid")
-    if receipt["manifestId"] != manifest["manifestId"] or receipt["provider"] != "hermes" or receipt["model"] != "deepseek-v4-flash" or receipt["reasoning"] != "medium" or receipt["recallMode"] != manifest["recallMode"] or receipt["sequence"] != manifest["sequence"] or receipt["runId"] == receipt["sessionId"] or receipt["status"] != "completed":
+    if receipt["manifestId"] != manifest["manifestId"] or receipt["provider"] != "hermes" or receipt["model"] != "deepseek-v4-flash" or receipt["reasoningProfile"] != "max" or receipt["cleanWorktreeFingerprint"] != manifest["cleanWorktreeFingerprint"] or receipt["recallMode"] != manifest["recallMode"] or receipt["sequence"] != manifest["sequence"] or receipt["runId"] == receipt["sessionId"] or receipt["status"] != "completed":
         raise RunnerCapabilityEvidenceError("receipt immutable identity is invalid")
-    return manifest["recallMode"] == "on" and not _activation_is_valid(manifest, receipt)
+    if not _IDENTIFIER.fullmatch(receipt["responseId"]) or not isinstance(receipt["priorResponseIds"], list) or len(receipt["priorResponseIds"]) > 128 or any(not isinstance(item, str) or not _IDENTIFIER.fullmatch(item) for item in receipt["priorResponseIds"]):
+        raise RunnerCapabilityEvidenceError("receipt response replay evidence is invalid")
+    replay = receipt["responseId"] in set(receipt["priorResponseIds"])
+    if receipt["cacheReplayDetected"] is not replay or replay:
+        raise RunnerCapabilityEvidenceError("receipt cache replay evidence is invalid")
+    if not isinstance(receipt["provenanceSourceCount"], int) or isinstance(receipt["provenanceSourceCount"], bool) or receipt["provenanceSourceCount"] <= 0 or not isinstance(receipt["provenanceCoveredCount"], int) or isinstance(receipt["provenanceCoveredCount"], bool) or receipt["provenanceCoveredCount"] != receipt["provenanceSourceCount"] or receipt["provenanceCoverage"] != 1.0:
+        raise RunnerCapabilityEvidenceError("receipt provenance evidence is invalid")
+    for field in ("inputTokens", "outputTokens"):
+        if isinstance(receipt[field], bool) or not isinstance(receipt[field], int) or not 0 < receipt[field] <= 10_000_000:
+            raise RunnerCapabilityEvidenceError("receipt token usage is invalid")
+    if isinstance(receipt["p95Ms"], bool) or not isinstance(receipt["p95Ms"], int) or not 0 <= receipt["p95Ms"] <= 3_600_000:
+        raise RunnerCapabilityEvidenceError("receipt latency evidence is invalid")
+    if isinstance(receipt["sensitiveCaptureCount"], bool) or not isinstance(receipt["sensitiveCaptureCount"], int) or receipt["sensitiveCaptureCount"] != 0:
+        raise RunnerCapabilityEvidenceError("receipt sensitive capture evidence is invalid")
+    if not all(receipt.get(name) is True for name in ("writerDisabled", "baselineUnchanged", "formalScopeUnchanged", "reviewNoRegression", "hermesNoRegression")):
+        raise RunnerCapabilityEvidenceError("receipt safety evidence is invalid")
+    if not _activation_is_valid(manifest, receipt):
+        raise RunnerCapabilityEvidenceError("receipt activation evidence is invalid")
+    return False
 
 
 def _prepare(args: argparse.Namespace, project_root: Path) -> dict[str, Any]:
@@ -175,11 +199,15 @@ def _prepare(args: argparse.Namespace, project_root: Path) -> dict[str, Any]:
 
 def _record(args: argparse.Namespace, project_root: Path) -> dict[str, Any]:
     manifest = _validate_manifest(_read_json(project_root, args.manifest))
+    if _git_status_porcelain(project_root).strip() or _current_git_head(project_root) != manifest["gitHead"]:
+        raise RunnerCapabilityEvidenceError("Git identity changed before recording capability evidence")
+    if canonical_fingerprint({"gitHead": manifest["gitHead"], "gitStatusPorcelain": ""}) != manifest["cleanWorktreeFingerprint"]:
+        raise RunnerCapabilityEvidenceError("clean worktree fingerprint changed before recording")
     receipt = _read_json(project_root, args.receipt)
     activation_missing = _validate_receipt(manifest, receipt)
     run = RunnerCapabilityRun(
         run_id=receipt["runId"], sequence=receipt["sequence"], recall_mode=receipt["recallMode"], git_head=manifest["gitHead"], project_id=manifest["projectId"], workspace_kind=manifest["workspaceKind"],
-        workspace_fingerprint=manifest["workspaceFingerprint"], task_fingerprint=manifest["taskFingerprint"], brief_fingerprint=manifest["briefFingerprint"], allowed_files_fingerprint=manifest["allowedFilesFingerprint"], commands_fingerprint=manifest["commandsFingerprint"], provider=receipt["provider"], model=receipt["model"], status="incomplete" if activation_missing else receipt["status"], cache_replay_detected=receipt["cacheReplayDetected"], input_tokens=receipt["inputTokens"], output_tokens=receipt["outputTokens"], p95_ms=receipt["p95Ms"], provenance_coverage=receipt["provenanceCoverage"], sensitive_capture_count=receipt["sensitiveCaptureCount"], writer_disabled=receipt["writerDisabled"], baseline_unchanged=receipt["baselineUnchanged"], formal_scope_unchanged=receipt["formalScopeUnchanged"], review_no_regression=receipt["reviewNoRegression"], hermes_no_regression=receipt["hermesNoRegression"],
+        workspace_fingerprint=manifest["workspaceFingerprint"], task_fingerprint=manifest["taskFingerprint"], brief_fingerprint=manifest["briefFingerprint"], allowed_files_fingerprint=manifest["allowedFilesFingerprint"], commands_fingerprint=manifest["commandsFingerprint"], provider=receipt["provider"], model=receipt["model"], reasoning_profile=receipt["reasoningProfile"], clean_worktree_fingerprint=receipt["cleanWorktreeFingerprint"], status=receipt["status"], cache_replay_detected=receipt["cacheReplayDetected"], input_tokens=receipt["inputTokens"], output_tokens=receipt["outputTokens"], p95_ms=receipt["p95Ms"], provenance_coverage=receipt["provenanceCoverage"], sensitive_capture_count=receipt["sensitiveCaptureCount"], writer_disabled=receipt["writerDisabled"], baseline_unchanged=receipt["baselineUnchanged"], formal_scope_unchanged=receipt["formalScopeUnchanged"], review_no_regression=receipt["reviewNoRegression"], hermes_no_regression=receipt["hermesNoRegression"],
     )
     payload = run.to_dict()
     _write_json(project_root, args.output, payload)

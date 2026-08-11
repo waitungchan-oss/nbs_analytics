@@ -35,6 +35,7 @@ def _run(*, run_id: str, sequence: int, recall_mode: str, input_tokens: int = 10
         "projectId": "nbs_analytics", "workspaceKind": "isolated_worktree", "workspaceFingerprint": "c" * 64,
         "taskFingerprint": TASK_FINGERPRINT, "briefFingerprint": "d" * 64, "allowedFilesFingerprint": "e" * 64,
         "commandsFingerprint": "f" * 64, "provider": "hermes", "model": "deepseek-v4-flash",
+        "reasoningProfile": "max", "cleanWorktreeFingerprint": "1" * 64,
         "status": "completed", "cacheReplayDetected": False, "inputTokens": input_tokens, "outputTokens": 100,
         "p95Ms": 200, "provenanceCoverage": 1.0, "sensitiveCaptureCount": 0, "writerDisabled": True,
         "baselineUnchanged": True, "formalScopeUnchanged": True, "reviewNoRegression": True,

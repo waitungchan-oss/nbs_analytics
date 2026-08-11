@@ -50,7 +50,7 @@ def create(args: argparse.Namespace, *, project_root: Path = PROJECT_ROOT) -> di
     manifest = _validate_manifest(_read_json(root, args.manifest))
     if _current_git_head(root) != manifest["gitHead"]:
         raise RunnerCapabilityEvidenceError("current Git HEAD does not match manifest")
-    if manifest["recallMode"] != "on" or manifest["sequence"] != 2 or manifest["provider"] != "hermes" or manifest["model"] != "deepseek-v4-flash" or manifest["reasoning"] != "medium" or manifest["writerDisabled"] is not True:
+    if manifest["recallMode"] != "on" or manifest["sequence"] != 2 or manifest["provider"] != "hermes" or manifest["model"] != "deepseek-v4-flash" or manifest["reasoningProfile"] != "max" or manifest["writerDisabled"] is not True:
         raise RunnerCapabilityEvidenceError("manifest is not an eligible recall-on treatment")
     if manifest["workspaceFingerprint"] != _workspace_fingerprint(root, manifest):
         raise RunnerCapabilityEvidenceError("manifest workspace fingerprint does not match current root")
@@ -66,7 +66,7 @@ def create(args: argparse.Namespace, *, project_root: Path = PROJECT_ROOT) -> di
         "workspaceFingerprint": manifest["workspaceFingerprint"], "taskFingerprint": manifest["taskFingerprint"],
         "briefFingerprint": manifest["briefFingerprint"], "allowedFilesFingerprint": manifest["allowedFilesFingerprint"],
         "commandsFingerprint": manifest["commandsFingerprint"], "provider": "hermes", "model": "deepseek-v4-flash",
-        "reasoning": "medium", "hintsPath": args.hints_output, "writerDisabled": True,
+        "reasoningProfile": "max", "hintsPath": args.hints_output, "writerDisabled": True,
     }
     envelope["activationId"] = activation_binding_fingerprint(envelope)
     hints = MemoryHints(
@@ -112,7 +112,7 @@ def probe(args: argparse.Namespace, *, project_root: Path = PROJECT_ROOT) -> dic
         "provider": envelope.get("provider"),
         "providerName": provider.name,
         "model": envelope.get("model"),
-        "reasoning": envelope.get("reasoning"),
+        "reasoningProfile": envelope.get("reasoningProfile"),
         "sessionId": session_id,
         "activationId": envelope.get("activationId"),
         "prefetchBytes": len(value.encode("utf-8")),
