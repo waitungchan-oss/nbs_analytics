@@ -114,10 +114,13 @@ from backend.services.agent_operations_service import AgentOperationsService
 from backend.agents.governance_graph_query_service import GovernanceGraphQueryService
 from backend.agents.governance_graph_evidence_lineage_models import EvidenceLineageInput
 from backend.agents.governance_graph_evidence_lineage_service import GovernanceGraphEvidenceLineageService
+from backend.agents.memory_hub_ui_service import MemoryHubUiService
+from backend.agents.memory_hub_deployment_provider import deployment_owned_catalog_provider
 from receipt_exclusion_rendering import (
     render_receipt_exclusion_confirmation,
     render_receipt_exclusion_governance,
 )
+from memory_hub_rendering import render_memory_hub
 from streamlit_rendering import *
 
 
@@ -148,6 +151,19 @@ def _render_agent_operations_tab(*, catalog_lookup=None) -> None:
     if catalog_lookup is not None:
         kwargs["catalog_lookup"] = catalog_lookup
     render_agent_operations(snapshot, **kwargs)
+
+
+def _render_memory_hub_tab() -> None:
+    """Render the bounded, read-only Memory Hub view without catalog discovery."""
+    service = MemoryHubUiService(
+        deployment_owned_catalog_provider(PROJECT_ROOT),
+        project_id="nbs_analytics",
+    )
+    render_memory_hub(
+        service.catalog_status(),
+        query_callback=service.query,
+        source_callback=service.resolve_source,
+    )
 
 
 def _coerce_entity_audit_dataframe(value: object) -> pd.DataFrame:
@@ -2547,7 +2563,9 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    tab_dash, tab_conf, tab_gmv, tab_agent_operations = st.tabs(["經營分析大盤", "業務規則配置", "GMV 排除訂單看板", "Agent Operations"])
+    tab_labels = ["經營分析大盤", "業務規則配置", "GMV 排除訂單看板", "Agent Operations"]
+    tab_labels.append("Memory Hub")
+    tab_dash, tab_conf, tab_gmv, tab_agent_operations, tab_memory_hub = st.tabs(tab_labels)
     with tab_dash:
         _render_dashboard_tab()
     with tab_conf:
@@ -2556,3 +2574,5 @@ def main() -> None:
         _render_gmv_exclusion_tab()
     with tab_agent_operations:
         _render_agent_operations_tab()
+    with tab_memory_hub:
+        _render_memory_hub_tab()
