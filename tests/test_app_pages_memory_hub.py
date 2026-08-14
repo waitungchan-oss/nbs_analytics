@@ -31,7 +31,7 @@ def test_memory_hub_tab_uses_explicit_missing_catalog_and_read_only_callbacks(mo
 
     app_pages._render_memory_hub_tab()
 
-    assert captured["provider"] is None
+    assert callable(captured["provider"])
     assert captured["project_id"] == "nbs_analytics"
     assert captured["model"] == "status-model"
     assert captured["query"] is not None

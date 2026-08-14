@@ -115,6 +115,7 @@ from backend.agents.governance_graph_query_service import GovernanceGraphQuerySe
 from backend.agents.governance_graph_evidence_lineage_models import EvidenceLineageInput
 from backend.agents.governance_graph_evidence_lineage_service import GovernanceGraphEvidenceLineageService
 from backend.agents.memory_hub_ui_service import MemoryHubUiService
+from backend.agents.memory_hub_deployment_provider import deployment_owned_catalog_provider
 from receipt_exclusion_rendering import (
     render_receipt_exclusion_confirmation,
     render_receipt_exclusion_governance,
@@ -154,7 +155,10 @@ def _render_agent_operations_tab(*, catalog_lookup=None) -> None:
 
 def _render_memory_hub_tab() -> None:
     """Render the bounded, read-only Memory Hub view without catalog discovery."""
-    service = MemoryHubUiService(None, project_id="nbs_analytics")
+    service = MemoryHubUiService(
+        deployment_owned_catalog_provider(PROJECT_ROOT),
+        project_id="nbs_analytics",
+    )
     render_memory_hub(
         service.catalog_status(),
         query_callback=service.query,
