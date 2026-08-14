@@ -89,6 +89,8 @@ def _discover_plugin(plugin_path: Path, hermes_source_root: Path) -> bool:
     if source_text not in sys.path:
         sys.path.insert(0, source_text)
     importlib.invalidate_caches()
+    previous_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
         loaded = sys.modules.get("agent.memory_provider")
         if loaded is not None and Path(getattr(loaded, "__file__", "")).resolve(strict=True) != memory_provider.resolve(strict=True):
@@ -98,18 +100,17 @@ def _discover_plugin(plugin_path: Path, hermes_source_root: Path) -> bool:
         if Path(getattr(module, "__file__", "")).resolve(strict=True) != memory_provider.resolve(strict=True):
             return False
         memory_provider_base = getattr(module, "MemoryProvider")
-    except (ImportError, OSError, AttributeError, ValueError):
-        return False
-    spec = importlib.util.spec_from_file_location("_nbs_isolated_sidecar_plugin", plugin_path)
-    if spec is None or spec.loader is None:
-        return False
-    module = importlib.util.module_from_spec(spec)
-    try:
+        spec = importlib.util.spec_from_file_location("_nbs_isolated_sidecar_plugin", plugin_path)
+        if spec is None or spec.loader is None:
+            return False
+        module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-    except (ImportError, OSError, ValueError):
+        provider = getattr(module, "NbsHermesSidecarProvider", None)
+        return isinstance(provider, type) and isinstance(memory_provider_base, type) and issubclass(provider, memory_provider_base)
+    except (ImportError, OSError, ValueError, AttributeError):
         return False
-    provider = getattr(module, "NbsHermesSidecarProvider", None)
-    return isinstance(provider, type) and isinstance(memory_provider_base, type) and issubclass(provider, memory_provider_base)
+    finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
 
 
 def create_isolated_profile(
