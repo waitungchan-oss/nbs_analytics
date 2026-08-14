@@ -12,55 +12,11 @@ def apply_global_styles() -> None:
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700;800&display=swap');
         :root {
-            --nbs-primary-navy: #0B1F3A;
-            --nbs-ink-navy: #071426;
-            --nbs-sidebar-navy: #061222;
-            --nbs-sidebar-panel: rgba(255,255,255,0.07);
-            --nbs-sidebar-bg: linear-gradient(180deg, #FFFFFF 0%, #F8FAFD 100%);
-            --nbs-sidebar-border: #D8E0EA;
-            --nbs-sidebar-panel-hover: #EEF5FF;
-            --nbs-sidebar-text: #334155;
-            --nbs-sidebar-text-strong: #111827;
-            --nbs-sidebar-muted: #64748B;
-            --nbs-sidebar-input-bg: #FFFFFF;
-            --nbs-sidebar-input-text: #111827;
-            --nbs-sidebar-chip-bg: #EFF6FF;
-            --nbs-sidebar-chip-text: #0B1F3A;
-            --nbs-sidebar-active-bg: linear-gradient(135deg, rgba(17,141,255,0.12), rgba(47,128,237,0.07));
-            --nbs-badge-official-text: #0F7A43;
-            --nbs-badge-official-bg: #DCFCE7;
-            --nbs-badge-official-border: #9AE6B4;
-            --nbs-badge-diagnostic-text: #1D5FBF;
-            --nbs-badge-diagnostic-bg: #DBEAFE;
-            --nbs-badge-diagnostic-border: #93C5FD;
-            --nbs-badge-experimental-text: #8A5A00;
-            --nbs-badge-experimental-bg: #FEF3C7;
-            --nbs-badge-experimental-border: #FBBF24;
-            --nbs-badge-readonly-text: #475569;
-            --nbs-badge-readonly-bg: #E2E8F0;
-            --nbs-badge-readonly-border: #CBD5E1;
-            --nbs-badge-manual-text: #BE185D;
-            --nbs-badge-manual-bg: #FCE7F3;
-            --nbs-badge-manual-border: #F9A8D4;
-            --nbs-badge-session-text: #6D28D9;
-            --nbs-badge-session-bg: #EDE9FE;
-            --nbs-badge-session-border: #C4B5FD;
             --nbs-primary-blue: #118DFF;
             --nbs-active-blue: #2F80ED;
-            --nbs-page-bg: #F4F7FB;
-            --nbs-surface: #FFFFFF;
-            --nbs-surface-soft: #F8FAFD;
-            --nbs-surface-panel: #FBFCFE;
-            --nbs-border: #D8E0EA;
-            --nbs-divider: #E5EAF0;
-            --nbs-text: #1F2937;
-            --nbs-muted: #52616F;
-            --nbs-faint: #7A8694;
             --nbs-success: #1F9D55;
             --nbs-warning: #D97706;
             --nbs-danger: #C2410C;
-            --nbs-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-            --nbs-dataframe-filter: none;
         }
         html, body, [class*="css"] {
             font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
@@ -889,4 +845,3 @@ def apply_global_styles() -> None:
     """,
         unsafe_allow_html=True,
     )
-
