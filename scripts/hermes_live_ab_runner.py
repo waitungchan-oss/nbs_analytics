@@ -8,6 +8,8 @@ run and leaves only redacted, bounded diagnostics.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,9 @@ from integrations.hermes_nbs_sidecar.plugin import ACTIVATION_SCHEMA, activation
 from backend.agents.runner_capability_evidence import RunnerCapabilityEvidenceError
 from scripts.hermes_isolated_profile import IsolatedHermesProfile
 from scripts.hermes_runner_capability_hook import _current_git_head, _git_status_porcelain, _validate_manifest
+from backend.agents.short_term_offload_policy import ShortTermOffloadPolicy
+from backend.agents.short_term_offload_service import persist_tool_output
+from backend.agents.short_term_offload_store import ShortTermOffloadStore
 
 
 _ENDPOINT = "https://api.deepseek.com/v1"
@@ -140,6 +145,18 @@ def _default_child(command: list[str], *, env: Mapping[str, str], timeout: int) 
         return 124, str(exc.stdout or ""), str(exc.stderr or "")
 
 
+def _persist_child_output(project_root: Path, *, run_id: str, session_id: str, arm: str, stdout: str) -> str | None:
+    bounded = stdout.encode("utf-8")[: ShortTermOffloadPolicy().max_content_bytes].decode("utf-8", errors="ignore")
+    fingerprint = sha256(bounded.encode("utf-8")).hexdigest()
+    store = ShortTermOffloadStore(project_root, policy=ShortTermOffloadPolicy())
+    result = persist_tool_output(
+        store, run_id=run_id, session_id=session_id, ref_id=f"{arm}-child-output",
+        content=bounded, summary=f"Hermes {arm} bounded child output",
+        source_fingerprint=fingerprint, now=datetime.now(timezone.utc),
+    )
+    return result.reference.ref_id if result.reference is not None else None
+
+
 def run_live_ab(
     profile: IsolatedHermesProfile,
     manifest: Mapping[str, object],
@@ -150,8 +167,11 @@ def run_live_ab(
     env: Mapping[str, str],
     child_runner: Callable[..., tuple[int, str, str]] | None = None,
     timeout_seconds: int = _CHILD_TIMEOUT_SECONDS,
+    short_term_offload: str = "off",
 ) -> LiveABRunResult:
     """Run exactly one control and one treatment child, otherwise fail closed."""
+    if short_term_offload not in {"off", "on"}:
+        raise ValueError("short_term_offload must be off or on")
     root = Path(project_root).resolve(strict=False)
     fallback_root = root / ".nbs_agent_runtime" / "live-ab" / "blocked"
     if profile.status != "ready" or profile.home_dir is None or profile.config_path is None or profile.plugin_dir is None or profile.home_dir.is_symlink() or profile.config_path.is_symlink() or profile.plugin_dir.is_symlink() or not profile.config_path.is_file() or not profile.plugin_dir.is_dir() or not isinstance(query, str) or not query or len(query) > 512 or not isinstance(source_refs, list) or not source_refs or any(not isinstance(item, str) or not item or len(item) > 256 for item in source_refs):
@@ -171,7 +191,7 @@ def run_live_ab(
     except RunnerCapabilityEvidenceError:
         return _blocked(root, acceptance_root, "completion_missing")
     child = child_runner or _default_child
-    child_env = {"HERMES_HOME": str(profile.home_dir), "DEEPSEEK_API_KEY": api_key, "DEEPSEEK_BASE_URL": base_url, "PYTHONDONTWRITEBYTECODE": "1"}
+    child_env = {"HERMES_HOME": str(profile.home_dir), "DEEPSEEK_API_KEY": api_key, "DEEPSEEK_BASE_URL": base_url, "PYTHONDONTWRITEBYTECODE": "1", "NBS_SHORT_TERM_OFFLOAD": short_term_offload}
     hermes_source_root = env.get("HERMES_SOURCE_ROOT", "")
     source_root_path = Path(hermes_source_root) if isinstance(hermes_source_root, str) else Path()
     if not isinstance(hermes_source_root, str) or not source_root_path.is_absolute() or source_root_path.is_symlink() or not (source_root_path / "agent" / "memory_provider.py").is_file() or (source_root_path / "agent" / "memory_provider.py").is_symlink():
@@ -211,6 +231,12 @@ def run_live_ab(
         if _workspace_fingerprint(root, arm_manifest) != arm_manifest["workspaceFingerprint"]:
             return _blocked(root, acceptance_root, "identity_mismatch", secrets=secrets)
         returncode, stdout, stderr = child(command, env={**child_env, **sidecar_env, "HERMES_CONFIG": str(profile.config_path)}, timeout=timeout_seconds)
+        if short_term_offload == "on" and returncode == 0:
+            try:
+                _persist_child_output(root, run_id=str(turn["runId"]), session_id=str(turn["sessionId"]), arm=arm, stdout=stdout)
+            except (OSError, ValueError, TypeError):
+                # Optional offload must never change the underlying Hermes verdict.
+                pass
         if returncode != 0 or not receipt_path.is_file() or receipt_path.is_symlink():
             return _blocked(root, acceptance_root, "completion_missing", stdout, stderr, secrets)
         try:

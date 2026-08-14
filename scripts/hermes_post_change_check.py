@@ -296,6 +296,46 @@ def governance_graph_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
     return report
 
 
+def short_term_offload_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
+    """Read-only inspection of the isolated short-term offload root."""
+    root = Path(project_root) / ".nbs_agent_runtime" / "short-term-offload"
+    report = {
+        "schemaVersion": "short-term-offload-hermes-report-v1",
+        "status": "ready",
+        "runCount": 0,
+        "artifactCount": 0,
+        "invalidPaths": [],
+        "capWarnings": [],
+        "policy": "read-only",
+        "invocations": 0,
+        "writes": 0,
+    }
+    if root.is_symlink():
+        report["status"] = "blocked"
+        report["invalidPaths"].append("root")
+        return report
+    if not root.is_dir():
+        return report
+    report["runCount"] = sum(1 for path in root.iterdir() if path.is_dir() and not path.is_symlink())
+    for run_dir in sorted(root.iterdir(), key=lambda path: path.name):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        for session_dir in run_dir.iterdir():
+            if session_dir.is_symlink() or not session_dir.is_dir():
+                report["invalidPaths"].append(str(session_dir.relative_to(root)))
+                continue
+            for path in session_dir.glob("*.json"):
+                if path.is_symlink() or not path.is_file():
+                    report["invalidPaths"].append(str(path.relative_to(root)))
+                    continue
+                report["artifactCount"] += 1
+                if path.stat().st_size > 50000:
+                    report["capWarnings"].append(str(path.relative_to(root)))
+    if report["invalidPaths"] or report["capWarnings"]:
+        report["status"] = "blocked"
+    return report
+
+
 def build_check_plan(
     *,
     include_monitor: bool = True,
@@ -345,6 +385,11 @@ def build_check_plan(
         "import json; "
         "print(json.dumps(governance_graph_artifact_report(), sort_keys=True))"
     )
+    short_term_offload_artifact_report_code = (
+        "from scripts.hermes_post_change_check import short_term_offload_artifact_report; "
+        "import json; "
+        "print(json.dumps(short_term_offload_artifact_report(), sort_keys=True))"
+    )
     memory_sidecar_artifact_report_code = (
         "from scripts.hermes_post_change_check import memory_sidecar_artifact_report; "
         "import json; "
@@ -391,6 +436,13 @@ def build_check_plan(
         CheckStep(
             "governance-graph-artifact-report",
             [py, "-c", governance_graph_artifact_report_code],
+            required=False,
+        )
+    )
+    plan.append(
+        CheckStep(
+            "short-term-offload-artifact-report",
+            [py, "-c", short_term_offload_artifact_report_code],
             required=False,
         )
     )
