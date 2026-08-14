@@ -59,7 +59,7 @@ def test_run_live_ab_builds_exactly_two_identical_inputs_with_distinct_lifecycle
 
     profile = _profile(tmp_path)
     hermes_source = _hermes_source(tmp_path)
-    result = subject.run_live_ab(profile, _manifest(tmp_path), "bounded question", ["live-ab/acceptance-1/source.json"], project_root=tmp_path, env={"DEEPSEEK_API_KEY": "super-secret", "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1", "HERMES_SOURCE_ROOT": str(hermes_source)}, child_runner=child)
+    result = subject.run_live_ab(profile, _manifest(tmp_path), "bounded question", ["live-ab/acceptance-1/source.json"], project_root=tmp_path, env={"DEEPSEEK_API_KEY": "super-secret", "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1", "HERMES_SOURCE_ROOT": str(hermes_source)}, child_runner=child, short_term_offload="on")
     assert result.status == "completed"
     assert len(observed) == 2
     control, treatment = (item["turn"] for item in observed)
@@ -82,6 +82,23 @@ def test_run_live_ab_builds_exactly_two_identical_inputs_with_distinct_lifecycle
     assert envelope["activationId"] == activation_binding_fingerprint(envelope)
     assert MemoryHints.from_dict(json.loads((tmp_path / ".nbs_agent_runtime" / hints_ref).read_text())).status == "ready"
     assert all("super-secret" not in json.dumps(item["turn"]) for item in observed)
+    offload_files = list((tmp_path / ".nbs_agent_runtime" / "short-term-offload").rglob("*.json"))
+    assert len(offload_files) == 2
+
+
+def test_run_live_ab_offload_store_failure_preserves_completed_status(tmp_path, monkeypatch):
+    from scripts import hermes_live_ab_runner as subject
+
+    monkeypatch.setattr(subject, "_persist_child_output", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("store unavailable")))
+    monkeypatch.setattr(subject, "_immutable_identity", lambda root: (HEAD, canonical_fingerprint({"gitHead": HEAD, "gitStatusPorcelain": ""})))
+    def child(command, **kwargs):
+        turn = json.loads((tmp_path / ".nbs_agent_runtime" / command[command.index("--turn-input") + 1]).read_text())
+        output = tmp_path / ".nbs_agent_runtime" / command[command.index("--output") + 1]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps({"status": "completed", "runId": turn["runId"], "sessionId": turn["sessionId"], "recallMode": turn["recallMode"], "sequence": turn["sequence"], "activationReceipt": turn["activationReceipt"], **{key: turn[key] for key in ("gitHead", "projectId", "workspaceKind", "workspaceFingerprint", "taskFingerprint", "briefFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "provider", "model", "reasoningProfile", "cleanWorktreeFingerprint")}}))
+        return 0, "safe stdout", ""
+    result = subject.run_live_ab(_profile(tmp_path), _manifest(tmp_path), "bounded question", ["live-ab/acceptance-1/source.json"], project_root=tmp_path, env={"DEEPSEEK_API_KEY": "x", "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1", "HERMES_SOURCE_ROOT": str(_hermes_source(tmp_path))}, child_runner=child, short_term_offload="on")
+    assert result.status == "completed"
 
 
 def test_run_live_ab_blocks_before_child_when_identity_changes(tmp_path, monkeypatch):
