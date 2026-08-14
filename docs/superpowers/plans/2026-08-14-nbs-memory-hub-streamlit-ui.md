@@ -33,7 +33,7 @@
 - Produces: frozen `MemoryHubUiReadModel`；`MemoryHubUiService(catalog_provider, *, project_id)`；`catalog_status() -> MemoryHubUiReadModel`；`query(*, query: str, consumer_id: str, scope: str, memory_kinds: tuple[str, ...], team_id: str | None) -> MemoryHubUiReadModel`；`resolve_source(source_id: str, *, consumer_id: str, team_id: str | None) -> MemoryHubUiReadModel`。
 - `catalog_provider` 是 deployment-owned zero-argument callable，回傳 `MemoryCatalog | None`；沒有 provider 時傳 `None`。Adapter 不接受 builder、raw path scan 或 write callback。
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 def test_missing_provider_is_explicitly_read_only_and_bounded():
@@ -56,7 +56,7 @@ def test_invalid_or_stale_source_resolves_fail_closed(fake_catalog):
     assert result.artifact_ref is None
 ```
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -66,7 +66,7 @@ Run:
 
 Expected: collection failure because `backend.agents.memory_hub_ui_service` does not exist.
 
-- [ ] **Step 3: Implement the bounded adapter**
+- [x] **Step 3: Implement the bounded adapter**
 
 Use frozen dataclasses with explicit fields:
 
@@ -84,7 +84,7 @@ class MemoryHubUiReadModel:
 
 `catalog_status()` must expose only catalog fingerprint, built-from head, policy fingerprint, source count, record count and status. `query()` must build fixed-limit `MemoryQuery`, fixed `RuntimeIdentity`, call `MemoryHubService.query()`, and convert records／ACL decisions to bounded dictionaries. `resolve_source()` must call `MemoryHubService.resolve_source()` and never read the artifact body. Catch `MemoryHubCatalogError`, `MemoryHubSchemaError`, `ValueError`, `OSError` and map them to `invalid_catalog`, `blocked_identity`, `query_invalid` or `source_unavailable` without raising into Streamlit.
 
-- [ ] **Step 4: Run focused GREEN verification**
+- [x] **Step 4: Run focused GREEN verification**
 
 ```bash
 .venv/bin/python -m pytest tests/test_memory_hub_ui_service.py -q
@@ -92,7 +92,7 @@ class MemoryHubUiReadModel:
 git diff --check
 ```
 
-- [ ] **Step 5: Commit and request strict Review**
+- [x] **Step 5: Commit and request strict Review**
 
 ```bash
 git add backend/agents/memory_hub_ui_service.py tests/test_memory_hub_ui_service.py
@@ -111,7 +111,7 @@ Review must confirm no builder call, no filesystem scan, no raw artifact content
 - Consumes: `MemoryHubUiReadModel` and query/source callbacks `Callable[..., MemoryHubUiReadModel]`。
 - Produces: `render_memory_hub(model: MemoryHubUiReadModel, *, query_callback, source_callback, st_module=streamlit) -> None` plus pure row helpers `_catalog_status_rows`, `_record_rows`, `_decision_rows`, `_source_rows` for contract tests。
 
-- [ ] **Step 1: Write failing rendering tests**
+- [x] **Step 1: Write failing rendering tests**
 
 Use a minimal fake Streamlit object and assert:
 
@@ -128,7 +128,7 @@ def test_ready_rows_hide_absolute_paths_and_raw_content(ready_model):
     assert all("/Users/" not in str(row) for row in rows)
 ```
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/test_memory_hub_rendering.py -q
@@ -136,11 +136,11 @@ def test_ready_rows_hide_absolute_paths_and_raw_content(ready_model):
 
 Expected: missing-module failure.
 
-- [ ] **Step 3: Implement read-only rendering**
+- [x] **Step 3: Implement read-only rendering**
 
 Render a title, authority notice, catalog status card, bounded query controls, record dataframe, ACL／failure panel and source drill-down. Do not add `st.button` actions that call a builder, writer, approval or refresh mutation. A query submit may call only the injected read-only query callback. Use existing theme tokens and existing table conventions; do not render raw source bodies or absolute paths.
 
-- [ ] **Step 4: Run GREEN verification**
+- [x] **Step 4: Run GREEN verification**
 
 ```bash
 .venv/bin/python -m pytest tests/test_memory_hub_rendering.py -q
@@ -148,7 +148,7 @@ Render a title, authority notice, catalog status card, bounded query controls, r
 git diff --check
 ```
 
-- [ ] **Step 5: Commit and request strict Review**
+- [x] **Step 5: Commit and request strict Review**
 
 ```bash
 git add memory_hub_rendering.py tests/test_memory_hub_rendering.py
@@ -167,11 +167,11 @@ Review must verify copy, bounded display, no write controls and no authority lea
 - Consumes: `MemoryHubUiService`, `MemoryHubUiReadModel`, `render_memory_hub`。
 - Produces: fifth top-level tab labelled `Memory Hub` and an explicit provider injection point. When no deployment-owned provider is configured, pass `lambda: None` and render `catalog_missing`; never auto-discover source roots or call `build_catalog()`.
 
-- [ ] **Step 1: Write failing app integration tests**
+- [x] **Step 1: Write failing app integration tests**
 
 Assert the tab list contains `Memory Hub`, the missing-provider path renders the prescribed copy, and importing／rendering the tab does not call `build_catalog`, mutate SQLite, or change `MemorySidecarProviderMetadata` defaults.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 ```bash
 .venv/bin/python -m pytest tests/test_app_pages_memory_hub.py -q
@@ -179,11 +179,11 @@ Assert the tab list contains `Memory Hub`, the missing-provider path renders the
 
 Expected: missing integration symbol or missing tab assertion.
 
-- [ ] **Step 3: Add the tab with explicit provider boundary**
+- [x] **Step 3: Add the tab with explicit provider boundary**
 
 Keep `main()`’s existing four tabs and append `Memory Hub`. Add a small `_render_memory_hub_tab()` that constructs `MemoryHubUiService` from an explicit provider function and project ID, then calls `render_memory_hub`. The default provider returns `None` until a deployment-owned catalog provider is configured; it must not inspect arbitrary paths or create artifacts. Keep Agent Operations and Governance Graph callbacks unchanged.
 
-- [ ] **Step 4: Run focused integration regression**
+- [x] **Step 4: Run focused integration regression**
 
 ```bash
 .venv/bin/python -m pytest tests/test_app_pages_memory_hub.py tests/test_app_pages_governance_graph.py tests/test_agent_operations_rendering.py tests/test_memory_sidecar_models.py -q
@@ -191,7 +191,7 @@ Keep `main()`’s existing four tabs and append `Memory Hub`. Add a small `_rend
 git diff --check
 ```
 
-- [ ] **Step 5: Commit and request strict Review**
+- [x] **Step 5: Commit and request strict Review**
 
 ```bash
 git add app_pages.py tests/test_app_pages_memory_hub.py
@@ -210,7 +210,7 @@ Review must confirm the new tab is observation-only and existing tabs／defaults
 - Consumes: approved Task 1–3 commits, existing Streamlit runtime, Context／Review artifacts and Hermes read-only checks。
 - Produces: browser smoke evidence for missing catalog／ready fixture／blocked query states and final acceptance report.
 
-- [ ] **Step 1: Run focused and full verification**
+- [x] **Step 1: Run focused and full verification**
 
 ```bash
 .venv/bin/python -m pytest tests/test_memory_hub_ui_service.py tests/test_memory_hub_rendering.py tests/test_app_pages_memory_hub.py tests/test_app_pages_governance_graph.py tests/test_agent_operations_rendering.py -q
@@ -219,14 +219,14 @@ Review must confirm the new tab is observation-only and existing tabs／defaults
 .venv/bin/python scripts/hermes_post_change_check.py
 ```
 
-- [ ] **Step 2: Run browser smoke checks**
+- [x] **Step 2: Run browser smoke checks**
 
 At `http://127.0.0.1:8502/`, verify the `Memory Hub` tab, missing-catalog message, query controls, authority notice and no-write behavior. Use a controlled test provider only for ready／drill-down coverage; never create production catalog data from the UI.
 
-- [ ] **Step 3: Confirm immutable boundaries**
+- [x] **Step 3: Confirm immutable boundaries**
 
 Verify `git diff --check`, SQLite signature, frozen baseline value, sidecar default flags, and absence of new catalog／snapshot writes caused by page load or query.
 
-- [ ] **Step 4: Record final acceptance and stop**
+- [x] **Step 4: Record final acceptance and stop**
 
 Write runtime evidence with test counts, browser states, Hermes result and blocked cases. Do not claim Memory Hub production catalog readiness unless an independently approved catalog provider exists.
