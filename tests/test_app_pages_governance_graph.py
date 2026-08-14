@@ -56,6 +56,69 @@ def test_agent_operations_injects_read_only_lineage_callback(monkeypatch):
     assert lineage_calls[0].to_dict() == request
 
 
+def test_agent_operations_graph_callback_translates_ui_filter_names(monkeypatch):
+    import app_pages
+
+    captured = {}
+    calls = []
+
+    class FakeOperations:
+        def __init__(self, root):
+            pass
+
+        def build_snapshot(self):
+            return {"schemaVersion": "agent-operations-snapshot-v1", "runs": []}
+
+    class FakeQuery:
+        def __init__(self, root):
+            pass
+
+        def query(self, *, run_id=None, node_type=None, node_status=None, node_id=None,
+                  edge_type=None, artifact_kind=None, evidence_status=None,
+                  snapshot_fingerprint=None):
+            calls.append({
+                "run_id": run_id,
+                "node_type": node_type,
+                "node_status": node_status,
+                "node_id": node_id,
+                "edge_type": edge_type,
+                "artifact_kind": artifact_kind,
+                "evidence_status": evidence_status,
+                "snapshot_fingerprint": snapshot_fingerprint,
+            })
+            return type("Result", (), {"to_dict": lambda self: {"status": "unavailable"}})()
+
+    monkeypatch.setattr(app_pages.st, "session_state", {})
+    monkeypatch.setattr(app_pages, "AgentOperationsService", FakeOperations)
+    monkeypatch.setattr(app_pages, "GovernanceGraphQueryService", FakeQuery)
+    monkeypatch.setattr(
+        app_pages,
+        "render_agent_operations",
+        lambda snapshot, *, on_refresh, query_graph, lineage_lookup: captured.update(query=query_graph),
+    )
+
+    app_pages._render_agent_operations_tab()
+    captured["query"]("run-123", {
+        "nodeType": "review",
+        "nodeStatus": "blocked",
+        "nodeId": "review-1",
+        "edgeType": "verifies",
+        "artifactKind": "review",
+        "evidenceStatus": "available",
+    })
+
+    assert calls == [{
+        "run_id": "run-123",
+        "node_type": "review",
+        "node_status": "blocked",
+        "node_id": "review-1",
+        "edge_type": "verifies",
+        "artifact_kind": "review",
+        "evidence_status": "available",
+        "snapshot_fingerprint": None,
+    }]
+
+
 def test_lineage_callback_rejects_malformed_request_without_writer(monkeypatch):
     import app_pages
 

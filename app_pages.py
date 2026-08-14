@@ -126,6 +126,16 @@ from streamlit_rendering import *
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+_GRAPH_QUERY_FILTER_MAP = {
+    "nodeType": "node_type",
+    "nodeStatus": "node_status",
+    "nodeId": "node_id",
+    "edgeType": "edge_type",
+    "artifactKind": "artifact_kind",
+    "evidenceStatus": "evidence_status",
+    "snapshotFingerprint": "snapshot_fingerprint",
+}
+
 
 def _load_agent_operations_snapshot(*, force: bool = False) -> dict:
     key = "AGENT_OPERATIONS_SNAPSHOT"
@@ -141,7 +151,12 @@ def _render_agent_operations_tab(*, catalog_lookup=None) -> None:
         _load_agent_operations_snapshot(force=True)
 
     def query_graph(run_id: str, filters: dict[str, str | None]) -> dict:
-        return GovernanceGraphQueryService(PROJECT_ROOT).query(run_id=run_id, **filters).to_dict()
+        service_filters = {
+            _GRAPH_QUERY_FILTER_MAP[key]: value
+            for key, value in filters.items()
+            if key in _GRAPH_QUERY_FILTER_MAP
+        }
+        return GovernanceGraphQueryService(PROJECT_ROOT).query(run_id=run_id, **service_filters).to_dict()
 
     def lineage_lookup(request: dict) -> dict:
         parsed = EvidenceLineageInput.from_dict(request)
