@@ -9,6 +9,7 @@ from scripts.short_term_offload_ab_operator import record_ab_evidence
 
 
 def _pair(root: Path, suffix: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     control, treatment = root / f"c-{suffix}.json", root / f"t-{suffix}.json"
     control.write_text(json.dumps(_receipt(_run("off", 1, f"control-{suffix}"))), encoding="utf-8")
     treatment.write_text(json.dumps(_receipt(_run("on", 2, f"treatment-{suffix}", input_tokens=400, output_tokens=100))), encoding="utf-8")
@@ -22,7 +23,8 @@ def test_acceptance_requires_three_distinct_pairs(tmp_path: Path):
 
 
 def test_acceptance_passes_only_three_distinct_complete_pairs(tmp_path: Path):
-    paths = tuple(_pair(tmp_path, suffix) for suffix in ("one", "two", "three"))
+    live_root = tmp_path / "live-ab"
+    paths = tuple(_pair(live_root / suffix, suffix) for suffix in ("one", "two", "three"))
     result = evaluate_three_pairs(paths)
     assert result["status"] == "pass"
     assert result["pairCount"] == 3

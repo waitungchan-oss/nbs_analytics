@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -52,13 +53,14 @@ def evaluate_three_pairs(evidence_paths: tuple[str | Path, ...], *, output_path:
     evidences: list[ShortTermOffloadABEvidence] = []
     try:
         seen: set[str] = set()
-        for path_value in evidence_paths:
+        resolved_inputs = [Path(path_value).resolve(strict=True) for path_value in evidence_paths]
+        common_root = Path(os.path.commonpath([str(path.parent) for path in resolved_inputs]))
+        if common_root.name != "live-ab" or common_root.is_symlink():
+            raise ValueError("evidence files must share an isolated live-ab root")
+        for path_value, resolved_path in zip(evidence_paths, resolved_inputs):
             path = Path(path_value)
             if path.is_symlink() or not path.is_file() or path.stat().st_size > 512 * 1024:
                 raise ValueError("evidence file unavailable")
-            resolved_path = path.resolve(strict=True)
-            if resolved_path.parent != Path(evidence_paths[0]).resolve(strict=True).parent:
-                raise ValueError("evidence files must share an isolated root")
             evidence = ShortTermOffloadABEvidence.from_dict(json.loads(resolved_path.read_text(encoding="utf-8")))
             if evidence.to_dict() != _expected(evidence).to_dict():
                 raise ValueError("evidence is not derivable from its live runs")
