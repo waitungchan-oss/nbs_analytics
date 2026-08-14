@@ -29,11 +29,11 @@
 - `deployment_owned_catalog_provider(project_root: Path) -> CatalogProvider`
 - Provider returns `MemoryCatalog | None`; it reads only the fixed manifest and catalog paths.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Test missing manifest returns `None`, valid fixture loads, tampered manifest/catalog raises a bounded catalog error, and app passes a callable provider instead of a builder or path scanner.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 .venv/bin/python -m pytest tests/test_memory_hub_deployment_provider.py tests/test_app_pages_memory_hub.py -q
@@ -41,11 +41,11 @@ Test missing manifest returns `None`, valid fixture loads, tampered manifest/cat
 
 Expected: missing provider module import or callable assertion failure.
 
-- [ ] **Step 3: Implement minimal provider**
+- [x] **Step 3: Implement minimal provider**
 
 Validate exact manifest keys and canonical fingerprint; parse `MemorySource`/`MemoryRecord`; construct `CatalogBuildPolicy`; call only `load_catalog()` under fixed roots. Return `None` only for missing manifest/catalog; map malformed input through `MemoryHubCatalogError`.
 
-- [ ] **Step 4: GREEN verification**
+- [x] **Step 4: GREEN verification**
 
 ```bash
 .venv/bin/python -m pytest tests/test_memory_hub_deployment_provider.py tests/test_app_pages_memory_hub.py tests/test_memory_hub_ui_service.py -q
@@ -53,7 +53,7 @@ Validate exact manifest keys and canonical fingerprint; parse `MemorySource`/`Me
 git diff --check
 ```
 
-- [ ] **Step 5: Strict Review and commit**
+- [x] **Step 5: Strict Review and commit**
 
 Review must verify no builder call, no arbitrary path input, no writes, and exact C-0/C-1 loader delegation.
 
@@ -63,6 +63,6 @@ Review must verify no builder call, no arbitrary path input, no writes, and exac
 - Modify only plan status after verification.
 - Runtime evidence only under `.nbs_agent_runtime/`.
 
-- [ ] **Step 1:** Run focused Memory Hub, Streamlit, Graph and Agent Operations suites.
-- [ ] **Step 2:** Run full pytest, system acceptance and Hermes read-only check.
-- [ ] **Step 3:** Confirm missing deployment artifact still renders `catalog_missing` and no default recall/write policy changed.
+- [x] **Step 1:** Run focused Memory Hub, Streamlit, Graph and Agent Operations suites.
+- [x] **Step 2:** Run full pytest, system acceptance and Hermes read-only check.
+- [x] **Step 3:** Confirm missing deployment artifact still renders `catalog_missing` and no default recall/write policy changed.
