@@ -341,6 +341,7 @@ def build_check_plan(
     include_monitor: bool = True,
     include_tests: bool = True,
     project_root: Path = PROJECT_ROOT,
+    verification_profile: str | None = None,
 ) -> list[CheckStep]:
     py = python_bin(project_root)
     baseline_code = (
@@ -395,20 +396,27 @@ def build_check_plan(
         "import json; "
         "print(json.dumps(memory_sidecar_artifact_report(), sort_keys=True))"
     )
+    profile_args = ["--verification-profile", verification_profile] if verification_profile else []
     plan = [
         CheckStep("git-status", ["git", "status", "--short", "--branch"]),
         CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
         CheckStep("git-diff-name-only", ["git", "diff", "--name-only"], required=False),
-        CheckStep("system-status", [py, "scripts/system_manager.py", "status"]),
-        CheckStep("system-acceptance", [py, "scripts/system_manager.py", "acceptance"]),
+        CheckStep("system-status", [py, "scripts/system_manager.py", "status", *profile_args]),
+        CheckStep("system-acceptance", [py, "scripts/system_manager.py", "acceptance", *profile_args]),
     ]
-    if include_monitor:
+    if include_monitor and not verification_profile:
         plan.append(CheckStep("system-monitor", [py, "scripts/system_manager.py", "monitor"]))
-    plan.append(CheckStep("phase2-baseline", [py, "-c", baseline_code]))
+    plan.append(
+        CheckStep(
+            "phase2-baseline",
+            [py, "scripts/phase2j_baseline_check.py", *profile_args]
+            if verification_profile else [py, "-c", baseline_code],
+        )
+    )
     plan.append(
         CheckStep(
             "monthly-baseline-governance",
-            [py, "scripts/monthly_baseline_check.py"],
+            [py, "scripts/monthly_baseline_check.py", *profile_args],
         )
     )
     plan.append(
@@ -547,13 +555,48 @@ def compute_overall_status(results: list[dict]) -> str:
     return "pass"
 
 
-def run_checks(*, include_monitor: bool = True, include_tests: bool = True, project_root: Path = PROJECT_ROOT) -> dict:
-    plan = build_check_plan(include_monitor=include_monitor, include_tests=include_tests, project_root=project_root)
+def run_checks(
+    *,
+    include_monitor: bool = True,
+    include_tests: bool = True,
+    project_root: Path = PROJECT_ROOT,
+    verification_profile: str | None = None,
+) -> dict:
+    profile_identity = None
+    if verification_profile:
+        try:
+            from backend.services.verification_runtime_paths import load_verification_runtime_profile
+            profile_path = Path(verification_profile)
+            if not profile_path.is_absolute():
+                profile_path = project_root / profile_path
+            profile, paths = load_verification_runtime_profile(profile_path, project_root=project_root)
+            profile_identity = {
+                "profileId": profile.profile_id,
+                "projectId": profile.project_id,
+                "gitHead": profile.git_head,
+                "snapshotFingerprint": profile.database.snapshot_fingerprint,
+                "sourceFingerprint": profile.database.source_fingerprint,
+                "runtimeDir": str(paths.runtime_dir),
+            }
+        except Exception as exc:
+            return {
+                "overallStatus": "fail",
+                "projectRoot": str(project_root),
+                "verificationProfile": {"status": "blocked_runner_capability", "reason": type(exc).__name__},
+                "results": [],
+            }
+    plan = build_check_plan(
+        include_monitor=include_monitor,
+        include_tests=include_tests,
+        project_root=project_root,
+        verification_profile=verification_profile,
+    )
     results = [run_step(step, project_root=project_root) for step in plan]
     return {
         "overallStatus": compute_overall_status(results),
         "projectRoot": str(project_root),
         "results": results,
+        **({"verificationProfile": profile_identity} if profile_identity else {}),
     }
 
 
@@ -643,12 +686,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skip-tests", action="store_true", help="Skip targeted pytest monitoring pack.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
     parser.add_argument("--markdown", action="store_true", help="Print a concise Markdown report.")
+    parser.add_argument("--verification-profile", help="Read-only verification profile path.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    report = run_checks(include_monitor=not args.skip_monitor, include_tests=not args.skip_tests)
+    report = run_checks(
+        include_monitor=not args.skip_monitor,
+        include_tests=not args.skip_tests,
+        verification_profile=args.verification_profile,
+    )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     elif args.markdown:
