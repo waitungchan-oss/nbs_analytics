@@ -103,7 +103,7 @@ absolute paths and secrets are not serialized into reports.
   },
   "services": {
     "profileNamespace": "...",
-    "ports": {"api": 0, "streamlit": 0, "vue": 0}
+    "ports": {"api": 18601, "streamlit": 18502, "vue": 15173}
   },
   "createdAt": "...",
   "profileFingerprint": "sha256"
@@ -185,4 +185,3 @@ Per task: RED focused test, GREEN focused test, `py_compile`, and
 acceptance`, `scripts/hermes_post_change_check.py`, and an explicit source
 database signature comparison before/after. Hermes PASS is separate from
 Review PASS.
-
