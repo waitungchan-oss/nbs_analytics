@@ -139,6 +139,36 @@ def test_optional_policy_gate_blocked_is_fail_closed(tmp_path: Path):
     assert result.records == ()
 
 
+def test_configured_unavailable_policy_blocks_even_when_no_records_match(tmp_path: Path):
+    base = _service(tmp_path)
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=MemoryHubPolicyService(None, None, project_id="nbs_analytics"))
+    query = MemoryQuery.from_parts(query="guidance", consumer_id="agent-a", scope="project", memory_kinds=("evidence",))
+    result = gated.query(query, RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-a"))
+    assert result.status == "blocked"
+    assert result.records == ()
+
+
+def test_configured_unavailable_policy_blocks_source_resolution(tmp_path: Path):
+    base = _service(tmp_path)
+    identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-a")
+    source = next(item for item in base.catalog.sources if item.scope == "project" and item.status == "verified")
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=MemoryHubPolicyService(None, None, project_id="nbs_analytics"))
+    result = gated.resolve_source(source.source_id, identity)
+    assert result.status == "blocked"
+    assert result.artifact_ref is None
+
+
+def test_ready_policy_denies_direct_source_resolution(tmp_path: Path):
+    base = _service(tmp_path)
+    policy = _policy_service_fixture()
+    identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-context-reader", team_id="team-finance-governance")
+    source = next(item for item in base.catalog.sources if item.scope == "team")
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=policy)
+    result = gated.resolve_source(source.source_id, identity)
+    assert result.status == "blocked"
+    assert result.artifact_ref is None
+
+
 def test_optional_policy_gate_allow_preserves_existing_output(tmp_path: Path):
     base = _service(tmp_path)
     gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=_policy_service_fixture())

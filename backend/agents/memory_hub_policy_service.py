@@ -119,6 +119,10 @@ class MemoryHubPolicyService:
             return None
         return team, policy
 
+    def is_ready(self) -> bool:
+        """Return whether both deployment-owned catalogs pass read-only validation."""
+        return self._catalogs() is not None
+
     @staticmethod
     def _record_integrity(record: MemoryRecord) -> tuple[bool, bool]:
         try:

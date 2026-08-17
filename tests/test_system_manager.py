@@ -111,6 +111,36 @@ def test_command_matching_rejects_port_substring_collision(tmp_path):
     assert system_manager._command_matches_service("api", command, spec, tmp_path) is False
 
 
+def test_command_matching_accepts_relative_entrypoint_when_process_cwd_matches(tmp_path):
+    spec = system_manager.build_service_specs(
+        tmp_path, "python", "npm", ports={"api": 18601, "streamlit": 18502, "vue": 15173}
+    )["streamlit"]
+    command = "python -m streamlit run app.py --server.port 18502"
+    assert system_manager._command_matches_service(
+        "streamlit", command, spec, tmp_path, process_cwd=tmp_path
+    ) is True
+
+
+def test_command_matching_rejects_relative_entrypoint_from_other_cwd(tmp_path):
+    spec = system_manager.build_service_specs(
+        tmp_path, "python", "npm", ports={"api": 18601, "streamlit": 18502, "vue": 15173}
+    )["streamlit"]
+    command = "python -m streamlit run app.py --server.port 18502"
+    assert system_manager._command_matches_service(
+        "streamlit", command, spec, tmp_path, process_cwd=tmp_path / "other"
+    ) is False
+
+
+def test_vue_command_matching_uses_frontend_working_directory(tmp_path):
+    spec = system_manager.build_service_specs(
+        tmp_path, "python", "npm", ports={"api": 18601, "streamlit": 18502, "vue": 15173}
+    )["vue"]
+    assert system_manager._command_matches_service(
+        "vue", "npm run dev --host 127.0.0.1 --port 15173", spec, tmp_path,
+        process_cwd=tmp_path / "frontend",
+    ) is True
+
+
 def test_parser_accepts_verification_profile_option():
     args = system_manager.build_parser().parse_args(["acceptance", "--verification-profile", "profile.json"])
     assert args.verification_profile == "profile.json"

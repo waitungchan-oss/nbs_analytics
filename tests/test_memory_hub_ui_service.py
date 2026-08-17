@@ -123,21 +123,6 @@ def test_policy_projection_is_read_only_and_fail_closed(tmp_path: Path) -> None:
     assert result.diagnostics == ("policy_blocked",)
 
 
-def test_policy_projection_does_not_label_no_match_as_deny(tmp_path: Path) -> None:
-    catalog = _catalog(tmp_path)
-    service = MemoryHubUiService(
-        lambda: catalog,
-        project_id="nbs",
-        policy_service=MemoryHubPolicyService(None, None, project_id="nbs"),
-    )
-    result = service.query(
-        query="skill", consumer_id="review-agent", scope="project",
-        memory_kinds=("skill",), team_id=None,
-    )
-    assert result.status == "empty"
-    assert result.diagnostics == ()
-
-
 def test_ui_rejects_arbitrary_policy_callback(tmp_path: Path) -> None:
     catalog = _catalog(tmp_path)
     with pytest.raises(ValueError):

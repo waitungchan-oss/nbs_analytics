@@ -170,7 +170,32 @@ def _process_command(pid: int) -> str:
     return result.stdout.strip()
 
 
-def _command_matches_service(name: str, command: str, spec: dict, project_root: Path) -> bool:
+def _process_cwd(pid: int) -> Path | None:
+    if os.name == "nt":
+        return None
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return Path(line[1:]).resolve()
+    return None
+
+
+def _command_matches_service(
+    name: str,
+    command: str,
+    spec: dict,
+    project_root: Path,
+    *,
+    process_cwd: Path | None = None,
+) -> bool:
     command = command.replace("\\", "/")
     project = str(project_root).replace("\\", "/")
     expected_port = str(spec["port"])
@@ -186,10 +211,12 @@ def _command_matches_service(name: str, command: str, spec: dict, project_root: 
                 if token.startswith(flag + "=") and token.split("=", 1)[1] == expected_port:
                     return True
         return False
+    expected_cwd = Path(spec.get("cwd") or project_root).resolve()
+    cwd_match = process_cwd is not None and process_cwd == expected_cwd
     if project and project in command:
         project_match = True
     else:
-        project_match = any(str(item).replace("\\", "/") in command for item in spec.get("required_files", []))
+        project_match = cwd_match or any(str(item).replace("\\", "/") in command for item in spec.get("required_files", []))
     if name == "streamlit":
         return project_match and "streamlit" in command and "app.py" in command and has_port("--server.port")
     if name == "api":
@@ -410,7 +437,16 @@ def service_status(project_root: Path = PROJECT_ROOT, *, profile=None) -> dict:
         record = (state.get("services") or {}).get(name) or {}
         alive = process_is_alive(record.get("pid"))
         ready = endpoint_is_ready(spec["ready_url"])
-        owner_match = bool(alive and _command_matches_service(name, _process_command(record.get("pid")), spec, project_root))
+        owner_match = bool(
+            alive
+            and _command_matches_service(
+                name,
+                _process_command(record.get("pid")),
+                spec,
+                project_root,
+                process_cwd=_process_cwd(record.get("pid")),
+            )
+        )
         identity_match = bool(owner_match and (profile is None or record.get("profileId") == profile.profile_id))
         services[name] = {
             "pid": record.get("pid"),
