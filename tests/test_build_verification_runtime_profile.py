@@ -53,7 +53,8 @@ def test_builder_creates_profile_snapshot_and_generation_metadata(tmp_path: Path
     assert profile.database.read_only is True
     assert profile.database.snapshot_ref.startswith("verification/")
     assert (profile_path.parent / "generation.json").is_file()
-    assert not (profile_path.parent / "cache").exists()
+    assert (profile_path.parent / "cache").is_dir()
+    assert list((profile_path.parent / "cache").iterdir()) == []
     assert source_db.is_file()
     assert source_db.stat().st_size == source_stat.st_size
     assert source_db.stat().st_mtime_ns == source_stat.st_mtime_ns

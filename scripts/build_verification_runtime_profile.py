@@ -114,6 +114,7 @@ def build_verification_profile(
     try:
         snapshot = build_read_only_snapshot(source, profile_dir / "snapshot.sqlite")
         profile_dir.mkdir(parents=True, exist_ok=True)
+        (profile_dir / "cache").mkdir()
         generation_payload = _bounded_generation(generation)
         (profile_dir / "generation.json").write_text(json.dumps(generation_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         baseline_fingerprint = _sha256(registry)

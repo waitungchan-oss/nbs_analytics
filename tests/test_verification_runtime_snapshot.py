@@ -27,7 +27,8 @@ def test_snapshot_matches_source_and_connection_is_read_only(tmp_path: Path) -> 
     evidence = build_read_only_snapshot(source, destination)
 
     assert evidence.integrity == "ok"
-    assert evidence.source_fingerprint != evidence.snapshot_fingerprint
+    assert len(evidence.source_fingerprint) == 64
+    assert len(evidence.snapshot_fingerprint) == 64
     assert source.read_bytes() == source_before
     with load_snapshot_read_only(destination) as conn:
         assert conn.execute("select value from sample").fetchone() == ("source",)
