@@ -548,3 +548,16 @@ v1 只定義 read-only monitoring contract。
 6. 建立最小 dashboard：讀取 `.nbs_runtime/health_history.jsonl` 與 `.hermes/runs/` 顯示近期巡檢狀態。
 
 任何 automation 都必須維持 read-only first 原則。涉及修復、寫入、刪除、rollback apply 或 schema migration 時，必須先取得使用者授權。
+## Verification runtime profile
+
+Hermes may inspect an isolated verification profile with:
+
+```bash
+.venv/bin/python scripts/hermes_post_change_check.py --verification-profile <profile.json> --json
+```
+
+This mode validates the profile before running checks, routes baseline,
+monthly-governance, health, and service-identity checks to the profile, and
+skips mutating monitor history. Missing, stale, or mismatched profile evidence
+is reported as `blocked_runner_capability`; no-profile invocation retains the
+primary runtime behavior.

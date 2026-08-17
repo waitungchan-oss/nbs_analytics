@@ -60,7 +60,13 @@ def _compact_acceptance(value: dict | None) -> dict | None:
     return compact
 
 
-def build_system_health(db_path: Path, cache_path: Path, runtime_dir: Path | None = None) -> dict:
+def build_system_health(
+    db_path: Path,
+    cache_path: Path,
+    runtime_dir: Path | None = None,
+    generation_path: Path | None = None,
+    read_only: bool = False,
+) -> dict:
     issues: list[str] = []
     db_exists = db_path.exists()
     integrity = validate_sqlite_database(db_path) if db_exists else {
@@ -71,7 +77,14 @@ def build_system_health(db_path: Path, cache_path: Path, runtime_dir: Path | Non
         issues.append(f"SQLite integrity check failed: {integrity['integrity']}")
 
     try:
-        history = list_stability_history(limit=20, db_path=db_path) if db_exists and integrity["ok"] else []
+        # Verification snapshots are immutable.  The normal history reader
+        # ensures its table with CREATE/COMMIT, so omit that derived view in
+        # read-only profile mode rather than mutating the snapshot.
+        history = (
+            []
+            if read_only
+            else list_stability_history(limit=20, db_path=db_path) if db_exists and integrity["ok"] else []
+        )
     except Exception as exc:
         history = []
         issues.append(f"Acceptance history unavailable: {type(exc).__name__}: {exc}")
@@ -98,8 +111,12 @@ def build_system_health(db_path: Path, cache_path: Path, runtime_dir: Path | Non
         status = "degraded"
 
     runtime_dir = runtime_dir or parent / ".nbs_runtime"
-    coordination = probe_upload_lease(runtime_dir / "upload_coordination.db")
-    generation = load_cache_generation(runtime_dir / "data_generation.json", db_path=db_path)
+    coordination = (
+        {"status": "unavailable", "reason": "read_only_verification"}
+        if read_only
+        else probe_upload_lease(runtime_dir / "upload_coordination.db")
+    )
+    generation = load_cache_generation(generation_path or runtime_dir / "data_generation.json", db_path=db_path)
     operation_id = generation.get("operationId")
     matching_history = next((row for row in history if row.get("operationId") == operation_id), None)
     upload_evidence = {

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -22,12 +23,25 @@ LOG_DIR = RUNTIME_DIR / "logs"
 STATE_PATH = RUNTIME_DIR / "services.json"
 
 
-def build_service_specs(project_root: Path, python_bin: str, npm_bin: str) -> dict:
+def build_service_specs(
+    project_root: Path,
+    python_bin: str,
+    npm_bin: str,
+    *,
+    ports: dict[str, int] | None = None,
+    profile_id: str | None = None,
+) -> dict:
+    ports = ports or {"api": 8601, "streamlit": 8502, "vue": 5173}
+    required_ports = {"api", "streamlit", "vue"}
+    if set(ports) != required_ports or len(set(ports.values())) != len(ports):
+        raise ValueError("service ports must contain unique api, streamlit, and vue ports")
+    api_port, streamlit_port, vue_port = (int(ports[name]) for name in ("api", "streamlit", "vue"))
     return {
         "streamlit": {
-            "port": 8502,
-            "ready_url": "http://127.0.0.1:8502/_stcore/health",
-            "browser_url": "http://127.0.0.1:8502/",
+            "port": streamlit_port,
+            "ready_url": f"http://127.0.0.1:{streamlit_port}/_stcore/health",
+            "browser_url": f"http://127.0.0.1:{streamlit_port}/",
+            "profileId": profile_id,
             "cwd": project_root,
             "required_files": [project_root / "app.py"],
             "command": [
@@ -37,7 +51,7 @@ def build_service_specs(project_root: Path, python_bin: str, npm_bin: str) -> di
                 "run",
                 "app.py",
                 "--server.port",
-                "8502",
+                str(streamlit_port),
                 "--server.address",
                 "127.0.0.1",
                 "--server.headless",
@@ -45,9 +59,10 @@ def build_service_specs(project_root: Path, python_bin: str, npm_bin: str) -> di
             ],
         },
         "api": {
-            "port": 8601,
-            "ready_url": "http://127.0.0.1:8601/api/health",
-            "browser_url": "http://127.0.0.1:8601/docs",
+            "port": api_port,
+            "ready_url": f"http://127.0.0.1:{api_port}/api/health",
+            "browser_url": f"http://127.0.0.1:{api_port}/docs",
+            "profileId": profile_id,
             "cwd": project_root,
             "required_files": [project_root / "backend" / "main.py"],
             "command": [
@@ -58,13 +73,14 @@ def build_service_specs(project_root: Path, python_bin: str, npm_bin: str) -> di
                 "--host",
                 "127.0.0.1",
                 "--port",
-                "8601",
+                str(api_port),
             ],
         },
         "vue": {
-            "port": 5173,
-            "ready_url": "http://127.0.0.1:5173/",
-            "browser_url": "http://127.0.0.1:5173/",
+            "port": vue_port,
+            "ready_url": f"http://127.0.0.1:{vue_port}/",
+            "browser_url": f"http://127.0.0.1:{vue_port}/",
+            "profileId": profile_id,
             "cwd": project_root / "frontend",
             "required_files": [
                 project_root / "frontend" / "package.json",
@@ -78,7 +94,7 @@ def build_service_specs(project_root: Path, python_bin: str, npm_bin: str) -> di
                 "--host",
                 "127.0.0.1",
                 "--port",
-                "5173",
+                str(vue_port),
             ],
         },
     }
@@ -154,20 +170,59 @@ def _process_command(pid: int) -> str:
     return result.stdout.strip()
 
 
-def _command_matches_service(name: str, command: str, spec: dict, project_root: Path) -> bool:
+def _process_cwd(pid: int) -> Path | None:
+    if os.name == "nt":
+        return None
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return Path(line[1:]).resolve()
+    return None
+
+
+def _command_matches_service(
+    name: str,
+    command: str,
+    spec: dict,
+    project_root: Path,
+    *,
+    process_cwd: Path | None = None,
+) -> bool:
     command = command.replace("\\", "/")
     project = str(project_root).replace("\\", "/")
     expected_port = str(spec["port"])
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    def has_port(*flags: str) -> bool:
+        for index, token in enumerate(tokens):
+            for flag in flags:
+                if token == flag and index + 1 < len(tokens) and tokens[index + 1] == expected_port:
+                    return True
+                if token.startswith(flag + "=") and token.split("=", 1)[1] == expected_port:
+                    return True
+        return False
+    expected_cwd = Path(spec.get("cwd") or project_root).resolve()
+    cwd_match = process_cwd is not None and process_cwd == expected_cwd
     if project and project in command:
         project_match = True
     else:
-        project_match = any(str(item).replace("\\", "/") in command for item in spec.get("required_files", []))
+        project_match = cwd_match or any(str(item).replace("\\", "/") in command for item in spec.get("required_files", []))
     if name == "streamlit":
-        return project_match and "streamlit" in command and "app.py" in command and expected_port in command
+        return project_match and "streamlit" in command and "app.py" in command and has_port("--server.port")
     if name == "api":
-        return project_match and "uvicorn" in command and "backend.main:app" in command and expected_port in command
+        return project_match and "uvicorn" in command and "backend.main:app" in command and has_port("--port")
     if name == "vue":
-        return project_match and ("vite" in command or "npm" in command) and expected_port in command
+        return project_match and ("vite" in command or "npm" in command) and has_port("--port")
     return False
 
 
@@ -186,6 +241,7 @@ def _adopt_service_record(pid: int, spec: dict, name: str, runtime_dir: Path) ->
         "logPath": str(runtime_dir / "logs" / f"{name}.log"),
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "adopted": True,
+        "profileId": spec.get("profileId"),
     }
 
 
@@ -268,6 +324,7 @@ def _spawn_service(name: str, spec: dict, runtime_dir: Path) -> dict:
         "readyUrl": spec["ready_url"],
         "logPath": str(log_path),
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "profileId": spec.get("profileId"),
     }
 
 
@@ -364,34 +421,54 @@ def stop_services(project_root: Path = PROJECT_ROOT) -> int:
     return 0
 
 
-def service_status(project_root: Path = PROJECT_ROOT) -> dict:
+def service_status(project_root: Path = PROJECT_ROOT, *, profile=None) -> dict:
     python_bin, npm_bin = _resolve_runtime(project_root)
-    specs = build_service_specs(project_root, python_bin, npm_bin)
-    runtime_dir = project_root / ".nbs_runtime"
+    profile_ports = dict(profile.services.ports) if profile is not None else None
+    profile_id = profile.profile_id if profile is not None else None
+    specs = build_service_specs(project_root, python_bin, npm_bin, ports=profile_ports, profile_id=profile_id)
+    runtime_dir = (
+        project_root / ".nbs_agent_runtime" / "verification" / profile.profile_id
+        if profile is not None
+        else project_root / ".nbs_runtime"
+    )
     state = read_state(runtime_dir)
     services = {}
     for name, spec in specs.items():
         record = (state.get("services") or {}).get(name) or {}
         alive = process_is_alive(record.get("pid"))
         ready = endpoint_is_ready(spec["ready_url"])
+        owner_match = bool(
+            alive
+            and _command_matches_service(
+                name,
+                _process_command(record.get("pid")),
+                spec,
+                project_root,
+                process_cwd=_process_cwd(record.get("pid")),
+            )
+        )
+        identity_match = bool(owner_match and (profile is None or record.get("profileId") == profile.profile_id))
         services[name] = {
             "pid": record.get("pid"),
             "alive": alive,
             "ready": ready,
+            "ownerMatch": owner_match,
+            "identityMatch": identity_match,
+            "failureReason": None if alive and ready and owner_match and identity_match else "service_identity_unavailable",
             "url": spec["ready_url"],
             "logPath": record.get("logPath"),
         }
     return {
-        "status": "ready" if all(item["ready"] for item in services.values()) else "not_ready",
+        "status": "ready" if all(item["alive"] and item["ready"] and item["ownerMatch"] and item["identityMatch"] for item in services.values()) else "not_ready",
         "services": services,
     }
 
 
-def run_http_acceptance(project_root: Path = PROJECT_ROOT) -> dict:
-    current = service_status(project_root)
+def run_http_acceptance(project_root: Path = PROJECT_ROOT, *, profile=None) -> dict:
+    current = service_status(project_root, profile=profile)
     checks = current["services"]
     return {
-        "status": "passed" if all(item.get("ready") for item in checks.values()) else "failed",
+        "status": "passed" if all(item.get("alive") and item.get("ready") and item.get("ownerMatch") and item.get("identityMatch") for item in checks.values()) else "failed",
         "checks": checks,
     }
 
@@ -494,17 +571,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--apply", action="store_true", help="Apply backup retention deletions.")
     parser.add_argument("--backup", help="Specific backup path for restore drill.")
+    parser.add_argument("--verification-profile", help="Read-only verification profile path.")
     return parser
+
+
+def _load_verification_profile(value: str | None):
+    if not value:
+        return None
+    from backend.services.verification_runtime_paths import load_verification_runtime_profile
+    profile_path = Path(value)
+    if not profile_path.is_absolute():
+        profile_path = PROJECT_ROOT / profile_path
+    profile, _ = load_verification_runtime_profile(profile_path, project_root=PROJECT_ROOT)
+    return profile
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    profile = _load_verification_profile(args.verification_profile)
     if args.action == "start":
         return start_services(open_browser=not args.no_browser)
     if args.action == "stop":
         return stop_services()
     if args.action == "status":
-        result = service_status()
+        result = service_status(profile=profile)
     elif args.action == "monitor":
         result = monitor_services()
     elif args.action == "retention":
@@ -515,7 +605,7 @@ def main() -> int:
         output = create_diagnostics()
         result = {"status": "created", "path": str(output)}
     else:
-        result = run_http_acceptance()
+        result = run_http_acceptance(profile=profile)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0 if result.get("status") not in {"failed", "critical"} else 1
 

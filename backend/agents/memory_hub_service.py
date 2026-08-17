@@ -13,6 +13,7 @@ from .memory_hub_models import (
     MemoryRecord,
     RuntimeIdentity,
 )
+from .memory_hub_policy_service import MemoryHubPolicyService
 
 
 @dataclass(frozen=True)
@@ -27,9 +28,12 @@ class SourceResolution:
 class MemoryHubService:
     """Read-only query facade over one immutable MemoryCatalog."""
 
-    def __init__(self, catalog: MemoryCatalog, *, project_id: str) -> None:
+    def __init__(self, catalog: MemoryCatalog, *, project_id: str, policy_service: MemoryHubPolicyService | None = None) -> None:
         self.catalog = catalog
         self.project_id = project_id
+        if policy_service is not None and type(policy_service) is not MemoryHubPolicyService:
+            raise TypeError("policy_service must be a deployment-owned MemoryHubPolicyService")
+        self.policy_service = policy_service
 
     @staticmethod
     def _decision(query: MemoryQuery, identity: RuntimeIdentity, record: MemoryRecord) -> MemoryACLDecision:
@@ -72,6 +76,8 @@ class MemoryHubService:
             return MemoryQueryResult.from_parts(query_fingerprint=query.query_fingerprint, status="blocked", records=(), acl_decisions=())
         if not isinstance(self.catalog, MemoryCatalog):
             return MemoryQueryResult.from_parts(query_fingerprint=query.query_fingerprint, status="blocked", records=(), acl_decisions=())
+        if self.policy_service is not None and not self.policy_service.is_ready():
+            return MemoryQueryResult.from_parts(query_fingerprint=query.query_fingerprint, status="blocked", records=(), acl_decisions=())
         if query.scope == "team" and identity.team_id is None:
             return MemoryQueryResult.from_parts(query_fingerprint=query.query_fingerprint, status="blocked", records=(), acl_decisions=())
         now = datetime.now(timezone.utc)
@@ -83,6 +89,15 @@ class MemoryHubService:
             and all(source.status == "verified" and datetime.fromisoformat(source.expires_at) > now for source in record.source_refs)
         ]
         candidates.sort(key=lambda record: (record.memory_kind, record.memory_id))
+        if self.policy_service is not None:
+            policy_decisions = tuple(self.policy_service.evaluate(identity, query, record) for record in candidates)
+            if any(decision.decision == "blocked" for decision in policy_decisions):
+                return MemoryQueryResult.from_parts(query_fingerprint=query.query_fingerprint, status="blocked", records=(), acl_decisions=())
+            policy_allowed = tuple(record for record, decision in zip(candidates, policy_decisions) if decision.decision == "allow")
+            if not policy_allowed:
+                status = "blocked" if any(decision.decision == "blocked" for decision in policy_decisions) else "empty"
+                return MemoryQueryResult.from_parts(query_fingerprint=query.query_fingerprint, status=status, records=(), acl_decisions=())
+            candidates = list(policy_allowed)
         decisions = tuple(self._decision(query, identity, record) for record in candidates)
         allowed = tuple(record for record, decision in zip(candidates, decisions) if decision.decision == "allow")[: query.max_items]
         returned_ids = {record.memory_id for record in allowed}
@@ -100,6 +115,26 @@ class MemoryHubService:
             return SourceResolution("blocked", source_id, None, None, None)
         if not isinstance(self.catalog, MemoryCatalog):
             return SourceResolution("blocked", source_id, None, None, None)
+        if self.policy_service is not None and not self.policy_service.is_ready():
+            return SourceResolution("blocked", source_id, None, None, None)
+        if self.policy_service is not None:
+            referenced = [record for record in self.catalog.records if any(source.source_id == source_id for source in record.source_refs)]
+            try:
+                policy_identity = identity
+                policy_allowed = False
+                for record in referenced:
+                    policy_query = MemoryQuery.from_parts(
+                        query="source resolution", consumer_id=identity.consumer_id,
+                        scope=record.scope, memory_kinds=(record.memory_kind,),
+                        max_items=3, max_bytes=6000, timeout_ms=800,
+                    )
+                    if self.policy_service.evaluate(policy_identity, policy_query, record).decision == "allow":
+                        policy_allowed = True
+                        break
+            except (MemoryHubSchemaError, ValueError):
+                policy_allowed = False
+            if not policy_allowed:
+                return SourceResolution("blocked", source_id, None, None, None)
         source = next((item for item in self.catalog.sources if item.source_id == source_id), None)
         now = datetime.now(timezone.utc)
         if source is None or source.status != "verified" or datetime.fromisoformat(source.expires_at) <= now:

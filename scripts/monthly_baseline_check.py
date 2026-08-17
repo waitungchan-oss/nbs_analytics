@@ -14,12 +14,17 @@ from backend.services.monthly_baseline_service import (
     evaluate_monthly_baselines,
     list_monthly_baseline_promotions,
 )
+from backend.services.verification_runtime_paths import load_verification_runtime_profile
 
 
-def build_monthly_baseline_report() -> dict:
-    evaluation = evaluate_monthly_baselines()
-    governance = build_monthly_baseline_governance(evaluation=evaluation)
-    promotions = list_monthly_baseline_promotions(limit=1)
+def build_monthly_baseline_report(*, db_path=None, verification_mode: bool = False) -> dict:
+    evaluation = evaluate_monthly_baselines(db_path=db_path)
+    if not verification_mode:
+        governance = build_monthly_baseline_governance(evaluation=evaluation)
+        promotions = list_monthly_baseline_promotions(limit=1)
+    else:
+        governance = build_monthly_baseline_governance(evaluation=evaluation, history_records=[])
+        promotions = []
     return {
         "status": governance.get("status"),
         "blockingStatus": governance.get("blockingStatus"),
@@ -37,12 +42,21 @@ def build_monthly_baseline_report() -> dict:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect monthly revenue baseline governance.")
+    parser.add_argument("--verification-profile", help="Profile JSON under the ignored verification runtime.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parse_args(argv)
-    report = build_monthly_baseline_report()
+    args = parse_args(argv)
+    db_path = None
+    if args.verification_profile:
+        project_root = Path(__file__).resolve().parents[1]
+        profile_path = Path(args.verification_profile)
+        if not profile_path.is_absolute():
+            profile_path = project_root / profile_path
+        _, paths = load_verification_runtime_profile(profile_path, project_root=project_root)
+        db_path = paths.db_path
+    report = build_monthly_baseline_report() if db_path is None else build_monthly_baseline_report(db_path=db_path, verification_mode=True)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 1 if report.get("blockingStatus") == "drift" else 0
 

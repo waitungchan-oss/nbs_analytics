@@ -25,8 +25,8 @@ def _artifact(ref: str, run: str = "run-1", content: str = "payload", *, created
 def test_store_round_trip_isolated_and_typed(tmp_path: Path) -> None:
     store = ShortTermOffloadStore(tmp_path, policy=ShortTermOffloadPolicy())
     artifact = _artifact("ref-1")
-    store.write(artifact)
-    loaded = store.read("run-1", "session-1", "ref-1")
+    store.write(artifact, now=NOW)
+    loaded = store.read("run-1", "session-1", "ref-1", now=NOW)
     assert loaded == artifact
     assert loaded is not None
     assert loaded.content == "payload"
@@ -36,7 +36,7 @@ def test_store_round_trip_isolated_and_typed(tmp_path: Path) -> None:
 def test_store_rejects_path_escape_symlink_and_enforces_run_caps(tmp_path: Path) -> None:
     policy = ShortTermOffloadPolicy(max_artifacts_per_run=1, max_total_bytes_per_run=1000)
     store = ShortTermOffloadStore(tmp_path, policy=policy)
-    store.write(_artifact("ref-1", content="1234567"))
+    store.write(_artifact("ref-1", content="1234567"), now=NOW)
     with pytest.raises(ValueError):
         store.write(_artifact("ref-2", content="x"))
     with pytest.raises(ValueError):
@@ -52,8 +52,8 @@ def test_cleanup_expired_only_removes_expired_offload_files(tmp_path: Path) -> N
     store = ShortTermOffloadStore(tmp_path, policy=ShortTermOffloadPolicy())
     expired = _artifact("expired", created=NOW - timedelta(minutes=10), expires=NOW - timedelta(seconds=1))
     current = _artifact("current")
-    store.write(expired, allow_expired=True)
-    store.write(current)
+    store.write(expired, allow_expired=True, now=NOW)
+    store.write(current, now=NOW)
     assert store.cleanup_expired(now=NOW) == ("expired",)
     assert store.read("run-1", "session-1", "current", now=NOW) == current
 
@@ -61,7 +61,7 @@ def test_cleanup_expired_only_removes_expired_offload_files(tmp_path: Path) -> N
 def test_read_expired_is_fail_closed_and_write_revalidates_envelope(tmp_path: Path) -> None:
     store = ShortTermOffloadStore(tmp_path, policy=ShortTermOffloadPolicy())
     expired = _artifact("expired", created=NOW - timedelta(minutes=10), expires=NOW - timedelta(seconds=1))
-    store.write(expired, allow_expired=True)
+    store.write(expired, allow_expired=True, now=NOW)
     assert store.read("run-1", "session-1", "expired", now=NOW) is None
     tampered = _artifact("tampered")
     object.__setattr__(tampered, "content_sha256", "0" * 64)

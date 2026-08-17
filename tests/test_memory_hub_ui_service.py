@@ -4,9 +4,12 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from backend.agents.memory_hub_catalog import CatalogBuildPolicy, build_catalog
 from backend.agents.memory_hub_models import MemoryRecord, MemorySource
 from backend.agents.memory_hub_ui_service import MemoryHubUiService, _record_rows
+from backend.agents.memory_hub_policy_service import MemoryHubPolicyService
 
 
 def _catalog(tmp_path: Path):
@@ -99,3 +102,48 @@ def test_missing_team_identity_is_blocked_without_raw_artifact_content(tmp_path:
     assert result.status == "blocked"
     assert result.records == ()
     assert "canonical governance guide" not in str(result.to_dict())
+
+
+def test_policy_projection_is_read_only_and_fail_closed(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    service = MemoryHubUiService(
+        lambda: catalog,
+        project_id="nbs",
+        policy_service=MemoryHubPolicyService(None, None, project_id="nbs"),
+    )
+    status = service.catalog_status()
+    assert status.policy_status == "configured"
+    result = service.query(
+        query="governance", consumer_id="review-agent", scope="project",
+        memory_kinds=("governance",), team_id=None,
+    )
+    assert result.status == "blocked"
+    assert result.records == ()
+    assert "artifactRef" not in str(result.to_dict())
+    assert result.diagnostics == ("policy_blocked",)
+
+
+def test_ui_rejects_arbitrary_policy_callback(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    with pytest.raises(ValueError):
+        MemoryHubUiService(lambda: catalog, project_id="nbs", policy_service=lambda *_: None)  # type: ignore[arg-type]
+
+
+def test_policy_configured_source_resolution_fails_closed_without_metadata(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    service = MemoryHubUiService(
+        lambda: catalog,
+        project_id="nbs",
+        policy_service=MemoryHubPolicyService(None, None, project_id="nbs"),
+    )
+    result = service.resolve_source(catalog.sources[0].source_id, consumer_id="review-agent", team_id=None)
+    assert result.status == "blocked"
+    assert result.source is None
+    assert "artifactRef" not in str(result.to_dict())
+
+
+def test_source_projection_keeps_policy_status(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    service = MemoryHubUiService(lambda: catalog, project_id="nbs")
+    result = service.resolve_source(catalog.sources[0].source_id, consumer_id="review-agent", team_id=None)
+    assert result.policy_status == "not_configured"

@@ -8,6 +8,8 @@ import pytest
 from backend.agents.memory_hub_catalog import CatalogBuildPolicy, build_catalog
 from backend.agents.memory_hub_models import MemoryQuery, MemoryRecord, MemorySource, RuntimeIdentity
 from backend.agents.memory_hub_service import MemoryHubService
+from backend.agents.memory_hub_policy_service import MemoryHubPolicyService
+from tests.test_memory_hub_policy_service import _service as _policy_service_fixture
 
 
 def _source(root: Path, name: str, *, scope: str = "project", owner: str = "governance", status: str = "verified", generated_at: str | None = None, expires_at: str | None = None) -> MemorySource:
@@ -117,3 +119,66 @@ def test_missing_catalog_returns_bounded_fallback():
     identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-a")
     assert service.query(query, identity).status == "blocked"
     assert service.resolve_source("a" * 64, identity).status == "blocked"
+
+
+def test_optional_policy_gate_deny_returns_no_records(tmp_path: Path):
+    base = _service(tmp_path)
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=_policy_service_fixture())
+    query = MemoryQuery.from_parts(query="guidance", consumer_id="agent-context-reader", scope="team", memory_kinds=("skill",))
+    result = gated.query(query, RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-context-reader", team_id="team-finance-governance"))
+    assert result.status == "empty"
+    assert result.records == ()
+
+
+def test_optional_policy_gate_blocked_is_fail_closed(tmp_path: Path):
+    base = _service(tmp_path)
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=MemoryHubPolicyService(None, None, project_id="nbs_analytics"))
+    query = MemoryQuery.from_parts(query="guidance", consumer_id="agent-a", scope="project", memory_kinds=("governance",))
+    result = gated.query(query, RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-a", team_id="team-a"))
+    assert result.status == "blocked"
+    assert result.records == ()
+
+
+def test_configured_unavailable_policy_blocks_even_when_no_records_match(tmp_path: Path):
+    base = _service(tmp_path)
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=MemoryHubPolicyService(None, None, project_id="nbs_analytics"))
+    query = MemoryQuery.from_parts(query="guidance", consumer_id="agent-a", scope="project", memory_kinds=("evidence",))
+    result = gated.query(query, RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-a"))
+    assert result.status == "blocked"
+    assert result.records == ()
+
+
+def test_configured_unavailable_policy_blocks_source_resolution(tmp_path: Path):
+    base = _service(tmp_path)
+    identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-a")
+    source = next(item for item in base.catalog.sources if item.scope == "project" and item.status == "verified")
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=MemoryHubPolicyService(None, None, project_id="nbs_analytics"))
+    result = gated.resolve_source(source.source_id, identity)
+    assert result.status == "blocked"
+    assert result.artifact_ref is None
+
+
+def test_ready_policy_denies_direct_source_resolution(tmp_path: Path):
+    base = _service(tmp_path)
+    policy = _policy_service_fixture()
+    identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-context-reader", team_id="team-finance-governance")
+    source = next(item for item in base.catalog.sources if item.scope == "team")
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=policy)
+    result = gated.resolve_source(source.source_id, identity)
+    assert result.status == "blocked"
+    assert result.artifact_ref is None
+
+
+def test_optional_policy_gate_allow_preserves_existing_output(tmp_path: Path):
+    base = _service(tmp_path)
+    gated = MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=_policy_service_fixture())
+    query = MemoryQuery.from_parts(query="guidance", consumer_id="agent-context-reader", scope="project", memory_kinds=("governance",))
+    identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="agent-context-reader", team_id="team-finance-governance")
+    assert gated.query(query, identity).status == "ready"
+    assert gated.query(query, identity).records
+
+
+def test_policy_gate_must_be_typed(tmp_path: Path):
+    base = _service(tmp_path)
+    with pytest.raises(TypeError):
+        MemoryHubService(base.catalog, project_id="nbs_analytics", policy_service=object())  # type: ignore[arg-type]
