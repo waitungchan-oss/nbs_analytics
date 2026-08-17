@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .evidence_models import canonical_fingerprint
 from .memory_hub_catalog import MemoryCatalog, MemoryHubCatalogError
 from .memory_hub_models import MemoryHubSchemaError, MemoryQuery, RuntimeIdentity
 from .memory_hub_service import MemoryHubService
+from .memory_hub_policy_service import MemoryHubPolicyService
 
 
 CatalogProvider = Callable[[], MemoryCatalog | None]
@@ -21,6 +23,7 @@ class MemoryHubUiReadModel:
     source: dict[str, object] | None
     diagnostics: tuple[str, ...]
     fingerprint: str
+    policy_status: str = "not_configured"
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, str) or not self.status:
@@ -43,6 +46,7 @@ class MemoryHubUiReadModel:
             "decisions": list(self.decisions),
             "source": self.source,
             "diagnostics": list(self.diagnostics),
+            "policyStatus": self.policy_status,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -57,6 +61,7 @@ def _model(
     decisions: tuple[dict[str, object], ...] = (),
     source: dict[str, object] | None = None,
     diagnostics: tuple[str, ...] = (),
+    policy_status: str = "not_configured",
 ) -> MemoryHubUiReadModel:
     unsigned = {
         "schemaVersion": "memory-hub-ui-read-model-v1",
@@ -66,8 +71,9 @@ def _model(
         "decisions": list(decisions),
         "source": source,
         "diagnostics": list(diagnostics),
+        "policyStatus": policy_status,
     }
-    return MemoryHubUiReadModel(status, catalog or {}, records, decisions, source, diagnostics, canonical_fingerprint(unsigned))
+    return MemoryHubUiReadModel(status, catalog or {}, records, decisions, source, diagnostics, canonical_fingerprint(unsigned), policy_status)
 
 
 def _catalog_metadata(catalog: MemoryCatalog) -> dict[str, object]:
@@ -108,11 +114,14 @@ def _record_rows(records: tuple) -> tuple[dict[str, object], ...]:
 class MemoryHubUiService:
     """Read-only UI adapter over an explicitly supplied immutable catalog."""
 
-    def __init__(self, catalog_provider: CatalogProvider | None, *, project_id: str) -> None:
+    def __init__(self, catalog_provider: CatalogProvider | None, *, project_id: str, policy_service: MemoryHubPolicyService | None = None) -> None:
         if catalog_provider is not None and not callable(catalog_provider):
             raise ValueError("catalog provider must be callable")
+        if policy_service is not None and type(policy_service) is not MemoryHubPolicyService:
+            raise ValueError("policy service must be deployment-owned")
         self._catalog_provider = catalog_provider
         self._project_id = project_id
+        self._policy_service = policy_service
 
     def _catalog(self) -> tuple[MemoryCatalog | None, str | None]:
         if self._catalog_provider is None:
@@ -130,8 +139,8 @@ class MemoryHubUiService:
     def catalog_status(self) -> MemoryHubUiReadModel:
         catalog, diagnostic = self._catalog()
         if catalog is None:
-            return _model(diagnostic or "invalid_catalog", diagnostics=(diagnostic or "invalid_catalog",))
-        return _model("ready", catalog=_catalog_metadata(catalog))
+            return _model(diagnostic or "invalid_catalog", diagnostics=(diagnostic or "invalid_catalog",), policy_status="configured" if self._policy_service is not None else "not_configured")
+        return _model("ready", catalog=_catalog_metadata(catalog), policy_status="configured" if self._policy_service is not None else "not_configured")
 
     def query(
         self, *, query: str, consumer_id: str, scope: str,
@@ -139,38 +148,76 @@ class MemoryHubUiService:
     ) -> MemoryHubUiReadModel:
         catalog, diagnostic = self._catalog()
         if catalog is None:
-            return _model(diagnostic or "invalid_catalog", diagnostics=(diagnostic or "invalid_catalog",))
+            return _model(diagnostic or "invalid_catalog", diagnostics=(diagnostic or "invalid_catalog",), policy_status="configured" if self._policy_service is not None else "not_configured")
         try:
             request = MemoryQuery.from_parts(
                 query=query, consumer_id=consumer_id, scope=scope,
                 memory_kinds=memory_kinds, max_items=3, max_bytes=6000, timeout_ms=800,
             )
             identity = RuntimeIdentity.from_parts(project_id=self._project_id, consumer_id=consumer_id, team_id=team_id)
-            result = MemoryHubService(catalog, project_id=self._project_id).query(request, identity)
+            result = MemoryHubService(catalog, project_id=self._project_id, policy_service=self._policy_service).query(request, identity)
         except (MemoryHubSchemaError, ValueError):
-            return _model("blocked", catalog=_catalog_metadata(catalog), diagnostics=("query_invalid",))
+            return _model("blocked", catalog=_catalog_metadata(catalog), diagnostics=("query_invalid",), policy_status="configured" if self._policy_service is not None else "not_configured")
+        diagnostics = () if result.status in {"ready", "empty"} else (result.status,)
+        if self._policy_service is not None and result.status in {"empty", "blocked"}:
+            policy_outcomes = []
+            now = datetime.now(timezone.utc)
+            for record in catalog.records:
+                try:
+                    candidate = (
+                        record.memory_kind in request.memory_kinds
+                        and record.freshness == "fresh"
+                        and record.status == "ready"
+                        and not any(source.status != "verified" or datetime.fromisoformat(source.expires_at) <= now for source in record.source_refs)
+                    )
+                except (TypeError, ValueError):
+                    candidate = False
+                if not candidate:
+                    continue
+                try:
+                    policy_outcomes.append(self._policy_service.evaluate(identity, request, record).decision)
+                except (MemoryHubSchemaError, ValueError):
+                    policy_outcomes.append("blocked")
+            if "blocked" in policy_outcomes:
+                diagnostics = ("policy_blocked",)
+            elif "deny" in policy_outcomes:
+                diagnostics = ("policy_deny",)
         return _model(
             result.status,
             catalog=_catalog_metadata(catalog),
             records=_record_rows(result.records),
             decisions=tuple(item.to_dict() for item in result.acl_decisions),
-            diagnostics=() if result.status in {"ready", "empty"} else (result.status,),
+            diagnostics=diagnostics,
+            policy_status="configured" if self._policy_service is not None else "not_configured",
         )
 
     def resolve_source(self, source_id: str, *, consumer_id: str, team_id: str | None) -> MemoryHubUiReadModel:
         catalog, diagnostic = self._catalog()
         if catalog is None:
-            return _model(diagnostic or "invalid_catalog", diagnostics=(diagnostic or "invalid_catalog",))
+            return _model(diagnostic or "invalid_catalog", diagnostics=(diagnostic or "invalid_catalog",), policy_status="configured" if self._policy_service is not None else "not_configured")
         try:
             identity = RuntimeIdentity.from_parts(project_id=self._project_id, consumer_id=consumer_id, team_id=team_id)
+            if self._policy_service is not None:
+                referenced = [record for record in catalog.records if any(source.source_id == source_id for source in record.source_refs)]
+                policy_allowed = False
+                for record in referenced:
+                    policy_query = MemoryQuery.from_parts(
+                        query="source resolution", consumer_id=consumer_id, scope=record.scope,
+                        memory_kinds=(record.memory_kind,), max_items=3, max_bytes=6000, timeout_ms=800,
+                    )
+                    if self._policy_service.evaluate(identity, policy_query, record).decision == "allow":
+                        policy_allowed = True
+                        break
+                if not policy_allowed:
+                    return _model("blocked", catalog=_catalog_metadata(catalog), diagnostics=("policy_denied",), policy_status="configured")
             resolution = MemoryHubService(catalog, project_id=self._project_id).resolve_source(source_id, identity)
         except (MemoryHubSchemaError, ValueError):
-            return _model("blocked", catalog=_catalog_metadata(catalog), diagnostics=("blocked_identity",))
+            return _model("blocked", catalog=_catalog_metadata(catalog), diagnostics=("blocked_identity",), policy_status="configured" if self._policy_service is not None else "not_configured")
         source = None
         source_record = next((item for item in catalog.sources if item.source_id == source_id), None)
         if resolution.status == "ready":
             if source_record is None:
-                return _model("invalid_catalog", catalog=_catalog_metadata(catalog), diagnostics=("source_unavailable",))
+                return _model("invalid_catalog", catalog=_catalog_metadata(catalog), diagnostics=("source_unavailable",), policy_status="configured" if self._policy_service is not None else "not_configured")
             source = {
                 "sourceId": resolution.source_id,
                 "sourceKind": source_record.source_kind,
@@ -199,4 +246,5 @@ class MemoryHubUiService:
             catalog=_catalog_metadata(catalog),
             source=source,
             diagnostics=() if resolution.status == "ready" else (reason,),
+            policy_status="configured" if self._policy_service is not None else "not_configured",
         )

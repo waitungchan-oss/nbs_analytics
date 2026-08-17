@@ -22,6 +22,7 @@ def _catalog_status_rows(model: MemoryHubUiReadModel) -> list[dict[str, object]]
         "Records": catalog.get("recordCount", 0),
         "Policy fingerprint": catalog.get("policyFingerprint", "未提供"),
         "Policy version": catalog.get("policyVersion", "未提供"),
+        "Policy gate": model.policy_status,
         "Freshness": catalog.get("freshnessSummary", "未提供"),
     }]
 
@@ -114,6 +115,7 @@ def render_memory_hub(
 ) -> None:
     st_module.title("Memory Hub")
     st_module.caption("Memory Hub 是 non-authoritative read-only memory；canonical artifacts 與正式 context 仍是真相來源。")
+    st_module.caption(f"Policy gate：{model.policy_status}；本頁只讀，不提供 membership、policy、dispatch 或 recall 控制。")
     st_module.dataframe(_catalog_status_rows(model), use_container_width=True, hide_index=True)
 
     if model.status == "catalog_missing":
