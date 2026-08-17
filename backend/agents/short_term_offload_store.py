@@ -72,8 +72,15 @@ class ShortTermOffloadStore:
             artifacts.append(ShortTermOffloadArtifact.from_dict(json.loads(path.read_text(encoding="utf-8"))))
         return artifacts
 
-    def write(self, artifact: ShortTermOffloadArtifact, *, allow_expired: bool = False) -> None:
-        if artifact.status not in {"ready", "blocked"} or (not allow_expired and artifact.expires_at <= datetime.now(timezone.utc)):
+    def write(
+        self,
+        artifact: ShortTermOffloadArtifact,
+        *,
+        allow_expired: bool = False,
+        now: datetime | None = None,
+    ) -> None:
+        comparison_now = now or datetime.now(timezone.utc)
+        if artifact.status not in {"ready", "blocked"} or (not allow_expired and artifact.expires_at <= comparison_now):
             raise ValueError("artifact is not writable")
         # Re-parse the exact envelope before any filesystem write.
         validated = ShortTermOffloadArtifact.from_dict(artifact.to_dict())

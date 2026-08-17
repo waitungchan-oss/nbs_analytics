@@ -66,7 +66,7 @@ def persist_tool_output(
         "blocked" if blocked else "ready",
     )
     try:
-        store.write(artifact)
+        store.write(artifact, now=now)
     except ValueError as exc:
         return OffloadPersistResult("blocked", None, str(exc))
     return OffloadPersistResult("blocked" if blocked else "ready", ShortTermOffloadReference.from_artifact(artifact), "redaction_blocked" if blocked else None)
