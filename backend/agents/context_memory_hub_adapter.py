@@ -60,7 +60,7 @@ def query_context_memory(*, project_root: Path, identity: RuntimeIdentity, query
             raise ValueError("context identity is invalid")
         if not isinstance(query, MemoryQuery) or query.consumer_id != CONSUMER_ID or query.scope not in {"project", "team"}:
             raise ValueError("context query identity is invalid")
-        if set(query.memory_kinds) - _ALLOWED_KINDS or query.max_items != 3 or query.max_bytes != 6000 or query.timeout_ms != 800:
+        if set(query.memory_kinds) != _ALLOWED_KINDS or query.max_items != 3 or query.max_bytes != 6000 or query.timeout_ms != 800:
             raise ValueError("context query bounds are invalid")
         service = _deployment_service(project_root)
         if service is None:

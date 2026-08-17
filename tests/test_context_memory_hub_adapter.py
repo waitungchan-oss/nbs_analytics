@@ -68,6 +68,16 @@ def test_invalid_identity_and_query_fail_closed(tmp_path: Path):
     assert result["reason"] == "invalid"
 
 
+def test_query_kind_subset_fails_closed(tmp_path: Path):
+    result = query_context_memory(
+        project_root=tmp_path,
+        identity=_identity(),
+        query=MemoryQuery.from_parts(query="governance only", consumer_id="context-agent", scope="project", memory_kinds=("governance",)),
+    )
+    assert result["status"] == "blocked"
+    assert result["reason"] == "invalid"
+
+
 def test_blocked_policy_result_has_no_hints(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("backend.agents.context_memory_hub_adapter._deployment_service", lambda root: memory_service(tmp_path))
     result = query_context_memory(project_root=tmp_path, identity=_identity(), query=_query(scope="team"))
