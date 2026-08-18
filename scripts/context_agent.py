@@ -17,7 +17,9 @@ from backend.agents.context_agent_service import (
     context_bundle_from_payload,
     format_context_markdown,
 )
+from backend.agents.context_memory_hub_adapter import query_context_memory
 from backend.agents.evidence_collector import EvidenceCollector, EvidencePolicy
+from backend.agents.memory_hub_models import MemoryQuery, RuntimeIdentity
 
 
 def exit_code_for_status(status: str | None) -> int:
@@ -43,6 +45,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument("--output")
     return parser
+
+
+def _collect_memory_hints(query_text: str) -> dict[str, object]:
+    """Query the fixed C2 composition for collect-only enrichment."""
+    query = MemoryQuery.from_parts(
+        query=query_text or "context governance evidence",
+        consumer_id="context-agent",
+        scope="project",
+        memory_kinds=("governance", "evidence", "skill"),
+        max_items=3,
+        max_bytes=6000,
+        timeout_ms=800,
+    )
+    identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="context-agent")
+    try:
+        return query_context_memory(project_root=PROJECT_ROOT, identity=identity, query=query)
+    except (OSError, TypeError, ValueError, RuntimeError):
+        # Memory Hub is optional enrichment; provider/runtime failures must not
+        # interrupt canonical context collection.
+        return {"status": "blocked", "reason": "provider_unavailable", "memoryHints": None}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,9 +94,14 @@ def main(argv: list[str] | None = None) -> int:
                     raise PermissionError("Agent command cannot be empty")
                 runner = SubprocessAgentRunner(command, allowed_executables=policy.agent_executables)
         instructions = (PROJECT_ROOT / "docs/agents/CONTEXT_AGENT_CONTRACT.md").read_text(encoding="utf-8")
+        memory_hints = None
+        if args.collect_only:
+            memory_result = _collect_memory_hints(" ".join(args.query))
+            if memory_result.get("status") == "ready":
+                memory_hints = memory_result.get("memoryHints")
         report = build_context_report(
             bundle, runner=runner, project_root=PROJECT_ROOT, runtime_root=PROJECT_ROOT / ".nbs_agent_runtime",
-            instructions=instructions, collect_only=args.collect_only,
+            instructions=instructions, collect_only=args.collect_only, memory_hints=memory_hints,
         )
         rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n" if args.format == "json" else format_context_markdown(report)
         if output_path is None:
