@@ -26,6 +26,7 @@ from backend.agents.implementation_models import (
     ImplementationRunReport,
     ImplementationTaskContract,
     ValidationResult,
+    build_implementation_memory_context,
     load_implementation_policy,
 )
 from backend.agents.validation_runner import CommandRejected, ValidationRunner
@@ -100,6 +101,8 @@ class ImplementationAgentService:
         self,
         contract: ImplementationTaskContract,
         agent_command: ApprovedAgentCommand,
+        *,
+        memory_hub_evidence: dict | None = None,
     ) -> ImplementationRunReport:
         started = perf_counter()
         try:
@@ -122,6 +125,14 @@ class ImplementationAgentService:
         risk = self._risk_decision(validated)
         if risk is not None:
             return self._finish(validated, status="blocked_high_risk", finding=risk, started=started)
+
+        try:
+            memory_context = build_implementation_memory_context(validated, memory_hub_evidence)
+        except PermissionError as exc:
+            return self._finish(
+                validated, status="blocked_invalid_contract",
+                finding=self._finding("memory_context", str(exc)), started=started,
+            )
 
         precondition = validate_preconditions(self.project_root, validated)
         if precondition.status != "allowed":
@@ -182,7 +193,7 @@ class ImplementationAgentService:
             )
 
         for attempt in range(max_repairs + 1):
-            request = self._request(validated, bundle, repair=repair)
+            request = self._request(validated, bundle, repair=repair, memory_context=memory_context)
             request_tokens = self._estimate_payload_tokens(request)
             if request_tokens > self._implementation_budget("inputTokens"):
                 return finish(
@@ -393,8 +404,9 @@ class ImplementationAgentService:
         bundle: EvidenceBundle,
         *,
         repair: dict[str, Any] | None,
+        memory_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
+        request = {
             "schemaVersion": _REQUEST_SCHEMA,
             "contractFingerprint": contract.fingerprint,
             "task": contract.to_dict(),
@@ -404,6 +416,9 @@ class ImplementationAgentService:
             "greenCommands": list(contract.effective_green_commands),
             "repair": repair,
         }
+        if memory_context is not None:
+            request["memoryHubContext"] = memory_context
+        return request
 
     def _validated_response(
         self,

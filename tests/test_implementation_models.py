@@ -14,6 +14,7 @@ from backend.agents.implementation_models import (
     ValidationResult,
     load_implementation_policy,
 )
+from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,40 @@ def valid_contract_payload() -> dict:
         "maxDiffLines": 800,
         "maxRepairLoops": 2,
     }
+
+
+def test_contract_memory_context_is_opt_in_and_fingerprint_bound():
+    payload = valid_contract_payload()
+    contract = ImplementationTaskContract.from_dict(payload)
+    assert contract.memory_context_allowed is False
+    assert contract.expected_memory_evidence_fingerprint is None
+    payload["memoryContextAllowed"] = True
+    payload["expectedMemoryEvidenceFingerprint"] = "d" * 64
+    opted_in = ImplementationTaskContract.from_dict(payload)
+    assert opted_in.memory_context_allowed is True
+    assert opted_in.expected_memory_evidence_fingerprint == "d" * 64
+
+
+def test_implementation_memory_context_requires_exact_authorized_evidence():
+    from backend.agents.implementation_models import build_implementation_memory_context
+
+    evidence = build_memory_hub_integration_evidence(
+        project_id="nbs-analytics", consumer_id="context-agent", integration_mode="direct_query",
+        status="ready", reason="ok", query_fingerprint="a" * 64, hints_fingerprint="b" * 64,
+        policy_decision_fingerprints=("c" * 64,), source_refs=("docs/brief.md",), hint_count=1,
+        generated_at="2026-08-18T00:00:00+00:00",
+    ).to_dict()
+    payload = valid_contract_payload()
+    payload["memoryContextAllowed"] = True
+    payload["expectedMemoryEvidenceFingerprint"] = evidence["evidenceFingerprint"]
+    contract = ImplementationTaskContract.from_dict(payload)
+    context = build_implementation_memory_context(contract, evidence)
+    assert context["evidenceFingerprint"] == evidence["evidenceFingerprint"]
+    assert context["hintCount"] == 1
+    assert set(context) == {"schemaVersion", "status", "authority", "evidenceFingerprint", "hintCount", "sourceRefs"}
+    payload["expectedMemoryEvidenceFingerprint"] = "e" * 64
+    with pytest.raises(PermissionError, match="fingerprint"):
+        build_implementation_memory_context(ImplementationTaskContract.from_dict(payload), evidence)
 
 
 def test_contract_rejects_unversioned_or_multi_task_payload():
