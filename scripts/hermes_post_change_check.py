@@ -66,6 +66,12 @@ TARGETED_TESTS = [
     "tests/test_agent_operations_service.py",
     "tests/test_agent_operations_rendering.py",
     "tests/test_hermes_post_change_check.py",
+    "tests/test_memory_hub_integration_models.py",
+    "tests/test_memory_hub_provisioning.py",
+    "tests/test_agent_operations_memory_hub.py",
+    "tests/test_governance_graph_memory_integration.py",
+    "tests/test_governance_graph_query_service.py",
+    "tests/test_documentation_evidence.py",
 ]
 
 
@@ -338,6 +344,48 @@ def short_term_offload_artifact_report(project_root: Path = PROJECT_ROOT) -> dic
     return report
 
 
+def memory_hub_integration_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
+    """Read-only validation of precomputed Memory Hub integration evidence."""
+    from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
+
+    runs_root = Path(project_root) / ".nbs_agent_runtime" / "runs"
+    report = {
+        "schemaVersion": "memory-hub-integration-hermes-report-v1",
+        "policy": "read-only",
+        "status": "pass",
+        "artifactCount": 0,
+        "readyCount": 0,
+        "ignoredCount": 0,
+        "invalidRuns": [],
+        "invocations": 0,
+        "writes": 0,
+    }
+    if runs_root.is_symlink() or not runs_root.is_dir():
+        return report
+    for run_dir in sorted(runs_root.iterdir(), key=lambda path: path.name):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        path = run_dir / "memory-hub-integration.json"
+        if not path.exists():
+            continue
+        report["artifactCount"] += 1
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+            report["invalidRuns"].append(run_dir.name)
+            continue
+        try:
+            evidence = MemoryHubIntegrationEvidence.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            report["invalidRuns"].append(run_dir.name)
+            continue
+        if evidence.status == "ready":
+            report["readyCount"] += 1
+        else:
+            report["ignoredCount"] += 1
+    if report["invalidRuns"]:
+        report["status"] = "blocked"
+    return report
+
+
 def build_check_plan(
     *,
     include_monitor: bool = True,
@@ -392,6 +440,11 @@ def build_check_plan(
         "from scripts.hermes_post_change_check import short_term_offload_artifact_report; "
         "import json; "
         "print(json.dumps(short_term_offload_artifact_report(), sort_keys=True))"
+    )
+    memory_hub_integration_artifact_report_code = (
+        "from scripts.hermes_post_change_check import memory_hub_integration_artifact_report; "
+        "import json; "
+        "print(json.dumps(memory_hub_integration_artifact_report(), sort_keys=True))"
     )
     memory_sidecar_artifact_report_code = (
         "from scripts.hermes_post_change_check import memory_sidecar_artifact_report; "
@@ -453,6 +506,13 @@ def build_check_plan(
         CheckStep(
             "short-term-offload-artifact-report",
             [py, "-c", short_term_offload_artifact_report_code],
+            required=False,
+        )
+    )
+    plan.append(
+        CheckStep(
+            "memory-hub-integration-artifact-report",
+            [py, "-c", memory_hub_integration_artifact_report_code],
             required=False,
         )
     )
