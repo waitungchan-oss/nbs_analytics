@@ -3,6 +3,7 @@ import json
 
 from backend.agents.context_memory_hub_adapter import query_context_memory
 from backend.agents.memory_hub_models import MemoryQuery, RuntimeIdentity
+from backend.agents.memory_hub_models import MemoryQueryResult
 from backend.agents.memory_sidecar_hint_models import MemoryHint, MemoryHints
 from backend.agents.evidence_models import canonical_fingerprint
 from tests.test_memory_hub_deployment_provider import _fixture
@@ -37,6 +38,28 @@ def test_ready_projection_uses_existing_non_authoritative_hint_contract(tmp_path
     assert result["memoryHints"]["status"] == "ready"
     assert len(result["memoryHints"]["hints"]) == 1
     assert result["memoryHints"]["limits"] == {"maxItems": 3, "maxBytes": 6000, "timeoutMs": 800}
+
+
+def test_query_result_fingerprint_mismatch_fails_closed(tmp_path: Path, monkeypatch):
+    service = memory_service(tmp_path)
+    original_query = service.query
+    query = _query()
+
+    class MismatchedService:
+        def query(self, requested_query, identity):
+            result = original_query(requested_query, identity)
+            return MemoryQueryResult.from_parts(
+                query_fingerprint="f" * 64,
+                status=result.status,
+                records=result.records,
+                acl_decisions=result.acl_decisions,
+            )
+
+    monkeypatch.setattr("backend.agents.context_memory_hub_adapter._deployment_service", lambda root: MismatchedService())
+    result = query_context_memory(project_root=tmp_path, identity=_identity(), query=query)
+    assert result["status"] == "blocked"
+    assert result["reason"] == "invalid_or_stale"
+    assert result["memoryHints"]["hints"] == []
 
 
 def test_ready_projection_uses_real_deployment_catalog_and_policy_files(tmp_path: Path):

@@ -68,6 +68,8 @@ def query_context_memory(*, project_root: Path, identity: RuntimeIdentity, query
         if service is None:
             return _result(query, status="blocked", reason="provider_unavailable")
         result = service.query(query, identity)
+        if result.query_fingerprint != query.query_fingerprint:
+            return _result(query, status="blocked", reason="invalid_or_stale")
         if result.status != "ready":
             return _result(query, status=result.status, reason=result.status)
         projected = project_memory_result(result)
