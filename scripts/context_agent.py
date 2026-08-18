@@ -59,7 +59,12 @@ def _collect_memory_hints(query_text: str) -> dict[str, object]:
         timeout_ms=800,
     )
     identity = RuntimeIdentity.from_parts(project_id="nbs_analytics", consumer_id="context-agent")
-    return query_context_memory(project_root=PROJECT_ROOT, identity=identity, query=query)
+    try:
+        return query_context_memory(project_root=PROJECT_ROOT, identity=identity, query=query)
+    except (OSError, TypeError, ValueError, RuntimeError):
+        # Memory Hub is optional enrichment; provider/runtime failures must not
+        # interrupt canonical context collection.
+        return {"status": "blocked", "reason": "provider_unavailable", "memoryHints": None}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -44,6 +44,17 @@ def test_non_ready_collect_result_is_canonical_only(monkeypatch):
     assert "memoryHints" not in payload
 
 
+def test_collect_memory_exception_is_canonical_only(monkeypatch):
+    def failing_query(**kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(context_agent, "query_context_memory", failing_query)
+    result = context_agent._collect_memory_hints("governance")
+    assert result["status"] == "blocked"
+    assert result["reason"] == "provider_unavailable"
+    assert result["memoryHints"] is None
+
+
 def test_fixed_collect_query_uses_context_identity_and_bounds(monkeypatch):
     seen = {}
     def fake_query(**kwargs):
