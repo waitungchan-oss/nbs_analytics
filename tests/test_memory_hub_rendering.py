@@ -76,6 +76,13 @@ def test_status_mapping_does_not_promote_degraded_to_ready() -> None:
     assert _catalog_status_rows(_model(status="degraded"))[0]["Status"] == "degraded"
 
 
+def test_rendering_exposes_policy_gate_as_observation_only() -> None:
+    fake = FakeStreamlit()
+    render_memory_hub(_model(status="catalog_missing", diagnostics=("catalog_missing",)), query_callback=None, source_callback=None, st_module=fake)
+    assert any("Policy gate：not_configured" in message for message in fake.messages)
+    assert all("dispatch" not in message.lower() or "不提供" in message for message in fake.messages)
+
+
 def test_query_renders_acl_failure_and_source_drilldown() -> None:
     model = _model(status="ready", records=({
         "memoryId": "a" * 64, "memoryKind": "governance", "summary": "bounded",
