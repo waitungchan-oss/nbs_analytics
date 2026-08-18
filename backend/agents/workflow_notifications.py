@@ -12,6 +12,9 @@ _OSASCRIPT = "/usr/bin/osascript"
 _TITLE_LIMIT = 80
 _MESSAGE_LIMIT = 240
 _ABSOLUTE_PATH = re.compile(r"(?<![\w])/(?!\s)[^\r\n]*")
+# Environment values shorter than this are not meaningful secrets (e.g. "/",
+# ":", "-"); replacing them would corrupt paths and defeat path redaction.
+_MIN_ENV_VALUE_LENGTH = 4
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,7 @@ class WorkflowNotifier(Protocol):
 def _sanitize(value: str, limit: int) -> str:
     sanitized = str(value)
     for environment_value in sorted(os.environ.values(), key=len, reverse=True):
-        if environment_value:
+        if len(environment_value) >= _MIN_ENV_VALUE_LENGTH:
             sanitized = sanitized.replace(environment_value, "[redacted]")
     sanitized = _ABSOLUTE_PATH.sub("[path]", sanitized)
     sanitized = "".join(character if character >= " " else " " for character in sanitized)

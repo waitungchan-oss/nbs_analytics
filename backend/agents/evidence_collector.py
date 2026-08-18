@@ -161,20 +161,34 @@ class EvidenceCollector:
     ) -> CommandEvidence:
         if not argv or argv[0] not in self._COMMAND_EXECUTABLES:
             raise PermissionError(f"Command is not allowlisted: {argv[0] if argv else '<empty>'}")
-        completed = subprocess.run(
-            argv,
-            cwd=self.project_root,
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
-            shell=False,
-        )
         limit = (
             self.policy.max_command_characters
             if command_character_limit is None
             else command_character_limit
         )
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=self.project_root,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+                shell=False,
+            )
+        except FileNotFoundError:
+            # ripgrep is an optional accelerator: when it is missing, degrade to
+            # a deterministic Python fixed-string search instead of crashing.
+            if argv[0] == "rg":
+                return self._rg_fallback_command(label, argv, limit)
+            return CommandEvidence(
+                label=label,
+                argv=tuple(argv),
+                exit_code=127,
+                stdout="",
+                stderr=f"executable not found: {argv[0]}",
+                truncated=False,
+            )
         return CommandEvidence(
             label=label,
             argv=tuple(argv),
@@ -182,6 +196,47 @@ class EvidenceCollector:
             stdout=completed.stdout[:limit],
             stderr=completed.stderr[:limit],
             truncated=len(completed.stdout) > limit or len(completed.stderr) > limit,
+        )
+
+    def _rg_fallback_command(
+        self, label: str, argv: list[str], limit: int
+    ) -> CommandEvidence:
+        """Python fallback for ``rg --files-with-matches --fixed-strings --``.
+
+        ``argv`` is ``["rg", "--files-with-matches", "--fixed-strings", "--",
+        query, *candidates]``. Candidates are already policy-approved relative
+        paths, so reading them here stays inside the allowlist boundary.
+        """
+        if len(argv) < 5 or tuple(argv[1:4]) != (
+            "--files-with-matches",
+            "--fixed-strings",
+            "--",
+        ):
+            return CommandEvidence(
+                label=label,
+                argv=tuple(argv),
+                exit_code=127,
+                stdout="",
+                stderr="executable not found: rg",
+                truncated=False,
+            )
+        query = argv[4]
+        matches: list[str] = []
+        for candidate in argv[5:]:
+            try:
+                content = (self.project_root / candidate).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if query and query in content:
+                matches.append(candidate)
+        stdout = "\n".join(matches)
+        return CommandEvidence(
+            label=label,
+            argv=tuple(argv),
+            exit_code=0,
+            stdout=stdout[:limit],
+            stderr="",
+            truncated=len(stdout) > limit,
         )
 
     def _document(self, path: Path) -> EvidenceItem:
