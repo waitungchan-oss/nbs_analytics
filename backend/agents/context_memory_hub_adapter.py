@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .evidence_models import canonical_fingerprint
 from .memory_hub_deployment_provider import deployment_owned_catalog_provider
 from .memory_hub_models import MemoryHubSchemaError, MemoryQuery, RuntimeIdentity
 from .memory_hub_projection import project_memory_result
@@ -25,13 +26,13 @@ def _deployment_service(project_root: Path) -> MemoryHubService | None:
     deployment supplies that composition this returns ``None`` and callers get
     a canonical-only, fail-closed result.
     """
-    catalog = deployment_owned_catalog_provider(project_root)()
-    if catalog is None:
-        return None
-    runtime_root = project_root.resolve(strict=False) / ".nbs_agent_runtime" / "memory-hub"
-    team_path = runtime_root / "team-catalog.json"
-    policy_path = runtime_root / "agent-policy-catalog.json"
     try:
+        catalog = deployment_owned_catalog_provider(project_root)()
+        if catalog is None:
+            return None
+        runtime_root = project_root.resolve(strict=False) / ".nbs_agent_runtime" / "memory-hub"
+        team_path = runtime_root / "team-catalog.json"
+        policy_path = runtime_root / "agent-policy-catalog.json"
         team = TeamCatalog.load(team_path, runtime_root=runtime_root, expected_project_id=PROJECT_ID)
         policy = AgentPolicyCatalog.load(policy_path, runtime_root=runtime_root, expected_project_id=PROJECT_ID, team_catalog=team)
         policy_service = MemoryHubPolicyService(team, policy, project_id=PROJECT_ID)
@@ -43,7 +44,8 @@ def _deployment_service(project_root: Path) -> MemoryHubService | None:
 
 
 def _result(query: MemoryQuery, *, status: str, reason: str, hints: MemoryHints | None = None) -> dict[str, object]:
-    payload = hints.to_dict() if hints is not None else MemoryHints.empty(query_fingerprint=query.query_fingerprint, status=status if status in {"empty", "timeout", "degraded"} else "degraded").to_dict()
+    query_fingerprint = query.query_fingerprint if isinstance(query, MemoryQuery) else canonical_fingerprint({"schemaVersion": "context-memory-invalid-query-v1"})
+    payload = hints.to_dict() if hints is not None else MemoryHints.empty(query_fingerprint=query_fingerprint, status=status if status in {"empty", "timeout", "degraded"} else "degraded").to_dict()
     return {"status": status, "reason": reason, "memoryHints": payload}
 
 

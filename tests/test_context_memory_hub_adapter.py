@@ -69,6 +69,12 @@ def test_invalid_identity_and_query_fail_closed(tmp_path: Path):
     assert result["reason"] == "invalid"
 
 
+def test_malformed_query_returns_blocked_without_raising(tmp_path: Path):
+    result = query_context_memory(project_root=tmp_path, identity=_identity(), query=object())  # type: ignore[arg-type]
+    assert result["status"] == "blocked"
+    assert result["reason"] == "invalid"
+
+
 def test_query_kind_subset_fails_closed(tmp_path: Path):
     result = query_context_memory(
         project_root=tmp_path,
