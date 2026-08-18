@@ -3,6 +3,7 @@ import json
 
 from backend.agents.context_memory_hub_adapter import query_context_memory
 from backend.agents.memory_hub_models import MemoryQuery, RuntimeIdentity
+from backend.agents.memory_sidecar_hint_models import MemoryHint, MemoryHints
 from backend.agents.evidence_models import canonical_fingerprint
 from tests.test_memory_hub_deployment_provider import _fixture
 from tests.test_memory_hub_policy_service import _policy_catalog, _team_catalog
@@ -74,6 +75,33 @@ def test_query_kind_subset_fails_closed(tmp_path: Path):
         identity=_identity(),
         query=MemoryQuery.from_parts(query="governance only", consumer_id="context-agent", scope="project", memory_kinds=("governance",)),
     )
+    assert result["status"] == "blocked"
+    assert result["reason"] == "invalid"
+
+
+def test_stale_projection_is_blocked_and_contains_no_hints(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("backend.agents.context_memory_hub_adapter._deployment_service", lambda root: memory_service(tmp_path))
+    stale = MemoryHints(
+        query_fingerprint=_query().query_fingerprint,
+        status="ready",
+        hints=(MemoryHint("a" * 64, "stale", ("docs/stale.md",), "stale", "high", ("b" * 64,)),),
+    )
+    monkeypatch.setattr("backend.agents.context_memory_hub_adapter.project_memory_result", lambda result: stale)
+    result = query_context_memory(project_root=tmp_path, identity=_identity(), query=_query())
+    assert result["status"] == "blocked"
+    assert result["reason"] == "invalid_or_stale"
+    assert result["memoryHints"]["hints"] == []
+
+
+def test_malformed_projection_is_blocked(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("backend.agents.context_memory_hub_adapter._deployment_service", lambda root: memory_service(tmp_path))
+    class Malformed:
+        status = "ready"
+        hints = ()
+        def to_dict(self):
+            return {"schemaVersion": "wrong"}
+    monkeypatch.setattr("backend.agents.context_memory_hub_adapter.project_memory_result", lambda result: Malformed())
+    result = query_context_memory(project_root=tmp_path, identity=_identity(), query=_query())
     assert result["status"] == "blocked"
     assert result["reason"] == "invalid"
 

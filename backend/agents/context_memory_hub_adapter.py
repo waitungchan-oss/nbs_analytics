@@ -71,6 +71,8 @@ def query_context_memory(*, project_root: Path, identity: RuntimeIdentity, query
         projected = project_memory_result(result)
         if projected is None or projected.status != "ready":
             return _result(query, status="blocked", reason="invalid_or_stale")
+        if any(item.freshness != "fresh" for item in projected.hints):
+            return _result(query, status="blocked", reason="invalid_or_stale")
         # Re-parse the serialized model to enforce the public bounded schema.
         parsed = MemoryHints.from_dict(projected.to_dict())
         return _result(query, status="ready", reason="enriched", hints=parsed)
