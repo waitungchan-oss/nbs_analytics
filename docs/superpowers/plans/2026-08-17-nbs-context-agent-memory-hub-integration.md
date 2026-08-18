@@ -101,7 +101,7 @@ Keep `EvidenceCollector.collect_context(...)` unchanged. Build a fixed `context-
 - [ ] **Step 4: Run GREEN and static checks**
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_context_agent_memory_hub_integration.py tests/test_context_agent_service.py
+.venv/bin/python -m pytest -q tests/test_context_agent_memory_hub_integration.py tests/test_context_agent_service.py tests/test_context_agent_cli.py
 .venv/bin/python -m py_compile backend/agents/context_agent_service.py scripts/context_agent.py tests/test_context_agent_memory_hub_integration.py
 git diff --check
 ```
@@ -131,7 +131,7 @@ git commit -m "feat: enrich context collection with memory hub hints"
 
 ```bash
 .venv/bin/python -m py_compile backend/agents/context_memory_hub_adapter.py backend/agents/context_agent_service.py scripts/context_agent.py
-.venv/bin/python -m pytest -q tests/test_context_memory_hub_adapter.py tests/test_context_agent_memory_hub_integration.py tests/test_context_agent_service.py tests/test_memory_hub_service.py tests/test_memory_hub_policy_service.py
+.venv/bin/python -m pytest -q tests/test_context_memory_hub_adapter.py tests/test_context_agent_memory_hub_integration.py tests/test_context_agent_service.py tests/test_context_agent_cli.py tests/test_memory_hub_service.py tests/test_memory_hub_policy_service.py
 git diff --check
 ```
 
