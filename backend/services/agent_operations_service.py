@@ -11,6 +11,11 @@ from typing import Any
 
 from backend.agents.context_agent_service import context_bundle_from_payload
 from backend.agents.canonical_evidence_reader import CanonicalEvidenceReader
+from backend.agents.context_memory_hub_adapter import PROJECT_ID as MEMORY_HUB_PROJECT_ID
+from backend.agents.memory_hub_agent_policy_catalog import AgentPolicyCatalog
+from backend.agents.memory_hub_deployment_provider import deployment_owned_catalog_provider
+from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
+from backend.agents.memory_hub_team_catalog import TeamCatalog
 from backend.agents.documentation_models import (
     DocumentationApplication,
     DocumentationEvidence,
@@ -130,9 +135,50 @@ class AgentOperationsService:
                 diagnostics=diagnostics,
                 hard_cap=stage_artifact_max_bytes,
             ),
+            "memoryHubIntegration": self._memory_hub_integration_observation(),
             "retention": retention,
             "diagnostics": diagnostics,
         }
+
+    def _memory_hub_integration_observation(self) -> dict[str, Any]:
+        """Return bounded Memory Hub readiness without provisioning or querying."""
+        try:
+            catalog = deployment_owned_catalog_provider(self.project_root)()
+            if catalog is None:
+                raise ValueError("provider_unavailable")
+            runtime_root = self.project_root / ".nbs_agent_runtime" / "memory-hub"
+            team = TeamCatalog.load(runtime_root / "team-catalog.json", runtime_root=runtime_root, expected_project_id=MEMORY_HUB_PROJECT_ID)
+            policy = AgentPolicyCatalog.load(runtime_root / "agent-policy-catalog.json", runtime_root=runtime_root, expected_project_id=MEMORY_HUB_PROJECT_ID, team_catalog=team)
+            evidence = build_memory_hub_integration_evidence(
+                project_id=MEMORY_HUB_PROJECT_ID,
+                consumer_id="context-agent",
+                integration_mode="direct_query",
+                status="ready",
+                reason="catalog_ready",
+                query_fingerprint=None,
+                hints_fingerprint=None,
+                policy_decision_fingerprints=tuple(sorted((team.catalog_fingerprint, policy.catalog_fingerprint))),
+                source_refs=(),
+                hint_count=0,
+                generated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return {
+                "schemaVersion": "memory-hub-agent-observation-v1",
+                "status": "ready",
+                "reason": "catalog_ready",
+                "catalogFingerprint": catalog.catalog_fingerprint,
+                "consumers": [{**evidence.to_dict(), "catalogFingerprint": catalog.catalog_fingerprint}],
+                "diagnostics": [],
+            }
+        except (OSError, TypeError, ValueError):
+            return {
+                "schemaVersion": "memory-hub-agent-observation-v1",
+                "status": "blocked",
+                "reason": "provider_unavailable",
+                "catalogFingerprint": None,
+                "consumers": [],
+                "diagnostics": ["provider_unavailable"],
+            }
 
     def _safe_root(self, candidate: Path) -> Path:
         candidate = candidate.expanduser()

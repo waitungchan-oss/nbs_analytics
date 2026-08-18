@@ -144,6 +144,26 @@ def test_render_non_empty_snapshot_covers_main_ui_contract(monkeypatch):
     assert any(call[0] == "warning" and "Diagnostics: 1" in call[1][0] for call in calls)
 
 
+def test_render_memory_hub_observation_is_read_only(monkeypatch):
+    import agent_operations_rendering
+
+    snapshot = _empty_snapshot()
+    snapshot["memoryHubIntegration"] = {
+        "status": "ready",
+        "reason": "catalog_ready",
+        "catalogFingerprint": "a" * 64,
+        "consumers": [{"consumerId": "context-agent", "status": "ready", "hintCount": 3}],
+        "diagnostics": [],
+    }
+    calls = []
+    monkeypatch.setattr(agent_operations_rendering, "st", FakeStreamlit(calls=calls))
+    agent_operations_rendering.render_agent_operations(snapshot, on_refresh=lambda: None)
+
+    assert any(call[0] == "subheader" and call[1][0] == "Memory Hub integration" for call in calls)
+    assert any(call[0] == "caption" and "context-agent" in call[1][0] for call in calls)
+    assert not any(call[0] == "button" and "provision" in str(call[1]).lower() for call in calls)
+
+
 def test_catalog_lookup_is_optional_dependency_injected(monkeypatch):
     snapshot = _empty_snapshot()
     snapshot["summary"].update({"runCount": 1, "completedCount": 1})
