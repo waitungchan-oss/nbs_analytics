@@ -1,6 +1,7 @@
 import pytest
 
 from backend.agents.evidence_models import EvidenceBundle, EvidenceItem, canonical_fingerprint
+from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
 from backend.agents.review_agent_service import (
     build_review_evidence_payload,
     build_review_report,
@@ -69,6 +70,59 @@ def context_summary(status="ready"):
         "unknowns": [],
         "contextFingerprint": "context-fingerprint",
     }
+
+
+def memory_evidence(*, status="ready", consumer_id="context-agent", hint_count=1):
+    return build_memory_hub_integration_evidence(
+        project_id="nbs-analytics", consumer_id=consumer_id,
+        integration_mode="direct_query", status=status, reason="ok",
+        query_fingerprint="a" * 64 if status == "ready" else None,
+        hints_fingerprint="b" * 64 if status == "ready" else None,
+        policy_decision_fingerprints=("c" * 64,), source_refs=("docs/brief.md",),
+        hint_count=hint_count, generated_at="2026-08-18T00:00:00+00:00",
+    ).to_dict()
+
+
+def test_review_optional_memory_observation_is_bounded_and_verdict_independent(tmp_path):
+    without = build_review_report(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
+        instructions="contract", strict=True,
+    )
+    with_memory = build_review_report(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
+        instructions="contract", strict=True, memory_hub_evidence=memory_evidence(),
+    )
+    assert with_memory["verdict"] == without["verdict"] == "pass"
+    assert with_memory["requirementCoverage"] == without["requirementCoverage"]
+    observation = with_memory["memoryHubContext"]
+    assert set(observation) == {"schemaVersion", "status", "consumerId", "integrationMode", "authority", "evidenceFingerprint", "hintCount", "diagnostics"}
+    assert observation["status"] == "ready"
+    assert observation["hintCount"] == 1
+
+
+def test_review_invalid_memory_is_ignored_without_blocking_canonical_review(tmp_path):
+    evidence = memory_evidence(consumer_id="other-agent")
+    report = build_review_report(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
+        instructions="contract", strict=True, memory_hub_evidence=evidence,
+    )
+    assert report["verdict"] == "pass"
+    assert report["memoryHubContext"]["status"] == "ignored"
+    assert report["memoryHubContext"]["diagnostics"] == ["consumer_mismatch"]
+
+
+def test_review_stale_memory_is_ignored(tmp_path):
+    report = build_review_report(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
+        instructions="contract", strict=True, memory_hub_evidence=memory_evidence(status="degraded", hint_count=0),
+    )
+    assert report["verdict"] == "pass"
+    assert report["memoryHubContext"]["status"] == "ignored"
+    assert report["memoryHubContext"]["diagnostics"] == ["evidence_not_ready"]
 
 
 def test_review_payload_has_exact_public_contract():

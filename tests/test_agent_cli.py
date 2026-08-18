@@ -93,6 +93,16 @@ def test_review_cli_collect_only_outputs_review_bundle():
     assert set(payload) == {"schemaVersion", "taskContract", "contextSummary", "gitDiff", "verification", "bundleFingerprint"}
 
 
+def test_review_cli_collect_only_does_not_query_or_include_memory_evidence():
+    result = subprocess.run(
+        [str(PYTHON), "scripts/review_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md",
+         "--base", "HEAD", "--head", "WORKTREE", "--collect-only"],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0
+    assert "memoryHubContext" not in json.loads(result.stdout)
+
+
 def test_review_cli_accepts_working_tree_alias_for_dirty_review():
     result = subprocess.run(
         [str(PYTHON), "scripts/review_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md", "--base", "HEAD", "--head", "working-tree", "--collect-only"],

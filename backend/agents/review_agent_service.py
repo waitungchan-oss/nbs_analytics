@@ -14,6 +14,7 @@ from backend.agents.evidence_models import (
     canonical_fingerprint,
     estimate_tokens,
 )
+from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
 
 
 REVIEW_EVIDENCE_SCHEMA = "review-evidence-v1"
@@ -44,6 +45,10 @@ _CONTEXT_LIST_FIELDS = (
     "taskUnderstanding", "systemBoundaries", "dependencies", "recommendedTests", "risks", "unknowns",
 )
 _VERIFICATION_KEYS = {"label", "argv", "exitCode", "stdoutTail", "stderrTail"}
+_MEMORY_CONTEXT_KEYS = {
+    "schemaVersion", "status", "consumerId", "integrationMode", "authority",
+    "evidenceFingerprint", "hintCount", "diagnostics",
+}
 
 
 def _validate_task_contract(task: object) -> dict:
@@ -166,6 +171,7 @@ def build_review_evidence_payload(
     *,
     context_summary: dict,
     verification: list[dict],
+    memory_hub_context: dict | None = None,
 ) -> dict:
     if bundle.schema_version != REVIEW_EVIDENCE_SCHEMA:
         raise ValueError("Unexpected Review evidence schema")
@@ -191,7 +197,46 @@ def build_review_evidence_payload(
         "gitDiff": git_diff,
         "verification": {"commands": verification},
     }
+    if memory_hub_context is not None:
+        unsigned["memoryHubContext"] = memory_hub_context
     return {**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)}
+
+
+def _memory_hub_observation(payload: object) -> dict:
+    base = {
+        "schemaVersion": "memory-hub-agent-observation-v1",
+        "status": "ignored",
+        "consumerId": "context-agent",
+        "integrationMode": "gated_context",
+        "authority": "non_authoritative_memory",
+        "evidenceFingerprint": None,
+        "hintCount": 0,
+        "diagnostics": [],
+    }
+    try:
+        evidence = MemoryHubIntegrationEvidence.from_dict(payload)
+    except (TypeError, ValueError):
+        base["diagnostics"] = ["invalid_evidence"]
+        return base
+    base["evidenceFingerprint"] = evidence.evidence_fingerprint
+    if evidence.consumer_id != "context-agent":
+        base["diagnostics"] = ["consumer_mismatch"]
+        return base
+    if evidence.status != "ready":
+        base["diagnostics"] = ["evidence_not_ready"]
+        return base
+    if evidence.integration_mode != "direct_query":
+        base["diagnostics"] = ["integration_mode_mismatch"]
+        return base
+    base["status"] = "ready"
+    base["hintCount"] = evidence.hint_count
+    return base
+
+
+def _attach_memory_observation(report: dict, observation: dict | None) -> dict:
+    if observation is None:
+        return report
+    return {**report, "memoryHubContext": observation}
 
 
 def _report(
@@ -289,13 +334,23 @@ def build_review_report(
     strict: bool = True,
     input_token_limit: int = 16000,
     output_token_limit: int = 2000,
+    memory_hub_evidence: dict | None = None,
 ) -> dict:
     if input_token_limit <= 0 or output_token_limit <= 0:
         raise ValueError("Review Agent token budgets must be positive")
     validated_runtime_root = _runtime_path(project_root, runtime_root)
     evidence_payload = build_review_evidence_payload(
         bundle, context_summary=context_summary, verification=verification,
+        memory_hub_context=(
+            _memory_hub_observation(memory_hub_evidence)
+            if memory_hub_evidence is not None else None
+        ),
     )
+    memory_observation = (
+        _memory_hub_observation(memory_hub_evidence)
+        if memory_hub_evidence is not None else None
+    )
+    finish = lambda report: _attach_memory_observation(report, memory_observation)
     if strict:
         validate_context_summary(context_summary)
     runtime_instructions = _runtime_instructions(instructions, strict=strict)
@@ -306,57 +361,57 @@ def build_review_report(
         evidence_payload=evidence_payload,
     )
     if strict and context_summary.get("status") != "ready":
-        return _report(
+        return finish(_report(
             "blocked",
             review_fingerprint,
             residual_risk=["Strict review requires a ready Context Agent summary."],
-        )
+        ))
     dirty_files = bundle.repository.get("dirtyFiles") or []
     if not isinstance(dirty_files, list) or not all(isinstance(item, str) for item in dirty_files):
         raise ValueError("Review repository dirtyFiles must be a list of strings")
     unattributed_dirty = sorted(set(dirty_files) - set(evidence_payload["gitDiff"]["files"]))
     if strict and unattributed_dirty:
-        return _report(
+        return finish(_report(
             "blocked",
             review_fingerprint,
             residual_risk=[f"Strict review has unattributed dirty files: {', '.join(unattributed_dirty)}"],
-        )
+        ))
     if strict and not verification:
-        return _report(
+        return finish(_report(
             "blocked",
             review_fingerprint,
             residual_risk=["Strict review requires verification evidence."],
-        )
+        ))
     if strict and any(item["exitCode"] != 0 for item in verification):
-        return _report(
+        return finish(_report(
             "changes_required",
             review_fingerprint,
             test_coverage=verification,
             residual_risk=["At least one verification command failed."],
-        )
+        ))
     if evidence_payload["gitDiff"]["truncated"]:
-        return _report(
+        return finish(_report(
             "context_overflow",
             review_fingerprint,
             residual_risk=["Review diff was truncated; split the task or lower the diff scope."],
-        )
+        ))
     request_text = json.dumps(
         {"instructions": runtime_instructions, "evidence": evidence_payload},
         ensure_ascii=False,
         sort_keys=True,
     )
     if estimate_tokens(request_text) > input_token_limit:
-        return _report(
+        return finish(_report(
             "context_overflow",
             review_fingerprint,
             residual_risk=["Collector must split or reduce Review evidence."],
-        )
+        ))
     if runner is None:
-        return _report(
+        return finish(_report(
             "blocked",
             review_fingerprint,
             residual_risk=["No AgentRunner was configured; use --collect-only or --agent-command."],
-        )
+        ))
     result = AgentRuntime(
         validated_runtime_root,
         input_token_limit=input_token_limit,
@@ -380,7 +435,7 @@ def build_review_report(
         )
     if estimate_tokens(json.dumps(result, ensure_ascii=False)) > output_token_limit:
         raise ValueError("Review Agent output token budget exceeded")
-    return result
+    return finish(result)
 
 
 def _extend_unique(target: list[Any], values: list[Any]) -> None:
@@ -463,9 +518,14 @@ def run_review_batches(
     strict: bool = True,
     input_token_limit: int = 16000,
     output_token_limit: int = 2000,
+    memory_hub_evidence: dict | None = None,
 ) -> dict:
     full_payload = build_review_evidence_payload(
         bundle, context_summary=context_summary, verification=verification,
+        memory_hub_context=(
+            _memory_hub_observation(memory_hub_evidence)
+            if memory_hub_evidence is not None else None
+        ),
     )
     runtime_root = _runtime_path(project_root, runtime_root)
     runtime_instructions = _runtime_instructions(instructions, strict=strict)
@@ -490,12 +550,18 @@ def run_review_batches(
             strict=strict,
             input_token_limit=input_token_limit,
             output_token_limit=output_token_limit,
+            memory_hub_evidence=memory_hub_evidence,
         )
         for batch in batches
     ]
-    return merge_review_batches(
+    merged = merge_review_batches(
         reports, fingerprint=fingerprint, output_token_limit=output_token_limit,
     )
+    observation = (
+        _memory_hub_observation(memory_hub_evidence)
+        if memory_hub_evidence is not None else None
+    )
+    return _attach_memory_observation(merged, observation)
 
 
 def _markdown_list(values: list[Any]) -> str:
