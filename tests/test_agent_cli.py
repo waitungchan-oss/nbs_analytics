@@ -43,6 +43,17 @@ def test_context_cli_collect_only_outputs_json():
     assert json.loads(result.stdout)["schemaVersion"] == "context-evidence-v1"
 
 
+def test_context_cli_collect_only_provider_unavailable_is_canonical_only():
+    result = subprocess.run(
+        [str(PYTHON), "scripts/context_agent.py", "--brief", "docs/agents/NBS_AGENT_ARCHITECTURE.md", "--collect-only"],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["schemaVersion"] == "context-evidence-v1"
+    assert "memoryHints" not in payload
+
+
 def test_context_cli_missing_brief_exits_two():
     result = subprocess.run(
         [str(PYTHON), "scripts/context_agent.py", "--brief", "docs/missing.md", "--collect-only"],
