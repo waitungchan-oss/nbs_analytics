@@ -8,6 +8,7 @@ from .governance_graph_query_models import (
     GovernanceGraphQueryResult,
     GovernanceGraphQuerySchemaError,
 )
+from .governance_graph_memory_integration_service import GovernanceGraphMemoryIntegrationService
 from .governance_graph_snapshot_reader import GovernanceGraphSnapshotReader
 
 
@@ -99,6 +100,10 @@ class GovernanceGraphQueryService:
             unknown_count=counts["unknown"], invalid_count=counts["invalid"],
             blocked_count=counts["blocked"], diagnostics=(),
         )
+
+    def memory_lineage(self, run_id: str) -> dict[str, Any]:
+        """Return the separate bounded Memory Hub lineage projection."""
+        return GovernanceGraphMemoryIntegrationService(self.project_root).project(run_id)
 
     @staticmethod
     def _node_record(node) -> dict[str, Any]:
