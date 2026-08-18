@@ -349,6 +349,8 @@ def render_agent_operations(
     if st.button("Refresh", key="AGENT_OPERATIONS_REFRESH"):
         on_refresh()
 
+    _render_memory_hub_observation(snapshot.get("memoryHubIntegration"))
+
     _render_governance_telemetry(snapshot.get("governanceTelemetry"))
 
     summary = snapshot.get("summary", {})
@@ -409,3 +411,24 @@ def render_agent_operations(
         st.info("目前篩選條件沒有 Agent runs")
 
     _render_retention_and_diagnostics(snapshot)
+
+
+def _render_memory_hub_observation(observation: object) -> None:
+    if not isinstance(observation, dict):
+        return
+    st.subheader("Memory Hub integration")
+    status = observation.get("status")
+    reason = observation.get("reason")
+    consumers = observation.get("consumers")
+    if status == "ready" and isinstance(consumers, list):
+        rows = []
+        for consumer in consumers[:3]:
+            if not isinstance(consumer, dict):
+                continue
+            rows.append(
+                f"{consumer.get('consumerId', 'unknown')}: {consumer.get('status', 'unknown')} "
+                f"({consumer.get('integrationMode', 'unknown')}, hints={consumer.get('hintCount', 0)})"
+            )
+        st.caption("Memory Hub ready · " + ("; ".join(rows) if rows else "no consumer evidence"))
+    else:
+        st.warning(f"Memory Hub unavailable: {reason or 'unknown'}")

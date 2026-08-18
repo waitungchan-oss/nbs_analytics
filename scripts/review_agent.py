@@ -47,6 +47,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--context")
     parser.add_argument("--task-contract")
     parser.add_argument("--verification")
+    parser.add_argument(
+        "--memory-evidence",
+        help="Optional precomputed Memory Hub evidence; never queried by Review Agent.",
+    )
     parser.add_argument("--collect-only", action="store_true")
     parser.add_argument("--agent-command")
     parser.add_argument("--strict", action="store_true")
@@ -124,10 +128,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             context_path = policy.resolve_input_path(Path(args.context)) if args.context else None
             verification_path = policy.resolve_input_path(Path(args.verification)) if args.verification else None
+            memory_path = policy.resolve_input_path(Path(args.memory_evidence)) if args.memory_evidence else None
             context_summary = _read_object(str(context_path), "Context summary") if context_path else {}
             if context_summary.get("schemaVersion") == "context-evidence-v1":
                 context_summary = context_summary_from_evidence_payload(context_summary)
             verification = _read_verification(str(verification_path)) if verification_path else []
+            memory_evidence = _read_object(str(memory_path), "Memory Hub evidence") if memory_path else None
             runner = None
             if args.agent_command:
                 command = shlex.split(args.agent_command)
@@ -150,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
                 strict=args.strict,
                 input_token_limit=policy.review_input_tokens,
                 output_token_limit=policy.review_output_tokens,
+                memory_hub_evidence=memory_evidence,
             )
         rendered = (
             json.dumps(report, ensure_ascii=False, indent=2) + "\n"

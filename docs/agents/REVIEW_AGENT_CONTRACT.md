@@ -7,6 +7,12 @@
 
 Review Agent 根據已批准 task contract、Context summary、實際 Git diff 與驗證證據進行 code review。它優先找出 bug、行為回歸、需求遺漏、baseline 風險與測試缺口，不修改程式，也不重複 Hermes 的完整系統治理。
 
+Review evidence 可選帶入 `memoryHubContext` observation。它只接受由 Context Agent
+預先產生、已通過 fingerprint 與 bounded schema 驗證的 evidence；Review Agent 不得
+自行 query Memory Hub。該 observation 只供追溯，不是 diff、test、requirement 或 PASS
+證據；缺失、過期、consumer mismatch 或 malformed evidence 一律標記 `ignored`，canonical
+review 繼續照常執行。
+
 ## Required Input
 
 ```json

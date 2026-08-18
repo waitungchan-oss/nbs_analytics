@@ -66,6 +66,25 @@ def test_build_service_specs_uses_profile_ports_and_identity(tmp_path):
     assert all(spec["profileId"] == "profile-test" for spec in specs.values())
 
 
+def test_start_services_accepts_verification_profile_without_using_default_ports(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    profile = SimpleNamespace(
+        profile_id="profile-test",
+        services=SimpleNamespace(ports={"api": 18601, "streamlit": 18502, "vue": 15173}),
+    )
+    captured = {}
+    monkeypatch.setattr(system_manager, "_resolve_runtime", lambda root: ("python", "npm"))
+    monkeypatch.setattr(system_manager, "preflight", lambda root, specs, runtime: captured.update(specs=specs, runtime=runtime) or {"ok": True, "issues": []})
+    monkeypatch.setattr(system_manager, "read_state", lambda runtime: {"services": {}})
+    monkeypatch.setattr(system_manager, "write_state", lambda *args: None)
+    monkeypatch.setattr(system_manager, "find_reusable_service_pid", lambda *args: None)
+    monkeypatch.setattr(system_manager, "_spawn_service", lambda name, spec, runtime: {"pid": 1, "port": spec["port"], "profileId": "profile-test"})
+    monkeypatch.setattr(system_manager, "wait_for_ready", lambda *args: True)
+    assert system_manager.start_services(tmp_path, open_browser=False, profile=profile) == 0
+    assert {value["port"] for value in captured["specs"].values()} == {18601, 18502, 15173}
+    assert captured["runtime"] == tmp_path / ".nbs_agent_runtime/verification/profile-test"
+
+
 def test_service_status_profile_rejects_missing_managed_pid(monkeypatch, tmp_path):
     from types import SimpleNamespace
     profile = SimpleNamespace(profile_id="profile-test", git_head="a" * 40, project_id="nbs_analytics", services=SimpleNamespace(profile_namespace="profile-test", ports={"api": 18601, "streamlit": 18502, "vue": 15173}))

@@ -143,6 +143,25 @@ def test_memory_sidecar_hermes_check_is_read_only_and_does_not_start_gateway():
     assert "append_memory_sidecar_telemetry" not in command
 
 
+def test_memory_hub_integration_report_is_read_only_and_validates_evidence(tmp_path):
+    from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
+    run = tmp_path / ".nbs_agent_runtime" / "runs" / "run-1"
+    run.mkdir(parents=True)
+    evidence = build_memory_hub_integration_evidence(
+        project_id="nbs-analytics", consumer_id="context-agent", integration_mode="direct_query",
+        status="ready", reason="ok", query_fingerprint="a" * 64, hints_fingerprint="b" * 64,
+        policy_decision_fingerprints=("c" * 64,), source_refs=(), hint_count=1,
+        generated_at="2026-08-18T00:00:00+00:00",
+    ).to_dict()
+    (run / "memory-hub-integration.json").write_text(__import__("json").dumps(evidence), encoding="utf-8")
+    report = post_check.memory_hub_integration_artifact_report(tmp_path)
+    assert report["status"] == "pass"
+    assert report["readyCount"] == 1
+    assert report["invocations"] == report["writes"] == 0
+    labels = [step.label for step in post_check.build_check_plan(include_monitor=False, include_tests=False)]
+    assert "memory-hub-integration-artifact-report" in labels
+
+
 def test_governance_graph_report_is_read_only_and_bounded(tmp_path):
     report = post_check.governance_graph_artifact_report(tmp_path)
 

@@ -339,10 +339,15 @@ def wait_for_ready(spec: dict, pid: int, timeout: float = 45.0) -> bool:
     return False
 
 
-def start_services(project_root: Path = PROJECT_ROOT, open_browser: bool = True) -> int:
+def start_services(project_root: Path = PROJECT_ROOT, open_browser: bool = True, *, profile=None) -> int:
     python_bin, npm_bin = _resolve_runtime(project_root)
-    specs = build_service_specs(project_root, python_bin, npm_bin)
-    runtime_dir = project_root / ".nbs_runtime"
+    profile_ports = dict(profile.services.ports) if profile is not None else None
+    profile_id = profile.profile_id if profile is not None else None
+    specs = build_service_specs(project_root, python_bin, npm_bin, ports=profile_ports, profile_id=profile_id)
+    runtime_dir = (
+        project_root / ".nbs_agent_runtime" / "verification" / profile.profile_id
+        if profile is not None else project_root / ".nbs_runtime"
+    )
     check = preflight(project_root, specs, runtime_dir)
     if not check["ok"]:
         for issue in check["issues"]:
@@ -378,11 +383,11 @@ def start_services(project_root: Path = PROJECT_ROOT, open_browser: bool = True)
     state["status"] = "ready"
     write_state(state, runtime_dir)
     print("NBS services are ready:")
-    print("  Streamlit: http://127.0.0.1:8502/")
-    print("  Vue:       http://127.0.0.1:5173/")
-    print("  API docs:  http://127.0.0.1:8601/docs")
+    print(f"  Streamlit: {specs['streamlit']['browser_url']}")
+    print(f"  Vue:       {specs['vue']['browser_url']}")
+    print(f"  API docs:  {specs['api']['browser_url']}")
     if open_browser:
-        webbrowser.open("http://127.0.0.1:8502/")
+        webbrowser.open(specs["streamlit"]["browser_url"])
     return 0
 
 
@@ -590,7 +595,7 @@ def main() -> int:
     args = build_parser().parse_args()
     profile = _load_verification_profile(args.verification_profile)
     if args.action == "start":
-        return start_services(open_browser=not args.no_browser)
+        return start_services(open_browser=not args.no_browser, profile=profile)
     if args.action == "stop":
         return stop_services()
     if args.action == "status":

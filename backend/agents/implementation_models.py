@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.evidence_models import canonical_fingerprint, load_json_config
+from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
 
 
 _CONTRACT_KEYS = {
@@ -14,6 +15,7 @@ _CONTRACT_KEYS = {
 }
 _OPTIONAL_CONTRACT_KEYS = {
     "taskType", "redCommands", "greenCommands", "approvedTestBehaviorChanges",
+    "memoryContextAllowed", "expectedMemoryEvidenceFingerprint",
 }
 _TASK_TYPES = {"behavior", "refactor", "test", "documentation", "configuration"}
 _CONTRACT_SCHEMA = "implementation-task-v1"
@@ -60,6 +62,8 @@ class ImplementationTaskContract:
     red_commands: tuple[str, ...] = ()
     green_commands: tuple[str, ...] = ()
     approved_test_behavior_changes: tuple[str, ...] = ()
+    memory_context_allowed: bool = False
+    expected_memory_evidence_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != _CONTRACT_SCHEMA:
@@ -86,6 +90,16 @@ class ImplementationTaskContract:
         ):
             if not all(isinstance(item, str) and item for item in value):
                 raise ValueError(f"{key} must be a list of strings")
+        if not isinstance(self.memory_context_allowed, bool):
+            raise ValueError("memoryContextAllowed must be boolean")
+        if self.expected_memory_evidence_fingerprint is not None and (
+            not isinstance(self.expected_memory_evidence_fingerprint, str)
+            or len(self.expected_memory_evidence_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in self.expected_memory_evidence_fingerprint)
+        ):
+            raise ValueError("expectedMemoryEvidenceFingerprint is invalid")
+        if not self.memory_context_allowed and self.expected_memory_evidence_fingerprint is not None:
+            raise ValueError("expectedMemoryEvidenceFingerprint requires memoryContextAllowed")
         for key, value in (
             ("maxChangedFiles", self.max_changed_files),
             ("maxDiffLines", self.max_diff_lines),
@@ -124,6 +138,8 @@ class ImplementationTaskContract:
                 _require_string_list(payload, "approvedTestBehaviorChanges")
                 if "approvedTestBehaviorChanges" in payload else ()
             ),
+            memory_context_allowed=payload.get("memoryContextAllowed", False),
+            expected_memory_evidence_fingerprint=payload.get("expectedMemoryEvidenceFingerprint"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -145,6 +161,10 @@ class ImplementationTaskContract:
             "redCommands": list(self.red_commands),
             "greenCommands": list(self.green_commands),
             "approvedTestBehaviorChanges": list(self.approved_test_behavior_changes),
+            **({
+                "memoryContextAllowed": True,
+                "expectedMemoryEvidenceFingerprint": self.expected_memory_evidence_fingerprint,
+            } if self.memory_context_allowed else {}),
         }
 
     @property
@@ -154,6 +174,33 @@ class ImplementationTaskContract:
     @property
     def fingerprint(self) -> str:
         return canonical_fingerprint(self.to_dict())
+
+
+def build_implementation_memory_context(
+    contract: ImplementationTaskContract,
+    payload: object,
+) -> dict[str, Any] | None:
+    """Return only authorized, precomputed memory metadata; never query a provider."""
+    if not contract.memory_context_allowed:
+        return None
+    try:
+        evidence = MemoryHubIntegrationEvidence.from_dict(payload)
+    except (TypeError, ValueError) as exc:
+        raise PermissionError("memory evidence is invalid") from exc
+    if evidence.status != "ready" or evidence.consumer_id != "context-agent":
+        raise PermissionError("memory evidence is not ready for implementation")
+    if evidence.integration_mode != "direct_query":
+        raise PermissionError("memory evidence integration mode is not authorized")
+    if evidence.evidence_fingerprint != contract.expected_memory_evidence_fingerprint:
+        raise PermissionError("memory evidence fingerprint does not match approved contract")
+    return {
+        "schemaVersion": "memory-hub-agent-implementation-context-v1",
+        "status": "ready",
+        "authority": "non_authoritative_memory",
+        "evidenceFingerprint": evidence.evidence_fingerprint,
+        "hintCount": evidence.hint_count,
+        "sourceRefs": list(evidence.source_refs),
+    }
 
 
 @dataclass(frozen=True)

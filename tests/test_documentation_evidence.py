@@ -11,6 +11,7 @@ from backend.agents.documentation_evidence import (
     _collect_commands,
     _collect_paths,
 )
+from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
 from backend.agents.workflow_models import (
     APPROVAL_SCHEMA,
     MANIFEST_SCHEMA,
@@ -119,6 +120,39 @@ def test_collector_fingerprint_is_stable_and_excludes_self(completed_run_fixture
     second = collector.collect(completed_run_fixture.run_id).to_dict()
     assert first == second
     assert first["documentationFingerprint"]
+
+
+def test_collector_includes_only_ready_precomputed_memory_summary_after_gates(completed_run_fixture):
+    evidence = build_memory_hub_integration_evidence(
+        project_id="nbs-analytics", consumer_id="context-agent", integration_mode="direct_query",
+        status="ready", reason="ok", query_fingerprint="a" * 64, hints_fingerprint="b" * 64,
+        policy_decision_fingerprints=("c" * 64,), source_refs=("docs/brief.md",), hint_count=2,
+        generated_at="2026-08-18T00:00:00+00:00",
+    ).to_dict()
+    memory_path = completed_run_fixture.store._run_file(completed_run_fixture.run_id, "memory-hub-integration.json")
+    memory_path.write_text(json.dumps(evidence), encoding="utf-8")
+    payload = DocumentationEvidenceCollector(completed_run_fixture.project_root).collect(
+        completed_run_fixture.run_id,
+    ).to_dict()
+    summary = payload["memoryHubSummary"]
+    assert set(summary) == {"status", "consumerId", "integrationMode", "authority", "evidenceFingerprint", "hintCount"}
+    assert summary["status"] == "ready"
+    assert summary["hintCount"] == 2
+
+
+def test_collector_ignores_non_ready_memory_summary(completed_run_fixture):
+    evidence = build_memory_hub_integration_evidence(
+        project_id="nbs-analytics", consumer_id="context-agent", integration_mode="direct_query",
+        status="degraded", reason="stale", query_fingerprint=None, hints_fingerprint=None,
+        policy_decision_fingerprints=(), source_refs=(), hint_count=0,
+        generated_at="2026-08-18T00:00:00+00:00",
+    ).to_dict()
+    memory_path = completed_run_fixture.store._run_file(completed_run_fixture.run_id, "memory-hub-integration.json")
+    memory_path.write_text(json.dumps(evidence), encoding="utf-8")
+    payload = DocumentationEvidenceCollector(completed_run_fixture.project_root).collect(
+        completed_run_fixture.run_id,
+    ).to_dict()
+    assert "memoryHubSummary" not in payload
 
 
 def test_collector_exposes_manifest_brief_as_safe_source(completed_run_fixture):

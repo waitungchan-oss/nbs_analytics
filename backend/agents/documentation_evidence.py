@@ -10,6 +10,7 @@ from typing import Any
 
 from .workflow_models import canonical_sha256
 from .workflow_store import WorkflowStore
+from .memory_hub_integration_models import MemoryHubIntegrationEvidence
 
 
 REQUIRED_ARTIFACTS = (
@@ -62,9 +63,10 @@ class DocumentationEvidence:
     gate_results: dict[str, str]
     guardrails: dict[str, str]
     documentation_fingerprint: str
+    memory_hub_summary: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schemaVersion": self.schema_version,
             "taskId": self.task_id,
             "generatedAt": self.generated_at,
@@ -78,6 +80,9 @@ class DocumentationEvidence:
             "guardrails": dict(self.guardrails),
             "documentationFingerprint": self.documentation_fingerprint,
         }
+        if self.memory_hub_summary is not None:
+            payload["memoryHubSummary"] = dict(self.memory_hub_summary)
+        return payload
 
 
 class DocumentationEvidenceCollector:
@@ -133,13 +138,35 @@ class DocumentationEvidenceCollector:
             "gateResults": {name[:-5]: _status(artifacts[name]) for name in _GATE_ARTIFACTS},
             "guardrails": {"revenueScope": "不含掛賬核銷與TT退款轉團款", "mayBaseline": "HKD 12,057,968"},
         }
+        memory_summary = _read_memory_summary(self.store, run_id)
+        if memory_summary is not None:
+            evidence["memoryHubSummary"] = memory_summary
         evidence["documentationFingerprint"] = canonical_sha256(evidence)
         return DocumentationEvidence(
             evidence["schemaVersion"], evidence["taskId"], evidence["generatedAt"],
             tuple(evidence["sources"]), artifact_hashes, changed_paths, command_results,
             coverage, summaries, evidence["gateResults"], evidence["guardrails"],
-            evidence["documentationFingerprint"],
+            evidence["documentationFingerprint"], memory_summary,
         )
+
+
+def _read_memory_summary(store: WorkflowStore, run_id: str) -> dict[str, Any] | None:
+    """Read only a precomputed artifact; never query or provision Memory Hub."""
+    try:
+        payload = _read_fixed_artifact(store, run_id, "memory-hub-integration.json")
+        evidence = MemoryHubIntegrationEvidence.from_dict(payload)
+    except (FileNotFoundError, DocumentationEvidenceError, PermissionError, TypeError, ValueError):
+        return None
+    if evidence.status != "ready" or evidence.consumer_id != "context-agent":
+        return None
+    return {
+        "status": evidence.status,
+        "consumerId": evidence.consumer_id,
+        "integrationMode": evidence.integration_mode,
+        "authority": "non_authoritative_memory",
+        "evidenceFingerprint": evidence.evidence_fingerprint,
+        "hintCount": evidence.hint_count,
+    }
 
 
 def _collect_paths(artifacts: dict[str, dict[str, Any]]) -> tuple[str, ...]:
