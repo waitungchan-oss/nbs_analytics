@@ -42,6 +42,7 @@ from app_workflows import (
     _build_feature_store_workbook,
     _build_forecast_governance_workbook,
     _build_gmv_audit_workbook,
+    _build_gmv_refund_preflight,
     _build_horizon_weighted_consensus,
     _build_upload_stability_gate_workbook,
     _change_summary_value,
@@ -63,11 +64,13 @@ from app_workflows import (
     _gmv_summary_rows,
     _governance_summary_value,
     _load_and_compute_cache,
+    _build_revenue_scope_frames,
     _invalidate_session_cache_if_generation_changed,
     _model_health_label,
     _apply_gmv_refund_adjustments,
     _parse_gmv_exclusion_ids,
-    _parse_gmv_refund_data,
+    _normalize_gmv_refund_rows,
+    _read_gmv_exclusion_file,
     _rebuild_cache_after_database_restore,
     _refresh_cache_and_rerun,
     _refresh_generation_after_database_write,
@@ -2422,13 +2425,22 @@ def _render_gmv_exclusion_tab() -> None:
     if db_tour.empty and db_others.empty:
         st.info("目前 SQLite 尚無資料，請先在經營分析大盤上傳主副表。")
         return
+    formal_tour, formal_others, _ = _build_revenue_scope_frames(db_tour, db_others)
 
     upload = st.file_uploader(
-        "上傳退款明細數據（Excel / CSV；需要欄位來源單據號、退款原幣金額）",
+        "上傳退款明細數據（Excel / CSV；需要欄位來源單據號、退款原幣金額、退款狀態）",
         type=["xlsx", "xls", "csv"],
         key="GMV_EXCLUSION_UPLOAD",
     )
     if not upload:
+        for state_key in (
+            "GMV_REFUND_PREFLIGHT_SIGNATURE",
+            "GMV_REFUND_PREFLIGHT",
+            "GMV_REFUND_EXCEPTION_ROWS",
+            "GMV_EXCLUSION_SIGNATURE",
+            "GMV_EXCLUSION_WORKBOOKS",
+        ):
+            st.session_state.pop(state_key, None)
         _render_info_panel(
             "GMV 退款扣減尚未套用",
             "請上傳退款明細數據；這個分析只影響本頁，不會改動正式看板、SQLite 或原本報表。",
@@ -2436,28 +2448,79 @@ def _render_gmv_exclusion_tab() -> None:
         return
 
     try:
-        refund_data, refund_audit = _parse_gmv_refund_data(upload)
+        refund_upload_rows = _read_gmv_exclusion_file(upload)
+        refund_data, _ = _normalize_gmv_refund_rows(refund_upload_rows)
     except Exception:
         _render_error("退款明細解析失敗。", traceback.format_exc())
         return
 
-    if refund_data.empty:
-        st.warning("退款明細沒有可用的來源單據號或退款原幣金額。")
-        return
-
     current_signature = hashlib.sha256(
-        refund_data.to_json(orient="records", force_ascii=False).encode("utf-8")
+        refund_upload_rows.to_json(orient="records", force_ascii=False).encode("utf-8")
     ).hexdigest()[:16]
+    if st.session_state.get("GMV_REFUND_PREFLIGHT_SIGNATURE") != current_signature:
+        st.session_state["GMV_REFUND_PREFLIGHT_SIGNATURE"] = current_signature
+        st.session_state.pop("GMV_REFUND_PREFLIGHT", None)
+        st.session_state.pop("GMV_REFUND_EXCEPTION_ROWS", None)
+        st.session_state.pop("GMV_EXCLUSION_WORKBOOKS", None)
     if st.session_state.get("GMV_EXCLUSION_SIGNATURE") != current_signature:
         st.session_state["GMV_EXCLUSION_SIGNATURE"] = current_signature
         st.session_state.pop("GMV_EXCLUSION_WORKBOOKS", None)
 
-    total_adjusted = _apply_gmv_refund_adjustments(db_tour, db_others, refund_data)
-    paid_adjusted = _apply_gmv_refund_adjustments(
-        db_tour, db_others, refund_data, refund_status="已退款"
+    preflight_report = _build_gmv_refund_preflight(
+        db_tour,
+        db_others,
+        refund_upload_rows,
+        formal_tour,
+        formal_others,
     )
-    total_summary_rows = _gmv_summary_rows(db_tour, db_others, total_adjusted)
-    paid_summary_rows = _gmv_summary_rows(db_tour, db_others, paid_adjusted)
+    st.session_state["GMV_REFUND_PREFLIGHT"] = preflight_report
+    st.session_state["GMV_REFUND_EXCEPTION_ROWS"] = preflight_report.get(
+        "exceptionRows", pd.DataFrame()
+    )
+    if preflight_report.get("status") == "blocked":
+        st.error("退款 Preflight 未通過，請先修正退款檔案。")
+        issues = pd.DataFrame(preflight_report.get("issues") or [])
+        if not issues.empty:
+            st.dataframe(issues, hide_index=True, width="stretch")
+        return
+    if preflight_report.get("status") == "warning":
+        st.warning("退款 Preflight 有需要留意的資料品質或匹配問題，請先查看異常中心。")
+    else:
+        st.success("退款 Preflight 通過，可進入總退款與已退款 GMV 扣減。")
+
+    file_metrics = preflight_report.get("fileMetrics") or {}
+    issue_rows = pd.DataFrame(preflight_report.get("issues") or [])
+    if not issue_rows.empty:
+        st.caption("Preflight issue summary")
+        st.dataframe(issue_rows, hide_index=True, width="stretch")
+    st.caption("退款 Preflight 摘要")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"指標": "退款檔行數", "數值": file_metrics.get("rows", len(refund_data))},
+                {"指標": "退款來源單據數", "數值": file_metrics.get("sourceOrders", 0)},
+                {"指標": "退款狀態分布", "數值": file_metrics.get("statusCounts", {})},
+                {"指標": "重複退款列", "數值": file_metrics.get("duplicateRows", 0)},
+                {"指標": "無效金額列", "數值": file_metrics.get("invalidAmountRows", 0)},
+                {"指標": "負值金額列", "數值": file_metrics.get("negativeAmountRows", 0)},
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption("總退款／已退款匹配比較")
+    dimension_rows = []
+    for dimension, metrics in (preflight_report.get("dimensions") or {}).items():
+        dimension_rows.append({"退款維度": dimension, **metrics})
+    if dimension_rows:
+        st.dataframe(pd.DataFrame(dimension_rows), hide_index=True, width="stretch")
+
+    total_adjusted = _apply_gmv_refund_adjustments(formal_tour, formal_others, refund_data)
+    paid_adjusted = _apply_gmv_refund_adjustments(
+        formal_tour, formal_others, refund_data, refund_status="已退款"
+    )
+    total_summary_rows = _gmv_summary_rows(formal_tour, formal_others, total_adjusted)
+    paid_summary_rows = _gmv_summary_rows(formal_tour, formal_others, paid_adjusted)
     summary_rows = total_summary_rows + paid_summary_rows
     summary_map = {row["指標"]: row["數值"] for row in total_summary_rows}
     branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
@@ -2533,6 +2596,49 @@ def _render_gmv_exclusion_tab() -> None:
             hide_index=True,
             width="stretch",
         )
+
+    st.caption("退款對帳異常中心")
+    exception_rows = st.session_state.get("GMV_REFUND_EXCEPTION_ROWS", pd.DataFrame())
+    dimension = st.selectbox(
+        "退款維度",
+        ["總退款", "已退款"],
+        key="GMV_REFUND_EXCEPTION_DIMENSION",
+    )
+    match_state = st.selectbox(
+        "匹配狀態",
+        ["全部", "正式口徑匹配", "被收入規則排除", "SQLite 找不到"],
+        key="GMV_REFUND_EXCEPTION_MATCH_STATE",
+    )
+    filtered_exceptions = exception_rows.copy()
+    if not filtered_exceptions.empty:
+        filtered_exceptions = filtered_exceptions.loc[
+            filtered_exceptions["退款維度"] == dimension
+        ].copy()
+        if match_state != "全部":
+            filtered_exceptions = filtered_exceptions.loc[
+                filtered_exceptions["匹配狀態"] == match_state
+            ].copy()
+    exception_columns = [
+        "退款維度", "來源單據號", "退款狀態", "退款明細金額", "匹配狀態",
+        "原因代碼", "是否可扣減", "原收款金額", "實際扣減金額", "超額退款金額",
+        "資料表", "分社", "銷售代表",
+    ]
+    exception_columns = [column for column in exception_columns if column in filtered_exceptions.columns]
+    st.dataframe(
+        filtered_exceptions[exception_columns]
+        if exception_columns
+        else filtered_exceptions,
+        hide_index=True,
+        width="stretch",
+    )
+    exception_csv = filtered_exceptions.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "下載退款對帳異常 CSV",
+        exception_csv,
+        "退款對帳異常中心.csv",
+        mime="text/csv",
+        width="stretch",
+    )
 
     with st.expander("查看未匹配來源單據號", expanded=False):
         st.dataframe(pd.DataFrame({"來源單據號": total_adjusted["unmatched_source_ids"]}), hide_index=True, width="stretch")

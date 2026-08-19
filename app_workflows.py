@@ -1046,19 +1046,100 @@ def _parse_gmv_exclusion_ids(file_obj) -> tuple[set[str], pd.DataFrame]:
     return set(audit["交易號碼"].astype(str)), audit
 
 
+def _normalize_gmv_refund_rows(refund_rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    canonical_columns = [COL_ORDER_ID, "退款原幣金額", "退款狀態"]
+    source_row_count = int(len(refund_rows))
+    status_column = "退款状态" if "退款状态" in refund_rows.columns else "退款狀態"
+    required_columns = {
+        COL_ORDER_ID,
+        "退款原幣金額",
+        status_column,
+    }
+    missing = sorted(required_columns - set(refund_rows.columns))
+    if missing:
+        canonical_missing = [
+            "退款狀態" if column == "退款狀態" else column
+            for column in missing
+        ]
+        return pd.DataFrame(columns=canonical_columns), {
+            "status": "blocked",
+            "missing": canonical_missing,
+            "sourceOrders": 0,
+            "duplicateRows": 0,
+            "emptySourceRows": 0,
+            "emptyStatusRows": 0,
+            "invalidAmountRows": 0,
+            "negativeAmountRows": 0,
+            "zeroAmountRows": 0,
+            "statusCounts": {},
+            "refundTotal": 0.0,
+            "rows": source_row_count,
+            "validRows": 0,
+            "emptySourceExamples": [],
+            "emptyStatusExamples": [],
+            "invalidAmountExamples": [],
+            "negativeAmountExamples": [],
+            "duplicateExamples": [],
+        }
+
+    work = refund_rows.copy()
+    work.rename(columns={status_column: "退款狀態"}, inplace=True)
+    extra_columns = [
+        column for column in work.columns
+        if column not in {COL_ORDER_ID, "退款原幣金額", "退款狀態"}
+    ]
+    raw_amount = work["退款原幣金額"].copy()
+    parsed_amount = pd.to_numeric(raw_amount, errors="coerce")
+    work[COL_ORDER_ID] = clean_invoice_number(work[COL_ORDER_ID])
+    work["退款原幣金額"] = parsed_amount.fillna(0.0)
+    work["退款狀態"] = work["退款狀態"].fillna("").astype(str).str.strip()
+
+    valid_source = ~work[COL_ORDER_ID].isin(["", "NAN"])
+    valid_status = work["退款狀態"] != ""
+    valid_amount = parsed_amount.notna() & (parsed_amount >= 0)
+    work = work.loc[valid_source & valid_status & valid_amount].reset_index(drop=True)
+    def _row_examples(mask: pd.Series) -> list[str]:
+        return [str(row) for row in refund_rows.loc[mask].head(5).to_dict("records")]
+    duplicate_rows = int(work.duplicated(keep="first").sum())
+    status_counts = {
+        str(key): int(value)
+        for key, value in work["退款狀態"].value_counts(dropna=False).to_dict().items()
+    }
+    has_usable_amount = bool(not work.empty)
+    status = "ready" if not work.empty and has_usable_amount else "blocked"
+    metrics = {
+        "status": status,
+        "missing": [],
+        "sourceOrders": int(work[COL_ORDER_ID].nunique()),
+        "duplicateRows": duplicate_rows,
+        "emptySourceRows": int((~valid_source).sum()),
+        "emptyStatusRows": int((valid_source & ~valid_status).sum()),
+        "invalidAmountRows": int(parsed_amount.isna().sum()),
+        "negativeAmountRows": int((parsed_amount < 0).fillna(False).sum()),
+        "zeroAmountRows": int((parsed_amount == 0).fillna(False).sum()),
+        "statusCounts": status_counts,
+        "refundTotal": float(work["退款原幣金額"].clip(lower=0).sum()),
+        "rows": source_row_count,
+        "validRows": int(len(work)),
+        "emptySourceExamples": _row_examples(~valid_source),
+        "emptyStatusExamples": _row_examples(valid_source & ~valid_status),
+        "invalidAmountExamples": _row_examples(parsed_amount.isna()),
+        "negativeAmountExamples": _row_examples((parsed_amount < 0).fillna(False)),
+        "duplicateExamples": _row_examples(refund_rows.duplicated(keep=False)),
+    }
+    return work[canonical_columns + extra_columns], metrics
+
+
 def _parse_gmv_refund_data(file_obj) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = _read_gmv_exclusion_file(file_obj)
-    status_col = "退款状态" if "退款状态" in df.columns else "退款狀態"
-    required = {COL_ORDER_ID, "退款原幣金額", status_col}
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise ValueError(f"退款明細缺少必要欄位：{', '.join(missing)}")
-    work = df[[COL_ORDER_ID, "退款原幣金額", status_col]].copy()
-    work.rename(columns={status_col: "退款狀態"}, inplace=True)
-    work[COL_ORDER_ID] = clean_invoice_number(work[COL_ORDER_ID])
-    work["退款原幣金額"] = pd.to_numeric(work["退款原幣金額"], errors="coerce").fillna(0.0)
-    work = work.loc[(work[COL_ORDER_ID] != "") & (work[COL_ORDER_ID] != "NAN")]
-    return work.sort_values([COL_ORDER_ID, "退款狀態"]).reset_index(drop=True), work
+    work, metrics = _normalize_gmv_refund_rows(df)
+    if metrics.get("status") == "blocked":
+        missing = metrics.get("missing") or []
+        if missing:
+            raise ValueError(f"退款明細缺少必要欄位：{', '.join(missing)}")
+        raise ValueError("退款明細沒有可用的來源單據號與退款原幣金額。")
+    work = work.sort_values([COL_ORDER_ID, "退款狀態"]).reset_index(drop=True)
+    return work, work.copy()
 
 
 def _apply_gmv_refund_adjustments(
@@ -1143,6 +1224,321 @@ def _order_id_series(df: pd.DataFrame) -> pd.Series:
     if df.empty or COL_ORDER_ID not in df.columns:
         return pd.Series("", index=df.index, dtype=str)
     return clean_invoice_number(df[COL_ORDER_ID])
+
+def _build_gmv_refund_match_index(
+    raw_tour: pd.DataFrame,
+    raw_others: pd.DataFrame,
+    formal_tour: pd.DataFrame,
+    formal_others: pd.DataFrame,
+) -> pd.DataFrame:
+    index_columns = [
+        "來源單據號",
+        "raw_present", "raw_amount", "raw_資料表", "raw_分社", "raw_銷售代表",
+        "formal_present", "formal_amount", "formal_資料表", "formal_分社", "formal_銷售代表",
+    ]
+
+    def _index_frames(frames: tuple[tuple[str, pd.DataFrame], ...], prefix: str) -> pd.DataFrame:
+        rows: list[dict] = []
+        for table_name, frame in frames:
+            work = normalize_runtime_columns(frame.copy())
+            if work.empty or COL_ORDER_ID not in work.columns:
+                continue
+            work["__gmv_source_id"] = _order_id_series(work)
+            work = work.loc[~work["__gmv_source_id"].isin(["", "NAN"])].copy()
+            for source_id, group in work.groupby("__gmv_source_id", sort=True):
+                amount = pd.to_numeric(
+                    group[COL_MONEY] if COL_MONEY in group.columns else pd.Series(0.0, index=group.index),
+                    errors="coerce",
+                ).fillna(0.0)
+                branch = group[COL_BRANCH].astype(str).str.strip() if COL_BRANCH in group.columns else pd.Series(dtype=str)
+                salesperson = group[COL_SALESPERSON].astype(str).str.strip() if COL_SALESPERSON in group.columns else pd.Series(dtype=str)
+                rows.append(
+                    {
+                        "來源單據號": str(source_id),
+                        f"{prefix}_present": True,
+                        f"{prefix}_amount": float(amount.sum()),
+                        f"{prefix}_資料表": table_name,
+                        f"{prefix}_分社": next((value for value in branch if value), ""),
+                        f"{prefix}_銷售代表": next((value for value in salesperson if value), ""),
+                    }
+                )
+        if not rows:
+            return pd.DataFrame(columns=[column for column in index_columns if column == "來源單據號" or column.startswith(prefix)])
+        indexed = pd.DataFrame(rows)
+        aggregations = {
+            f"{prefix}_present": "max",
+            f"{prefix}_amount": "sum",
+            f"{prefix}_資料表": lambda values: "、".join(sorted(set(values.astype(str)))),
+            f"{prefix}_分社": lambda values: next((value for value in values if value), ""),
+            f"{prefix}_銷售代表": lambda values: next((value for value in values if value), ""),
+        }
+        return indexed.groupby("來源單據號", as_index=False).agg(aggregations)
+
+    raw_index = _index_frames((("旅行團", raw_tour), ("其他業務", raw_others)), "raw")
+    formal_index = _index_frames((("旅行團", formal_tour), ("其他業務", formal_others)), "formal")
+    index = raw_index.merge(formal_index, on="來源單據號", how="outer")
+    for column in ("raw_present", "formal_present"):
+        index[column] = index.get(column, False)
+        index[column] = index[column].astype("boolean").fillna(False).astype(bool)
+    for column in ("raw_amount", "formal_amount"):
+        if column not in index.columns:
+            index[column] = 0.0
+        index[column] = pd.to_numeric(index[column], errors="coerce").fillna(0.0)
+    for column in (
+        "raw_資料表", "raw_分社", "raw_銷售代表",
+        "formal_資料表", "formal_分社", "formal_銷售代表",
+    ):
+        if column not in index.columns:
+            index[column] = ""
+        index[column] = index[column].fillna("").astype(str)
+    return index.sort_values("來源單據號").reset_index(drop=True)
+
+
+def _build_gmv_refund_exception_rows(
+    refund_rows: pd.DataFrame,
+    raw_tour: pd.DataFrame,
+    raw_others: pd.DataFrame,
+    formal_tour: pd.DataFrame,
+    formal_others: pd.DataFrame,
+    refund_status: str | None = None,
+) -> pd.DataFrame:
+    columns = [
+        "退款維度", "來源單據號", "退款狀態", "退款明細金額", "匹配狀態", "原因代碼",
+        "是否可扣減", "原收款金額", "實際扣減金額", "超額退款金額", "資料表", "分社", "銷售代表",
+    ]
+    normalized, _ = _normalize_gmv_refund_rows(refund_rows)
+    if refund_status is not None:
+        normalized = normalized.loc[normalized["退款狀態"] == refund_status].copy()
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = (
+        normalized.groupby("來源單據號", as_index=False)
+        .agg(
+            退款明細金額=("退款原幣金額", "sum"),
+            退款狀態=("退款狀態", lambda values: "、".join(sorted(set(values.astype(str))))),
+            退款列數=("來源單據號", "size"),
+        )
+    )
+    duplicate_by_source = (
+        normalized.assign(__duplicate_row=normalized.duplicated(keep=False))
+        .groupby(COL_ORDER_ID)["__duplicate_row"]
+        .sum()
+    )
+    grouped["重複退款列數"] = (
+        grouped["來源單據號"].map(duplicate_by_source).fillna(0).astype(int)
+    )
+    result = grouped.merge(
+        _build_gmv_refund_match_index(raw_tour, raw_others, formal_tour, formal_others),
+        on="來源單據號",
+        how="left",
+    )
+    result["raw_present"] = result["raw_present"].astype("boolean").fillna(False).astype(bool)
+    result["formal_present"] = result["formal_present"].astype("boolean").fillna(False).astype(bool)
+    result["raw_amount"] = pd.to_numeric(result["raw_amount"], errors="coerce").fillna(0.0)
+    result["退款維度"] = refund_status or "總退款"
+    result["匹配狀態"] = "SQLite 找不到"
+    result.loc[result["raw_present"] & ~result["formal_present"], "匹配狀態"] = "被收入規則排除"
+    result.loc[result["formal_present"], "匹配狀態"] = "正式口徑匹配"
+    result["是否可扣減"] = result["formal_present"]
+    result["原收款金額"] = result["raw_amount"]
+    result["超額退款金額"] = (
+        result["退款明細金額"].clip(lower=0) - result["原收款金額"].clip(lower=0)
+    ).clip(lower=0.0)
+    result.loc[~result["raw_present"] | (result["原收款金額"] <= 0), "超額退款金額"] = 0.0
+
+    selected = normalized[[COL_ORDER_ID, "退款原幣金額", "退款狀態"]].copy()
+    adjusted = _apply_gmv_refund_adjustments(formal_tour, formal_others, selected)
+    result["實際扣減金額"] = 0.0
+    adjusted_detail = adjusted.get("adjusted_detail", pd.DataFrame())
+    if not adjusted_detail.empty:
+        applied = (
+            adjusted_detail.assign(__canonical_source_id=_order_id_series(adjusted_detail))
+            .groupby("__canonical_source_id")["退款扣減金額"]
+            .sum()
+        )
+        result["實際扣減金額"] = result["來源單據號"].map(applied).fillna(0.0)
+
+    result["原因代碼"] = "SQLITE_SOURCE_NOT_FOUND"
+    result.loc[result["匹配狀態"] == "被收入規則排除", "原因代碼"] = "REVENUE_SCOPE_EXCLUDED"
+    result.loc[result["匹配狀態"] == "正式口徑匹配", "原因代碼"] = "FORMAL_MATCHED"
+    result.loc[result["重複退款列數"] > 0, "原因代碼"] = "DUPLICATE_REFUND_ROW"
+    result.loc[result["超額退款金額"] > 0, "原因代碼"] = "OVER_REFUND"
+    result.loc[result["退款明細金額"] <= 0, "原因代碼"] = "INVALID_REFUND_AMOUNT"
+    result = result.rename(
+        columns={"raw_資料表": "資料表", "raw_分社": "分社", "raw_銷售代表": "銷售代表"}
+    )
+    return result[columns]
+
+
+def _build_gmv_refund_preflight(
+    raw_tour: pd.DataFrame,
+    raw_others: pd.DataFrame,
+    refund_rows: pd.DataFrame,
+    formal_tour: pd.DataFrame | None = None,
+    formal_others: pd.DataFrame | None = None,
+) -> dict:
+    normalized, file_metrics = _normalize_gmv_refund_rows(refund_rows)
+    report = {
+        "status": file_metrics.get("status", "blocked"),
+        "schema": {
+            "required": [COL_ORDER_ID, "退款原幣金額", "退款狀態"],
+            "missing": file_metrics.get("missing", []),
+            "status_column": "退款狀態",
+        },
+        "fileMetrics": file_metrics,
+        "dimensions": {},
+        "issues": [],
+        "exceptionRows": pd.DataFrame(),
+    }
+    if report["status"] == "blocked":
+        code = "MISSING_REQUIRED_COLUMN" if file_metrics.get("missing") else "NO_USABLE_REFUND_ROWS"
+        message = (
+            f"退款明細缺少必要欄位：{', '.join(file_metrics['missing'])}"
+            if file_metrics.get("missing")
+            else "退款明細沒有可用的來源單據號與退款原幣金額。"
+        )
+        report["issues"] = [{
+            "code": code,
+            "severity": "blocking",
+            "count": len(file_metrics.get("missing", [])),
+            "amount": 0.0,
+            "examples": (
+                file_metrics.get("missing", [])
+                if file_metrics.get("missing")
+                else file_metrics.get("invalidAmountExamples", [])
+                + file_metrics.get("negativeAmountExamples", [])
+                + file_metrics.get("emptySourceExamples", [])
+                + file_metrics.get("emptyStatusExamples", [])
+            ),
+            "message": message,
+        }]
+        return report
+
+    if formal_tour is None or formal_others is None:
+        derived_tour, derived_others, _ = _build_revenue_scope_frames(raw_tour, raw_others)
+        formal_tour = derived_tour if formal_tour is None else formal_tour
+        formal_others = derived_others if formal_others is None else formal_others
+
+    exception_frames: list[pd.DataFrame] = []
+    for dimension, status in (("總退款", None), ("已退款", "已退款")):
+        dimension_rows = normalized if status is None else normalized.loc[normalized["退款狀態"] == status]
+        adjusted = _apply_gmv_refund_adjustments(
+            formal_tour, formal_others, dimension_rows, refund_status=status
+        )
+        exceptions = _build_gmv_refund_exception_rows(
+            dimension_rows,
+            raw_tour,
+            raw_others,
+            formal_tour,
+            formal_others,
+            refund_status=status,
+        )
+        if not exceptions.empty:
+            exception_frames.append(exceptions)
+        source_orders = int(dimension_rows[COL_ORDER_ID].nunique())
+        formal_matches = int((exceptions["匹配狀態"] == "正式口徑匹配").sum()) if not exceptions.empty else 0
+        excluded_matches = int((exceptions["匹配狀態"] == "被收入規則排除").sum()) if not exceptions.empty else 0
+        unmatched = int((exceptions["匹配狀態"] == "SQLite 找不到").sum()) if not exceptions.empty else 0
+        unmatched_amount = float(
+            exceptions.loc[exceptions["匹配狀態"] == "SQLite 找不到", "退款明細金額"].sum()
+        ) if not exceptions.empty else 0.0
+        report["dimensions"][dimension] = {
+            "sourceOrders": source_orders,
+            "matchedFormalOrders": formal_matches,
+            "matchedExcludedOrders": excluded_matches,
+            "unmatchedOrders": unmatched,
+            "formalMatchRate": formal_matches / source_orders if source_orders else 0.0,
+            "unmatchedAmount": unmatched_amount,
+            "refundTotal": float(adjusted["refund_total"]),
+            "appliedRefundTotal": float(adjusted["applied_refund_total"]),
+            "overRefundTotal": float(adjusted["over_refund_total"]),
+        }
+
+    report["exceptionRows"] = (
+        pd.concat(exception_frames, ignore_index=True, sort=False)
+        if exception_frames else pd.DataFrame()
+    )
+    issues: list[dict] = []
+    if file_metrics.get("emptySourceRows"):
+        issues.append({
+            "code": "EMPTY_SOURCE_ORDER_ID", "severity": "warning",
+            "count": int(file_metrics["emptySourceRows"]), "amount": 0.0,
+            "examples": file_metrics.get("emptySourceExamples", []),
+            "message": "退款檔存在缺少來源單據號的列，該列未進入對帳。",
+        })
+    if file_metrics.get("emptyStatusRows"):
+        issues.append({
+            "code": "EMPTY_REFUND_STATUS", "severity": "warning",
+            "count": int(file_metrics["emptyStatusRows"]), "amount": 0.0,
+            "examples": file_metrics.get("emptyStatusExamples", []),
+            "message": "退款檔存在空白退款狀態列，該列未進入總退款或已退款維度。",
+        })
+    if file_metrics.get("duplicateRows"):
+        issues.append({
+            "code": "DUPLICATE_REFUND_ROW", "severity": "warning",
+            "count": int(file_metrics["duplicateRows"]), "amount": 0.0,
+            "examples": file_metrics.get("duplicateExamples", []),
+            "message": "退款檔存在重複列，請確認是否應重複計算。",
+        })
+    if file_metrics.get("invalidAmountRows") or file_metrics.get("negativeAmountRows"):
+        issues.append({
+            "code": "INVALID_REFUND_AMOUNT", "severity": "warning",
+            "count": int(file_metrics["invalidAmountRows"] + file_metrics["negativeAmountRows"]),
+            "amount": 0.0,
+            "examples": file_metrics.get("invalidAmountExamples", []) + file_metrics.get("negativeAmountExamples", []),
+            "message": "退款檔存在無法解析或負值金額。",
+        })
+    known_statuses = {"已退款", "待退款"}
+    unknown_statuses = sorted(set(file_metrics.get("statusCounts", {})) - known_statuses)
+    if unknown_statuses:
+        issues.append({
+            "code": "UNKNOWN_REFUND_STATUS", "severity": "warning",
+            "count": sum(file_metrics["statusCounts"].get(value, 0) for value in unknown_statuses),
+            "amount": 0.0, "examples": unknown_statuses,
+            "message": "退款檔包含未定義狀態；已退款只取精確已退款狀態。",
+        })
+    for dimension, values in report["dimensions"].items():
+        dimension_exceptions = report["exceptionRows"]
+        if not dimension_exceptions.empty:
+            dimension_exceptions = dimension_exceptions.loc[
+                dimension_exceptions["退款維度"] == dimension
+            ]
+        if values["matchedExcludedOrders"]:
+            excluded_examples = dimension_exceptions.loc[
+                dimension_exceptions["匹配狀態"] == "被收入規則排除", "來源單據號"
+            ].head(5).astype(str).tolist()
+            issues.append({
+                "code": "REVENUE_SCOPE_EXCLUDED", "severity": "warning",
+                "count": values["matchedExcludedOrders"], "amount": 0.0,
+                "examples": excluded_examples,
+                "message": f"{dimension}有來源單據號落在正式收入規則排除範圍。",
+            })
+        if values["unmatchedOrders"]:
+            unmatched_examples = dimension_exceptions.loc[
+                dimension_exceptions["匹配狀態"] == "SQLite 找不到", "來源單據號"
+            ].head(5).astype(str).tolist()
+            issues.append({
+                "code": "SQLITE_SOURCE_NOT_FOUND", "severity": "warning",
+                "count": values["unmatchedOrders"], "amount": values["unmatchedAmount"],
+                "examples": unmatched_examples,
+                "message": f"{dimension}有來源單據號在正式 SQLite 找不到。",
+            })
+        if values["overRefundTotal"]:
+            over_examples = dimension_exceptions.loc[
+                dimension_exceptions["原因代碼"] == "OVER_REFUND", "來源單據號"
+            ].head(5).astype(str).tolist()
+            issues.append({
+                "code": "OVER_REFUND", "severity": "warning",
+                "count": int((dimension_exceptions["原因代碼"] == "OVER_REFUND").sum())
+                if not dimension_exceptions.empty else 0,
+                "amount": values["overRefundTotal"], "examples": over_examples,
+                "message": f"{dimension}存在超過原收款金額的退款，系統已套用扣減上限。",
+            })
+    report["issues"] = issues
+    report["status"] = "warning" if issues else "ready"
+    return report
+
 
 def _filter_gmv_exclusion_frames(
     db_tour: pd.DataFrame,
