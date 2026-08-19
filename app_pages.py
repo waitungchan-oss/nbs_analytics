@@ -65,7 +65,9 @@ from app_workflows import (
     _load_and_compute_cache,
     _invalidate_session_cache_if_generation_changed,
     _model_health_label,
+    _apply_gmv_refund_adjustments,
     _parse_gmv_exclusion_ids,
+    _parse_gmv_refund_data,
     _rebuild_cache_after_database_restore,
     _refresh_cache_and_rerun,
     _refresh_generation_after_database_write,
@@ -2413,7 +2415,7 @@ def _render_dashboard_tab() -> None:
 def _render_gmv_exclusion_tab() -> None:
     _render_section(
         "GMV 排除訂單看板",
-        "上傳交易號碼清單後，系統會在記憶體中扣除匹配來源單據號，生成獨立 GMV 視角與同規格報表；不回寫 SQLite。",
+        "上傳退款明細後，系統按來源單據號彙總退款原幣金額，從原收款金額扣減，生成獨立 GMV 視角與同規格報表；不回寫 SQLite。",
         "🧾",
     )
     db_tour, db_others = load_all_data_from_db()
@@ -2422,46 +2424,51 @@ def _render_gmv_exclusion_tab() -> None:
         return
 
     upload = st.file_uploader(
-        "上傳 GMV 排除訂單清單（Excel / CSV；欄名交易號碼或 A 欄）",
+        "上傳退款明細數據（Excel / CSV；需要欄位來源單據號、退款原幣金額）",
         type=["xlsx", "xls", "csv"],
         key="GMV_EXCLUSION_UPLOAD",
     )
     if not upload:
         _render_info_panel(
-            "GMV 排除看板尚未套用",
-            "請上傳一份交易號碼清單；這個分析只影響本頁，不會改動正式看板、SQLite 或原本報表。",
+            "GMV 退款扣減尚未套用",
+            "請上傳退款明細數據；這個分析只影響本頁，不會改動正式看板、SQLite 或原本報表。",
         )
         return
 
     try:
-        exclusion_ids, exclusion_audit = _parse_gmv_exclusion_ids(upload)
+        refund_data, refund_audit = _parse_gmv_refund_data(upload)
     except Exception:
-        _render_error("GMV 排除清單解析失敗。", traceback.format_exc())
+        _render_error("退款明細解析失敗。", traceback.format_exc())
         return
 
-    if not exclusion_ids:
-        st.warning("排除清單沒有可用的交易號碼。請確認 A 欄或欄名「交易號碼」有內容。")
+    if refund_data.empty:
+        st.warning("退款明細沒有可用的來源單據號或退款原幣金額。")
         return
 
     current_signature = hashlib.sha256(
-        json.dumps(sorted(exclusion_ids), ensure_ascii=False).encode("utf-8")
+        refund_data.to_json(orient="records", force_ascii=False).encode("utf-8")
     ).hexdigest()[:16]
     if st.session_state.get("GMV_EXCLUSION_SIGNATURE") != current_signature:
         st.session_state["GMV_EXCLUSION_SIGNATURE"] = current_signature
         st.session_state.pop("GMV_EXCLUSION_WORKBOOKS", None)
 
-    filtered = _filter_gmv_exclusion_frames(db_tour, db_others, exclusion_ids)
-    summary_rows = _gmv_summary_rows(db_tour, db_others, filtered, exclusion_ids)
-    summary_map = {row["指標"]: row["數值"] for row in summary_rows}
+    total_adjusted = _apply_gmv_refund_adjustments(db_tour, db_others, refund_data)
+    paid_adjusted = _apply_gmv_refund_adjustments(
+        db_tour, db_others, refund_data, refund_status="已退款"
+    )
+    total_summary_rows = _gmv_summary_rows(db_tour, db_others, total_adjusted)
+    paid_summary_rows = _gmv_summary_rows(db_tour, db_others, paid_adjusted)
+    summary_rows = total_summary_rows + paid_summary_rows
+    summary_map = {row["指標"]: row["數值"] for row in total_summary_rows}
     branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
 
     _render_kpi_strip(
         [
             {
-                "label": "排除清單筆數",
-                "value": f"{int(summary_map.get('排除清單筆數', 0)):,}",
-                "delta": f"成功匹配 {int(summary_map.get('成功匹配訂單數', 0)):,}",
-                "note": "以交易號碼對來源單據號匹配",
+                "label": "總退款來源訂單數",
+                "value": f"{int(summary_map.get('退款來源訂單數', 0)):,}",
+                "delta": f"成功匹配 {int(summary_map.get('成功匹配來源訂單數', 0)):,}",
+                "note": "按來源單據號聚合退款",
                 "accent": "#118DFF",
             },
             {
@@ -2472,15 +2479,15 @@ def _render_gmv_exclusion_tab() -> None:
                 "accent": "#12239E",
             },
             {
-                "label": "排除金額",
-                "value": _money_text(float(summary_map.get("排除金額", 0))),
-                "delta": f"未匹配 {int(summary_map.get('未匹配訂單數', 0)):,}",
-                "note": "被扣除的匹配訂單金額",
+                "label": "總退款扣減金額",
+                "value": _money_text(float(summary_map.get("實際扣減金額", 0))),
+                "delta": f"未匹配 {int(summary_map.get('未匹配來源訂單數', 0)):,}",
+                "note": "從收款原幣金額扣減",
                 "accent": "#E66C37",
             },
             {
-                "label": "排除後 GMV",
-                "value": _money_text(float(summary_map.get("排除後 GMV", 0))),
+                "label": "總退款扣減後 GMV",
+                "value": _money_text(float(summary_map.get("退款扣減後 GMV", 0))),
                 "delta": "本頁派生視角",
                 "note": "不覆蓋正式營收看板",
                 "accent": "#197278",
@@ -2492,8 +2499,8 @@ def _render_gmv_exclusion_tab() -> None:
     st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
 
     _, gmv_s1, _ = build_dashboard_data(
-        filtered["tour"],
-        filtered["others"],
+        total_adjusted["tour"],
+        total_adjusted["others"],
         branch_mapping,
         target_branches,
         cruise_depts,
@@ -2511,54 +2518,83 @@ def _render_gmv_exclusion_tab() -> None:
             .sort_values("總額", ascending=False)
         )
         rank.insert(0, "排名", range(1, len(rank) + 1))
-        st.caption("GMV 排除後分社排行")
+        st.caption("退款扣減後分社排行")
         st.dataframe(rank.head(20), hide_index=True, width="stretch")
 
-    detail_cols = [c for c in ["資料表", COL_ORDER_ID, COL_DATE, COL_MONEY, COL_BRANCH, COL_SALESPERSON, "來源報表標籤", "收款類型", "收款方式"] if c in filtered["excluded_detail"].columns]
-    st.caption("被排除訂單明細")
-    st.dataframe(filtered["excluded_detail"][detail_cols] if detail_cols else filtered["excluded_detail"], hide_index=True, width="stretch")
+    detail_cols = [c for c in ["資料表", COL_ORDER_ID, "退款維度", "退款前收款原幣金額", "退款扣減金額", "退款後收款原幣金額", COL_DATE, COL_BRANCH, COL_SALESPERSON, "來源報表標籤", "收款類型", "收款方式"] if c in total_adjusted["adjusted_detail"].columns]
+    st.caption("總退款扣減明細")
+    st.dataframe(total_adjusted["adjusted_detail"][detail_cols] if detail_cols else total_adjusted["adjusted_detail"], hide_index=True, width="stretch")
 
-    with st.expander("查看未匹配交易號碼", expanded=False):
-        st.dataframe(pd.DataFrame({"交易號碼": filtered["unmatched_ids"]}), hide_index=True, width="stretch")
+    with st.expander("查看已退款維度扣減明細", expanded=False):
+        st.dataframe(
+            paid_adjusted["adjusted_detail"][detail_cols]
+            if detail_cols
+            else paid_adjusted["adjusted_detail"],
+            hide_index=True,
+            width="stretch",
+        )
 
-    if st.button("生成 GMV 排除版完整報表", type="primary", width="stretch"):
-        with st.spinner("正在生成三份 GMV 排除版完整報表，報表結構沿用原本正式報表..."):
-            workbooks = _compute_gmv_exclusion_workbooks(filtered["tour"], filtered["others"])
-            workbooks["audit"] = _build_gmv_audit_workbook(summary_rows, filtered["excluded_detail"], filtered["unmatched_ids"])
+    with st.expander("查看未匹配來源單據號", expanded=False):
+        st.dataframe(pd.DataFrame({"來源單據號": total_adjusted["unmatched_source_ids"]}), hide_index=True, width="stretch")
+
+    if st.button("生成總退款及已退款兩套完整報表", type="primary", width="stretch"):
+        with st.spinner("正在生成總退款及已退款兩套完整報表，報表結構沿用原本正式報表..."):
+            workbooks = {
+                "total": _compute_gmv_exclusion_workbooks(total_adjusted["tour"], total_adjusted["others"]),
+                "paid": _compute_gmv_exclusion_workbooks(paid_adjusted["tour"], paid_adjusted["others"]),
+            }
+            workbooks["total"]["audit"] = _build_gmv_audit_workbook(
+                total_summary_rows,
+                total_adjusted["adjusted_detail"],
+                total_adjusted["unmatched_source_ids"],
+                dimension="總退款",
+            )
+            workbooks["paid"]["audit"] = _build_gmv_audit_workbook(
+                paid_summary_rows,
+                paid_adjusted["adjusted_detail"],
+                paid_adjusted["unmatched_source_ids"],
+                dimension="已退款",
+            )
             st.session_state["GMV_EXCLUSION_WORKBOOKS"] = workbooks
-        st.success("GMV 排除版報表已生成，可在下方下載。")
+        st.success("總退款及已退款兩套退款扣減版報表已生成，可在下方下載。")
 
     workbooks = st.session_state.get("GMV_EXCLUSION_WORKBOOKS")
     if workbooks:
-        d1, d2, d3, d4 = st.columns(4)
-        with d1:
-            st.download_button(
-                "下載 GMV 排除版全維度報表",
-                workbooks.get("ex") or b"",
-                "GMV排除訂單_分社與專職_經營統計_V5.0.xlsx",
-                width="stretch",
-            )
-        with d2:
-            st.download_button(
-                "下載 GMV 排除版（不含掛賬核銷）",
-                workbooks.get("ex_no_writeoff") or b"",
-                "GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷.xlsx",
-                width="stretch",
-            )
-        with d3:
-            st.download_button(
-                "下載 GMV 排除版（正式口徑）",
-                workbooks.get("ex_no_writeoff_refund_transfer") or b"",
-                "GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷與TT退款轉團款.xlsx",
-                width="stretch",
-            )
-        with d4:
-            st.download_button(
-                "下載 GMV 排除匹配稽核",
-                workbooks.get("audit") or b"",
-                "GMV排除訂單_匹配稽核.xlsx",
-                width="stretch",
-            )
+        for dimension_key, dimension_label, suffix in (
+            ("total", "總退款", ""),
+            ("paid", "已退款", "_已退款"),
+        ):
+            dimension_workbooks = workbooks.get(dimension_key) or {}
+            st.caption(f"{dimension_label}退款扣減版下載")
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                st.download_button(
+                    f"下載{dimension_label}全維度報表",
+                    dimension_workbooks.get("ex") or b"",
+                    f"GMV排除訂單_分社與專職_經營統計_V5.0{suffix}.xlsx",
+                    width="stretch",
+                )
+            with d2:
+                st.download_button(
+                    f"下載{dimension_label}（不含掛賬核銷）",
+                    dimension_workbooks.get("ex_no_writeoff") or b"",
+                    f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷{suffix}.xlsx",
+                    width="stretch",
+                )
+            with d3:
+                st.download_button(
+                    f"下載{dimension_label}（正式口徑）",
+                    dimension_workbooks.get("ex_no_writeoff_refund_transfer") or b"",
+                    f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷與TT退款轉團款{suffix}.xlsx",
+                    width="stretch",
+                )
+            with d4:
+                st.download_button(
+                    f"下載{dimension_label}退款扣減稽核",
+                    dimension_workbooks.get("audit") or b"",
+                    f"GMV排除訂單_退款扣減稽核{suffix}.xlsx",
+                    width="stretch",
+                )
 
 def main() -> None:
     st.markdown(
