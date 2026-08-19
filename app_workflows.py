@@ -1045,6 +1045,100 @@ def _parse_gmv_exclusion_ids(file_obj) -> tuple[set[str], pd.DataFrame]:
     audit = pd.DataFrame({"交易號碼": sorted(set(ids.astype(str)))})
     return set(audit["交易號碼"].astype(str)), audit
 
+
+def _parse_gmv_refund_data(file_obj) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df = _read_gmv_exclusion_file(file_obj)
+    status_col = "退款状态" if "退款状态" in df.columns else "退款狀態"
+    required = {COL_ORDER_ID, "退款原幣金額", status_col}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"退款明細缺少必要欄位：{', '.join(missing)}")
+    work = df[[COL_ORDER_ID, "退款原幣金額", status_col]].copy()
+    work.rename(columns={status_col: "退款狀態"}, inplace=True)
+    work[COL_ORDER_ID] = clean_invoice_number(work[COL_ORDER_ID])
+    work["退款原幣金額"] = pd.to_numeric(work["退款原幣金額"], errors="coerce").fillna(0.0)
+    work = work.loc[(work[COL_ORDER_ID] != "") & (work[COL_ORDER_ID] != "NAN")]
+    return work.sort_values([COL_ORDER_ID, "退款狀態"]).reset_index(drop=True), work
+
+
+def _apply_gmv_refund_adjustments(
+    db_tour: pd.DataFrame,
+    db_others: pd.DataFrame,
+    refunds: pd.DataFrame,
+    refund_status: str | None = None,
+) -> dict:
+    tour = normalize_runtime_columns(db_tour.copy())
+    others = normalize_runtime_columns(db_others.copy())
+    refund_work = refunds.copy()
+    if "退款狀態" not in refund_work.columns and "退款状态" in refund_work.columns:
+        refund_work.rename(columns={"退款状态": "退款狀態"}, inplace=True)
+    if refund_work.empty:
+        refund_amounts = pd.Series(dtype=float, name="退款原幣金額")
+    else:
+        refund_work[COL_ORDER_ID] = clean_invoice_number(refund_work[COL_ORDER_ID])
+        refund_work["退款原幣金額"] = pd.to_numeric(
+            refund_work["退款原幣金額"], errors="coerce"
+        ).fillna(0.0)
+        refund_work = refund_work.loc[
+            (refund_work[COL_ORDER_ID] != "") & (refund_work[COL_ORDER_ID] != "NAN")
+        ]
+        if refund_status is not None:
+            refund_work = refund_work.loc[refund_work["退款狀態"] == refund_status]
+        refund_amounts = refund_work.groupby(COL_ORDER_ID)["退款原幣金額"].sum()
+
+    parts = []
+    for source_name, frame in (("旅行團", tour), ("其他業務", others)):
+        work = frame.copy()
+        work["退款前收款原幣金額"] = pd.to_numeric(
+            work.get(COL_MONEY, 0), errors="coerce"
+        ).fillna(0.0)
+        work["退款扣減金額"] = 0.0
+        work["資料表"] = source_name
+        work["__gmv_source_id"] = _order_id_series(work)
+        parts.append(work)
+
+    combined = pd.concat(parts, ignore_index=True, sort=False)
+    original_by_source = combined.groupby("__gmv_source_id")["退款前收款原幣金額"].sum()
+    matched_source_ids = set(refund_amounts.index) & set(original_by_source.index)
+    unmatched_source_ids = sorted(set(refund_amounts.index) - matched_source_ids)
+    applied_refund_total = 0.0
+    over_refund_total = 0.0
+
+    for source_id, raw_refund_amount in refund_amounts.items():
+        original_amount = float(original_by_source.get(source_id, 0.0))
+        refund_amount = max(float(raw_refund_amount), 0.0)
+        applied_amount = min(refund_amount, max(original_amount, 0.0)) if original_amount else 0.0
+        applied_refund_total += applied_amount
+        if source_id in matched_source_ids:
+            over_refund_total += max(refund_amount - applied_amount, 0.0)
+        if applied_amount <= 0 or original_amount <= 0:
+            continue
+        mask = combined["__gmv_source_id"] == source_id
+        combined.loc[mask, "退款扣減金額"] = (
+            combined.loc[mask, "退款前收款原幣金額"] / original_amount * applied_amount
+        )
+
+    combined[COL_MONEY] = (
+        combined["退款前收款原幣金額"] - combined["退款扣減金額"]
+    ).clip(lower=0.0)
+    adjusted_detail = combined.loc[combined["退款扣減金額"] > 0].copy()
+    adjusted_detail["退款後收款原幣金額"] = adjusted_detail[COL_MONEY]
+    adjusted_detail["退款維度"] = refund_status or "總退款"
+    tour = combined.loc[combined["資料表"] == "旅行團"].drop(columns=["__gmv_source_id"])
+    others = combined.loc[combined["資料表"] == "其他業務"].drop(columns=["__gmv_source_id"])
+    return {
+        "tour": tour,
+        "others": others,
+        "adjusted_detail": adjusted_detail.drop(columns=["__gmv_source_id"]),
+        "refund_total": float(refund_amounts.sum()),
+        "applied_refund_total": float(applied_refund_total),
+        "over_refund_total": float(over_refund_total),
+        "matched_source_ids": matched_source_ids,
+        "unmatched_source_ids": unmatched_source_ids,
+        "refund_amounts": refund_amounts,
+        "refund_status": refund_status or "總退款",
+    }
+
 def _order_id_series(df: pd.DataFrame) -> pd.Series:
     if df.empty or COL_ORDER_ID not in df.columns:
         return pd.Series("", index=df.index, dtype=str)
@@ -1088,28 +1182,29 @@ def _filter_gmv_exclusion_frames(
 def _gmv_amount(df: pd.DataFrame) -> float:
     return _sum_money(df)
 
-def _gmv_summary_rows(db_tour: pd.DataFrame, db_others: pd.DataFrame, filtered: dict, exclusion_ids: set[str]) -> list[dict]:
+def _gmv_summary_rows(db_tour: pd.DataFrame, db_others: pd.DataFrame, adjusted: dict) -> list[dict]:
     before = _gmv_amount(db_tour) + _gmv_amount(db_others)
-    excluded = _gmv_amount(filtered["excluded_tour"]) + _gmv_amount(filtered["excluded_others"])
-    after = _gmv_amount(filtered["tour"]) + _gmv_amount(filtered["others"])
+    after = _gmv_amount(adjusted["tour"]) + _gmv_amount(adjusted["others"])
     return [
-        {"指標": "排除清單筆數", "數值": len(exclusion_ids)},
-        {"指標": "成功匹配訂單數", "數值": len(filtered["matched_ids"])},
-        {"指標": "未匹配訂單數", "數值": len(filtered["unmatched_ids"])},
-        {"指標": "排除前 GMV", "數值": round(before, 2)},
-        {"指標": "排除金額", "數值": round(excluded, 2)},
-        {"指標": "排除後 GMV", "數值": round(after, 2)},
+        {"退款維度": adjusted["refund_status"], "指標": "退款來源訂單數", "數值": len(adjusted["refund_amounts"])},
+        {"退款維度": adjusted["refund_status"], "指標": "成功匹配來源訂單數", "數值": len(adjusted["matched_source_ids"])},
+        {"退款維度": adjusted["refund_status"], "指標": "未匹配來源訂單數", "數值": len(adjusted["unmatched_source_ids"])},
+        {"退款維度": adjusted["refund_status"], "指標": "排除前 GMV", "數值": round(before, 2)},
+        {"退款維度": adjusted["refund_status"], "指標": "退款明細金額", "數值": round(adjusted["refund_total"], 2)},
+        {"退款維度": adjusted["refund_status"], "指標": "實際扣減金額", "數值": round(adjusted["applied_refund_total"], 2)},
+        {"退款維度": adjusted["refund_status"], "指標": "超額退款金額", "數值": round(adjusted["over_refund_total"], 2)},
+        {"退款維度": adjusted["refund_status"], "指標": "退款扣減後 GMV", "數值": round(after, 2)},
     ]
 
 def _compute_gmv_exclusion_workbooks(filtered_tour: pd.DataFrame, filtered_others: pd.DataFrame) -> dict:
     return _compute_export_workbooks(filtered_tour, filtered_others)
 
-def _build_gmv_audit_workbook(summary_rows: list[dict], excluded_detail: pd.DataFrame, unmatched_ids: list[str]) -> bytes:
+def _build_gmv_audit_workbook(summary_rows: list[dict], adjusted_detail: pd.DataFrame, unmatched_ids: list[str], dimension: str = "總退款") -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="排除清單摘要", index=False)
-        excluded_detail.to_excel(writer, sheet_name="匹配排除明細", index=False)
-        pd.DataFrame({"交易號碼": unmatched_ids}).to_excel(writer, sheet_name="未匹配交易號碼", index=False)
+        pd.DataFrame(summary_rows).to_excel(writer, sheet_name=f"{dimension}摘要", index=False)
+        adjusted_detail.to_excel(writer, sheet_name=f"{dimension}扣減明細", index=False)
+        pd.DataFrame({"來源單據號": unmatched_ids}).to_excel(writer, sheet_name=f"{dimension}未匹配來源單據號", index=False)
     buf.seek(0)
     return buf.getvalue()
 
