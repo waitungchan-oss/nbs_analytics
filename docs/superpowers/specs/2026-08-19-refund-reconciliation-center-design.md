@@ -1,7 +1,7 @@
 # Refund Reconciliation Center Design
 
 **日期：** 2026-08-19  
-**狀態：** Draft for user review  
+**狀態：** Approved for implementation planning
 **範圍：** GMV 排除訂單看板的退款 Preflight、退款對帳引擎、退款對帳異常中心
 
 ## 1. 目標與決策
