@@ -35,3 +35,21 @@ def test_formal_labels_keep_total_refund_operational_and_quantity_original():
     assert "總退款" in source
     assert "已退款" in source
     assert "原交易人數／數量（未按退款調整）" in source
+
+
+def test_active_scope_reopens_without_refund_upload_and_supports_versioned_exports():
+    tab_source = _function_source("_render_gmv_exclusion_tab")
+    active_source = _function_source("_render_active_gmv_scope")
+
+    assert "build_active_gmv_read_model" in tab_source
+    assert "_render_active_gmv_scope" in tab_source
+    assert "生成 active version 總退款及已退款完整報表" in active_source
+    assert "GMV_ACTIVE_VERSION_WORKBOOKS" in active_source
+    assert '"version_id": model.version_id' in active_source
+
+
+def test_formal_preview_uses_revenue_only_generation_token():
+    source = _function_source("_render_gmv_exclusion_tab")
+
+    assert "revenue_state_token" in source
+    assert "load_cache_generation" not in source

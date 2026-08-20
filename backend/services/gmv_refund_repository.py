@@ -344,6 +344,23 @@ class GmvRefundRepository:
                 params=(version_id,),
             )
 
+    def load_reconciliation_snapshot(
+        self, version_id: str, refund_dimension: str
+    ) -> pd.DataFrame:
+        if refund_dimension not in {"TOTAL_REFUND", "REFUNDED"}:
+            raise ValueError("unsupported refund dimension")
+        with self.connect() as conn:
+            return pd.read_sql_query(
+                "SELECT source_receipt_no, refund_detail_amount_minor, "
+                "applied_refund_amount_minor, over_refund_amount_minor, "
+                "match_status, reason_code "
+                "FROM gmv_reconciliation_results "
+                "WHERE version_id = ? AND refund_dimension = ? "
+                "ORDER BY source_receipt_no",
+                conn,
+                params=(version_id, refund_dimension),
+            )
+
     def load_scope_history(self, limit: int = 20) -> tuple[dict[str, object], ...]:
         if limit < 1:
             raise ValueError("limit must be positive")

@@ -114,8 +114,10 @@ from backend.services.upload_lock_service import DEFAULT_COORDINATION_DB
 from backend.services.gmv_refund_service import (
     RevenueFrames,
     StaleGmvPreview,
+    build_active_gmv_read_model,
     confirm_refund_batch,
     preview_refund_batch,
+    revenue_state_token,
 )
 from backend.services.upload_orchestrator_service import execute_upload_operation
 from backend.services.receipt_exclusion_governance_service import (
@@ -2424,10 +2426,160 @@ def _render_dashboard_tab() -> None:
     _render_rank_and_drilldown(s1, t_df, o_df, rank_branch_sel, rank_sales_sel, rank_year_sel, rank_month_sel, rank_date_rng)
     _render_ai_and_exports(cache)
 
+def _load_current_gmv_revenue_frames() -> RevenueFrames:
+    raw_tour, raw_others = load_all_data_from_db()
+    formal_tour, formal_others, _ = _build_revenue_scope_frames(raw_tour, raw_others)
+    return RevenueFrames(raw_tour, raw_others, formal_tour, formal_others)
+
+
+def _render_active_gmv_scope(model, formal_tour: pd.DataFrame, formal_others: pd.DataFrame) -> None:
+    total_adjusted = model.total_adjusted
+    paid_adjusted = model.paid_adjusted
+    if not model.can_export or total_adjusted is None or paid_adjusted is None:
+        st.warning(
+            "正式淨 GMV 的主營收資料或業務規則已變更；為避免錯配，現有版本只顯示 provenance，"
+            "請重新執行退款 Preflight 並建立新 active version。"
+        )
+        return
+
+    total_summary_rows = _gmv_summary_rows(formal_tour, formal_others, total_adjusted)
+    paid_summary_rows = _gmv_summary_rows(formal_tour, formal_others, paid_adjusted)
+    paid_map = {row["指標"]: row["數值"] for row in paid_summary_rows}
+    total_map = {row["指標"]: row["數值"] for row in total_summary_rows}
+    _render_kpi_strip(
+        [
+            {
+                "label": "正式營收 GMV",
+                "value": _money_text(float(paid_map.get("排除前 GMV", 0))),
+                "delta": REVENUE_SCOPE_LABEL,
+                "note": "退款扣減前",
+                "accent": "#12239E",
+            },
+            {
+                "label": "總退款",
+                "value": _money_text(float(total_map.get("退款明細金額", 0))),
+                "delta": _money_text(float(total_map.get("實際扣減金額", 0))),
+                "note": "營運比較維度／實際可扣減",
+                "accent": "#E66C37",
+            },
+            {
+                "label": "已退款扣減",
+                "value": _money_text(float(paid_map.get("實際扣減金額", 0))),
+                "delta": f"來源訂單 {int(paid_map.get('退款來源訂單數', 0)):,}",
+                "note": "正式淨 GMV 扣減維度",
+                "accent": "#118DFF",
+            },
+            {
+                "label": "正式淨 GMV",
+                "value": _money_text(float(paid_map.get("退款扣減後 GMV", 0))),
+                "delta": f"version {model.version_id}",
+                "note": "主營收減已退款",
+                "accent": "#197278",
+            },
+        ]
+    )
+    st.caption("正式淨 GMV 摘要（active version）")
+    st.dataframe(
+        pd.DataFrame(total_summary_rows + paid_summary_rows),
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption("旅行團人數／票務數量：原交易人數／數量（未按退款調整）")
+    detail_columns = [
+        column
+        for column in [
+            "資料表", COL_ORDER_ID, "退款維度", "退款前收款原幣金額",
+            "退款扣減金額", "退款後收款原幣金額", COL_DATE, COL_BRANCH,
+            COL_SALESPERSON, "來源報表標籤", "收款類型", "收款方式",
+        ]
+        if column in total_adjusted["adjusted_detail"].columns
+    ]
+    st.caption("總退款扣減明細")
+    st.dataframe(
+        total_adjusted["adjusted_detail"][detail_columns]
+        if detail_columns else total_adjusted["adjusted_detail"],
+        hide_index=True,
+        width="stretch",
+    )
+    with st.expander("查看已退款維度扣減明細", expanded=False):
+        st.dataframe(
+            paid_adjusted["adjusted_detail"][detail_columns]
+            if detail_columns else paid_adjusted["adjusted_detail"],
+            hide_index=True,
+            width="stretch",
+        )
+
+    export_state_key = "GMV_ACTIVE_VERSION_WORKBOOKS"
+    cached = st.session_state.get(export_state_key) or {}
+    if cached.get("version_id") != model.version_id:
+        st.session_state.pop(export_state_key, None)
+        cached = {}
+    if st.button(
+        "生成 active version 總退款及已退款完整報表",
+        type="primary",
+        key="GMV_ACTIVE_EXPORT_BUILD",
+        width="stretch",
+    ):
+        with st.spinner("正在按 active version 生成兩套完整報表..."):
+            audit_workbooks = build_formal_gmv_workbooks(
+                total_adjusted=total_adjusted,
+                paid_adjusted=paid_adjusted,
+                total_summary_rows=total_summary_rows,
+                paid_summary_rows=paid_summary_rows,
+                provenance={
+                    "version_id": model.version_id,
+                    "quantity_basis": "原交易人數／數量（未按退款調整）",
+                    "revenue_scope": REVENUE_SCOPE_LABEL,
+                },
+            )
+            workbooks = {
+                "total": _compute_gmv_exclusion_workbooks(
+                    total_adjusted["tour"], total_adjusted["others"]
+                ),
+                "paid": _compute_gmv_exclusion_workbooks(
+                    paid_adjusted["tour"], paid_adjusted["others"]
+                ),
+            }
+            workbooks["total"]["audit"] = audit_workbooks["total"]
+            workbooks["paid"]["audit"] = audit_workbooks["paid"]
+            st.session_state[export_state_key] = {
+                "version_id": model.version_id,
+                "workbooks": workbooks,
+            }
+            cached = st.session_state[export_state_key]
+        st.success("active version 兩套完整報表已生成。")
+
+    for dimension_key, dimension_label, suffix in (
+        ("total", "總退款", ""),
+        ("paid", "已退款", "_已退款"),
+    ):
+        workbooks = (cached.get("workbooks") or {}).get(dimension_key) or {}
+        if not workbooks:
+            continue
+        st.caption(f"{dimension_label}退款扣減版下載")
+        columns = st.columns(4)
+        downloads = (
+            ("ex", "全維度報表", f"GMV排除訂單_分社與專職_經營統計_V5.0{suffix}.xlsx"),
+            ("ex_no_writeoff", "不含掛賬核銷", f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷{suffix}.xlsx"),
+            ("ex_no_writeoff_refund_transfer", "正式口徑", f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷與TT退款轉團款{suffix}.xlsx"),
+            ("audit", "退款扣減稽核", f"GMV排除訂單_退款扣減稽核{suffix}.xlsx"),
+        )
+        for column, (workbook_key, label, filename) in zip(columns, downloads):
+            with column:
+                st.download_button(
+                    f"下載{dimension_label}{label}",
+                    workbooks.get(workbook_key) or b"",
+                    filename,
+                    key=f"GMV_ACTIVE_DOWNLOAD_{dimension_key}_{workbook_key}_{model.version_id}",
+                    width="stretch",
+                )
+
+
 def _render_gmv_exclusion_tab() -> None:
     _render_section(
         "GMV 排除訂單看板",
-        "上傳退款明細後，系統按來源單據號彙總退款原幣金額，從原收款金額扣減，生成獨立 GMV 視角與同規格報表；不回寫 SQLite。",
+        "上傳退款明細後，系統按來源單據號彙總退款原幣金額並生成獨立 GMV 視角；"
+        "Preview 不寫入 SQLite，只有人工確認後才建立新的正式 active version。",
         "🧾",
     )
     upload = st.file_uploader(
@@ -2458,6 +2610,12 @@ def _render_gmv_exclusion_tab() -> None:
         st.info("目前 SQLite 尚無資料，請先在經營分析大盤上傳主副表。")
         return
     formal_tour, formal_others, _ = _build_revenue_scope_frames(db_tour, db_others)
+    revenue_frames = RevenueFrames(
+        raw_tour=db_tour,
+        raw_others=db_others,
+        formal_tour=formal_tour,
+        formal_others=formal_others,
+    )
 
     active_version_id = None
     if formal_scope_loaded:
@@ -2474,6 +2632,14 @@ def _render_gmv_exclusion_tab() -> None:
                 st.caption("正式淨 GMV active version")
                 st.dataframe(pd.DataFrame([active_scope]), hide_index=True, width="stretch")
                 st.caption("正式淨 GMV 只扣減『已退款』；總退款保留為營運比較維度。")
+                active_model = build_active_gmv_read_model(
+                    repository,
+                    revenue_frames,
+                    rule_version=REVENUE_SCOPE_LABEL,
+                )
+                if not upload:
+                    _render_active_gmv_scope(active_model, formal_tour, formal_others)
+                    return
         if not upload:
             return
     if not upload:
@@ -2533,18 +2699,11 @@ def _render_gmv_exclusion_tab() -> None:
         st.success("退款 Preflight 通過，可進入總退款與已退款 GMV 扣減。")
 
     if formal_scope_loaded and schema_status.ready:
-        generation_token = str(
-            load_cache_generation(db_path=database_module.DB_FILE).get("cacheToken") or "0:missing"
-        )
+        generation_token = revenue_state_token(revenue_frames, REVENUE_SCOPE_LABEL)
         formal_preview = preview_refund_batch(
             refund_data,
             repository=repository,
-            revenue_frames=RevenueFrames(
-                raw_tour=db_tour,
-                raw_others=db_others,
-                formal_tour=formal_tour,
-                formal_others=formal_others,
-            ),
+            revenue_frames=revenue_frames,
             revenue_generation_token=generation_token,
             rule_version=REVENUE_SCOPE_LABEL,
             file_sha256=hashlib.sha256(upload.getvalue()).hexdigest(),
@@ -2583,15 +2742,9 @@ def _render_gmv_exclusion_tab() -> None:
                     acknowledgements=frozenset({"TOTAL_REFUND_OPERATIONAL_ONLY"}),
                     db_path=database_module.DB_FILE,
                     coordination_db_path=DEFAULT_COORDINATION_DB,
-                    revenue_loader=lambda: RevenueFrames(
-                        raw_tour=db_tour,
-                        raw_others=db_others,
-                        formal_tour=formal_tour,
-                        formal_others=formal_others,
-                    ),
-                    revenue_generation_loader=lambda: str(
-                        load_cache_generation(db_path=database_module.DB_FILE).get("cacheToken")
-                        or "0:missing"
+                    revenue_loader=_load_current_gmv_revenue_frames,
+                    revenue_generation_loader=lambda: revenue_state_token(
+                        _load_current_gmv_revenue_frames(), REVENUE_SCOPE_LABEL
                     ),
                 )
                 st.success(

@@ -6,6 +6,7 @@ import pytest
 from backend.services.gmv_refund_models import RefundCurrentState
 from backend.services.gmv_refund_repository import GmvRefundRepository, migrate_gmv_schema
 from backend.services.gmv_refund_service import (
+    build_active_gmv_read_model,
     InjectedGmvFailure,
     RevenueFrames,
     deactivate_gmv_scope,
@@ -14,6 +15,7 @@ from backend.services.gmv_refund_service import (
     rollback_gmv_scope,
     confirm_refund_batch,
     preview_refund_batch,
+    revenue_state_token,
 )
 from backend.services.upload_lock_service import UploadBusyError, acquire_upload_lease
 from app_workflows import _gmv_revenue_row_fingerprint
@@ -129,6 +131,194 @@ def test_revenue_row_fingerprint_is_stable_and_amount_sensitive():
 
     assert first == second
     assert first != changed
+
+
+def test_revenue_row_fingerprint_distinguishes_identical_row_occurrences():
+    row = pd.Series(
+        {
+            "來源單據號": "S-1",
+            "收款時間": "2026-08-20",
+            "收款原幣金額": 50.0,
+            "__gmv_row_ordinal": 0,
+        }
+    )
+    duplicate = row.copy()
+    duplicate["__gmv_row_ordinal"] = 1
+
+    assert _gmv_revenue_row_fingerprint("旅行團", row) != _gmv_revenue_row_fingerprint(
+        "旅行團", duplicate
+    )
+
+
+def test_revenue_row_fingerprint_uses_pre_refund_amount_for_adjusted_rows():
+    first = pd.Series(
+        {
+            "來源單據號": "S-1",
+            "收款時間": "2026-08-20",
+            "收款原幣金額": 0.0,
+            "退款前收款原幣金額": 50.0,
+            "__gmv_row_ordinal": 0,
+        }
+    )
+    second = first.copy()
+    second["退款前收款原幣金額"] = 80.0
+
+    assert _gmv_revenue_row_fingerprint("旅行團", first) != _gmv_revenue_row_fingerprint(
+        "旅行團", second
+    )
+
+
+def test_revenue_state_token_is_order_independent_and_sensitive_to_revenue_and_rules():
+    frames = _frames()
+    reordered = RevenueFrames(
+        raw_tour=frames.raw_tour.iloc[::-1].reset_index(drop=True),
+        raw_others=frames.raw_others,
+        formal_tour=frames.formal_tour,
+        formal_others=frames.formal_others,
+    )
+    changed_tour = frames.formal_tour.copy()
+    changed_tour.loc[changed_tour.index[0], "收款原幣金額"] = 101.0
+    changed = RevenueFrames(
+        raw_tour=frames.raw_tour,
+        raw_others=frames.raw_others,
+        formal_tour=changed_tour,
+        formal_others=frames.formal_others,
+    )
+
+    token = revenue_state_token(frames, "rules-1")
+
+    assert token == revenue_state_token(reordered, "rules-1")
+    assert token != revenue_state_token(changed, "rules-1")
+    assert token != revenue_state_token(frames, "rules-2")
+
+
+def test_confirm_preserves_identical_revenue_rows_and_snapshot_money_invariant(tmp_path):
+    db_path = _seed_database(tmp_path / "nbs.db")
+    duplicate_tour = pd.DataFrame(
+        [
+            {"來源單據號": "S-1", "收款原幣金額": 50.0, "收款時間": "2026-08-20"},
+            {"來源單據號": "S-1", "收款原幣金額": 50.0, "收款時間": "2026-08-20"},
+        ]
+    )
+    frames = RevenueFrames(
+        raw_tour=duplicate_tour,
+        raw_others=pd.DataFrame(),
+        formal_tour=duplicate_tour.copy(),
+        formal_others=pd.DataFrame(),
+    )
+    token = revenue_state_token(frames, "rules-1")
+    preview = preview_refund_batch(
+        pd.DataFrame(
+            [{"退款單號": "R-1", "來源單據號": "S-1", "退款原幣金額": "50", "退款狀態": "已退款"}]
+        ),
+        repository=GmvRefundRepository(db_path),
+        revenue_frames=frames,
+        revenue_generation_token=token,
+        rule_version="rules-1",
+        file_sha256="duplicates-file",
+    )
+
+    receipt = confirm_refund_batch(
+        preview,
+        actor="tester",
+        acknowledgements=frozenset(),
+        db_path=db_path,
+        coordination_db_path=tmp_path / "coordination.db",
+        revenue_loader=lambda: frames,
+        revenue_generation_loader=lambda: token,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        snapshot = conn.execute(
+            "SELECT COUNT(*), SUM(applied_refund_amount_minor) "
+            "FROM gmv_adjustment_snapshot WHERE version_id = ?",
+            (receipt.version_id,),
+        ).fetchone()
+        metric = conn.execute(
+            "SELECT metric_amount_minor FROM gmv_metric_snapshot "
+            "WHERE version_id = ? AND refund_dimension = 'REFUNDED' "
+            "AND metric_name = 'APPLIED_REFUND'",
+            (receipt.version_id,),
+        ).fetchone()[0]
+
+    assert snapshot == (2, 5000)
+    assert metric == snapshot[1]
+
+
+def test_active_read_model_reopens_both_refund_dimensions_without_upload(tmp_path):
+    db_path = _seed_database(tmp_path / "nbs.db")
+    frames = _frames()
+    token = revenue_state_token(frames, "rules-1")
+    preview = preview_refund_batch(
+        pd.DataFrame(
+            [
+                {"退款單號": "R-1", "來源單據號": "S-1", "退款原幣金額": "50", "退款狀態": "已退款"},
+                {"退款單號": "R-2", "來源單據號": "S-1", "退款原幣金額": "20", "退款狀態": "退款中"},
+            ]
+        ),
+        repository=GmvRefundRepository(db_path),
+        revenue_frames=frames,
+        revenue_generation_token=token,
+        rule_version="rules-1",
+        file_sha256="active-read-file",
+    )
+    receipt = confirm_refund_batch(
+        preview,
+        actor="tester",
+        acknowledgements=frozenset(),
+        db_path=db_path,
+        coordination_db_path=tmp_path / "coordination.db",
+        revenue_loader=lambda: frames,
+        revenue_generation_loader=lambda: token,
+    )
+
+    model = build_active_gmv_read_model(
+        GmvRefundRepository(db_path), frames, rule_version="rules-1"
+    )
+
+    assert model.status == "CURRENT"
+    assert model.version_id == receipt.version_id
+    assert model.can_export is True
+    assert model.total_adjusted["refund_total"] == 70.0
+    assert model.paid_adjusted["refund_total"] == 50.0
+    assert model.total_adjusted["applied_refund_total"] == 70.0
+    assert model.paid_adjusted["applied_refund_total"] == 50.0
+
+
+def test_active_read_model_fails_closed_when_revenue_changes(tmp_path):
+    db_path = _seed_database(tmp_path / "nbs.db")
+    frames = _frames()
+    token = revenue_state_token(frames, "rules-1")
+    preview = preview_refund_batch(
+        pd.DataFrame(
+            [{"退款單號": "R-1", "來源單據號": "S-1", "退款原幣金額": "50", "退款狀態": "已退款"}]
+        ),
+        repository=GmvRefundRepository(db_path),
+        revenue_frames=frames,
+        revenue_generation_token=token,
+        rule_version="rules-1",
+        file_sha256="stale-read-file",
+    )
+    confirm_refund_batch(
+        preview,
+        actor="tester",
+        acknowledgements=frozenset(),
+        db_path=db_path,
+        coordination_db_path=tmp_path / "coordination.db",
+        revenue_loader=lambda: frames,
+        revenue_generation_loader=lambda: token,
+    )
+    changed = _frames()
+    changed.formal_tour.loc[changed.formal_tour.index[0], "收款原幣金額"] = 101.0
+
+    model = build_active_gmv_read_model(
+        GmvRefundRepository(db_path), changed, rule_version="rules-1"
+    )
+
+    assert model.status == "STALE_REVENUE_GENERATION"
+    assert model.can_export is False
+    assert model.total_adjusted is None
+    assert model.paid_adjusted is None
 
 
 def test_preview_requires_refund_order_business_key(tmp_path):

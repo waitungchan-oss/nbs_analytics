@@ -1149,13 +1149,34 @@ def _gmv_revenue_row_fingerprint(table_name: str, row: pd.Series) -> str:
         "table": str(table_name),
         "source_receipt_no": str(row.get(COL_ORDER_ID, "") or "").strip(),
         "receipt_time": str(row.get(COL_DATE, "") or "").strip(),
-        "amount_minor": money_to_minor(row.get(COL_MONEY, 0)),
+        "amount_minor": money_to_minor(
+            row.get("退款前收款原幣金額", row.get(COL_MONEY, 0))
+        ),
         "branch": str(row.get(COL_BRANCH, "") or "").strip(),
         "salesperson": str(row.get(COL_SALESPERSON, "") or "").strip(),
+        "duplicate_ordinal": int(row.get("__gmv_row_ordinal", 0) or 0),
     }
     if not payload["source_receipt_no"]:
         raise ValueError("source receipt number is required for GMV row fingerprint")
     return canonical_payload_sha256(payload)
+
+
+def _attach_gmv_row_ordinals(table_name: str, frame: pd.DataFrame) -> pd.DataFrame:
+    work = frame.copy()
+    if work.empty:
+        work["__gmv_row_ordinal"] = pd.Series(dtype="int64")
+        return work
+    def base_hash(row: pd.Series) -> str:
+        if not str(row.get(COL_ORDER_ID, "") or "").strip():
+            return f"__empty_source__:{row.name}"
+        return _gmv_revenue_row_fingerprint(
+            table_name,
+            row.drop(labels=["__gmv_row_ordinal"], errors="ignore"),
+        )
+
+    base_hashes = work.apply(base_hash, axis=1)
+    work["__gmv_row_ordinal"] = base_hashes.groupby(base_hashes, sort=False).cumcount()
+    return work
 
 
 def _apply_gmv_refund_adjustments(
@@ -1185,7 +1206,7 @@ def _apply_gmv_refund_adjustments(
 
     parts = []
     for source_name, frame in (("旅行團", tour), ("其他業務", others)):
-        work = frame.copy()
+        work = _attach_gmv_row_ordinals(source_name, frame)
         work["退款前收款原幣金額"] = pd.to_numeric(
             work.get(COL_MONEY, 0), errors="coerce"
         ).fillna(0.0)

@@ -77,6 +77,52 @@ class GmvRefundPreview:
     proposed_states: tuple[RefundCurrentState, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class GmvActiveReadModel:
+    status: str
+    version_id: str | None
+    scope: dict[str, object] | None
+    metrics: pd.DataFrame
+    total_adjusted: dict[str, object] | None
+    paid_adjusted: dict[str, object] | None
+    can_export: bool
+
+
+def _canonical_frame_sha256(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return canonical_payload_sha256({"columns": sorted(map(str, frame.columns)), "rows": []})
+    columns = sorted(map(str, frame.columns))
+    work = frame.reindex(columns=columns).copy()
+
+    def normalize(value: object) -> str:
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, pd.Timestamp):
+            return value.isoformat()
+        return str(value).strip()
+
+    rows = sorted(tuple(normalize(value) for value in row) for row in work.itertuples(index=False, name=None))
+    return canonical_payload_sha256({"columns": columns, "rows": rows})
+
+
+def revenue_state_token(frames: RevenueFrames, rule_version: str) -> str:
+    """Fingerprint only revenue inputs, never unrelated tables in the SQLite file."""
+    digest = canonical_payload_sha256(
+        {
+            "schema": "gmv-revenue-state-v1",
+            "ruleVersion": str(rule_version),
+            "rawTour": _canonical_frame_sha256(frames.raw_tour),
+            "rawOthers": _canonical_frame_sha256(frames.raw_others),
+            "formalTour": _canonical_frame_sha256(frames.formal_tour),
+            "formalOthers": _canonical_frame_sha256(frames.formal_others),
+        }
+    )
+    return f"gmv-revenue-state-v1:{digest}"
+
+
 def _row_hash(row: Mapping[str, object]) -> str:
     return canonical_payload_sha256(dict(row))
 
@@ -283,21 +329,45 @@ def _insert_reconciliation_rows(conn, version_id: str, frames: RevenueFrames, st
         # projection. The total-refund dimension remains available in the
         # dashboard/export path and its reconciliation result/metrics.
         if status == "已退款":
-            for row in adjusted["adjusted_detail"].itertuples(index=False):
-                source_table = str(getattr(row, "資料表", ""))
-                source_receipt = str(getattr(row, "來源單據號", ""))
+            snapshot_rows = adjusted["adjusted_detail"].to_dict(orient="records")
+            expected_applied_minor = money_to_minor(adjusted["applied_refund_total"])
+            applied_minors = [
+                money_to_minor(row.get("退款扣減金額", 0)) for row in snapshot_rows
+            ]
+            residual = expected_applied_minor - sum(applied_minors)
+            if residual and snapshot_rows:
+                for index in range(len(snapshot_rows) - 1, -1, -1):
+                    before_minor = money_to_minor(
+                            snapshot_rows[index].get("退款前收款原幣金額", 0)
+                    )
+                    candidate = applied_minors[index] + residual
+                    if 0 <= candidate <= before_minor:
+                        applied_minors[index] = candidate
+                        residual = 0
+                        break
+            if residual:
+                raise ValueError("GMV adjustment minor-unit allocation is not conserved")
+            for row, applied_minor in zip(snapshot_rows, applied_minors):
+                source_table = str(row.get("資料表", ""))
+                source_receipt = str(row.get("來源單據號", ""))
                 if not source_receipt:
                     continue
-                before = money_to_minor(getattr(row, "退款前收款原幣金額", 0))
-                applied_minor = money_to_minor(getattr(row, "退款扣減金額", 0))
-                after = money_to_minor(getattr(row, "退款後收款原幣金額", 0))
+                before = money_to_minor(row.get("退款前收款原幣金額", 0))
+                after = before - applied_minor
                 from app_workflows import _gmv_revenue_row_fingerprint
-                fingerprint = _gmv_revenue_row_fingerprint(source_table, pd.Series(row._asdict()))
+                fingerprint = _gmv_revenue_row_fingerprint(source_table, pd.Series(row))
                 conn.execute(
-                    "INSERT OR IGNORE INTO gmv_adjustment_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO gmv_adjustment_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (version_id, source_table, fingerprint, source_receipt, "UNKNOWN", None, before, applied_minor, after, 1000000, None, None, None),
                 )
                 adjustment_hashes.append(fingerprint)
+            persisted_applied_minor = conn.execute(
+                "SELECT COALESCE(SUM(applied_refund_amount_minor), 0) "
+                "FROM gmv_adjustment_snapshot WHERE version_id = ?",
+                (version_id,),
+            ).fetchone()[0]
+            if persisted_applied_minor != expected_applied_minor:
+                raise ValueError("GMV adjustment snapshot does not reconcile to paid-refund metric")
         for metric_name, amount, count, basis in (
             ("REFUND_DETAIL", adjusted["refund_total"], len(adjusted["refund_amounts"]), "NOT_APPLICABLE"),
             ("APPLIED_REFUND", adjusted["applied_refund_total"], len(adjusted["matched_source_ids"]), "NOT_APPLICABLE"),
@@ -438,6 +508,80 @@ def load_gmv_scope_status(repository: GmvRefundRepository, current_revenue_token
         return {"status": "NOT_INITIALIZED", "version_id": None}
     status = "CURRENT" if active["revenue_generation_token"] == current_revenue_token else "STALE_REVENUE_GENERATION"
     return {"status": status, **active}
+
+
+def _refund_frame_from_reconciliation(
+    repository: GmvRefundRepository,
+    version_id: str,
+    refund_dimension: str,
+) -> pd.DataFrame:
+    snapshot = repository.load_reconciliation_snapshot(version_id, refund_dimension)
+    if snapshot.empty:
+        return pd.DataFrame(
+            columns=["退款單號", "來源單據號", "退款原幣金額", "退款狀態"]
+        )
+    status = "已退款" if refund_dimension == "REFUNDED" else "總退款"
+    return pd.DataFrame(
+        {
+            "退款單號": [f"{refund_dimension}:{value}" for value in snapshot["source_receipt_no"]],
+            "來源單據號": snapshot["source_receipt_no"].astype(str),
+            "退款原幣金額": snapshot["refund_detail_amount_minor"].astype("int64") / 100,
+            "退款狀態": status,
+        }
+    )
+
+
+def build_active_gmv_read_model(
+    repository: GmvRefundRepository,
+    revenue_frames: RevenueFrames,
+    *,
+    rule_version: str,
+) -> GmvActiveReadModel:
+    """Reopen the immutable active GMV version without requiring its source upload."""
+    active = repository.load_active_scope()
+    if active is None:
+        return GmvActiveReadModel(
+            "NOT_INITIALIZED", None, None, pd.DataFrame(), None, None, False
+        )
+    version_id = str(active["version_id"])
+    current_token = revenue_state_token(revenue_frames, rule_version)
+    if active["revenue_generation_token"] != current_token:
+        return GmvActiveReadModel(
+            "STALE_REVENUE_GENERATION",
+            version_id,
+            active,
+            repository.load_metric_snapshot(version_id),
+            None,
+            None,
+            False,
+        )
+
+    from app_workflows import _apply_gmv_refund_adjustments
+
+    total_rows = _refund_frame_from_reconciliation(
+        repository, version_id, "TOTAL_REFUND"
+    )
+    paid_rows = _refund_frame_from_reconciliation(
+        repository, version_id, "REFUNDED"
+    )
+    total_adjusted = _apply_gmv_refund_adjustments(
+        revenue_frames.formal_tour, revenue_frames.formal_others, total_rows
+    )
+    paid_adjusted = _apply_gmv_refund_adjustments(
+        revenue_frames.formal_tour,
+        revenue_frames.formal_others,
+        paid_rows,
+        refund_status="已退款",
+    )
+    return GmvActiveReadModel(
+        "CURRENT",
+        version_id,
+        active,
+        repository.load_metric_snapshot(version_id),
+        total_adjusted,
+        paid_adjusted,
+        True,
+    )
 
 
 def _insert_scope_event(conn, event_id: str, event_type: str, from_version_id: str | None, to_version_id: str | None, reason: str, actor: str, timestamp: str) -> None:
