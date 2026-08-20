@@ -1142,6 +1142,22 @@ def _parse_gmv_refund_data(file_obj) -> tuple[pd.DataFrame, pd.DataFrame]:
     return work, work.copy()
 
 
+def _gmv_revenue_row_fingerprint(table_name: str, row: pd.Series) -> str:
+    from backend.services.gmv_refund_models import canonical_payload_sha256, money_to_minor
+
+    payload = {
+        "table": str(table_name),
+        "source_receipt_no": str(row.get(COL_ORDER_ID, "") or "").strip(),
+        "receipt_time": str(row.get(COL_DATE, "") or "").strip(),
+        "amount_minor": money_to_minor(row.get(COL_MONEY, 0)),
+        "branch": str(row.get(COL_BRANCH, "") or "").strip(),
+        "salesperson": str(row.get(COL_SALESPERSON, "") or "").strip(),
+    }
+    if not payload["source_receipt_no"]:
+        raise ValueError("source receipt number is required for GMV row fingerprint")
+    return canonical_payload_sha256(payload)
+
+
 def _apply_gmv_refund_adjustments(
     db_tour: pd.DataFrame,
     db_others: pd.DataFrame,
@@ -1595,14 +1611,68 @@ def _gmv_summary_rows(db_tour: pd.DataFrame, db_others: pd.DataFrame, adjusted: 
 def _compute_gmv_exclusion_workbooks(filtered_tour: pd.DataFrame, filtered_others: pd.DataFrame) -> dict:
     return _compute_export_workbooks(filtered_tour, filtered_others)
 
-def _build_gmv_audit_workbook(summary_rows: list[dict], adjusted_detail: pd.DataFrame, unmatched_ids: list[str], dimension: str = "總退款") -> bytes:
+def _build_gmv_audit_workbook(
+    summary_rows: list[dict],
+    adjusted_detail: pd.DataFrame,
+    unmatched_ids: list[str],
+    dimension: str = "總退款",
+    provenance: dict | None = None,
+) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name=f"{dimension}摘要", index=False)
         adjusted_detail.to_excel(writer, sheet_name=f"{dimension}扣減明細", index=False)
         pd.DataFrame({"來源單據號": unmatched_ids}).to_excel(writer, sheet_name=f"{dimension}未匹配來源單據號", index=False)
+        if provenance:
+            pd.DataFrame(
+                [{"欄位": str(key), "值": value} for key, value in provenance.items()]
+            ).to_excel(writer, sheet_name="Provenance", index=False)
     buf.seek(0)
     return buf.getvalue()
+
+
+def build_formal_gmv_workbooks(
+    *,
+    total_adjusted: dict,
+    paid_adjusted: dict,
+    total_summary_rows: list[dict],
+    paid_summary_rows: list[dict],
+    provenance: dict,
+) -> dict[str, bytes]:
+    """Build the three audit exports for the dual formal GMV dimensions.
+
+    The ordinary dashboard workbooks remain produced by the existing export
+    path. These compact audit workbooks make the dimension and source version
+    explicit without changing the established export schema.
+    """
+    common = dict(provenance or {})
+    common.setdefault("quantity_basis", "原交易人數／數量（未按退款調整）")
+    total = _build_gmv_audit_workbook(
+        total_summary_rows,
+        total_adjusted["adjusted_detail"],
+        total_adjusted["unmatched_source_ids"],
+        dimension="總退款",
+        provenance={**common, "refund_dimension": "總退款"},
+    )
+    paid = _build_gmv_audit_workbook(
+        paid_summary_rows,
+        paid_adjusted["adjusted_detail"],
+        paid_adjusted["unmatched_source_ids"],
+        dimension="已退款",
+        provenance={**common, "refund_dimension": "已退款"},
+    )
+    formal = _build_gmv_audit_workbook(
+        paid_summary_rows,
+        paid_adjusted["adjusted_detail"],
+        paid_adjusted["unmatched_source_ids"],
+        dimension="正式淨GMV",
+        provenance={
+            **common,
+            "refund_dimension": "已退款",
+            "official_scope": "正式淨GMV",
+        },
+    )
+    return {"total": total, "paid": paid, "formal": formal}
 
 def _compute_ai_runtime_outputs(analysis_tour: pd.DataFrame, analysis_others: pd.DataFrame) -> dict:
     backtest_report, backtest_err = run_ai_backtest_report(analysis_tour, analysis_others)
