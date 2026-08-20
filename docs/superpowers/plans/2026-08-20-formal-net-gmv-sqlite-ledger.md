@@ -119,9 +119,9 @@ def test_home_regression_must_satisfy_both_relative_and_absolute_gates():
 
 Expected: FAIL because the benchmark module does not exist.
 
-- [ ] **Step 3: Implement a read-only Streamlit AppTest harness**
+- [ ] **Step 3: Implement a read-only dashboard data-preparation harness**
 
-Use `streamlit.testing.v1.AppTest.from_file("app.py")`. Run one untimed warm-up, then 10 timed `.run()` calls. Record only elapsed milliseconds, app exception count, resolved DB identity hash, `tour_data`／`others_data` row counts, Git HEAD and timestamp. Do not record business rows, trigger downloads, upload files or write SQLite.
+Call the existing `load_all_data_from_db()` and `_build_revenue_scope_frames()` path directly, with one untimed warm-up followed by 10 timed iterations. This avoids conflating the full Streamlit page's AI／Memory／all-tab rendering with the revenue data-preparation hot path. Record only elapsed milliseconds, resolved DB identity hash, `tour_data`／`others_data` row counts, formal row counts, Git HEAD and timestamp. Do not record business rows, trigger downloads, upload files or write SQLite.
 
 CLI contract:
 
@@ -130,7 +130,7 @@ CLI contract:
 .venv/bin/python scripts/benchmark_gmv_page_load.py --mode candidate --iterations 10 --baseline /tmp/nbs-gmv-baseline.json --output /tmp/nbs-gmv-candidate.json
 ```
 
-Candidate passes only when homepage median regression is both no more than `300 ms` and no more than `5%` of baseline. AppTest exceptions fail the run.
+Candidate passes only when dashboard data-preparation median regression is both no more than `300 ms` and no more than `5%` of baseline. Missing or changing row counts fail the run.
 
 - [ ] **Step 4: Capture the pre-change baseline**
 
@@ -141,7 +141,7 @@ Candidate passes only when homepage median regression is both no more than `300 
 git diff --check
 ```
 
-Expected: tests pass, baseline contains 10 warm samples and zero app exceptions.
+Expected: tests pass, baseline contains 10 warm samples, stable formal row counts and no measurement errors.
 
 - [ ] **Step 5: Findings-first Review and main-Codex commit**
 
@@ -871,7 +871,7 @@ Tests assert:
 - import/render never performs migration;
 - one active scope summary query is supported by indexes and has no full scan over observation/reconciliation ledgers;
 - workbook builder is not invoked by Dashboard data preparation;
-- benchmark comparison fails if homepage median regression exceeds either `300 ms` or `5%` of baseline;
+- benchmark comparison fails if dashboard data-preparation median regression exceeds either `300 ms` or `5%` of baseline;
 - indexed active read target is `< 100 ms` median;
 - GMV Dashboard data preparation target is `< 1.5 s` median, excluding workbook generation.
 
@@ -991,6 +991,6 @@ Documentation updates to `NBS_ANALYTICS_SYSTEM_MAP.md` and `NBS_ANALYTICS_HANDOF
 - Incremental refund uploads update current state by `退款單號`; status transitions do not become duplicate append-only business state.
 - Official net GMV deducts only exact `已退款`; `總退款` remains available as an operational dimension.
 - Confirm/rebuild/rollback/deactivate are lease-protected, atomic, auditable and fail closed on stale evidence.
-- Dashboard uses lazy active snapshots and does not regress homepage median beyond `300 ms` or `5%`.
+- Dashboard uses lazy active snapshots and does not regress the measured dashboard data-preparation median beyond `300 ms` or `5%`.
 - Exports contain total, paid and formal products with provenance; quantity values remain original and visibly labelled.
 - Targeted tests, complete pytest, findings-first Review, Hermes, temp migration, private-file parity, actual Streamlit UI and performance gates all pass with captured evidence.
