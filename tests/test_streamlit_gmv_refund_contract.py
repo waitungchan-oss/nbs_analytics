@@ -41,8 +41,9 @@ def test_gmv_tab_exposes_exception_download_and_clears_stale_state():
     assert 'st.session_state.pop("GMV_REFUND_EXCEPTION_ROWS"' in source
 
 
-def test_gmv_tab_keeps_read_only_boundary_visible():
+def test_gmv_tab_distinguishes_read_only_preview_from_confirmed_ledger_write():
     source = _function_source("_render_gmv_exclusion_tab")
 
-    assert "不回寫 SQLite" in source
+    assert "Preview 不寫入 SQLite" in source
+    assert "人工確認後才建立新的正式 active version" in source
     assert "不覆蓋正式營收看板" in source
