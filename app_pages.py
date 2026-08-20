@@ -41,8 +41,8 @@ from app_workflows import (
     _build_entity_resolution_workbook,
     _build_feature_store_workbook,
     _build_forecast_governance_workbook,
-    _build_gmv_audit_workbook,
     _build_gmv_refund_preflight,
+    build_formal_gmv_workbooks,
     _build_horizon_weighted_consensus,
     _build_upload_stability_gate_workbook,
     _change_summary_value,
@@ -108,6 +108,7 @@ from app_workflows import (
     upsert_to_db,
 )
 from backend.services.upload_lock_service import UploadBusyError, acquire_upload_lease
+from backend.services.gmv_refund_repository import GmvRefundRepository
 from backend.services.upload_orchestrator_service import execute_upload_operation
 from backend.services.receipt_exclusion_governance_service import (
     confirm_receipt_exclusion_revocation,
@@ -2421,17 +2422,52 @@ def _render_gmv_exclusion_tab() -> None:
         "上傳退款明細後，系統按來源單據號彙總退款原幣金額，從原收款金額扣減，生成獨立 GMV 視角與同規格報表；不回寫 SQLite。",
         "🧾",
     )
+    upload = st.file_uploader(
+        "上傳退款明細數據（Excel / CSV；正式 ledger 需要退款單號、來源單據號、退款原幣金額、退款狀態）",
+        type=["xlsx", "xls", "csv"],
+        key="GMV_EXCLUSION_UPLOAD",
+    )
+    if st.button("載入正式淨 GMV", key="GMV_FORMAL_LOAD", width="stretch"):
+        st.session_state["GMV_FORMAL_SCOPE_LOADED"] = True
+    formal_scope_loaded = bool(st.session_state.get("GMV_FORMAL_SCOPE_LOADED"))
+    if not upload and not formal_scope_loaded:
+        for state_key in (
+            "GMV_REFUND_PREFLIGHT_SIGNATURE",
+            "GMV_REFUND_PREFLIGHT",
+            "GMV_REFUND_EXCEPTION_ROWS",
+            "GMV_EXCLUSION_SIGNATURE",
+            "GMV_EXCLUSION_WORKBOOKS",
+        ):
+            st.session_state.pop(state_key, None)
+        _render_info_panel(
+            "GMV 退款扣減尚未套用",
+            "請上傳退款明細數據或按下「載入正式淨 GMV」；未操作前不讀取 GMV ledger 或主資料明細。",
+        )
+        return
+
     db_tour, db_others = load_all_data_from_db()
     if db_tour.empty and db_others.empty:
         st.info("目前 SQLite 尚無資料，請先在經營分析大盤上傳主副表。")
         return
     formal_tour, formal_others, _ = _build_revenue_scope_frames(db_tour, db_others)
 
-    upload = st.file_uploader(
-        "上傳退款明細數據（Excel / CSV；需要欄位來源單據號、退款原幣金額、退款狀態）",
-        type=["xlsx", "xls", "csv"],
-        key="GMV_EXCLUSION_UPLOAD",
-    )
+    active_version_id = None
+    if formal_scope_loaded:
+        repository = GmvRefundRepository(database_module.DB_FILE)
+        schema_status = repository.validate_schema()
+        if not schema_status.ready:
+            st.warning("正式淨 GMV ledger 尚未完成 explicit migration；目前只顯示 session-only 退款分析。")
+        else:
+            active_scope = repository.load_active_scope()
+            if active_scope is None:
+                st.info("正式淨 GMV 尚未建立 active version，請先完成退款 Preflight 與人工確認。")
+            else:
+                active_version_id = active_scope.get("version_id")
+                st.caption("正式淨 GMV active version")
+                st.dataframe(pd.DataFrame([active_scope]), hide_index=True, width="stretch")
+                st.caption("正式淨 GMV 只扣減『已退款』；總退款保留為營運比較維度。")
+        if not upload:
+            return
     if not upload:
         for state_key in (
             "GMV_REFUND_PREFLIGHT_SIGNATURE",
@@ -2560,6 +2596,7 @@ def _render_gmv_exclusion_tab() -> None:
 
     st.caption("GMV 排除摘要")
     st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
+    st.caption("旅行團人數／票務數量：原交易人數／數量（未按退款調整）")
 
     _, gmv_s1, _ = build_dashboard_data(
         total_adjusted["tour"],
@@ -2645,22 +2682,23 @@ def _render_gmv_exclusion_tab() -> None:
 
     if st.button("生成總退款及已退款兩套完整報表", type="primary", width="stretch"):
         with st.spinner("正在生成總退款及已退款兩套完整報表，報表結構沿用原本正式報表..."):
+            audit_workbooks = build_formal_gmv_workbooks(
+                total_adjusted=total_adjusted,
+                paid_adjusted=paid_adjusted,
+                total_summary_rows=total_summary_rows,
+                paid_summary_rows=paid_summary_rows,
+                provenance={
+                    "version_id": active_version_id or "SESSION_PREVIEW",
+                    "quantity_basis": "原交易人數／數量（未按退款調整）",
+                    "revenue_scope": REVENUE_SCOPE_LABEL,
+                },
+            )
             workbooks = {
                 "total": _compute_gmv_exclusion_workbooks(total_adjusted["tour"], total_adjusted["others"]),
                 "paid": _compute_gmv_exclusion_workbooks(paid_adjusted["tour"], paid_adjusted["others"]),
             }
-            workbooks["total"]["audit"] = _build_gmv_audit_workbook(
-                total_summary_rows,
-                total_adjusted["adjusted_detail"],
-                total_adjusted["unmatched_source_ids"],
-                dimension="總退款",
-            )
-            workbooks["paid"]["audit"] = _build_gmv_audit_workbook(
-                paid_summary_rows,
-                paid_adjusted["adjusted_detail"],
-                paid_adjusted["unmatched_source_ids"],
-                dimension="已退款",
-            )
+            workbooks["total"]["audit"] = audit_workbooks["total"]
+            workbooks["paid"]["audit"] = audit_workbooks["paid"]
             st.session_state["GMV_EXCLUSION_WORKBOOKS"] = workbooks
         st.success("總退款及已退款兩套退款扣減版報表已生成，可在下方下載。")
 
