@@ -71,3 +71,16 @@ def test_canonical_payload_hash_is_order_independent():
     right = canonical_payload_sha256({"amountMinor": 5000, "source": "S-1"})
 
     assert left == right
+
+
+def test_refund_state_hash_includes_currency_and_refund_date():
+    from backend.services.gmv_refund_models import refund_state_sha256
+
+    base = {
+        "R-1": RefundCurrentState("R-1", "S-1", 5000, "已退款", "B-1", "state", "HKD", "2026-08-20")
+    }
+    changed = {
+        "R-1": RefundCurrentState("R-1", "S-1", 5000, "已退款", "B-1", "state", "CNY", "2026-08-20")
+    }
+
+    assert refund_state_sha256(base) != refund_state_sha256(changed)

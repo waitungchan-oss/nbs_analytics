@@ -48,6 +48,21 @@ def canonical_payload_sha256(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def refund_state_sha256(current: Mapping[str, "RefundCurrentState"]) -> str:
+    rows = [
+        {
+            "refundOrderNo": state.refund_order_no,
+            "sourceReceiptNo": state.source_receipt_no,
+            "refundStatus": state.refund_status,
+            "refundAmountMinor": state.refund_amount_minor,
+            "currencyCode": state.currency_code,
+            "refundDate": state.refund_date,
+        }
+        for state in sorted(current.values(), key=lambda item: normalize_text(item.refund_order_no))
+    ]
+    return canonical_payload_sha256({"refunds": rows})
+
+
 @dataclass(frozen=True, slots=True)
 class RefundObservation:
     refund_order_no: str
@@ -55,6 +70,8 @@ class RefundObservation:
     refund_amount_minor: int
     refund_status: str
     raw_row_sha256: str
+    currency_code: str = "HKD"
+    refund_date: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("refund_order_no", "source_receipt_no", "refund_status", "raw_row_sha256"):
@@ -72,6 +89,8 @@ class RefundObservation:
                 "sourceReceiptNo": self.source_receipt_no,
                 "refundAmountMinor": self.refund_amount_minor,
                 "refundStatus": self.refund_status,
+                "currencyCode": self.currency_code,
+                "refundDate": self.refund_date,
             }
         )
         return RefundCurrentState(
@@ -81,6 +100,8 @@ class RefundObservation:
             refund_status=self.refund_status,
             source_batch_id=batch_id,
             state_sha256=state_sha256,
+            currency_code=self.currency_code,
+            refund_date=self.refund_date,
         )
 
 
@@ -92,6 +113,8 @@ class RefundCurrentState:
     refund_status: str
     source_batch_id: str
     state_sha256: str
+    currency_code: str = "HKD"
+    refund_date: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +173,7 @@ def classify_refund_changes(
         same_identity = (
             normalize_text(existing.source_receipt_no) == normalize_text(observation.source_receipt_no)
             and existing.refund_amount_minor == observation.refund_amount_minor
+            and normalize_text(existing.currency_code) == normalize_text(observation.currency_code)
         )
         if not same_identity:
             identity_conflicts.append(

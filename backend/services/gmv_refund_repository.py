@@ -304,7 +304,7 @@ class GmvRefundRepository:
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT refund_order_no, source_receipt_no, refund_amount_minor, "
-                "refund_status, last_seen_batch_id, state_sha256 "
+                "refund_status, last_seen_batch_id, state_sha256, currency_code, refund_date "
                 "FROM gmv_refund_current ORDER BY refund_order_no"
             ).fetchall()
         return {
@@ -315,6 +315,8 @@ class GmvRefundRepository:
                 refund_status=row[3],
                 source_batch_id=row[4],
                 state_sha256=row[5],
+                currency_code=row[6],
+                refund_date=row[7],
             )
             for row in rows
         }

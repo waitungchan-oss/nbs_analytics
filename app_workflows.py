@@ -1142,6 +1142,22 @@ def _parse_gmv_refund_data(file_obj) -> tuple[pd.DataFrame, pd.DataFrame]:
     return work, work.copy()
 
 
+def _gmv_revenue_row_fingerprint(table_name: str, row: pd.Series) -> str:
+    from backend.services.gmv_refund_models import canonical_payload_sha256, money_to_minor
+
+    payload = {
+        "table": str(table_name),
+        "source_receipt_no": str(row.get(COL_ORDER_ID, "") or "").strip(),
+        "receipt_time": str(row.get(COL_DATE, "") or "").strip(),
+        "amount_minor": money_to_minor(row.get(COL_MONEY, 0)),
+        "branch": str(row.get(COL_BRANCH, "") or "").strip(),
+        "salesperson": str(row.get(COL_SALESPERSON, "") or "").strip(),
+    }
+    if not payload["source_receipt_no"]:
+        raise ValueError("source receipt number is required for GMV row fingerprint")
+    return canonical_payload_sha256(payload)
+
+
 def _apply_gmv_refund_adjustments(
     db_tour: pd.DataFrame,
     db_others: pd.DataFrame,
