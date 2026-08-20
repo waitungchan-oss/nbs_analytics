@@ -27,6 +27,7 @@
 - 原始 observations append-only；另外維護每個退款單號的 latest-state projection。每個 GMV version 以全部 latest states 計算，不只計算本次檔案。
 - 第一階段只接入 GMV Dashboard 與完整報表匯出。
 - 第一階段不接入 AI Forecast、Daily WAPE、Macro Backtest 或現有 frozen baseline。
+- 第一階段退款只調整 GMV 金額，不調整旅行團交易人數或票務交易數量；數量欄位必須標示為原交易口徑。
 - 退款計算只在確認／切換版本的 write path 執行；頁面只讀取 active snapshot。
 - 現有首頁 page-load hot path 不得新增 GMV query、migration、退款計算或 cache invalidation。
 
@@ -43,6 +44,8 @@
 目前限制是結果只存在 Streamlit session，不具備正式批次、版本、啟用歷史、可回滾 snapshot 或穩定 read contract。
 
 對實際 `退款明細數據.xlsx` 的唯讀 schema 檢查顯示：1,000 筆資料的 `退款單號` 全部非空且唯一；`來源單據號` 只有 865 個唯一值。因此 `退款單號` 可作 refund identity，`來源單據號` 只作營收匹配與多筆退款彙總，不能作退款主鍵。正式狀態使用 E 欄 `退款状态`；`退款單狀態` 另作來源稽核欄位保存。
+
+該退款檔沒有「退款人數」或「退款票數」欄位。退款金額不能可靠推導退款數量，部分退款也不能按金額比例轉換為整數人數／票數。因此第一階段保留原交易 `COL_QTY`，不得按退款比例、全額退款或 GMV 歸零自行改寫數量。
 
 ## 4. 範圍
 
@@ -61,6 +64,7 @@
 
 - 修改現有正式營收定義或 2026-05 frozen baseline。
 - 把正式淨 GMV 接入 Forecast、WAPE 或 Backtest。
+- 建立「淨旅行團人數」或「淨票務數量」；這需要可靠的退款人數／票數或明確數量沖銷來源。
 - 建立第二個 SQLite 檔案、外部資料庫或外部服務。
 - Governance Graph、Memory Hub、Agent orchestration 或新的通用 approval/workflow subsystem。
 - 自動確認退款批次；正式生效必須由人工作出明確確認。
@@ -274,8 +278,9 @@ append-only 保存每次上傳看到的標準化退款狀態。歷史 observatio
 - `metric_name TEXT NOT NULL`
 - `metric_amount_minor INTEGER NOT NULL`
 - `metric_count INTEGER NOT NULL`
+- `quantity_basis TEXT NOT NULL`：金額 metric 使用 `NOT_APPLICABLE`；人數／票數 metric 使用 `ORIGINAL_TRANSACTION`
 
-主鍵覆蓋上述 grain。首頁排名、月度趨勢、分社、銷售代表與業務類型只查這張小型 read model。
+主鍵覆蓋上述 grain。首頁排名、月度趨勢、分社、銷售代表與業務類型只查這張小型 read model。任何人數／票數 count 都是原交易數量，不是退款後淨數量。
 
 ### 6.9 `gmv_scope_events`
 
@@ -409,6 +414,7 @@ GMV Dashboard 同時呈現：
 - 分社、銷售代表、業務類型排名。
 - 匹配、規則排除、找不到、超額退款及 warning 摘要。
 - 本次批次的新增、未變、更改狀態及 identity conflict 數量。
+- 旅行團與票務數量只可標示為「原交易人數／數量（未按退款調整）」，不得使用「淨人數」或「退款後數量」。
 
 若沒有 active version，GMV 正式區顯示「尚未建立正式淨 GMV 版本」，但現有 Dashboard 照常載入。
 
@@ -432,6 +438,7 @@ GMV Dashboard 同時呈現：
 - 退款明細金額、實際扣減金額及超額退款金額。
 - 匹配狀態與 reason code。
 - 「總退款」或「已退款」退款維度。
+- 旅行團交易人數與票務交易數量沿用原交易 `COL_QTY`，並在 sheet header／說明欄標示「未按退款調整」。
 
 Workbook 只在使用者按下載時生成，並以 `(version_id, export_schema_version)` 作 cache key；生成 workbook 不屬於 page-load hot path。
 
@@ -481,6 +488,7 @@ Workbook 只在使用者按下載時生成，並以 `(version_id, export_schema_
 - 同一來源單據多筆退款彙總。
 - 多收款列比例分配與 minor-unit rounding 守恆。
 - cap、超額退款、規則排除與找不到分類。
+- 部分退款、全額退款及 GMV 歸零均不改 `COL_QTY`。
 
 ### 13.2 Repository / migration
 
@@ -507,6 +515,7 @@ Workbook 只在使用者按下載時生成，並以 `(version_id, export_schema_
 - active version provenance 完整。
 - 沒有 active version 時 fail-safe empty state。
 - Workbook 同時包含總退款與已退款，正式 sheet 只使用已退款。
+- Dashboard 與 workbook 的旅行團人數／票務數量保持原交易值，並顯示未按退款調整標籤。
 - Audit sheet 可追溯至 batch、version、generation 與 checksum。
 - 同一退款單號的狀態歷史可由 current projection 追回全部 observations。
 
@@ -536,7 +545,8 @@ Workbook 只在使用者按下載時生成，並以 `(version_id, export_schema_
 
 1. 現有正式營收、baseline、Forecast、WAPE 與 Backtest 數字未改變。
 2. 正式淨 GMV 只扣減已退款，總退款仍可在 Dashboard 與 Export 查看。
-3. 任一正式數字可追溯至 batch、observation、current state、reconciliation member、version、snapshot 與 activation event。
-4. stale、重複或 transaction 失敗均 fail closed，舊 active version 保持可用。
-5. 現有首頁無 GMV repository call，效能 Gate 通過。
-6. Migration、targeted tests、Review、full pytest、Hermes 與實際 UI 驗收全部通過。
+3. 退款不改旅行團人數或票務數量，所有數量 consumer 都明確標示原交易口徑。
+4. 任一正式數字可追溯至 batch、observation、current state、reconciliation member、version、snapshot 與 activation event。
+5. stale、重複或 transaction 失敗均 fail closed，舊 active version 保持可用。
+6. 現有首頁無 GMV repository call，效能 Gate 通過。
+7. Migration、targeted tests、Review、full pytest、Hermes 與實際 UI 驗收全部通過。
