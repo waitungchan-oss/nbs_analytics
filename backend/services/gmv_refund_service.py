@@ -282,23 +282,22 @@ def _insert_reconciliation_rows(conn, version_id: str, frames: RevenueFrames, st
         # The immutable adjustment snapshot is the official net-GMV (已退款)
         # projection. The total-refund dimension remains available in the
         # dashboard/export path and its reconciliation result/metrics.
-        if status != "已退款":
-            continue
-        for row in adjusted["adjusted_detail"].itertuples(index=False):
-            source_table = str(getattr(row, "資料表", ""))
-            source_receipt = str(getattr(row, "來源單據號", ""))
-            if not source_receipt:
-                continue
-            before = money_to_minor(getattr(row, "退款前收款原幣金額", 0))
-            applied_minor = money_to_minor(getattr(row, "退款扣減金額", 0))
-            after = money_to_minor(getattr(row, "退款後收款原幣金額", 0))
-            from app_workflows import _gmv_revenue_row_fingerprint
-            fingerprint = _gmv_revenue_row_fingerprint(source_table, pd.Series(row._asdict()))
-            conn.execute(
-                "INSERT OR IGNORE INTO gmv_adjustment_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (version_id, source_table, fingerprint, source_receipt, "UNKNOWN", None, before, applied_minor, after, 1000000, None, None, None),
-            )
-            adjustment_hashes.append(fingerprint)
+        if status == "已退款":
+            for row in adjusted["adjusted_detail"].itertuples(index=False):
+                source_table = str(getattr(row, "資料表", ""))
+                source_receipt = str(getattr(row, "來源單據號", ""))
+                if not source_receipt:
+                    continue
+                before = money_to_minor(getattr(row, "退款前收款原幣金額", 0))
+                applied_minor = money_to_minor(getattr(row, "退款扣減金額", 0))
+                after = money_to_minor(getattr(row, "退款後收款原幣金額", 0))
+                from app_workflows import _gmv_revenue_row_fingerprint
+                fingerprint = _gmv_revenue_row_fingerprint(source_table, pd.Series(row._asdict()))
+                conn.execute(
+                    "INSERT OR IGNORE INTO gmv_adjustment_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (version_id, source_table, fingerprint, source_receipt, "UNKNOWN", None, before, applied_minor, after, 1000000, None, None, None),
+                )
+                adjustment_hashes.append(fingerprint)
         for metric_name, amount, count, basis in (
             ("REFUND_DETAIL", adjusted["refund_total"], len(adjusted["refund_amounts"]), "NOT_APPLICABLE"),
             ("APPLIED_REFUND", adjusted["applied_refund_total"], len(adjusted["matched_source_ids"]), "NOT_APPLICABLE"),
