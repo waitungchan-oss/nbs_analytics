@@ -99,6 +99,7 @@ from app_workflows import (
     map_dest_category,
     map_ticket_category,
     list_monthly_baseline_promotions,
+    load_cache_generation,
     promote_monthly_baselines,
     record_stability_history,
     restore_database_from_backup,
@@ -109,6 +110,13 @@ from app_workflows import (
 )
 from backend.services.upload_lock_service import UploadBusyError, acquire_upload_lease
 from backend.services.gmv_refund_repository import GmvRefundRepository
+from backend.services.upload_lock_service import DEFAULT_COORDINATION_DB
+from backend.services.gmv_refund_service import (
+    RevenueFrames,
+    StaleGmvPreview,
+    confirm_refund_batch,
+    preview_refund_batch,
+)
 from backend.services.upload_orchestrator_service import execute_upload_operation
 from backend.services.receipt_exclusion_governance_service import (
     confirm_receipt_exclusion_revocation,
@@ -2523,6 +2531,77 @@ def _render_gmv_exclusion_tab() -> None:
         st.warning("退款 Preflight 有需要留意的資料品質或匹配問題，請先查看異常中心。")
     else:
         st.success("退款 Preflight 通過，可進入總退款與已退款 GMV 扣減。")
+
+    if formal_scope_loaded and schema_status.ready:
+        generation_token = str(
+            load_cache_generation(db_path=database_module.DB_FILE).get("cacheToken") or "0:missing"
+        )
+        formal_preview = preview_refund_batch(
+            refund_data,
+            repository=repository,
+            revenue_frames=RevenueFrames(
+                raw_tour=db_tour,
+                raw_others=db_others,
+                formal_tour=formal_tour,
+                formal_others=formal_others,
+            ),
+            revenue_generation_token=generation_token,
+            rule_version=REVENUE_SCOPE_LABEL,
+            file_sha256=hashlib.sha256(upload.getvalue()).hexdigest(),
+        )
+        st.caption("正式淨 GMV 增量 Preview")
+        st.dataframe(
+            pd.DataFrame(
+                [{"分類": key, "筆數": value} for key, value in formal_preview.change_counts.items()]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        if formal_preview.blocking_codes:
+            st.error("正式確認被阻擋：" + "、".join(formal_preview.blocking_codes))
+        else:
+            st.success(
+                f"Preview 可確認；正式淨 GMV 只扣減已退款，預估為 "
+                f"{_money_text(formal_preview.official_net_gmv_minor / 100)}。"
+            )
+        actor = st.text_input("確認人員", key="GMV_FORMAL_ACTOR")
+        warning_ack = st.checkbox(
+            "我確認此批次會建立新的 active version，並保留總退款作營運比較維度。",
+            key="GMV_FORMAL_WARNING_ACK",
+        )
+        if st.button(
+            "確認並啟用正式淨 GMV",
+            type="primary",
+            disabled=bool(formal_preview.blocking_codes) or not actor or not warning_ack,
+            key="GMV_FORMAL_CONFIRM",
+            width="stretch",
+        ):
+            try:
+                receipt = confirm_refund_batch(
+                    formal_preview,
+                    actor=actor,
+                    acknowledgements=frozenset({"TOTAL_REFUND_OPERATIONAL_ONLY"}),
+                    db_path=database_module.DB_FILE,
+                    coordination_db_path=DEFAULT_COORDINATION_DB,
+                    revenue_loader=lambda: RevenueFrames(
+                        raw_tour=db_tour,
+                        raw_others=db_others,
+                        formal_tour=formal_tour,
+                        formal_others=formal_others,
+                    ),
+                    revenue_generation_loader=lambda: str(
+                        load_cache_generation(db_path=database_module.DB_FILE).get("cacheToken")
+                        or "0:missing"
+                    ),
+                )
+                st.success(
+                    f"已啟用正式淨 GMV：version={receipt.version_id}；batch={receipt.batch_id}；"
+                    f"previous={receipt.previous_version_id or 'None'}。"
+                )
+            except StaleGmvPreview as exc:
+                st.error(f"正式確認失敗，Preview 已過期，請重新 Preflight：{exc}")
+    elif formal_scope_loaded and not schema_status.ready:
+        st.info("正式 ledger schema 尚未 migration；目前可查看 session-only 退款分析，不能確認寫入。")
 
     file_metrics = preflight_report.get("fileMetrics") or {}
     issue_rows = pd.DataFrame(preflight_report.get("issues") or [])
