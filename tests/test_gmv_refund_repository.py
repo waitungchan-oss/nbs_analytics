@@ -68,6 +68,18 @@ def test_empty_views_are_safe_after_migration(tmp_path):
     assert repository.load_adjustment_snapshot("missing").empty
 
 
+def test_load_active_scope_falls_back_when_legacy_db_lacks_current_scope_view(tmp_path):
+    db_path = migrate_gmv_schema(_seed_revenue_database(tmp_path / "nbs.db")).db_path
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP VIEW v_gmv_current_scope")
+        conn.execute(
+            "INSERT INTO gmv_scope_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("V-legacy", None, None, "g", "refund", "rules", "calc-legacy", "ACTIVE", "2026-08-20T00:00:00Z", "tester"),
+        )
+    active = GmvRefundRepository(db_path).load_active_scope()
+    assert active["version_id"] == "V-legacy"
+
+
 def test_immutable_ledger_rows_reject_update_and_delete(tmp_path):
     db_path = migrate_gmv_schema(_seed_revenue_database(tmp_path / "nbs.db")).db_path
     with sqlite3.connect(db_path) as conn:

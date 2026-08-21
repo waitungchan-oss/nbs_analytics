@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping
@@ -650,8 +651,22 @@ def build_gmv_formal_artifacts(
         paid_summary_rows=paid_summary_rows,
         provenance={"version_id": version_id, "revenue_generation_token": active["revenue_generation_token"]},
     )
-    total_exports = _compute_gmv_exclusion_workbooks(total_adjusted["tour"], total_adjusted["others"])
-    paid_exports = _compute_gmv_exclusion_workbooks(paid_adjusted["tour"], paid_adjusted["others"])
+    # The two dimensions are independent and workbook generation is the costly
+    # part of cache creation. Build them concurrently without changing the
+    # artifact contract or the order in which they are persisted below.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gmv-export") as executor:
+        total_future = executor.submit(
+            _compute_gmv_exclusion_workbooks,
+            total_adjusted["tour"],
+            total_adjusted["others"],
+        )
+        paid_future = executor.submit(
+            _compute_gmv_exclusion_workbooks,
+            paid_adjusted["tour"],
+            paid_adjusted["others"],
+        )
+        total_exports = total_future.result()
+        paid_exports = paid_future.result()
     total_exports = {key: value for key, value in total_exports.items() if isinstance(value, (bytes, bytearray))}
     paid_exports = {key: value for key, value in paid_exports.items() if isinstance(value, (bytes, bytearray))}
     total_exports["audit"] = workbooks["total"]
@@ -690,11 +705,27 @@ def load_active_gmv_read_model(
         summaries = json.loads(read_gmv_export_artifact(cache_manifest, cache_dir or ".nbs_runtime_cache", "summaries").decode("utf-8"))
         total_rows = [row for row in summaries if row.get("退款維度") == "總退款"]
         paid_rows = [row for row in summaries if row.get("退款維度") == "已退款"]
+        _validate_cached_summary_contract(total_rows, "總退款")
+        _validate_cached_summary_contract(paid_rows, "已退款")
         total_adjusted = _cached_adjusted(total_detail, total_rows, "總退款")
         paid_adjusted = _cached_adjusted(paid_detail, paid_rows, "已退款")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return GmvActiveReadModel("CACHE_INVALID", version_id, active, repository.load_metric_snapshot(version_id), None, None, False)
     return GmvActiveReadModel("CURRENT", version_id, active, repository.load_metric_snapshot(version_id), total_adjusted, paid_adjusted, True)
+
+
+def _validate_cached_summary_contract(summary_rows: list[dict[str, object]], dimension: str) -> None:
+    required_metrics = {
+        "退款明細金額",
+        "實際扣減金額",
+        "超額退款金額",
+        "排除前 GMV",
+        "退款扣減後 GMV",
+    }
+    available = {str(row.get("指標")) for row in summary_rows if isinstance(row, dict)}
+    missing = sorted(required_metrics - available)
+    if missing:
+        raise ValueError(f"incomplete {dimension} GMV summary contract: {','.join(missing)}")
 
 
 def _cached_adjusted(detail_bytes: bytes, summary_rows: list[dict[str, object]], status: str) -> dict[str, object]:

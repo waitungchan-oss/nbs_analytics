@@ -323,7 +323,20 @@ class GmvRefundRepository:
 
     def load_active_scope(self) -> dict[str, object] | None:
         with self.connect() as conn:
-            cursor = conn.execute("SELECT * FROM v_gmv_current_scope")
+            try:
+                cursor = conn.execute("SELECT * FROM v_gmv_current_scope")
+            except sqlite3.OperationalError as exc:
+                # Older production copies may contain the GMV tables but not
+                # the derived current-scope view. Keep reopening read-only by
+                # using the view's equivalent predicate until migration runs.
+                if "no such table: v_gmv_current_scope" not in str(exc):
+                    raise
+                cursor = conn.execute(
+                    "SELECT version_id, trigger_batch_id, previous_version_id, "
+                    "revenue_generation_token, refund_state_sha256, rule_version, "
+                    "activated_at, activated_by, calculation_sha256 "
+                    "FROM gmv_scope_versions WHERE status = 'ACTIVE'"
+                )
             row = cursor.fetchone()
             columns = [item[0] for item in cursor.description] if cursor.description else []
         return dict(zip(columns, row)) if row else None

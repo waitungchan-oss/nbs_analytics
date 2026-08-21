@@ -1219,22 +1219,21 @@ def _apply_gmv_refund_adjustments(
     original_by_source = combined.groupby("__gmv_source_id")["退款前收款原幣金額"].sum()
     matched_source_ids = set(refund_amounts.index) & set(original_by_source.index)
     unmatched_source_ids = sorted(set(refund_amounts.index) - matched_source_ids)
-    applied_refund_total = 0.0
-    over_refund_total = 0.0
+    refund_amounts = refund_amounts.clip(lower=0.0)
+    original_for_refunds = original_by_source.reindex(refund_amounts.index).fillna(0.0)
+    applied_by_source = refund_amounts.clip(upper=original_for_refunds)
+    applied_refund_total = float(applied_by_source.sum())
+    over_refund_total = float(
+        (refund_amounts.loc[refund_amounts.index.isin(matched_source_ids)]
+         - original_for_refunds.loc[original_for_refunds.index.isin(matched_source_ids)])
+        .clip(lower=0.0)
+        .sum()
+    )
 
-    for source_id, raw_refund_amount in refund_amounts.items():
-        original_amount = float(original_by_source.get(source_id, 0.0))
-        refund_amount = max(float(raw_refund_amount), 0.0)
-        applied_amount = min(refund_amount, max(original_amount, 0.0)) if original_amount else 0.0
-        applied_refund_total += applied_amount
-        if source_id in matched_source_ids:
-            over_refund_total += max(refund_amount - applied_amount, 0.0)
-        if applied_amount <= 0 or original_amount <= 0:
-            continue
-        mask = combined["__gmv_source_id"] == source_id
-        combined.loc[mask, "退款扣減金額"] = (
-            combined.loc[mask, "退款前收款原幣金額"] / original_amount * applied_amount
-        )
+    applied_for_rows = combined["__gmv_source_id"].map(applied_by_source).fillna(0.0)
+    original_for_rows = combined["__gmv_source_id"].map(original_by_source).fillna(0.0)
+    ratio = combined["退款前收款原幣金額"].div(original_for_rows.where(original_for_rows > 0))
+    combined["退款扣減金額"] = ratio.fillna(0.0).mul(applied_for_rows)
 
     combined[COL_MONEY] = (
         combined["退款前收款原幣金額"] - combined["退款扣減金額"]
@@ -1275,41 +1274,48 @@ def _build_gmv_refund_match_index(
     ]
 
     def _index_frames(frames: tuple[tuple[str, pd.DataFrame], ...], prefix: str) -> pd.DataFrame:
-        rows: list[dict] = []
+        indexed_parts: list[pd.DataFrame] = []
         for table_name, frame in frames:
             work = normalize_runtime_columns(frame.copy())
             if work.empty or COL_ORDER_ID not in work.columns:
                 continue
             work["__gmv_source_id"] = _order_id_series(work)
             work = work.loc[~work["__gmv_source_id"].isin(["", "NAN"])].copy()
-            for source_id, group in work.groupby("__gmv_source_id", sort=True):
-                amount = pd.to_numeric(
-                    group[COL_MONEY] if COL_MONEY in group.columns else pd.Series(0.0, index=group.index),
-                    errors="coerce",
-                ).fillna(0.0)
-                branch = group[COL_BRANCH].astype(str).str.strip() if COL_BRANCH in group.columns else pd.Series(dtype=str)
-                salesperson = group[COL_SALESPERSON].astype(str).str.strip() if COL_SALESPERSON in group.columns else pd.Series(dtype=str)
-                rows.append(
-                    {
-                        "來源單據號": str(source_id),
-                        f"{prefix}_present": True,
-                        f"{prefix}_amount": float(amount.sum()),
-                        f"{prefix}_資料表": table_name,
-                        f"{prefix}_分社": next((value for value in branch if value), ""),
-                        f"{prefix}_銷售代表": next((value for value in salesperson if value), ""),
-                    }
-                )
-        if not rows:
+            work["__gmv_amount"] = pd.to_numeric(
+                work[COL_MONEY] if COL_MONEY in work.columns else 0.0,
+                errors="coerce",
+            ).fillna(0.0)
+            work["__gmv_branch"] = (
+                work[COL_BRANCH].fillna("").astype(str).str.strip()
+                if COL_BRANCH in work.columns else ""
+            )
+            work["__gmv_salesperson"] = (
+                work[COL_SALESPERSON].fillna("").astype(str).str.strip()
+                if COL_SALESPERSON in work.columns else ""
+            )
+            work["__gmv_branch"] = work["__gmv_branch"].replace("", pd.NA)
+            work["__gmv_salesperson"] = work["__gmv_salesperson"].replace("", pd.NA)
+            grouped = work.groupby("__gmv_source_id", sort=True)
+            indexed_parts.append(grouped.agg(
+                **{
+                    "來源單據號": ("__gmv_source_id", "first"),
+                    f"{prefix}_amount": ("__gmv_amount", "sum"),
+                    f"{prefix}_分社": ("__gmv_branch", "first"),
+                    f"{prefix}_銷售代表": ("__gmv_salesperson", "first"),
+                }
+            ).fillna("").assign(**{
+                f"{prefix}_present": True,
+                f"{prefix}_資料表": table_name,
+            }).reset_index(drop=True))
+        if not indexed_parts:
             return pd.DataFrame(columns=[column for column in index_columns if column == "來源單據號" or column.startswith(prefix)])
-        indexed = pd.DataFrame(rows)
-        aggregations = {
+        return pd.concat(indexed_parts, ignore_index=True).groupby("來源單據號", as_index=False).agg({
             f"{prefix}_present": "max",
             f"{prefix}_amount": "sum",
             f"{prefix}_資料表": lambda values: "、".join(sorted(set(values.astype(str)))),
             f"{prefix}_分社": lambda values: next((value for value in values if value), ""),
             f"{prefix}_銷售代表": lambda values: next((value for value in values if value), ""),
-        }
-        return indexed.groupby("來源單據號", as_index=False).agg(aggregations)
+        })
 
     raw_index = _index_frames((("旅行團", raw_tour), ("其他業務", raw_others)), "raw")
     formal_index = _index_frames((("旅行團", formal_tour), ("其他業務", formal_others)), "formal")
@@ -1338,6 +1344,8 @@ def _build_gmv_refund_exception_rows(
     formal_tour: pd.DataFrame,
     formal_others: pd.DataFrame,
     refund_status: str | None = None,
+    match_index: pd.DataFrame | None = None,
+    adjusted: dict | None = None,
 ) -> pd.DataFrame:
     columns = [
         "退款維度", "來源單據號", "退款狀態", "退款明細金額", "匹配狀態", "原因代碼",
@@ -1366,7 +1374,9 @@ def _build_gmv_refund_exception_rows(
         grouped["來源單據號"].map(duplicate_by_source).fillna(0).astype(int)
     )
     result = grouped.merge(
-        _build_gmv_refund_match_index(raw_tour, raw_others, formal_tour, formal_others),
+        match_index if match_index is not None else _build_gmv_refund_match_index(
+            raw_tour, raw_others, formal_tour, formal_others
+        ),
         on="來源單據號",
         how="left",
     )
@@ -1385,7 +1395,7 @@ def _build_gmv_refund_exception_rows(
     result.loc[~result["raw_present"] | (result["原收款金額"] <= 0), "超額退款金額"] = 0.0
 
     selected = normalized[[COL_ORDER_ID, "退款原幣金額", "退款狀態"]].copy()
-    adjusted = _apply_gmv_refund_adjustments(formal_tour, formal_others, selected)
+    adjusted = adjusted or _apply_gmv_refund_adjustments(formal_tour, formal_others, selected)
     result["實際扣減金額"] = 0.0
     adjusted_detail = adjusted.get("adjusted_detail", pd.DataFrame())
     if not adjusted_detail.empty:
@@ -1458,6 +1468,7 @@ def _build_gmv_refund_preflight(
         formal_others = derived_others if formal_others is None else formal_others
 
     exception_frames: list[pd.DataFrame] = []
+    match_index = _build_gmv_refund_match_index(raw_tour, raw_others, formal_tour, formal_others)
     for dimension, status in (("總退款", None), ("已退款", "已退款")):
         dimension_rows = normalized if status is None else normalized.loc[normalized["退款狀態"] == status]
         adjusted = _apply_gmv_refund_adjustments(
@@ -1470,6 +1481,8 @@ def _build_gmv_refund_preflight(
             formal_tour,
             formal_others,
             refund_status=status,
+            match_index=match_index,
+            adjusted=adjusted,
         )
         if not exceptions.empty:
             exception_frames.append(exceptions)

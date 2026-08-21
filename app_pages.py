@@ -2954,6 +2954,25 @@ def _render_gmv_exclusion_tab_legacy() -> None:
                 )
 
 
+def _active_gmv_summary_rows(adjusted: dict[str, object]) -> list[dict[str, object]]:
+    required = (
+        "refund_status", "refund_total", "applied_refund_total",
+        "over_refund_total", "before_gmv",
+    )
+    missing = [key for key in required if key not in adjusted]
+    if missing:
+        raise ValueError(f"incomplete active GMV read model: {','.join(missing)}")
+    before_gmv = float(adjusted["before_gmv"])
+    applied_refund_total = float(adjusted["applied_refund_total"])
+    return [
+        {"退款維度": adjusted["refund_status"], "指標": "退款明細金額", "數值": adjusted["refund_total"]},
+        {"退款維度": adjusted["refund_status"], "指標": "實際扣減金額", "數值": applied_refund_total},
+        {"退款維度": adjusted["refund_status"], "指標": "超額退款金額", "數值": adjusted["over_refund_total"]},
+        {"退款維度": adjusted["refund_status"], "指標": "排除前 GMV", "數值": before_gmv},
+        {"退款維度": adjusted["refund_status"], "指標": "退款扣減後 GMV", "數值": before_gmv - applied_refund_total},
+    ]
+
+
 def _render_active_gmv_scope(model, formal_tour: pd.DataFrame, formal_others: pd.DataFrame) -> None:
     """Compatibility renderer; active downloads are now cache-backed in the GMV tab."""
     if not model.can_export:
@@ -2989,7 +3008,7 @@ def _render_gmv_exclusion_tab() -> None:
     cache_dir = PROJECT_ROOT / ".nbs_runtime_cache"
     active_scope = repository.load_active_scope()
 
-    if upload:
+    if upload is not None:
         try:
             refund_upload_rows = _read_gmv_exclusion_file(upload)
             refund_data, _ = _normalize_gmv_refund_rows(refund_upload_rows)
@@ -3084,16 +3103,13 @@ def _render_gmv_exclusion_tab() -> None:
     if not model.can_export or model.total_adjusted is None or model.paid_adjusted is None:
         st.warning("正式淨 GMV cache 尚未 ready，或主營收 token 已變更；請重新上傳退款明細並合併。")
         return
-    def summary(adjusted):
-        return [
-            {"退款維度": adjusted["refund_status"], "指標": "退款明細金額", "數值": adjusted["refund_total"]},
-            {"退款維度": adjusted["refund_status"], "指標": "實際扣減金額", "數值": adjusted["applied_refund_total"]},
-            {"退款維度": adjusted["refund_status"], "指標": "超額退款金額", "數值": adjusted["over_refund_total"]},
-            {"退款維度": adjusted["refund_status"], "指標": "排除前 GMV", "數值": adjusted["before_gmv"]},
-            {"退款維度": adjusted["refund_status"], "指標": "退款扣減後 GMV", "數值": adjusted["before_gmv"] - adjusted["applied_refund_total"]},
-        ]
     total_adjusted, paid_adjusted = model.total_adjusted, model.paid_adjusted
-    st.dataframe(pd.DataFrame(summary(total_adjusted) + summary(paid_adjusted)), hide_index=True, width="stretch")
+    try:
+        summary_rows = _active_gmv_summary_rows(total_adjusted) + _active_gmv_summary_rows(paid_adjusted)
+    except (TypeError, ValueError) as exc:
+        st.warning(f"正式淨 GMV cache/read model 尚未符合目前報表契約，請重新上傳退款明細並合併：{exc}")
+        return
+    st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
     st.caption("旅行團人數／票務數量：原交易人數／數量（未按退款調整）")
     st.caption("總退款扣減明細")
     st.dataframe(total_adjusted["adjusted_detail"], hide_index=True, width="stretch")
@@ -3111,27 +3127,6 @@ def _render_gmv_exclusion_tab() -> None:
                     read_gmv_export_artifact(cache_manifest, cache_dir, artifact_key),
                     f"GMV排除訂單_{name}{suffix}.xlsx",
                     key=f"GMV_CACHE_DOWNLOAD_{dimension}_{key}_{version_id}", width="stretch",
-                )
-            with d2:
-                st.download_button(
-                    f"下載{dimension_label}（不含掛賬核銷）",
-                    dimension_workbooks.get("ex_no_writeoff") or b"",
-                    f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷{suffix}.xlsx",
-                    width="stretch",
-                )
-            with d3:
-                st.download_button(
-                    f"下載{dimension_label}（正式口徑）",
-                    dimension_workbooks.get("ex_no_writeoff_refund_transfer") or b"",
-                    f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷與TT退款轉團款{suffix}.xlsx",
-                    width="stretch",
-                )
-            with d4:
-                st.download_button(
-                    f"下載{dimension_label}退款扣減稽核",
-                    dimension_workbooks.get("audit") or b"",
-                    f"GMV排除訂單_退款扣減稽核{suffix}.xlsx",
-                    width="stretch",
                 )
 
 def main() -> None:

@@ -1,6 +1,10 @@
 import ast
 from pathlib import Path
 
+import pytest
+
+from app_pages import _active_gmv_summary_rows
+
 
 PAGES_PATH = Path(__file__).resolve().parents[1] / "app_pages.py"
 
@@ -53,3 +57,15 @@ def test_formal_preview_uses_revenue_only_generation_token():
 
     assert "revenue_state_token" in source
     assert "load_cache_generation" not in source
+
+
+def test_active_summary_contract_rejects_missing_before_gmv():
+    adjusted = {
+        "refund_status": "總退款",
+        "refund_total": 20.0,
+        "applied_refund_total": 20.0,
+        "over_refund_total": 0.0,
+    }
+
+    with pytest.raises(ValueError, match="before_gmv"):
+        _active_gmv_summary_rows(adjusted)

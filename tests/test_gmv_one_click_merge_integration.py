@@ -1,4 +1,6 @@
+import hashlib
 import sqlite3
+import threading
 
 import pandas as pd
 
@@ -61,6 +63,22 @@ def test_active_read_uses_ready_cache_without_recomputing_revenue(tmp_path, monk
     assert model.paid_adjusted["applied_refund_total"] == 20
 
 
+def test_formal_cache_builds_total_and_paid_exports_concurrently(tmp_path, monkeypatch):
+    db_path, frames, token, receipt = _active(tmp_path)
+    barrier = threading.Barrier(2, timeout=2)
+
+    def synchronized_export(*args, **kwargs):
+        barrier.wait()
+        return {"ex": b"ex", "ex_no_writeoff": b"no-writeoff", "ex_no_writeoff_refund_transfer": b"official"}
+
+    monkeypatch.setattr("app_workflows._compute_gmv_exclusion_workbooks", synchronized_export)
+    artifacts = build_gmv_formal_artifacts(
+        repository=GmvRefundRepository(db_path), version_id=receipt.version_id,
+        revenue_frames=frames, rule_version="rules-1", cache_dir=tmp_path / "cache",
+    )
+    assert artifacts.cache_manifest.status == "ready"
+
+
 def test_active_read_rejects_cache_for_stale_revenue_token(tmp_path):
     db_path, frames, token, receipt = _active(tmp_path)
     artifacts = build_gmv_formal_artifacts(
@@ -72,4 +90,32 @@ def test_active_read_rejects_cache_for_stale_revenue_token(tmp_path):
         current_revenue_token="different-token", cache_dir=tmp_path / "cache",
     )
     assert model.status == "STALE_REVENUE_GENERATION"
+    assert model.can_export is False
+
+
+def test_active_read_rejects_cache_with_incomplete_summary_contract(tmp_path):
+    db_path, frames, token, receipt = _active(tmp_path)
+    artifacts = build_gmv_formal_artifacts(
+        repository=GmvRefundRepository(db_path), version_id=receipt.version_id,
+        revenue_frames=frames, rule_version="rules-1", cache_dir=tmp_path / "cache",
+    )
+    manifest = artifacts.cache_manifest
+    summaries_record = manifest.artifacts["summaries"]
+    summaries_path = (
+        tmp_path / "cache" / receipt.version_id / manifest.cache_key.replace(":", "-")
+        / str(summaries_record["path"])
+    )
+    summaries_path.write_text(
+        '[{"退款維度":"總退款","指標":"退款明細金額","數值":20}]',
+        encoding="utf-8",
+    )
+    summary_bytes = summaries_path.read_bytes()
+    summaries_record.update(
+        bytes=len(summary_bytes), sha256=hashlib.sha256(summary_bytes).hexdigest()
+    )
+    model = load_active_gmv_read_model(
+        repository=GmvRefundRepository(db_path), cache_manifest=manifest,
+        current_revenue_token=token, cache_dir=tmp_path / "cache",
+    )
+    assert model.status == "CACHE_INVALID"
     assert model.can_export is False
