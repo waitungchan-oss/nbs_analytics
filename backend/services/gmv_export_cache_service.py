@@ -220,3 +220,15 @@ def load_gmv_export_cache(
     except (OSError, KeyError, TypeError, ValueError):
         return None
     return manifest
+
+
+def read_gmv_export_artifact(manifest: GmvExportCacheManifest, cache_dir: Path, artifact_key: str) -> bytes:
+    """Read one already-validated artifact from a matching cache manifest."""
+    record = manifest.artifacts[artifact_key]
+    target = _target_dir(cache_dir, manifest.version_id, manifest.cache_key)
+    path = (target / str(record["path"])).resolve()
+    path.relative_to(target.resolve())
+    data = path.read_bytes()
+    if len(data) != int(record["bytes"]) or hashlib.sha256(data).hexdigest() != record["sha256"]:
+        raise ValueError("GMV cache artifact integrity mismatch")
+    return data
