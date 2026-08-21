@@ -328,6 +328,26 @@ class GmvRefundRepository:
             columns = [item[0] for item in cursor.description] if cursor.description else []
         return dict(zip(columns, row)) if row else None
 
+    def load_confirmed_batch_identity(
+        self, file_sha256: str, revenue_generation_token: str
+    ) -> dict[str, object] | None:
+        """Return the immutable activation receipt for a previously confirmed upload."""
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "SELECT b.batch_id, v.version_id, v.previous_version_id, "
+                "v.revenue_generation_token, v.refund_state_sha256, e.event_id "
+                "FROM gmv_refund_batches AS b "
+                "JOIN gmv_scope_versions AS v ON v.trigger_batch_id = b.batch_id "
+                "JOIN gmv_scope_events AS e ON e.to_version_id = v.version_id "
+                "AND e.event_type = 'ACTIVATE' "
+                "WHERE b.file_sha256 = ? AND b.revenue_generation_token = ? "
+                "ORDER BY v.activated_at DESC LIMIT 1",
+                (file_sha256, revenue_generation_token),
+            )
+            row = cursor.fetchone()
+            columns = [item[0] for item in cursor.description] if cursor.description else []
+        return dict(zip(columns, row)) if row else None
+
     def load_metric_snapshot(self, version_id: str) -> pd.DataFrame:
         with self.connect() as conn:
             return pd.read_sql_query(

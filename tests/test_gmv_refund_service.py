@@ -61,6 +61,76 @@ def _seed_current(db_path):
         )
 
 
+def _preview_with_warning(tmp_path, code):
+    db_path = _seed_database(tmp_path / "nbs.db")
+    repository = GmvRefundRepository(db_path)
+    return preview_refund_batch(
+        pd.DataFrame(
+            [{"退款單號": "R-WARN", "來源單據號": "S-1", "退款原幣金額": "20", "退款狀態": "已退款"}]
+        ),
+        repository=repository,
+        revenue_frames=_frames(),
+        revenue_generation_token="rev-warning",
+        rule_version="rules-1",
+        file_sha256=f"warning-{code}",
+        warning_codes=(code,),
+        warning_summaries=({"code": code, "count": 1, "amount": 20.0, "examples": ["S-1"]},),
+    )
+
+
+def test_warning_only_preview_can_be_confirmed_without_acknowledgement(tmp_path):
+    preview = _preview_with_warning(tmp_path, code="SQLITE_SOURCE_NOT_FOUND")
+    assert preview.blocking_codes == ()
+    receipt = confirm_refund_batch(
+        preview,
+        actor="streamlit-auto-merge",
+        acknowledgements=frozenset(),
+        db_path=tmp_path / "nbs.db",
+        coordination_db_path=tmp_path / "coordination.db",
+        revenue_loader=_frames,
+        revenue_generation_loader=lambda: preview.revenue_generation_token,
+    )
+    assert receipt.version_id
+    with sqlite3.connect(tmp_path / "nbs.db") as conn:
+        payload = conn.execute(
+            "SELECT warning_acknowledgement_json FROM gmv_refund_batches WHERE batch_id = ?",
+            (receipt.batch_id,),
+        ).fetchone()[0]
+    assert "SQLITE_SOURCE_NOT_FOUND" in payload
+    assert '"warningSummaries"' in payload
+
+
+def test_confirm_is_idempotent_for_same_file_and_revenue_generation(tmp_path):
+    db_path = _seed_database(tmp_path / "nbs.db")
+    repository = GmvRefundRepository(db_path)
+    preview = preview_refund_batch(
+        pd.DataFrame(
+            [{"退款單號": "R-IDEMPOTENT", "來源單據號": "S-1", "退款原幣金額": "20", "退款狀態": "已退款"}]
+        ),
+        repository=repository,
+        revenue_frames=_frames(),
+        revenue_generation_token="rev-idempotent",
+        rule_version="rules-1",
+        file_sha256="idempotent-file",
+    )
+
+    kwargs = {
+        "actor": "streamlit-auto-merge",
+        "acknowledgements": frozenset(),
+        "db_path": db_path,
+        "coordination_db_path": tmp_path / "coordination.db",
+        "revenue_loader": _frames,
+        "revenue_generation_loader": lambda: preview.revenue_generation_token,
+    }
+    first = confirm_refund_batch(preview, **kwargs)
+    second = confirm_refund_batch(preview, **kwargs)
+
+    assert second == first
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM gmv_refund_batches").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM gmv_scope_versions WHERE status = 'ACTIVE'").fetchone()[0] == 1
+
+
 def test_preview_uses_current_plus_incoming_status_change_for_both_dimensions(tmp_path):
     db_path = _seed_database(tmp_path / "nbs.db")
     _seed_current(db_path)

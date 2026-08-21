@@ -72,6 +72,7 @@ class GmvRefundPreview:
     official_net_gmv_minor: int
     blocking_codes: tuple[str, ...]
     warning_codes: tuple[str, ...]
+    warning_summaries: tuple[dict[str, object], ...]
     preflight_fingerprint: str
     observations: tuple[RefundObservation, ...]
     proposed_states: tuple[RefundCurrentState, ...]
@@ -196,6 +197,8 @@ def preview_refund_batch(
     revenue_generation_token: str,
     rule_version: str,
     file_sha256: str,
+    warning_codes: tuple[str, ...] = (),
+    warning_summaries: tuple[dict[str, object], ...] = (),
 ) -> GmvRefundPreview:
     observations, blocking_codes = _build_observations(refund_rows)
     current = repository.load_current_refunds()
@@ -243,6 +246,8 @@ def preview_refund_batch(
             "proposedStateSha256": proposed_hash,
             "revenueGenerationToken": revenue_generation_token,
             "ruleVersion": rule_version,
+            "warningCodes": sorted(set(warning_codes)),
+            "warningSummaries": list(warning_summaries),
         }
     )
     return GmvRefundPreview(
@@ -258,7 +263,8 @@ def preview_refund_batch(
         formal_revenue_minor=formal_revenue_minor,
         official_net_gmv_minor=formal_revenue_minor - paid_deduction,
         blocking_codes=tuple(blocking_codes),
-        warning_codes=(),
+        warning_codes=tuple(sorted(set(warning_codes))),
+        warning_summaries=tuple(dict(item) for item in warning_summaries),
         preflight_fingerprint=fingerprint,
         observations=tuple(observations),
         proposed_states=tuple(sorted(proposed.values(), key=lambda item: item.refund_order_no)),
@@ -399,6 +405,18 @@ def confirm_refund_batch(
         coordination_db_path=coordination_db_path,
     ):
         repository = GmvRefundRepository(db_path)
+        duplicate = repository.load_confirmed_batch_identity(
+            preview.file_sha256, preview.revenue_generation_token
+        )
+        if duplicate is not None:
+            return GmvActivationReceipt(
+                batch_id=str(duplicate["batch_id"]),
+                version_id=str(duplicate["version_id"]),
+                event_id=str(duplicate["event_id"]),
+                previous_version_id=duplicate["previous_version_id"],
+                revenue_generation_token=str(duplicate["revenue_generation_token"]),
+                refund_state_sha256=str(duplicate["refund_state_sha256"]),
+            )
         current = repository.load_current_refunds()
         if refund_state_sha256(current) != preview.current_state_sha256:
             raise StaleGmvPreview("current refund state changed after Preflight")
@@ -415,17 +433,16 @@ def confirm_refund_batch(
         }
         with repository.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            duplicate = conn.execute(
-                "SELECT 1 FROM gmv_refund_batches WHERE file_sha256 = ? AND revenue_generation_token = ?",
-                (preview.file_sha256, preview.revenue_generation_token),
-            ).fetchone()
-            if duplicate:
-                raise ValueError("refund batch already confirmed for this revenue generation")
+            confirmation_payload = {
+                "acknowledgements": sorted(acknowledgements),
+                "warnings": list(preview.warning_codes),
+                "warningSummaries": list(preview.warning_summaries),
+            }
             conn.execute(
                 "INSERT INTO gmv_refund_batches VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (batch_id, f"refund-{preview.file_sha256[:12]}.xlsx", preview.file_sha256, preview.normalized_sha256,
                  len(preview.observations), len(preview.observations), "CONFIRMED", preview.preflight_fingerprint,
-                 json.dumps(sorted(acknowledgements), ensure_ascii=False), preview.revenue_generation_token,
+                 json.dumps(confirmation_payload, ensure_ascii=False, sort_keys=True), preview.revenue_generation_token,
                  preview.rule_version, timestamp, actor),
             )
             _fault("after_batch", fault_after)
