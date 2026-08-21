@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping
@@ -72,6 +73,7 @@ class GmvRefundPreview:
     official_net_gmv_minor: int
     blocking_codes: tuple[str, ...]
     warning_codes: tuple[str, ...]
+    warning_summaries: tuple[dict[str, object], ...]
     preflight_fingerprint: str
     observations: tuple[RefundObservation, ...]
     proposed_states: tuple[RefundCurrentState, ...]
@@ -86,6 +88,15 @@ class GmvActiveReadModel:
     total_adjusted: dict[str, object] | None
     paid_adjusted: dict[str, object] | None
     can_export: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GmvFormalArtifacts:
+    total_adjusted: dict[str, object]
+    paid_adjusted: dict[str, object]
+    total_summary_rows: list[dict[str, object]]
+    paid_summary_rows: list[dict[str, object]]
+    cache_manifest: object
 
 
 def _canonical_frame_sha256(frame: pd.DataFrame) -> str:
@@ -196,6 +207,8 @@ def preview_refund_batch(
     revenue_generation_token: str,
     rule_version: str,
     file_sha256: str,
+    warning_codes: tuple[str, ...] = (),
+    warning_summaries: tuple[dict[str, object], ...] = (),
 ) -> GmvRefundPreview:
     observations, blocking_codes = _build_observations(refund_rows)
     current = repository.load_current_refunds()
@@ -243,6 +256,8 @@ def preview_refund_batch(
             "proposedStateSha256": proposed_hash,
             "revenueGenerationToken": revenue_generation_token,
             "ruleVersion": rule_version,
+            "warningCodes": sorted(set(warning_codes)),
+            "warningSummaries": list(warning_summaries),
         }
     )
     return GmvRefundPreview(
@@ -258,7 +273,8 @@ def preview_refund_batch(
         formal_revenue_minor=formal_revenue_minor,
         official_net_gmv_minor=formal_revenue_minor - paid_deduction,
         blocking_codes=tuple(blocking_codes),
-        warning_codes=(),
+        warning_codes=tuple(sorted(set(warning_codes))),
+        warning_summaries=tuple(dict(item) for item in warning_summaries),
         preflight_fingerprint=fingerprint,
         observations=tuple(observations),
         proposed_states=tuple(sorted(proposed.values(), key=lambda item: item.refund_order_no)),
@@ -399,6 +415,18 @@ def confirm_refund_batch(
         coordination_db_path=coordination_db_path,
     ):
         repository = GmvRefundRepository(db_path)
+        duplicate = repository.load_confirmed_batch_identity(
+            preview.file_sha256, preview.revenue_generation_token
+        )
+        if duplicate is not None:
+            return GmvActivationReceipt(
+                batch_id=str(duplicate["batch_id"]),
+                version_id=str(duplicate["version_id"]),
+                event_id=str(duplicate["event_id"]),
+                previous_version_id=duplicate["previous_version_id"],
+                revenue_generation_token=str(duplicate["revenue_generation_token"]),
+                refund_state_sha256=str(duplicate["refund_state_sha256"]),
+            )
         current = repository.load_current_refunds()
         if refund_state_sha256(current) != preview.current_state_sha256:
             raise StaleGmvPreview("current refund state changed after Preflight")
@@ -415,17 +443,16 @@ def confirm_refund_batch(
         }
         with repository.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            duplicate = conn.execute(
-                "SELECT 1 FROM gmv_refund_batches WHERE file_sha256 = ? AND revenue_generation_token = ?",
-                (preview.file_sha256, preview.revenue_generation_token),
-            ).fetchone()
-            if duplicate:
-                raise ValueError("refund batch already confirmed for this revenue generation")
+            confirmation_payload = {
+                "acknowledgements": sorted(acknowledgements),
+                "warnings": list(preview.warning_codes),
+                "warningSummaries": list(preview.warning_summaries),
+            }
             conn.execute(
                 "INSERT INTO gmv_refund_batches VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (batch_id, f"refund-{preview.file_sha256[:12]}.xlsx", preview.file_sha256, preview.normalized_sha256,
                  len(preview.observations), len(preview.observations), "CONFIRMED", preview.preflight_fingerprint,
-                 json.dumps(sorted(acknowledgements), ensure_ascii=False), preview.revenue_generation_token,
+                 json.dumps(confirmation_payload, ensure_ascii=False, sort_keys=True), preview.revenue_generation_token,
                  preview.rule_version, timestamp, actor),
             )
             _fault("after_batch", fault_after)
@@ -536,6 +563,8 @@ def build_active_gmv_read_model(
     revenue_frames: RevenueFrames,
     *,
     rule_version: str,
+    cache_manifest=None,
+    cache_dir=None,
 ) -> GmvActiveReadModel:
     """Reopen the immutable active GMV version without requiring its source upload."""
     active = repository.load_active_scope()
@@ -545,6 +574,13 @@ def build_active_gmv_read_model(
         )
     version_id = str(active["version_id"])
     current_token = revenue_state_token(revenue_frames, rule_version)
+    if cache_manifest is not None:
+        return load_active_gmv_read_model(
+            repository=repository,
+            cache_manifest=cache_manifest,
+            current_revenue_token=current_token,
+            cache_dir=cache_dir,
+        )
     if active["revenue_generation_token"] != current_token:
         return GmvActiveReadModel(
             "STALE_REVENUE_GENERATION",
@@ -582,6 +618,129 @@ def build_active_gmv_read_model(
         paid_adjusted,
         True,
     )
+
+
+def build_gmv_formal_artifacts(
+    *, repository: GmvRefundRepository, version_id: str,
+    revenue_frames: RevenueFrames, rule_version: str, cache_dir=None,
+) -> GmvFormalArtifacts:
+    """Calculate both formal dimensions once and persist their derived cache."""
+    from app_workflows import (
+        _apply_gmv_refund_adjustments, _compute_gmv_exclusion_workbooks,
+        _gmv_summary_rows, build_formal_gmv_workbooks,
+    )
+    from backend.services.gmv_export_cache_service import build_gmv_export_cache
+
+    active = repository.load_active_scope()
+    if active is None or str(active["version_id"]) != version_id:
+        raise ValueError("GMV version is not the active version")
+    refunds = _refund_frame_from_reconciliation(repository, version_id, "TOTAL_REFUND")
+    paid_refunds = _refund_frame_from_reconciliation(repository, version_id, "REFUNDED")
+    total_adjusted = _apply_gmv_refund_adjustments(
+        revenue_frames.formal_tour, revenue_frames.formal_others, refunds
+    )
+    paid_adjusted = _apply_gmv_refund_adjustments(
+        revenue_frames.formal_tour, revenue_frames.formal_others, paid_refunds, refund_status="已退款"
+    )
+    total_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, total_adjusted)
+    paid_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, paid_adjusted)
+    workbooks = build_formal_gmv_workbooks(
+        total_adjusted=total_adjusted,
+        paid_adjusted=paid_adjusted,
+        total_summary_rows=total_summary_rows,
+        paid_summary_rows=paid_summary_rows,
+        provenance={"version_id": version_id, "revenue_generation_token": active["revenue_generation_token"]},
+    )
+    # The two dimensions are independent and workbook generation is the costly
+    # part of cache creation. Build them concurrently without changing the
+    # artifact contract or the order in which they are persisted below.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gmv-export") as executor:
+        total_future = executor.submit(
+            _compute_gmv_exclusion_workbooks,
+            total_adjusted["tour"],
+            total_adjusted["others"],
+        )
+        paid_future = executor.submit(
+            _compute_gmv_exclusion_workbooks,
+            paid_adjusted["tour"],
+            paid_adjusted["others"],
+        )
+        total_exports = total_future.result()
+        paid_exports = paid_future.result()
+    total_exports = {key: value for key, value in total_exports.items() if isinstance(value, (bytes, bytearray))}
+    paid_exports = {key: value for key, value in paid_exports.items() if isinstance(value, (bytes, bytearray))}
+    total_exports["audit"] = workbooks["total"]
+    paid_exports["audit"] = workbooks["paid"]
+    manifest = build_gmv_export_cache(
+        version_id=version_id,
+        revenue_generation_token=str(active["revenue_generation_token"]),
+        rule_version=rule_version,
+        total_workbooks={f"{key}.xlsx": value for key, value in total_exports.items()},
+        paid_workbooks={f"{key}.xlsx": value for key, value in paid_exports.items()},
+        total_detail=total_adjusted["adjusted_detail"],
+        paid_detail=paid_adjusted["adjusted_detail"],
+        summaries=total_summary_rows + paid_summary_rows,
+        cache_dir=cache_dir or ".nbs_runtime_cache",
+    )
+    return GmvFormalArtifacts(total_adjusted, paid_adjusted, total_summary_rows, paid_summary_rows, manifest)
+
+
+def load_active_gmv_read_model(
+    *, repository: GmvRefundRepository, cache_manifest, current_revenue_token: str,
+    cache_dir=None,
+) -> GmvActiveReadModel:
+    """Read active formal dimensions from verified cache artifacts, never revenue frames."""
+    active = repository.load_active_scope()
+    if active is None:
+        return GmvActiveReadModel("NOT_INITIALIZED", None, None, pd.DataFrame(), None, None, False)
+    version_id = str(active["version_id"])
+    if str(active["revenue_generation_token"]) != current_revenue_token:
+        return GmvActiveReadModel("STALE_REVENUE_GENERATION", version_id, active, repository.load_metric_snapshot(version_id), None, None, False)
+    if cache_manifest is None or getattr(cache_manifest, "status", None) != "ready":
+        return GmvActiveReadModel("CACHE_NOT_READY", version_id, active, repository.load_metric_snapshot(version_id), None, None, False)
+    from backend.services.gmv_export_cache_service import read_gmv_export_artifact
+    try:
+        total_detail = read_gmv_export_artifact(cache_manifest, cache_dir or ".nbs_runtime_cache", "total.detail")
+        paid_detail = read_gmv_export_artifact(cache_manifest, cache_dir or ".nbs_runtime_cache", "paid.detail")
+        summaries = json.loads(read_gmv_export_artifact(cache_manifest, cache_dir or ".nbs_runtime_cache", "summaries").decode("utf-8"))
+        total_rows = [row for row in summaries if row.get("退款維度") == "總退款"]
+        paid_rows = [row for row in summaries if row.get("退款維度") == "已退款"]
+        _validate_cached_summary_contract(total_rows, "總退款")
+        _validate_cached_summary_contract(paid_rows, "已退款")
+        total_adjusted = _cached_adjusted(total_detail, total_rows, "總退款")
+        paid_adjusted = _cached_adjusted(paid_detail, paid_rows, "已退款")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return GmvActiveReadModel("CACHE_INVALID", version_id, active, repository.load_metric_snapshot(version_id), None, None, False)
+    return GmvActiveReadModel("CURRENT", version_id, active, repository.load_metric_snapshot(version_id), total_adjusted, paid_adjusted, True)
+
+
+def _validate_cached_summary_contract(summary_rows: list[dict[str, object]], dimension: str) -> None:
+    required_metrics = {
+        "退款明細金額",
+        "實際扣減金額",
+        "超額退款金額",
+        "排除前 GMV",
+        "退款扣減後 GMV",
+    }
+    available = {str(row.get("指標")) for row in summary_rows if isinstance(row, dict)}
+    missing = sorted(required_metrics - available)
+    if missing:
+        raise ValueError(f"incomplete {dimension} GMV summary contract: {','.join(missing)}")
+
+
+def _cached_adjusted(detail_bytes: bytes, summary_rows: list[dict[str, object]], status: str) -> dict[str, object]:
+    from io import BytesIO
+    detail = pd.read_csv(BytesIO(detail_bytes))
+    values = {str(row["指標"]): row["數值"] for row in summary_rows}
+    return {
+        "tour": pd.DataFrame(), "others": pd.DataFrame(), "adjusted_detail": detail,
+        "refund_total": float(values.get("退款明細金額", 0)),
+        "applied_refund_total": float(values.get("實際扣減金額", 0)),
+        "over_refund_total": float(values.get("超額退款金額", 0)),
+        "before_gmv": float(values.get("排除前 GMV", 0)),
+        "matched_source_ids": set(), "unmatched_source_ids": [], "refund_amounts": pd.Series(dtype=float),
+        "refund_status": status,
+    }
 
 
 def _insert_scope_event(conn, event_id: str, event_type: str, from_version_id: str | None, to_version_id: str | None, reason: str, actor: str, timestamp: str) -> None:

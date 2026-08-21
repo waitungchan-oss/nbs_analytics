@@ -115,10 +115,12 @@ from backend.services.gmv_refund_service import (
     RevenueFrames,
     StaleGmvPreview,
     build_active_gmv_read_model,
+    build_gmv_formal_artifacts,
     confirm_refund_batch,
     preview_refund_batch,
     revenue_state_token,
 )
+from backend.services.gmv_export_cache_service import load_gmv_export_cache, read_gmv_export_artifact
 from backend.services.upload_orchestrator_service import execute_upload_operation
 from backend.services.receipt_exclusion_governance_service import (
     confirm_receipt_exclusion_revocation,
@@ -2432,7 +2434,7 @@ def _load_current_gmv_revenue_frames() -> RevenueFrames:
     return RevenueFrames(raw_tour, raw_others, formal_tour, formal_others)
 
 
-def _render_active_gmv_scope(model, formal_tour: pd.DataFrame, formal_others: pd.DataFrame) -> None:
+def _render_active_gmv_scope_legacy(model, formal_tour: pd.DataFrame, formal_others: pd.DataFrame) -> None:
     total_adjusted = model.total_adjusted
     paid_adjusted = model.paid_adjusted
     if not model.can_export or total_adjusted is None or paid_adjusted is None:
@@ -2575,7 +2577,7 @@ def _render_active_gmv_scope(model, formal_tour: pd.DataFrame, formal_others: pd
                 )
 
 
-def _render_gmv_exclusion_tab() -> None:
+def _render_gmv_exclusion_tab_legacy() -> None:
     _render_section(
         "GMV 排除訂單看板",
         "上傳退款明細後，系統按來源單據號彙總退款原幣金額並生成獨立 GMV 視角；"
@@ -2950,26 +2952,181 @@ def _render_gmv_exclusion_tab() -> None:
                     f"GMV排除訂單_分社與專職_經營統計_V5.0{suffix}.xlsx",
                     width="stretch",
                 )
-            with d2:
+
+
+def _active_gmv_summary_rows(adjusted: dict[str, object]) -> list[dict[str, object]]:
+    required = (
+        "refund_status", "refund_total", "applied_refund_total",
+        "over_refund_total", "before_gmv",
+    )
+    missing = [key for key in required if key not in adjusted]
+    if missing:
+        raise ValueError(f"incomplete active GMV read model: {','.join(missing)}")
+    before_gmv = float(adjusted["before_gmv"])
+    applied_refund_total = float(adjusted["applied_refund_total"])
+    return [
+        {"退款維度": adjusted["refund_status"], "指標": "退款明細金額", "數值": adjusted["refund_total"]},
+        {"退款維度": adjusted["refund_status"], "指標": "實際扣減金額", "數值": applied_refund_total},
+        {"退款維度": adjusted["refund_status"], "指標": "超額退款金額", "數值": adjusted["over_refund_total"]},
+        {"退款維度": adjusted["refund_status"], "指標": "排除前 GMV", "數值": before_gmv},
+        {"退款維度": adjusted["refund_status"], "指標": "退款扣減後 GMV", "數值": before_gmv - applied_refund_total},
+    ]
+
+
+def _render_active_gmv_scope(model, formal_tour: pd.DataFrame, formal_others: pd.DataFrame) -> None:
+    """Compatibility renderer; active downloads are now cache-backed in the GMV tab."""
+    if not model.can_export:
+        st.warning("正式淨 GMV cache 尚未 ready，或主營收 token 已變更。")
+        return
+    st.caption("正式淨 GMV active version 已由 version-scoped cache 載入")
+    st.dataframe(model.metrics, hide_index=True, width="stretch")
+
+
+def _render_gmv_exclusion_tab() -> None:
+    """One-click refund merge with cache-backed, read-only active rendering."""
+    _render_section(
+        "GMV 排除訂單看板",
+        "上傳退款明細後，按一次「上傳並合併退款資料庫」；warning 會保留稽核紀錄並自動建立 active version，blocking 則完全不寫入。",
+        "🧾",
+    )
+    upload = st.file_uploader(
+        "上傳退款明細數據（Excel / CSV；需要退款單號、來源單據號、退款原幣金額、退款狀態）",
+        type=["xlsx", "xls", "csv"], key="GMV_EXCLUSION_UPLOAD",
+    )
+    repository = GmvRefundRepository(database_module.DB_FILE)
+    schema_status = repository.validate_schema()
+    if not schema_status.ready:
+        st.warning("正式 GMV ledger 尚未完成 migration，暫時不能建立 active version。")
+        return
+
+    db_tour, db_others = load_all_data_from_db()
+    if db_tour.empty and db_others.empty:
+        st.info("目前 SQLite 尚無資料，請先在經營分析大盤上傳主副表。")
+        return
+    formal_tour, formal_others, _ = _build_revenue_scope_frames(db_tour, db_others)
+    revenue_frames = RevenueFrames(db_tour, db_others, formal_tour, formal_others)
+    cache_dir = PROJECT_ROOT / ".nbs_runtime_cache"
+    active_scope = repository.load_active_scope()
+
+    if upload is not None:
+        try:
+            refund_upload_rows = _read_gmv_exclusion_file(upload)
+            refund_data, _ = _normalize_gmv_refund_rows(refund_upload_rows)
+            preflight_report = _build_gmv_refund_preflight(
+                db_tour, db_others, refund_upload_rows, formal_tour, formal_others
+            )
+        except Exception:
+            _render_error("退款明細解析失敗。", traceback.format_exc())
+            return
+        st.caption("退款 Preflight 摘要")
+        issue_rows = pd.DataFrame(preflight_report.get("issues") or [])
+        if not issue_rows.empty:
+            st.dataframe(issue_rows, hide_index=True, width="stretch")
+        exception_rows = preflight_report.get("exceptionRows", pd.DataFrame())
+        if not exception_rows.empty:
+            st.caption("退款對帳異常中心")
+            st.dataframe(exception_rows, hide_index=True, width="stretch")
+        dimension_rows = [
+            {"退款維度": key, **value}
+            for key, value in (preflight_report.get("dimensions") or {}).items()
+        ]
+        if dimension_rows:
+            st.dataframe(pd.DataFrame(dimension_rows), hide_index=True, width="stretch")
+        if preflight_report.get("status") == "blocked":
+            st.error("退款 Preflight 未通過；沒有寫入 batch、current 或 active version。")
+            return
+        generation_token = revenue_state_token(revenue_frames, REVENUE_SCOPE_LABEL)
+        issues = tuple(preflight_report.get("issues") or ())
+        warning_codes = tuple(sorted({str(issue.get("code")) for issue in issues if issue.get("severity") == "warning"}))
+        formal_preview = preview_refund_batch(
+            refund_data, repository=repository, revenue_frames=revenue_frames,
+            revenue_generation_token=generation_token, rule_version=REVENUE_SCOPE_LABEL,
+            file_sha256=hashlib.sha256(upload.getvalue()).hexdigest(),
+            warning_codes=warning_codes,
+            warning_summaries=tuple(dict(issue) for issue in issues if issue.get("severity") == "warning"),
+        )
+        st.dataframe(
+            pd.DataFrame([{"分類": key, "筆數": value} for key, value in formal_preview.change_counts.items()]),
+            hide_index=True, width="stretch",
+        )
+        if formal_preview.blocking_codes:
+            st.error("正式合併被阻擋：" + "、".join(formal_preview.blocking_codes))
+            return
+        if preflight_report.get("status") == "warning":
+            st.warning("Preflight 有 warning；系統會保留 bounded warning provenance 並自動繼續。")
+        else:
+            st.success("Preflight 通過，可合併。")
+        if st.button("上傳並合併退款資料庫", type="primary", key="GMV_ONE_CLICK_MERGE", width="stretch"):
+            try:
+                with st.status("正在執行退款合併流程…", expanded=True) as progress:
+                    progress.write("Preflight 已完成，正在寫入 immutable batch 與 active version…")
+                    receipt = confirm_refund_batch(
+                        formal_preview, actor="streamlit-auto-merge", acknowledgements=frozenset(),
+                        db_path=database_module.DB_FILE, coordination_db_path=DEFAULT_COORDINATION_DB,
+                        revenue_loader=_load_current_gmv_revenue_frames,
+                        revenue_generation_loader=lambda: revenue_state_token(
+                            _load_current_gmv_revenue_frames(), REVENUE_SCOPE_LABEL
+                        ),
+                    )
+                    progress.write("active version 已建立，正在建立總退款／已退款 cache…")
+                    artifacts = build_gmv_formal_artifacts(
+                        repository=repository, version_id=receipt.version_id,
+                        revenue_frames=revenue_frames, rule_version=REVENUE_SCOPE_LABEL,
+                        cache_dir=cache_dir,
+                    )
+                    if artifacts.cache_manifest.status != "ready":
+                        raise RuntimeError(artifacts.cache_manifest.error or "GMV export cache failed")
+                    progress.update(label="退款資料庫合併與報表 cache 完成", state="complete")
+                st.success(f"已建立正式淨 GMV active version：{receipt.version_id}")
+                st.rerun()
+            except StaleGmvPreview as exc:
+                st.error(f"合併失敗：資料在 Preflight 後已變更，請重新上傳：{exc}")
+            except Exception as exc:
+                st.error(f"合併或報表 cache 失敗：{type(exc).__name__}: {exc}")
+        return
+
+    if active_scope is None:
+        _render_info_panel("尚無正式淨 GMV active version", "上傳退款明細後按一次「上傳並合併退款資料庫」即可建立。")
+        return
+    version_id = str(active_scope["version_id"])
+    current_token = revenue_state_token(revenue_frames, REVENUE_SCOPE_LABEL)
+    cache_manifest = load_gmv_export_cache(
+        version_id=version_id, revenue_generation_token=current_token,
+        rule_version=REVENUE_SCOPE_LABEL, cache_dir=cache_dir,
+    )
+    model = build_active_gmv_read_model(
+        repository, revenue_frames, rule_version=REVENUE_SCOPE_LABEL,
+        cache_manifest=cache_manifest, cache_dir=cache_dir,
+    )
+    st.caption("正式淨 GMV active version")
+    st.dataframe(pd.DataFrame([active_scope]), hide_index=True, width="stretch")
+    if not model.can_export or model.total_adjusted is None or model.paid_adjusted is None:
+        st.warning("正式淨 GMV cache 尚未 ready，或主營收 token 已變更；請重新上傳退款明細並合併。")
+        return
+    total_adjusted, paid_adjusted = model.total_adjusted, model.paid_adjusted
+    try:
+        summary_rows = _active_gmv_summary_rows(total_adjusted) + _active_gmv_summary_rows(paid_adjusted)
+    except (TypeError, ValueError) as exc:
+        st.warning(f"正式淨 GMV cache/read model 尚未符合目前報表契約，請重新上傳退款明細並合併：{exc}")
+        return
+    st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
+    st.caption("旅行團人數／票務數量：原交易人數／數量（未按退款調整）")
+    st.caption("總退款扣減明細")
+    st.dataframe(total_adjusted["adjusted_detail"], hide_index=True, width="stretch")
+    with st.expander("查看已退款維度扣減明細", expanded=False):
+        st.dataframe(paid_adjusted["adjusted_detail"], hide_index=True, width="stretch")
+    st.caption("報表已由 active version cache 產生；下載不會重新掃描完整營收資料。")
+    for dimension, label in (("total", "總退款"), ("paid", "已退款")):
+        columns = st.columns(4)
+        suffix = "" if dimension == "total" else "_已退款"
+        for column, key, name in zip(columns, ("ex", "ex_no_writeoff", "ex_no_writeoff_refund_transfer", "audit"), ("全維度報表", "不含掛賬核銷", "正式口徑", "退款扣減稽核")):
+            artifact_key = f"{dimension}.workbook.{key}.xlsx"
+            with column:
                 st.download_button(
-                    f"下載{dimension_label}（不含掛賬核銷）",
-                    dimension_workbooks.get("ex_no_writeoff") or b"",
-                    f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷{suffix}.xlsx",
-                    width="stretch",
-                )
-            with d3:
-                st.download_button(
-                    f"下載{dimension_label}（正式口徑）",
-                    dimension_workbooks.get("ex_no_writeoff_refund_transfer") or b"",
-                    f"GMV排除訂單_分社與專職_經營統計_V5.0_不含掛賬核銷與TT退款轉團款{suffix}.xlsx",
-                    width="stretch",
-                )
-            with d4:
-                st.download_button(
-                    f"下載{dimension_label}退款扣減稽核",
-                    dimension_workbooks.get("audit") or b"",
-                    f"GMV排除訂單_退款扣減稽核{suffix}.xlsx",
-                    width="stretch",
+                    f"下載{label}{name}",
+                    read_gmv_export_artifact(cache_manifest, cache_dir, artifact_key),
+                    f"GMV排除訂單_{name}{suffix}.xlsx",
+                    key=f"GMV_CACHE_DOWNLOAD_{dimension}_{key}_{version_id}", width="stretch",
                 )
 
 def main() -> None:

@@ -323,7 +323,40 @@ class GmvRefundRepository:
 
     def load_active_scope(self) -> dict[str, object] | None:
         with self.connect() as conn:
-            cursor = conn.execute("SELECT * FROM v_gmv_current_scope")
+            try:
+                cursor = conn.execute("SELECT * FROM v_gmv_current_scope")
+            except sqlite3.OperationalError as exc:
+                # Older production copies may contain the GMV tables but not
+                # the derived current-scope view. Keep reopening read-only by
+                # using the view's equivalent predicate until migration runs.
+                if "no such table: v_gmv_current_scope" not in str(exc):
+                    raise
+                cursor = conn.execute(
+                    "SELECT version_id, trigger_batch_id, previous_version_id, "
+                    "revenue_generation_token, refund_state_sha256, rule_version, "
+                    "activated_at, activated_by, calculation_sha256 "
+                    "FROM gmv_scope_versions WHERE status = 'ACTIVE'"
+                )
+            row = cursor.fetchone()
+            columns = [item[0] for item in cursor.description] if cursor.description else []
+        return dict(zip(columns, row)) if row else None
+
+    def load_confirmed_batch_identity(
+        self, file_sha256: str, revenue_generation_token: str
+    ) -> dict[str, object] | None:
+        """Return the immutable activation receipt for a previously confirmed upload."""
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "SELECT b.batch_id, v.version_id, v.previous_version_id, "
+                "v.revenue_generation_token, v.refund_state_sha256, e.event_id "
+                "FROM gmv_refund_batches AS b "
+                "JOIN gmv_scope_versions AS v ON v.trigger_batch_id = b.batch_id "
+                "JOIN gmv_scope_events AS e ON e.to_version_id = v.version_id "
+                "AND e.event_type = 'ACTIVATE' "
+                "WHERE b.file_sha256 = ? AND b.revenue_generation_token = ? "
+                "ORDER BY v.activated_at DESC LIMIT 1",
+                (file_sha256, revenue_generation_token),
+            )
             row = cursor.fetchone()
             columns = [item[0] for item in cursor.description] if cursor.description else []
         return dict(zip(columns, row)) if row else None
