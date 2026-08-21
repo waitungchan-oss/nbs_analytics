@@ -624,7 +624,10 @@ def build_gmv_formal_artifacts(
     revenue_frames: RevenueFrames, rule_version: str, cache_dir=None,
 ) -> GmvFormalArtifacts:
     """Calculate both formal dimensions once and persist their derived cache."""
-    from app_workflows import _apply_gmv_refund_adjustments, _gmv_summary_rows, build_formal_gmv_workbooks
+    from app_workflows import (
+        _apply_gmv_refund_adjustments, _compute_gmv_exclusion_workbooks,
+        _gmv_summary_rows, build_formal_gmv_workbooks,
+    )
     from backend.services.gmv_export_cache_service import build_gmv_export_cache
 
     active = repository.load_active_scope()
@@ -647,12 +650,18 @@ def build_gmv_formal_artifacts(
         paid_summary_rows=paid_summary_rows,
         provenance={"version_id": version_id, "revenue_generation_token": active["revenue_generation_token"]},
     )
+    total_exports = _compute_gmv_exclusion_workbooks(total_adjusted["tour"], total_adjusted["others"])
+    paid_exports = _compute_gmv_exclusion_workbooks(paid_adjusted["tour"], paid_adjusted["others"])
+    total_exports = {key: value for key, value in total_exports.items() if isinstance(value, (bytes, bytearray))}
+    paid_exports = {key: value for key, value in paid_exports.items() if isinstance(value, (bytes, bytearray))}
+    total_exports["audit"] = workbooks["total"]
+    paid_exports["audit"] = workbooks["paid"]
     manifest = build_gmv_export_cache(
         version_id=version_id,
         revenue_generation_token=str(active["revenue_generation_token"]),
         rule_version=rule_version,
-        total_workbooks={"正式淨GMV.xlsx": workbooks["total"]},
-        paid_workbooks={"正式淨GMV.xlsx": workbooks["paid"]},
+        total_workbooks={f"{key}.xlsx": value for key, value in total_exports.items()},
+        paid_workbooks={f"{key}.xlsx": value for key, value in paid_exports.items()},
         total_detail=total_adjusted["adjusted_detail"],
         paid_detail=paid_adjusted["adjusted_detail"],
         summaries=total_summary_rows + paid_summary_rows,
@@ -697,6 +706,7 @@ def _cached_adjusted(detail_bytes: bytes, summary_rows: list[dict[str, object]],
         "refund_total": float(values.get("退款明細金額", 0)),
         "applied_refund_total": float(values.get("實際扣減金額", 0)),
         "over_refund_total": float(values.get("超額退款金額", 0)),
+        "before_gmv": float(values.get("排除前 GMV", 0)),
         "matched_source_ids": set(), "unmatched_source_ids": [], "refund_amounts": pd.Series(dtype=float),
         "refund_status": status,
     }

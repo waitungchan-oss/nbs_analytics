@@ -14,12 +14,12 @@ def _function_source(name: str) -> str:
     raise AssertionError(f"{name} not found")
 
 
-def test_gmv_tab_has_explicit_formal_load_gate_before_database_read():
+def test_gmv_tab_reads_active_scope_without_manual_load_gate():
     source = _function_source("_render_gmv_exclusion_tab")
 
-    assert "載入正式淨 GMV" in source
+    assert "載入正式淨 GMV" not in source
     assert source.index("st.file_uploader(") < source.index("load_all_data_from_db()")
-    assert "GMV_FORMAL_SCOPE_LOADED" in source
+    assert "load_gmv_export_cache" in source
 
 
 def test_gmv_tab_never_runs_schema_migration_during_render():
@@ -42,10 +42,10 @@ def test_active_scope_reopens_without_refund_upload_and_supports_versioned_expor
     active_source = _function_source("_render_active_gmv_scope")
 
     assert "build_active_gmv_read_model" in tab_source
-    assert "_render_active_gmv_scope" in tab_source
-    assert "生成 active version 總退款及已退款完整報表" in active_source
-    assert "GMV_ACTIVE_VERSION_WORKBOOKS" in active_source
-    assert '"version_id": model.version_id' in active_source
+    assert "cache_manifest=cache_manifest" in tab_source
+    assert "read_gmv_export_artifact" in tab_source
+    assert "生成 active version 總退款及已退款完整報表" not in active_source
+    assert "_compute_gmv_exclusion_workbooks" not in tab_source
 
 
 def test_formal_preview_uses_revenue_only_generation_token():
