@@ -651,6 +651,7 @@ def build_dashboard_data(
     sales_rep_list: list[str],
     make_workbook: bool = True,
     include_branch_salesperson_sheet: bool = False,
+    return_facts: bool = False,
 ):
     df_tour_matched = normalize_runtime_columns(df_tour_matched)
     df_others_matched = normalize_runtime_columns(df_others_matched)
@@ -1128,6 +1129,8 @@ def build_dashboard_data(
     if include_branch_salesperson_sheet:
         sheets.insert(1, (result_s1_salesperson, "分社經營統計_含銷售員"))
 
+    if not make_workbook and return_facts:
+        return None, result_s1, {sheet_name: frame.copy(deep=True) for frame, sheet_name in sheets}
     if not make_workbook:
         return None, result_s1, result_s2
 
@@ -1150,6 +1153,7 @@ def build_dashboard_data_excluding_receipt_types(
     excluded_payment_methods: list[str] | None = None,
     make_workbook: bool = True,
     include_branch_salesperson_sheet: bool = False,
+    return_facts: bool = False,
 ):
     excluded_types = {str(v).strip() for v in excluded_receipt_types if str(v).strip()}
     excluded_methods = {str(v).strip() for v in (excluded_payment_methods or []) if str(v).strip()}
@@ -1163,6 +1167,7 @@ def build_dashboard_data_excluding_receipt_types(
             sales_rep_list,
             make_workbook=make_workbook,
             include_branch_salesperson_sheet=include_branch_salesperson_sheet,
+            return_facts=return_facts,
         )
 
     def collect_excluded_ids(df: pd.DataFrame) -> set[str]:
@@ -1192,4 +1197,5 @@ def build_dashboard_data_excluding_receipt_types(
         sales_rep_list,
         make_workbook=make_workbook,
         include_branch_salesperson_sheet=include_branch_salesperson_sheet,
+        return_facts=return_facts,
     )
