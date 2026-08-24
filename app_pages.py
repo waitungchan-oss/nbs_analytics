@@ -2305,6 +2305,21 @@ def _render_ai_and_exports(cache: dict) -> None:
         export_loaded = bool(cache.get("ex") and cache.get("ex_no_writeoff") and cache.get("ex_no_writeoff_refund_transfer"))
         export_cache_ready = cache.get("export_cache_status") == "ready"
         _render_export_status_card(cache, export_loaded)
+        if cache.get("export_fast_status") == "fallback":
+            st.warning(
+                "高速匯出驗證失敗，已使用相容匯出路徑。"
+                f"（{str(cache.get('export_fast_fallback_reason') or 'bounded failure')[:180]}）"
+            )
+        fast_package_path = Path(str(cache.get("export_fast_package_path", "")))
+        if export_loaded and fast_package_path.is_file():
+            st.download_button(
+                "📦 一鍵下載完整報表包 ZIP",
+                fast_package_path.read_bytes(),
+                "NBS_Analytics_Data_Exports.zip",
+                mime="application/zip",
+                width="stretch",
+                help="ZIP 已由 READY manifest 建立；下載只讀取已驗證 artifact，不會重新 aggregation。",
+            )
         if not export_loaded:
             if export_cache_ready:
                 st.success("大型 Excel workbook 已在本地快取中準備好。為保持首頁快速載入，下載 bytes 會在你需要時才載入。")
