@@ -37,6 +37,18 @@ from backend.services.cache_generation_service import (  # noqa: E402
     load_cache_generation,
     refresh_cache_generation_signature,
 )
+from backend.services.export_fast_path_service import (  # noqa: E402
+    ExportRolloutMode,
+    build_fast_export_job,
+)
+from backend.services.export_intermediate_service import (  # noqa: E402
+    ExportScope,
+    build_scope_report_inputs,
+)
+from backend.services.export_manifest_service import (  # noqa: E402
+    build_export_package,
+    load_ready_export_manifest,
+)
 
 config_module = importlib.reload(config_module)
 database_module = importlib.reload(database_module)
@@ -116,8 +128,10 @@ REVENUE_SCOPE_EXCLUDED_RECEIPT_TYPES = ('掛賬核銷',)
 REVENUE_SCOPE_EXCLUDED_PAYMENT_METHODS = ('TT 退款轉團款',)
 AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
 EXPORT_CACHE_VERSION = 'export-lazy-v3'
+EXPORT_FAST_PATH_MODE = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", "shadow").strip().lower()
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v1'
 AI_CACHE_DIR = Path(__file__).resolve().parent / '.nbs_runtime_cache'
+EXPORT_FAST_CACHE_DIR = AI_CACHE_DIR / "export_fast"
 PERSISTENT_REPAIR_STATE_PATH = Path(__file__).resolve().parent / '.nbs_runtime' / 'persistent_repair_state.json'
 
 
@@ -1025,6 +1039,64 @@ def _compute_export_workbooks(db_tour: pd.DataFrame, db_others: pd.DataFrame) ->
         "export_cache_version": EXPORT_CACHE_VERSION,
         "official_export_schema": OFFICIAL_EXPORT_SCHEMA_CONTRACT,
     }
+
+
+def _build_export_fast_candidate(scope_id: str, intermediate) -> bytes:
+    inputs = build_scope_report_inputs(intermediate, ExportScope(scope_id))
+    branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
+    include_salesperson = scope_id == ExportScope.OFFICIAL.value
+    workbook_builder = build_dashboard_data
+    excel_buf, _, _ = workbook_builder(
+        inputs.tour,
+        inputs.others,
+        branch_mapping,
+        target_branches,
+        cruise_depts,
+        sales_reps,
+        include_branch_salesperson_sheet=include_salesperson,
+    )
+    return _buffer_to_bytes(excel_buf) or b""
+
+
+def _build_fast_export_job_for_cache(cache: dict):
+    cache_key = cache.get("export_cache_key")
+    if not cache_key:
+        return None
+    return build_fast_export_job(
+        cache.get("raw_t", pd.DataFrame()),
+        cache.get("raw_o", pd.DataFrame()),
+        generation_token=cache_key,
+        rules_fingerprint=_file_content_hash(CONFIG_FILE),
+        export_schema_version=OFFICIAL_EXPORT_SCHEMA_CONTRACT,
+        cache_root=EXPORT_FAST_CACHE_DIR / cache_key,
+        reference_builder=_compute_export_workbooks,
+        candidate_builder=_build_export_fast_candidate,
+        worker_count=3,
+    )
+
+
+def _load_fast_export_artifacts(cache: dict, manifest_path: str | Path) -> bool:
+    manifest = load_ready_export_manifest(Path(manifest_path))
+    if manifest is None:
+        return False
+    root = manifest.path.parent
+    loaded = {}
+    for key, artifact in manifest.artifacts.items():
+        loaded[key] = (root / artifact.path).read_bytes()
+    if not all(loaded.get(key) for key in ("ex", "ex_no_writeoff", "ex_no_writeoff_refund_transfer")):
+        return False
+    cache.update(
+        loaded,
+        export_fast_manifest_path=str(manifest.path),
+        export_fast_package_path=str(build_export_package(manifest, root)),
+        export_fast_status="ready",
+        export_fast_mode=EXPORT_FAST_PATH_MODE,
+        export_cache_status="ready",
+        export_cache_path=str(manifest.path),
+        export_cache_version=EXPORT_CACHE_VERSION,
+        official_export_schema=OFFICIAL_EXPORT_SCHEMA_CONTRACT,
+    )
+    return True
 
 def _read_gmv_exclusion_file(file_obj) -> pd.DataFrame:
     _reset_uploaded_file(file_obj)
@@ -3432,6 +3504,16 @@ def _ensure_export_workbooks(cache: dict) -> bool:
     cache_key = cache.get("export_cache_key")
     if not cache_key:
         return False
+    fast_mode = EXPORT_FAST_PATH_MODE
+    if fast_mode in {ExportRolloutMode.OPT_IN.value, ExportRolloutMode.DEFAULT.value}:
+        fast_job = _build_fast_export_job_for_cache(cache)
+        if fast_job is not None:
+            cache["export_fast_status"] = fast_job.status.lower()
+            cache["export_fast_timings"] = dict(fast_job.timings)
+            cache["export_fast_fallback_reason"] = fast_job.fallback_reason
+            if fast_job.status == "READY" and fast_job.manifest_path and _load_fast_export_artifacts(cache, fast_job.manifest_path):
+                st.session_state["PROCESSED_DATA_CACHE"] = cache
+                return True
     export_payload = _load_export_runtime_cache(cache_key)
     if export_payload is None:
         export_payload = _compute_export_workbooks(cache.get("raw_t", pd.DataFrame()), cache.get("raw_o", pd.DataFrame()))
