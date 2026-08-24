@@ -3,6 +3,7 @@ import sqlite3
 import threading
 
 import pandas as pd
+import streamlit as st
 
 from backend.services.gmv_refund_repository import GmvRefundRepository, migrate_gmv_schema
 from backend.services.gmv_refund_service import (
@@ -76,6 +77,18 @@ def test_formal_cache_builds_total_and_paid_exports_concurrently(tmp_path, monke
         repository=GmvRefundRepository(db_path), version_id=receipt.version_id,
         revenue_frames=frames, rule_version="rules-1", cache_dir=tmp_path / "cache",
     )
+    assert artifacts.cache_manifest.status == "ready"
+
+
+def test_formal_cache_build_does_not_require_branch_mapping_session_key(tmp_path, monkeypatch):
+    db_path, frames, token, receipt = _active(tmp_path)
+    monkeypatch.delitem(st.session_state, "BRANCH_MAPPING", raising=False)
+
+    artifacts = build_gmv_formal_artifacts(
+        repository=GmvRefundRepository(db_path), version_id=receipt.version_id,
+        revenue_frames=frames, rule_version="rules-1", cache_dir=tmp_path / "cache",
+    )
+
     assert artifacts.cache_manifest.status == "ready"
 
 
