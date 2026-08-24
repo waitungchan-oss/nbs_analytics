@@ -137,6 +137,54 @@ def test_preflight_does_not_apply_revenue_scope_excluded_amounts():
     assert excluded["實際扣減金額"] == pytest.approx(0.0)
 
 
+def test_preflight_excludes_tt_refund_transfer_before_over_refund_cap():
+    raw = pd.DataFrame([
+        {
+            "來源單據號": "03LBJ6727142533",
+            "收款原幣金額": 9520.0,
+            "收款類型": "旅費",
+            "收款方式": "CR 信用咭",
+        }
+    ])
+    refunds = pd.DataFrame([
+        {
+            "來源單據號": "03LBJ6727142533",
+            "退款原幣金額": 4000.0,
+            "退款狀態": "待退款",
+            "退款方式": "TT 退款轉團款",
+        },
+        {
+            "來源單據號": "03LBJ6727142533",
+            "退款原幣金額": 9520.0,
+            "退款狀態": "待退款",
+            "退款方式": "TT 退款轉團款",
+        },
+        {
+            "來源單據號": "03LBJ6727142533",
+            "退款原幣金額": 100.0,
+            "退款狀態": "已退款",
+            "退款方式": "TT 退款轉團款",
+        },
+    ])
+
+    report = _build_gmv_refund_preflight(raw, pd.DataFrame(), refunds, raw, pd.DataFrame())
+
+    total = report["dimensions"]["總退款"]
+    excluded = report["exceptionRows"].iloc[0]
+    assert total["refundTotal"] == pytest.approx(0.0)
+    assert total["appliedRefundTotal"] == pytest.approx(0.0)
+    assert total["overRefundTotal"] == pytest.approx(0.0)
+    paid = report["dimensions"]["已退款"]
+    assert paid["refundTotal"] == pytest.approx(0.0)
+    assert paid["appliedRefundTotal"] == pytest.approx(0.0)
+    assert paid["overRefundTotal"] == pytest.approx(0.0)
+    assert excluded["匹配狀態"] == "被收入規則排除"
+    assert excluded["原因代碼"] == "REVENUE_SCOPE_EXCLUDED"
+    assert bool(excluded["是否可扣減"]) is False
+    assert excluded["實際扣減金額"] == pytest.approx(0.0)
+    assert excluded["超額退款金額"] == pytest.approx(0.0)
+
+
 def test_preflight_handles_all_sources_excluded_from_formal_scope():
     raw = pd.DataFrame(
         [{"來源單據號": "EXCLUDED", "收款原幣金額": 80.0, "收款類型": "掛賬核銷"}]

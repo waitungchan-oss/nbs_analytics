@@ -1171,6 +1171,8 @@ def _normalize_gmv_refund_rows(refund_rows: pd.DataFrame) -> tuple[pd.DataFrame,
 
     work = refund_rows.copy()
     work.rename(columns={status_column: "退款狀態"}, inplace=True)
+    if "退款方式" in work.columns:
+        work["退款方式"] = work["退款方式"].fillna("").astype(str).str.strip()
     extra_columns = [
         column for column in work.columns
         if column not in {COL_ORDER_ID, "退款原幣金額", "退款狀態"}
@@ -1289,6 +1291,15 @@ def _apply_gmv_refund_adjustments(
         ]
         if refund_status is not None:
             refund_work = refund_work.loc[refund_work["退款狀態"] == refund_status]
+        if "退款方式" in refund_work.columns:
+            excluded_methods = {
+                str(value).strip()
+                for value in REVENUE_SCOPE_EXCLUDED_PAYMENT_METHODS
+                if str(value).strip()
+            }
+            refund_work = refund_work.loc[
+                ~refund_work["退款方式"].astype(str).str.strip().isin(excluded_methods)
+            ]
         refund_amounts = refund_work.groupby(COL_ORDER_ID)["退款原幣金額"].sum()
 
     parts = []
@@ -1471,17 +1482,43 @@ def _build_gmv_refund_exception_rows(
     result["formal_present"] = result["formal_present"].astype("boolean").fillna(False).astype(bool)
     result["raw_amount"] = pd.to_numeric(result["raw_amount"], errors="coerce").fillna(0.0)
     result["退款維度"] = refund_status or "總退款"
+    excluded_methods = {
+        str(value).strip()
+        for value in REVENUE_SCOPE_EXCLUDED_PAYMENT_METHODS
+        if str(value).strip()
+    }
+    scope_excluded_by_source = (
+        normalized.groupby(COL_ORDER_ID)["退款方式"]
+        .agg(lambda values: bool(excluded_methods and values.astype(str).str.strip().isin(excluded_methods).all()))
+        if "退款方式" in normalized.columns
+        else pd.Series(dtype=bool)
+    )
+    result["退款口徑排除"] = (
+        result["來源單據號"].map(scope_excluded_by_source)
+        .astype("boolean")
+        .fillna(False)
+        .astype(bool)
+    )
     result["匹配狀態"] = "SQLite 找不到"
     result.loc[result["raw_present"] & ~result["formal_present"], "匹配狀態"] = "被收入規則排除"
     result.loc[result["formal_present"], "匹配狀態"] = "正式口徑匹配"
-    result["是否可扣減"] = result["formal_present"]
+    result.loc[result["退款口徑排除"], "匹配狀態"] = "被收入規則排除"
+    result["是否可扣減"] = result["formal_present"] & ~result["退款口徑排除"]
     result["原收款金額"] = result["raw_amount"]
     result["超額退款金額"] = (
         result["退款明細金額"].clip(lower=0) - result["原收款金額"].clip(lower=0)
     ).clip(lower=0.0)
-    result.loc[~result["raw_present"] | (result["原收款金額"] <= 0), "超額退款金額"] = 0.0
+    result.loc[
+        ~result["raw_present"]
+        | (result["原收款金額"] <= 0)
+        | result["退款口徑排除"],
+        "超額退款金額",
+    ] = 0.0
 
-    selected = normalized[[COL_ORDER_ID, "退款原幣金額", "退款狀態"]].copy()
+    selected_columns = [COL_ORDER_ID, "退款原幣金額", "退款狀態"]
+    if "退款方式" in normalized.columns:
+        selected_columns.append("退款方式")
+    selected = normalized[selected_columns].copy()
     adjusted = adjusted or _apply_gmv_refund_adjustments(formal_tour, formal_others, selected)
     result["實際扣減金額"] = 0.0
     adjusted_detail = adjusted.get("adjusted_detail", pd.DataFrame())

@@ -2600,7 +2600,7 @@ def _render_gmv_exclusion_tab_legacy() -> None:
         "🧾",
     )
     upload = st.file_uploader(
-        "上傳退款明細數據（Excel / CSV；正式 ledger 需要退款單號、來源單據號、退款原幣金額、退款狀態）",
+        "上傳退款明細數據（Excel / CSV；需要退款單號、來源單據號、退款原幣金額、退款狀態；退款方式用於同步正式口徑排除）",
         type=["xlsx", "xls", "csv"],
         key="GMV_EXCLUSION_UPLOAD",
     )
@@ -3005,7 +3005,7 @@ def _render_gmv_exclusion_tab() -> None:
         "🧾",
     )
     upload = st.file_uploader(
-        "上傳退款明細數據（Excel / CSV；需要退款單號、來源單據號、退款原幣金額、退款狀態）",
+        "上傳退款明細數據（Excel / CSV；需要退款單號、來源單據號、退款原幣金額、退款狀態；退款方式用於同步正式口徑排除）",
         type=["xlsx", "xls", "csv"], key="GMV_EXCLUSION_UPLOAD",
     )
     repository = GmvRefundRepository(database_module.DB_FILE)
