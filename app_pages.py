@@ -2305,6 +2305,11 @@ def _render_ai_and_exports(cache: dict) -> None:
         export_loaded = bool(cache.get("ex") and cache.get("ex_no_writeoff") and cache.get("ex_no_writeoff_refund_transfer"))
         export_cache_ready = cache.get("export_cache_status") == "ready"
         _render_export_status_card(cache, export_loaded)
+        if cache.get("export_fast_status") == "fallback":
+            st.warning(
+                "高速匯出驗證失敗，已使用相容匯出路徑。"
+                f"（{str(cache.get('export_fast_fallback_reason') or 'bounded failure')[:180]}）"
+            )
         fast_package_path = Path(str(cache.get("export_fast_package_path", "")))
         if export_loaded and fast_package_path.is_file():
             st.download_button(

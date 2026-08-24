@@ -135,6 +135,20 @@ EXPORT_FAST_CACHE_DIR = AI_CACHE_DIR / "export_fast"
 PERSISTENT_REPAIR_STATE_PATH = Path(__file__).resolve().parent / '.nbs_runtime' / 'persistent_repair_state.json'
 
 
+def resolve_export_mode() -> str:
+    mode = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", EXPORT_FAST_PATH_MODE).strip().lower()
+    allowed = {item.value for item in ExportRolloutMode}
+    return mode if mode in allowed else ExportRolloutMode.SHADOW.value
+
+
+def should_publish_fast_export(*, mode: str, equivalence_status: str, baseline_status: str) -> bool:
+    return (
+        mode in {ExportRolloutMode.OPT_IN.value, ExportRolloutMode.DEFAULT.value}
+        and equivalence_status == "PASS"
+        and baseline_status == "PASS"
+    )
+
+
 def _evaluate_monthly_baselines_for_runtime() -> dict:
     cache = st.session_state.get("PROCESSED_DATA_CACHE")
     if cache and isinstance(cache.get("s1"), pd.DataFrame) and isinstance(cache.get("s2"), pd.DataFrame):
@@ -3504,7 +3518,7 @@ def _ensure_export_workbooks(cache: dict) -> bool:
     cache_key = cache.get("export_cache_key")
     if not cache_key:
         return False
-    fast_mode = EXPORT_FAST_PATH_MODE
+    fast_mode = resolve_export_mode()
     if fast_mode in {ExportRolloutMode.OPT_IN.value, ExportRolloutMode.DEFAULT.value}:
         fast_job = _build_fast_export_job_for_cache(cache)
         if fast_job is not None:
