@@ -111,6 +111,27 @@ def test_fast_export_job_falls_back_when_candidate_is_not_equivalent(tmp_path):
     assert result.fallback_reason
 
 
+def test_fast_export_job_blocks_publication_when_baseline_is_not_pass(tmp_path):
+    from backend.services.export_fast_path_service import build_fast_export_job
+
+    tour, others = _frames()
+    result = build_fast_export_job(
+        tour,
+        others,
+        generation_token="generation-baseline-blocked",
+        rules_fingerprint="rules-1",
+        export_schema_version="schema-1",
+        cache_root=tmp_path,
+        reference_builder=_reference_builder,
+        candidate_builder=_candidate_builder,
+        worker_count=1,
+        baseline_status="DRIFT",
+    )
+
+    assert result.status == "FALLBACK"
+    assert "baseline status" in (result.fallback_reason or "")
+
+
 def test_rollout_mode_controls_whether_ready_fast_result_is_selected():
     from backend.services.export_fast_path_service import ExportRolloutMode, select_export_path
 

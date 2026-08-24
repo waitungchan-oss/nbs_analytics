@@ -1086,6 +1086,7 @@ def _build_fast_export_job_for_cache(cache: dict):
         reference_builder=_compute_export_workbooks,
         candidate_builder=_build_export_fast_candidate,
         worker_count=3,
+        baseline_status=str(cache.get("export_baseline_status", "UNKNOWN")),
     )
 
 
@@ -3520,6 +3521,7 @@ def _ensure_export_workbooks(cache: dict) -> bool:
         return False
     fast_mode = resolve_export_mode()
     if fast_mode in {ExportRolloutMode.OPT_IN.value, ExportRolloutMode.DEFAULT.value}:
+        cache.setdefault("export_baseline_status", "UNKNOWN")
         fast_job = _build_fast_export_job_for_cache(cache)
         if fast_job is not None:
             cache["export_fast_status"] = fast_job.status.lower()

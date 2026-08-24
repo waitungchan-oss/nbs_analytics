@@ -55,10 +55,13 @@ def build_fast_export_job(
     reference_builder: Callable[[pd.DataFrame, pd.DataFrame], Mapping[str, bytes]],
     candidate_builder: Callable[[str, object], bytes],
     worker_count: int = 3,
+    baseline_status: str = "PASS",
 ) -> ExportJobResult:
     started = time.perf_counter()
     job_id = str(generation_token)
     try:
+        if baseline_status != "PASS":
+            raise ValueError("baseline status is not PASS; fast export publication blocked")
         intermediate_started = time.perf_counter()
         intermediate = build_export_intermediate(
             raw_tour,
