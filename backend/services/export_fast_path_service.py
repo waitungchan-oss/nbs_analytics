@@ -70,9 +70,10 @@ def build_fast_export_job(
         intermediate_ms = round((time.perf_counter() - intermediate_started) * 1000)
 
         reference_started = time.perf_counter()
-        reference = dict(reference_builder(raw_tour.copy(deep=True), raw_others.copy(deep=True)))
+        reference_payload = dict(reference_builder(raw_tour.copy(deep=True), raw_others.copy(deep=True)))
         reference_ms = round((time.perf_counter() - reference_started) * 1000)
-        if set(reference) != set(EXPORT_KEYS) or not all(isinstance(value, bytes) and value for value in reference.values()):
+        reference = {key: reference_payload.get(key) for key in EXPORT_KEYS}
+        if not all(isinstance(value, bytes) and value for value in reference.values()):
             raise ValueError("legacy reference export contract invalid")
 
         candidate_started = time.perf_counter()
