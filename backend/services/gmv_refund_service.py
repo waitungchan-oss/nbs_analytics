@@ -627,6 +627,7 @@ def build_gmv_formal_artifacts(
     """Calculate both formal dimensions once and persist their derived cache."""
     from app_workflows import (
         _apply_gmv_refund_adjustments, _compute_gmv_exclusion_workbooks,
+        _current_rules,
         _gmv_summary_rows, build_formal_gmv_workbooks,
     )
     from backend.services.gmv_export_cache_service import build_gmv_export_cache
@@ -644,6 +645,7 @@ def build_gmv_formal_artifacts(
     )
     total_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, total_adjusted)
     paid_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, paid_adjusted)
+    export_rules = _current_rules()
     workbooks = build_formal_gmv_workbooks(
         total_adjusted=total_adjusted,
         paid_adjusted=paid_adjusted,
@@ -659,11 +661,13 @@ def build_gmv_formal_artifacts(
             _compute_gmv_exclusion_workbooks,
             total_adjusted["tour"],
             total_adjusted["others"],
+            rules=export_rules,
         )
         paid_future = executor.submit(
             _compute_gmv_exclusion_workbooks,
             paid_adjusted["tour"],
             paid_adjusted["others"],
+            rules=export_rules,
         )
         total_exports = total_future.result()
         paid_exports = paid_future.result()

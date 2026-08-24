@@ -169,12 +169,36 @@ def _money_text(value: float) -> str:
 
 
 def _current_rules() -> tuple[dict, list[str], list[str], list[str], list[str]]:
+    # Cache/export workers may run without a complete Streamlit session. Keep
+    # the business-rule source deterministic instead of letting a missing UI
+    # key abort an already-confirmed formal GMV version.
+    rules = config_module.load_business_rules()
+    branch_mapping = rules.get("BRANCH_MAPPING", config_module.DEFAULT_BRANCH_MAPPING)
+    if not isinstance(branch_mapping, dict):
+        branch_mapping = config_module.DEFAULT_BRANCH_MAPPING
+    normalized_mapping = {
+        config_module._clean_text(key).upper(): config_module._clean_text(value)
+        for key, value in branch_mapping.items()
+        if config_module._clean_text(key) and config_module._clean_text(value)
+    }
     return (
-        st.session_state["BRANCH_MAPPING"],
-        st.session_state["TARGET_BRANCHES_S3"],
-        st.session_state["CRUISE_DEPTS"],
-        st.session_state["SALES_REP_LIST"],
-        st.session_state["EXCLUDE_PREFIXES"],
+        st.session_state.get("BRANCH_MAPPING", normalized_mapping),
+        st.session_state.get(
+            "TARGET_BRANCHES_S3",
+            config_module._clean_list(rules.get("TARGET_BRANCHES_S3", [])),
+        ),
+        st.session_state.get(
+            "CRUISE_DEPTS",
+            config_module._clean_list(rules.get("CRUISE_DEPTS", [])),
+        ),
+        st.session_state.get(
+            "SALES_REP_LIST",
+            config_module._clean_list(rules.get("SALES_REP_LIST", [])),
+        ),
+        st.session_state.get(
+            "EXCLUDE_PREFIXES",
+            config_module._clean_list(rules.get("EXCLUDE_PREFIXES", [])),
+        ),
     )
 
 def _sum_money(df: pd.DataFrame) -> float:
@@ -1016,8 +1040,13 @@ def _buffer_to_bytes(buffer: io.BytesIO | None) -> bytes | None:
     buffer.seek(0)
     return buffer.getvalue()
 
-def _compute_export_workbooks(db_tour: pd.DataFrame, db_others: pd.DataFrame) -> dict:
-    branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
+def _compute_export_workbooks(
+    db_tour: pd.DataFrame,
+    db_others: pd.DataFrame,
+    *,
+    rules: tuple[dict, list[str], list[str], list[str], list[str]] | None = None,
+) -> dict:
+    branch_mapping, target_branches, cruise_depts, sales_reps, _ = rules or _current_rules()
     excel_buf, _, _ = build_dashboard_data(
         db_tour,
         db_others,
@@ -1766,8 +1795,13 @@ def _gmv_summary_rows(db_tour: pd.DataFrame, db_others: pd.DataFrame, adjusted: 
         {"退款維度": adjusted["refund_status"], "指標": "退款扣減後 GMV", "數值": round(after, 2)},
     ]
 
-def _compute_gmv_exclusion_workbooks(filtered_tour: pd.DataFrame, filtered_others: pd.DataFrame) -> dict:
-    return _compute_export_workbooks(filtered_tour, filtered_others)
+def _compute_gmv_exclusion_workbooks(
+    filtered_tour: pd.DataFrame,
+    filtered_others: pd.DataFrame,
+    *,
+    rules: tuple[dict, list[str], list[str], list[str], list[str]] | None = None,
+) -> dict:
+    return _compute_export_workbooks(filtered_tour, filtered_others, rules=rules)
 
 def _build_gmv_audit_workbook(
     summary_rows: list[dict],

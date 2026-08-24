@@ -3,10 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.services.agent_operations_service import AgentOperationsService
+from scripts.provision_memory_hub_catalog import provision
 
 
 def test_agent_operations_snapshot_projects_memory_hub_readiness() -> None:
     root = Path(__file__).resolve().parents[1]
+    # The service is intentionally read-only; prepare its deployment-owned
+    # catalog here so this test does not depend on another test's order.
+    provision(root)
     snapshot = AgentOperationsService(root).build_snapshot()
     observation = snapshot["memoryHubIntegration"]
     assert observation["status"] == "ready"
