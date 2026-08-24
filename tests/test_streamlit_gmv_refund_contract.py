@@ -31,6 +31,14 @@ def test_gmv_tab_blocks_report_generation_for_blocked_preflight():
     assert "st.rerun()" in source
 
 
+def test_gmv_tab_clears_upload_before_rerun_to_show_active_reports():
+    source = _function_source("_render_gmv_exclusion_tab")
+
+    assert 'GMV_CLEAR_UPLOAD_AFTER_MERGE' in source
+    assert 'st.session_state.pop("GMV_EXCLUSION_UPLOAD", None)' in source
+    assert 'st.session_state["GMV_CLEAR_UPLOAD_AFTER_MERGE"] = True' in source
+
+
 def test_gmv_tab_exposes_exception_download_and_clears_stale_state():
     source = _function_source("_render_gmv_exclusion_tab")
 

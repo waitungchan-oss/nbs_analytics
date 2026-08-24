@@ -2999,6 +2999,11 @@ def _render_active_gmv_scope(model, formal_tour: pd.DataFrame, formal_others: pd
 
 def _render_gmv_exclusion_tab() -> None:
     """One-click refund merge with cache-backed, read-only active rendering."""
+    # ``st.file_uploader`` keeps its value across reruns. Clear it before the
+    # widget is instantiated so a successful merge can fall through to the
+    # active-version report renderer instead of reopening the preview branch.
+    if st.session_state.pop("GMV_CLEAR_UPLOAD_AFTER_MERGE", False):
+        st.session_state.pop("GMV_EXCLUSION_UPLOAD", None)
     _render_section(
         "GMV 排除訂單看板",
         "上傳退款明細後，按一次「上傳並合併退款資料庫」；warning 會保留稽核紀錄並自動建立 active version，blocking 則完全不寫入。",
@@ -3093,6 +3098,7 @@ def _render_gmv_exclusion_tab() -> None:
                         raise RuntimeError(artifacts.cache_manifest.error or "GMV export cache failed")
                     progress.update(label="退款資料庫合併與報表 cache 完成", state="complete")
                 st.success(f"已建立正式淨 GMV active version：{receipt.version_id}")
+                st.session_state["GMV_CLEAR_UPLOAD_AFTER_MERGE"] = True
                 st.rerun()
             except StaleGmvPreview as exc:
                 st.error(f"合併失敗：資料在 Preflight 後已變更，請重新上傳：{exc}")
