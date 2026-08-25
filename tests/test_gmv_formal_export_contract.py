@@ -9,6 +9,7 @@ from app_workflows import (
     _gmv_summary_rows,
     build_formal_gmv_workbooks,
 )
+from tests.fixtures.gmv_export_semantic_fixture import read_gmv_workbook_semantics, semantic_fixture
 
 
 def test_formal_export_keeps_total_paid_and_official_net_products():
@@ -58,3 +59,22 @@ def test_formal_audit_workbook_contains_provenance_and_original_quantity_label()
     values = [cell.value for row in sheets["Provenance"].iter_rows() for cell in row]
     assert "V-1" in values
     assert "原交易人數／數量（未按退款調整）" in values
+
+
+def test_semantic_reader_covers_legacy_audit_workbook_contract():
+    _, _, formal_tour, formal_others, refunds = semantic_fixture()
+    total = _apply_gmv_refund_adjustments(formal_tour, formal_others, refunds)
+    paid = _apply_gmv_refund_adjustments(formal_tour, formal_others, refunds, refund_status="已退款")
+    workbooks = build_formal_gmv_workbooks(
+        total_adjusted=total,
+        paid_adjusted=paid,
+        total_summary_rows=_gmv_summary_rows(formal_tour, formal_others, total),
+        paid_summary_rows=_gmv_summary_rows(formal_tour, formal_others, paid),
+        provenance={"version_id": "fixture-v1"},
+    )
+    semantics = read_gmv_workbook_semantics(workbooks["paid"])
+    assert semantics["sheetNames"] == ["已退款摘要", "已退款扣減明細", "已退款未匹配來源單據號", "Provenance"]
+    assert semantics["sheets"]["已退款摘要"]["headers"] == ["退款維度", "指標", "數值"]
+    assert semantics["sheets"]["已退款摘要"]["stableKeys"][0] == {"退款維度": "已退款", "指標": "退款來源訂單數"}
+    assert semantics["sheets"]["已退款扣減明細"]["rowCount"] == 3
+    assert any("已退款" in row for row in semantics["sheets"]["Provenance"]["rows"])

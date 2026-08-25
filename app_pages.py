@@ -115,7 +115,7 @@ from backend.services.gmv_refund_service import (
     RevenueFrames,
     StaleGmvPreview,
     build_active_gmv_read_model,
-    build_gmv_formal_artifacts,
+    build_gmv_formal_artifacts_fast_or_legacy,
     confirm_refund_batch,
     preview_refund_batch,
     revenue_state_token,
@@ -3078,6 +3078,7 @@ def _render_gmv_exclusion_tab() -> None:
             st.success("Preflight 通過，可合併。")
         if st.button("上傳並合併退款資料庫", type="primary", key="GMV_ONE_CLICK_MERGE", width="stretch"):
             try:
+                build_started = time.perf_counter()
                 with st.status("正在執行退款合併流程…", expanded=True) as progress:
                     progress.write("Preflight 已完成，正在寫入 immutable batch 與 active version…")
                     receipt = confirm_refund_batch(
@@ -3088,16 +3089,25 @@ def _render_gmv_exclusion_tab() -> None:
                             _load_current_gmv_revenue_frames(), REVENUE_SCOPE_LABEL
                         ),
                     )
-                    progress.write("active version 已建立，正在建立總退款／已退款 cache…")
-                    artifacts = build_gmv_formal_artifacts(
+                    progress.write("active version 已建立，正在建立總退款／已退款 facts…")
+                    progress.write("正在查找 trusted reference；cold miss 只建立一次 legacy seed…")
+                    progress.write("正在序列化報表並執行 semantic shadow validation…")
+                    artifacts = build_gmv_formal_artifacts_fast_or_legacy(
                         repository=repository, version_id=receipt.version_id,
                         revenue_frames=revenue_frames, rule_version=REVENUE_SCOPE_LABEL,
-                        cache_dir=cache_dir,
+                        cache_dir=cache_dir, worker_count=3,
                     )
                     if artifacts.cache_manifest.status != "ready":
                         raise RuntimeError(artifacts.cache_manifest.error or "GMV export cache failed")
                     progress.update(label="退款資料庫合併與報表 cache 完成", state="complete")
                 st.success(f"已建立正式淨 GMV active version：{receipt.version_id}")
+                st.caption(
+                    f"cache builder：{getattr(artifacts.cache_manifest, 'builder_mode', 'legacy')}；"
+                    f"equivalence：{getattr(artifacts.cache_manifest, 'equivalence_status', 'NOT_RUN')}；"
+                    f"validation：{getattr(artifacts.cache_manifest, 'validation_mode', 'legacy')}；"
+                    f"shadow：{getattr(artifacts.cache_manifest, 'shadow_status', 'NOT_RUN')}；"
+                    f"耗時：{time.perf_counter() - build_started:.1f} 秒"
+                )
                 st.session_state["GMV_CLEAR_UPLOAD_AFTER_MERGE"] = True
                 st.rerun()
             except StaleGmvPreview as exc:
@@ -3136,7 +3146,11 @@ def _render_gmv_exclusion_tab() -> None:
     st.dataframe(total_adjusted["adjusted_detail"], hide_index=True, width="stretch")
     with st.expander("查看已退款維度扣減明細", expanded=False):
         st.dataframe(paid_adjusted["adjusted_detail"], hide_index=True, width="stretch")
-    st.caption("報表已由 active version cache 產生；下載不會重新掃描完整營收資料。")
+    st.caption(
+        "報表已由 active version cache 產生；下載不會重新掃描完整營收資料。"
+        f" validation={getattr(cache_manifest, 'validation_mode', 'legacy')}；"
+        f" shadow={getattr(cache_manifest, 'shadow_status', 'NOT_RUN')}。"
+    )
     for dimension, label in (("total", "總退款"), ("paid", "已退款")):
         columns = st.columns(4)
         suffix = "" if dimension == "total" else "_已退款"

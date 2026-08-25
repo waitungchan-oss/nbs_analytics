@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Mapping
 
 import pandas as pd
@@ -97,6 +99,22 @@ class GmvFormalArtifacts:
     total_summary_rows: list[dict[str, object]]
     paid_summary_rows: list[dict[str, object]]
     cache_manifest: object
+
+
+@dataclass(frozen=True, slots=True)
+class GmvFastCandidate:
+    artifacts: dict[str, bytes]
+    total_adjusted: dict[str, object]
+    paid_adjusted: dict[str, object]
+    total_summary_rows: list[dict[str, object]]
+    paid_summary_rows: list[dict[str, object]]
+    shadow_status: str
+    reference_status: str
+
+
+GMV_EXPORT_SCHEMA_VERSION = "gmv-formal-export-v2"
+GMV_PIPELINE_FINGERPRINT = "pipeline-gmv-fast-v1"
+GMV_SERIALIZER_VERSION = "gmv-openpyxl-serializer-v1"
 
 
 def _canonical_frame_sha256(frame: pd.DataFrame) -> str:
@@ -623,6 +641,8 @@ def build_active_gmv_read_model(
 def build_gmv_formal_artifacts(
     *, repository: GmvRefundRepository, version_id: str,
     revenue_frames: RevenueFrames, rule_version: str, cache_dir=None,
+    builder_mode: str = "legacy", equivalence_status: str = "NOT_RUN",
+    publish_active: bool = True, fallback_reason: str | None = None,
 ) -> GmvFormalArtifacts:
     """Calculate both formal dimensions once and persist their derived cache."""
     from app_workflows import (
@@ -685,8 +705,449 @@ def build_gmv_formal_artifacts(
         paid_detail=paid_adjusted["adjusted_detail"],
         summaries=total_summary_rows + paid_summary_rows,
         cache_dir=cache_dir or ".nbs_runtime_cache",
+        builder_mode=builder_mode,
+        equivalence_status=equivalence_status,
+        publish_active=publish_active,
+        ready_error=fallback_reason,
     )
     return GmvFormalArtifacts(total_adjusted, paid_adjusted, total_summary_rows, paid_summary_rows, manifest)
+
+
+def _gmv_artifact_kinds() -> dict[str, str]:
+    from backend.services.gmv_trusted_reference_service import TRUSTED_REFERENCE_ARTIFACT_KEYS
+
+    return {
+        key: "json" if key == "summaries" else "csv" if key.endswith(".detail") else "xlsx"
+        for key in TRUSTED_REFERENCE_ARTIFACT_KEYS
+    }
+
+
+def _read_gmv_artifacts(manifest, cache_dir) -> dict[str, bytes]:
+    from backend.services.gmv_export_cache_service import read_gmv_export_artifact
+
+    return {
+        key: read_gmv_export_artifact(manifest, cache_dir or ".nbs_runtime_cache", key)
+        for key in manifest.artifacts
+    }
+
+
+def _build_trusted_reference_manifest(*, seed_manifest, seed_artifacts, active, rule_version: str):
+    from backend.services.gmv_export_equivalence_service import build_gmv_artifact_semantic_records
+    from backend.services.gmv_trusted_reference_service import (
+        TRUSTED_ARTIFACT_CONTRACT_VERSION, TRUSTED_REFERENCE_ID_PREFIX,
+        TRUSTED_REFERENCE_SCHEMA_VERSION, TrustedReferenceArtifact,
+        TrustedReferenceManifest, TrustedReferenceSource, build_gmv_content_fingerprint,
+    )
+
+    source = TrustedReferenceSource(
+        revenue_generation_token=str(active["revenue_generation_token"]),
+        refund_state_sha256=str(active["refund_state_sha256"]),
+        rule_version=str(rule_version),
+        export_schema_version=GMV_EXPORT_SCHEMA_VERSION,
+        pipeline_fingerprint=GMV_PIPELINE_FINGERPRINT,
+        serializer_version=GMV_SERIALIZER_VERSION,
+    )
+    fingerprint = build_gmv_content_fingerprint(
+        revenue_generation_token=source.revenue_generation_token,
+        refund_state_sha256=source.refund_state_sha256,
+        rule_version=source.rule_version,
+        export_schema_version=source.export_schema_version,
+        pipeline_fingerprint=source.pipeline_fingerprint,
+        serializer_version=source.serializer_version,
+    )
+    records = build_gmv_artifact_semantic_records(seed_artifacts, _gmv_artifact_kinds())
+    return TrustedReferenceManifest(
+        schema_version=TRUSTED_REFERENCE_SCHEMA_VERSION,
+        reference_id=f"{TRUSTED_REFERENCE_ID_PREFIX}{fingerprint}",
+        content_fingerprint=fingerprint,
+        status="TRUSTED",
+        created_at=datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        seed_mode="LEGACY_SEED",
+        source=source,
+        artifact_contract_version=TRUSTED_ARTIFACT_CONTRACT_VERSION,
+        artifacts={key: TrustedReferenceArtifact.from_dict(record) for key, record in records.items()},
+        seed_provenance={
+            "cacheKey": str(seed_manifest.cache_key),
+            "generationPath": f"{seed_manifest.version_id}/{seed_manifest.generation_path}",
+            "manifestSha256": hashlib.sha256(
+                (json.dumps(seed_manifest.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+            ).hexdigest(),
+        },
+    )
+
+
+def _cached_formal_artifacts(*, manifest, cache_dir) -> GmvFormalArtifacts:
+    summaries = json.loads(_read_gmv_artifacts(manifest, cache_dir)["summaries"].decode("utf-8"))
+    total_rows = [row for row in summaries if row.get("退款維度") == "總退款"]
+    paid_rows = [row for row in summaries if row.get("退款維度") == "已退款"]
+    return GmvFormalArtifacts(
+        _cached_adjusted(_read_gmv_artifacts(manifest, cache_dir)["total.detail"], total_rows, "總退款"),
+        _cached_adjusted(_read_gmv_artifacts(manifest, cache_dir)["paid.detail"], paid_rows, "已退款"),
+        total_rows,
+        paid_rows,
+        manifest,
+    )
+
+
+def _gmv_scope_masks_for_adjusted_frames(
+    tour: pd.DataFrame, others: pd.DataFrame,
+) -> dict[str, tuple[pd.Series, pd.Series]]:
+    """Derive receipt-scope masks against the post-refund frame indexes."""
+    from backend.services.gmv_export_intermediate_service import _scope_masks
+
+    tour_masks = _scope_masks(tour)
+    others_masks = _scope_masks(others)
+    return {
+        scope_id: (tour_masks[scope_id], others_masks[scope_id])
+        for scope_id in ("all", "no_writeoff", "official")
+    }
+
+
+def _gmv_preparation_checksum_status(preparation) -> str:
+    """Verify preparation fingerprints against the frames they describe."""
+    try:
+        from backend.services.gmv_export_intermediate_service import _stable_frame_fingerprint
+
+        expected = {
+            "tour": _stable_frame_fingerprint(preparation.tour),
+            "others": _stable_frame_fingerprint(preparation.others),
+        }
+        actual = dict(preparation.source_fingerprints)
+        return "PASS" if actual == expected and all(len(value) == 64 for value in actual.values()) else "FAIL"
+    except (AttributeError, TypeError, ValueError, KeyError):
+        return "FAIL"
+
+
+def _gmv_baseline_status(*, repository: GmvRefundRepository, generation_token: str, cache_dir) -> str:
+    """Evaluate blocking monthly baselines through cached Dashboard Facts only."""
+    try:
+        from app_workflows import _current_rules
+        from backend.services.dashboard_analytics_service import build_analytics_from_facts
+        from backend.services.dashboard_facts_service import build_dashboard_facts
+        from backend.services.monthly_baseline_service import evaluate_monthly_baselines
+        from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL
+
+        branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
+        facts = build_dashboard_facts(
+            db_path=repository.db_path,
+            generation_token=str(generation_token),
+            branch_mapping=branch_mapping,
+            target_branches_s3=target_branches,
+            cruise_depts=cruise_depts,
+            sales_rep_list=sales_reps,
+            cache_dir=cache_dir,
+        )
+        evaluation = evaluate_monthly_baselines(
+            analytics_builder=lambda filters: {
+                "revenueScope": REVENUE_SCOPE_LABEL,
+                **build_analytics_from_facts(
+                    facts["branchFacts"], facts["specialistFacts"], filters,
+                ),
+            },
+        )
+        return "PASS" if (
+            evaluation.get("scope") == REVENUE_SCOPE_LABEL
+            and evaluation.get("blockingStatus") == "matched"
+        ) else "FAIL"
+    except (AttributeError, KeyError, OSError, TypeError, ValueError, RuntimeError):
+        return "FAIL"
+
+
+def _annotate_gmv_fallback(result: GmvFormalArtifacts, reason: str) -> GmvFormalArtifacts:
+    if not isinstance(result, GmvFormalArtifacts):
+        return result
+    manifest = replace(
+        result.cache_manifest,
+        builder_mode="legacy_fallback",
+        validation_mode="legacy_fallback",
+        error=reason[:240],
+    )
+    return replace(result, cache_manifest=manifest)
+
+
+def build_gmv_formal_artifacts_fast_or_legacy(
+    *, repository: GmvRefundRepository, version_id: str,
+    revenue_frames: RevenueFrames, rule_version: str, cache_dir=None,
+    worker_count: int = 3, validation_mode: str = "trusted_warm",
+) -> GmvFormalArtifacts:
+    """Use trusted warm validation and a private legacy seed on cold miss."""
+    cache_root = cache_dir or ".nbs_runtime_cache"
+    previous_manifest = None
+    seed_manifest = None
+    try:
+        from backend.services.gmv_export_cache_service import load_gmv_export_cache, build_gmv_export_cache
+        from backend.services.gmv_export_equivalence_service import (
+            build_gmv_artifact_semantic_records, compare_gmv_artifact_semantics,
+        )
+        from backend.services.gmv_trusted_reference_service import (
+            build_gmv_content_fingerprint, load_trusted_reference, write_trusted_reference,
+        )
+
+        active = repository.load_active_scope()
+        if active is None or str(active["version_id"]) != str(version_id):
+            raise ValueError("GMV version is not the active version")
+        source = {
+            "revenueGenerationToken": str(active["revenue_generation_token"]),
+            "refundStateSha256": str(active["refund_state_sha256"]),
+            "ruleVersion": str(rule_version),
+            "exportSchemaVersion": GMV_EXPORT_SCHEMA_VERSION,
+            "pipelineFingerprint": GMV_PIPELINE_FINGERPRINT,
+            "serializerVersion": GMV_SERIALIZER_VERSION,
+        }
+        content_fingerprint = build_gmv_content_fingerprint(
+            revenue_generation_token=source["revenueGenerationToken"],
+            refund_state_sha256=source["refundStateSha256"],
+            rule_version=source["ruleVersion"],
+            export_schema_version=source["exportSchemaVersion"],
+            pipeline_fingerprint=source["pipelineFingerprint"],
+            serializer_version=source["serializerVersion"],
+        )
+        previous_manifest = load_gmv_export_cache(
+            version_id=version_id,
+            revenue_generation_token=source["revenueGenerationToken"],
+            rule_version=rule_version,
+            cache_dir=cache_root,
+        )
+        reference = load_trusted_reference(
+            cache_dir=cache_root, content_fingerprint=content_fingerprint, expected_source=source,
+        )
+        reference_was_missing = reference is None
+        if reference is None:
+            seed_result = build_gmv_formal_artifacts(
+                repository=repository, version_id=version_id, revenue_frames=revenue_frames,
+                rule_version=rule_version, cache_dir=cache_root,
+                builder_mode="legacy_seed", equivalence_status="NOT_RUN", publish_active=False,
+            )
+            seed_manifest = seed_result.cache_manifest
+            if seed_manifest.status != "ready":
+                raise RuntimeError(seed_manifest.error or "legacy seed cache failed")
+            seed_artifacts = _read_gmv_artifacts(seed_manifest, cache_root)
+            reference = _build_trusted_reference_manifest(
+                seed_manifest=seed_manifest, seed_artifacts=seed_artifacts,
+                active=active, rule_version=rule_version,
+            )
+            write_trusted_reference(cache_dir=cache_root, manifest=reference)
+
+        baseline_status = _gmv_baseline_status(
+            repository=repository,
+            generation_token=source["revenueGenerationToken"],
+            cache_dir=cache_root,
+        )
+
+        candidate = _run_fast_export_gate(
+            repository=repository, version_id=version_id, revenue_frames=revenue_frames,
+            rule_version=rule_version, cache_dir=cache_root, worker_count=worker_count,
+            reference_manifest=reference, baseline_status=baseline_status,
+        )
+        if candidate is None:
+            raise RuntimeError("fast export candidate is empty")
+        if reference_was_missing:
+            candidate = replace(candidate, reference_status="SEED")
+        candidate_manifest = build_gmv_export_cache(
+            version_id=version_id,
+            revenue_generation_token=str(active["revenue_generation_token"]),
+            rule_version=rule_version,
+            total_workbooks={
+                key.split(".workbook.", 1)[1]: value
+                for key, value in candidate.artifacts.items()
+                if key.startswith("total.workbook.")
+            },
+            paid_workbooks={
+                key.split(".workbook.", 1)[1]: value
+                for key, value in candidate.artifacts.items()
+                if key.startswith("paid.workbook.")
+            },
+            total_detail=candidate.total_adjusted["adjusted_detail"],
+            paid_detail=candidate.paid_adjusted["adjusted_detail"],
+            summaries=candidate.total_summary_rows + candidate.paid_summary_rows,
+            cache_dir=cache_root,
+            builder_mode="fast",
+            equivalence_status=candidate.shadow_status,
+            content_fingerprint=reference.content_fingerprint,
+            reference_id=reference.reference_id,
+            validation_mode=validation_mode,
+            shadow_status=candidate.shadow_status,
+            reference_status=candidate.reference_status,
+            reference_manifest_sha256=hashlib.sha256(
+                (json.dumps(reference.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+            ).hexdigest(),
+        )
+        if candidate_manifest.status != "ready":
+            raise RuntimeError(candidate_manifest.error or "fast cache publication failed")
+        return GmvFormalArtifacts(
+            candidate.total_adjusted, candidate.paid_adjusted,
+            candidate.total_summary_rows, candidate.paid_summary_rows, candidate_manifest,
+        )
+    except Exception as exc:
+        fallback_reason = f"fast_fallback:{type(exc).__name__}: {str(exc)[:180]}"
+        if previous_manifest is not None and previous_manifest.status == "ready":
+            return _annotate_gmv_fallback(
+                _cached_formal_artifacts(manifest=previous_manifest, cache_dir=cache_root), fallback_reason,
+            )
+        if seed_manifest is not None and seed_manifest.status == "ready":
+            from backend.services.gmv_export_cache_service import publish_gmv_export_cache_manifest
+            publish_gmv_export_cache_manifest(cache_dir=cache_root, manifest=seed_manifest)
+            return _annotate_gmv_fallback(
+                _cached_formal_artifacts(manifest=seed_manifest, cache_dir=cache_root), fallback_reason,
+            )
+        return build_gmv_formal_artifacts(
+            repository=repository, version_id=version_id, revenue_frames=revenue_frames,
+            rule_version=rule_version, cache_dir=cache_root,
+            builder_mode="legacy_fallback", equivalence_status="FALLBACK",
+            fallback_reason=fallback_reason,
+        )
+
+
+def _run_fast_export_gate(
+    *, repository: GmvRefundRepository, version_id: str, revenue_frames: RevenueFrames,
+    rule_version: str, cache_dir, worker_count: int, reference_manifest, baseline_status: str,
+) -> GmvFastCandidate:
+    """Execute the real preparation/facts/serializer/equivalence gate.
+
+    The legacy builder remains the reference publisher until all candidate
+    workbook semantics match. Any exception intentionally triggers fallback.
+    """
+    from app_workflows import (
+        _apply_gmv_refund_adjustments, _current_rules, _gmv_summary_rows,
+        build_formal_gmv_workbooks,
+    )
+    from backend.services.gmv_export_equivalence_service import (
+        build_gmv_artifact_semantic_records, compare_gmv_artifact_semantics,
+    )
+    from backend.services.gmv_export_intermediate_service import (
+        build_gmv_export_base_preparation, build_gmv_report_facts,
+    )
+    from backend.services.gmv_export_serializer_service import (
+        SerializerJob, SerializerPublicationGate, bounded_serializer_timeout_seconds,
+        serialize_gmv_workbooks_parallel,
+    )
+
+    active = repository.load_active_scope()
+    if active is None or str(active["version_id"]) != str(version_id):
+        raise ValueError("GMV version is not active for fast export")
+    if reference_manifest is None or getattr(reference_manifest, "status", None) not in {"ready", "TRUSTED"}:
+        raise ValueError("fast export requires a trusted reference manifest")
+    generation_token = str(active["revenue_generation_token"])
+    total_rows = _refund_frame_from_reconciliation(repository, version_id, "TOTAL_REFUND")
+    paid_rows = _refund_frame_from_reconciliation(repository, version_id, "REFUNDED")
+    total_adjusted = _apply_gmv_refund_adjustments(
+        revenue_frames.formal_tour, revenue_frames.formal_others, total_rows,
+    )
+    paid_adjusted = _apply_gmv_refund_adjustments(
+        revenue_frames.formal_tour, revenue_frames.formal_others, paid_rows, refund_status="已退款",
+    )
+    total_adjusted["tour"].attrs["gmv_refund_dimension"] = "總退款"
+    total_adjusted["others"].attrs["gmv_refund_dimension"] = "總退款"
+    paid_adjusted["tour"].attrs["gmv_refund_dimension"] = "已退款"
+    paid_adjusted["others"].attrs["gmv_refund_dimension"] = "已退款"
+    adjusted_scope_masks = _gmv_scope_masks_for_adjusted_frames(
+        total_adjusted["tour"], total_adjusted["others"],
+    )
+    total_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, total_adjusted)
+    paid_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, paid_adjusted)
+    audit_workbooks = build_formal_gmv_workbooks(
+        total_adjusted=total_adjusted,
+        paid_adjusted=paid_adjusted,
+        total_summary_rows=total_summary_rows,
+        paid_summary_rows=paid_summary_rows,
+        provenance={"version_id": version_id, "revenue_generation_token": generation_token},
+    )
+    rules = _current_rules()
+    prep = build_gmv_export_base_preparation(
+        version_id=version_id, revenue_generation_token=generation_token,
+        rules_fingerprint=rule_version, export_schema_version="gmv-formal-export-v2",
+        pipeline_fingerprint="pipeline-gmv-fast-v1", tour=revenue_frames.formal_tour,
+        others=revenue_frames.formal_others,
+    )
+    checksum_status = _gmv_preparation_checksum_status(prep)
+    with tempfile.TemporaryDirectory(prefix="gmv-fast-gate-", dir=cache_dir) as raw_dir:
+        gate_dir = Path(raw_dir)
+        fact_jobs = []
+        job_specs = (
+            ("total", "總退款", total_adjusted),
+            ("paid", "已退款", paid_adjusted),
+        )
+        scope_files = (("all", "ex.xlsx"), ("no_writeoff", "ex_no_writeoff.xlsx"), ("official", "ex_no_writeoff_refund_transfer.xlsx"))
+        for dimension_key, dimension_label, adjusted in job_specs:
+            for scope_id, filename in scope_files:
+                tour_mask, others_mask = adjusted_scope_masks[scope_id]
+                tour = adjusted["tour"].loc[tour_mask].copy()
+                others = adjusted["others"].loc[others_mask].copy()
+                tour.attrs["gmv_refund_dimension"] = dimension_label
+                others.attrs["gmv_refund_dimension"] = dimension_label
+                facts = build_gmv_report_facts(
+                    adjusted_tour=tour, adjusted_others=others, scope_id=scope_id,
+                    rules=rules, include_branch_salesperson_sheet=(scope_id == "official"), dimension=dimension_label,
+                )
+                fact_jobs.append((f"{dimension_key}.workbook.{filename}", facts, gate_dir / f"{dimension_key}.{filename}"))
+        facts_schema_status = "PASS" if all(
+            facts.schema_fingerprint and facts.data_fingerprint for _, facts, _ in fact_jobs
+        ) else "FAIL"
+        staging_gate = SerializerPublicationGate(
+            "PENDING", checksum_status, facts_schema_status, baseline_status,
+            "PENDING", staging_only=True,
+        )
+        jobs = [SerializerJob(artifact_id, facts, path, staging_gate) for artifact_id, facts, path in fact_jobs]
+        results = serialize_gmv_workbooks_parallel(
+            jobs,
+            max_workers=max(1, min(worker_count, 3)),
+            timeout_seconds=bounded_serializer_timeout_seconds(jobs),
+        )
+        if not all(result.status == "READY" for result in results):
+            failures = "; ".join(
+                f"{result.artifact_id}:{result.status}:{result.error or 'unknown'}"
+                for result in results if result.status != "READY"
+            )
+            raise RuntimeError(
+                f"fast serializer gate did not produce READY artifacts: {failures[:500]}"
+            )
+        candidate = {
+            key: result.path.read_bytes()
+            for key, result in zip((job.artifact_id for job in jobs), results)
+        }
+        candidate.update({
+            "total.detail": total_adjusted["adjusted_detail"].to_csv(index=False).encode("utf-8"),
+            "paid.detail": paid_adjusted["adjusted_detail"].to_csv(index=False).encode("utf-8"),
+            "total.workbook.audit.xlsx": audit_workbooks["total"],
+            "paid.workbook.audit.xlsx": audit_workbooks["paid"],
+            "summaries": json.dumps(
+                total_summary_rows + paid_summary_rows,
+                ensure_ascii=False, sort_keys=True, indent=2,
+            ).encode("utf-8"),
+        })
+        # content_fingerprint identifies the upstream source/contract tuple;
+        # this exact comparison is the artifact-semantic identity boundary.
+        # It must run before the active cache pointer can be published.
+        reference_records = reference_manifest.artifacts
+        candidate_records = build_gmv_artifact_semantic_records(candidate, _gmv_artifact_kinds())
+        comparison = compare_gmv_artifact_semantics(
+            {
+                key: artifact.to_dict() if hasattr(artifact, "to_dict") else artifact
+                for key, artifact in reference_records.items()
+            },
+            candidate_records,
+        )
+        equivalence_status = comparison.status
+        shadow_status = comparison.status
+        if comparison.status != "PASS" or comparison.mismatch_count:
+            raise RuntimeError(
+                f"fast semantic shadow failed: {comparison.mismatch_count} mismatches; "
+                f"examples={comparison.mismatch_examples[:2]}"
+            )
+        publication_gate = SerializerPublicationGate(
+            equivalence_status, checksum_status, facts_schema_status, baseline_status, shadow_status,
+        )
+        if not publication_gate.ready:
+            raise RuntimeError("fast serializer publication gate did not pass shadow validation")
+        return GmvFastCandidate(
+            artifacts=candidate,
+            total_adjusted=total_adjusted,
+            paid_adjusted=paid_adjusted,
+            total_summary_rows=total_summary_rows,
+            paid_summary_rows=paid_summary_rows,
+            shadow_status=shadow_status,
+            reference_status="HIT" if reference_manifest is not None else "MISS",
+        )
 
 
 def load_active_gmv_read_model(
