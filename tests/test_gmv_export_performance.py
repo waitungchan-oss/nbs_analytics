@@ -32,7 +32,7 @@ def test_ready_cache_load_and_repeat_download_are_fast_and_read_only(tmp_path):
     )
     manifest = artifacts.cache_manifest
     mtimes_before = {
-        key: (cache_dir / receipt.version_id).glob("*/" + str(record["path"])).__iter__().__next__().stat().st_mtime_ns
+        key: (cache_dir / receipt.version_id / manifest.generation_path / str(record["path"])).stat().st_mtime_ns
         for key, record in manifest.artifacts.items()
     }
     started = time.perf_counter()
@@ -46,7 +46,7 @@ def test_ready_cache_load_and_repeat_download_are_fast_and_read_only(tmp_path):
     assert loaded is not None
     assert elapsed < 2.0
     mtimes_after = {
-        key: (cache_dir / receipt.version_id).glob("*/" + str(record["path"])).__iter__().__next__().stat().st_mtime_ns
+        key: (cache_dir / receipt.version_id / manifest.generation_path / str(record["path"])).stat().st_mtime_ns
         for key, record in manifest.artifacts.items()
     }
     assert mtimes_after == mtimes_before

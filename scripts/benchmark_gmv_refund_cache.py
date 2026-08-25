@@ -26,7 +26,9 @@ if str(PROJECT_ROOT) not in sys.path:
 import database
 import app_workflows
 from backend.services.gmv_refund_repository import GmvRefundRepository
-from backend.services.gmv_refund_service import RevenueFrames, build_gmv_formal_artifacts
+from backend.services.gmv_refund_service import (
+    RevenueFrames, build_gmv_formal_artifacts, build_gmv_formal_artifacts_fast_or_legacy,
+)
 from backend.services.gmv_export_cache_service import read_gmv_export_artifact
 
 
@@ -124,14 +126,16 @@ def run_gmv_cache_benchmark(
     db_path: str | Path,
     version_id: str,
     cache_dir: str | Path,
-    mode: str = "legacy",
+    mode: str = "shadow",
     workers: int = LEGACY_WORKERS,
 ) -> dict[str, object]:
     """Benchmark one cache build without mutating SQLite or formal cache."""
-    if mode != "legacy":
+    if mode not in {"legacy", "fast", "shadow", "trusted_warm"}:
         raise ValueError(f"unsupported benchmark mode: {mode}")
-    if workers != LEGACY_WORKERS:
+    if mode == "legacy" and workers != LEGACY_WORKERS:
         raise ValueError(f"legacy benchmark requires workers={LEGACY_WORKERS}")
+    if mode in {"fast", "shadow", "trusted_warm"} and workers not in {1, 2, 3}:
+        raise ValueError("fast benchmark requires workers in {1, 2, 3}")
 
     cache_root = _validate_benchmark_cache_dir(cache_dir)
     repository = GmvRefundRepository(db_path)
@@ -142,6 +146,9 @@ def run_gmv_cache_benchmark(
     timings: dict[str, list[float]] = {}
     started = time.perf_counter()
     import backend.services.gmv_export_cache_service as cache_service
+    import backend.services.gmv_export_equivalence_service as equivalence_service
+    import backend.services.gmv_refund_service as refund_service
+    import backend.services.gmv_trusted_reference_service as reference_service
 
     patches = [
         _timed_patch(app_workflows, "_apply_gmv_refund_adjustments", timings),
@@ -150,15 +157,21 @@ def run_gmv_cache_benchmark(
         _timed_patch(app_workflows, "_compute_gmv_exclusion_workbooks", timings),
         _timed_patch(cache_service, "build_gmv_export_cache", timings),
     ]
+    if mode != "legacy":
+        patches.extend([
+            _timed_patch(reference_service, "load_trusted_reference", timings),
+            _timed_patch(reference_service, "write_trusted_reference", timings),
+            _timed_patch(refund_service, "_run_fast_export_gate", timings),
+            _timed_patch(equivalence_service, "compare_gmv_artifact_semantics", timings),
+        ])
     try:
         for patch in patches:
             patch.__enter__()
-        result = build_gmv_formal_artifacts(
-            repository=repository,
-            version_id=str(version_id),
-            revenue_frames=frames,
-            rule_version=str(active["rule_version"]),
-            cache_dir=cache_root,
+        builder = build_gmv_formal_artifacts if mode == "legacy" else build_gmv_formal_artifacts_fast_or_legacy
+        result = builder(
+            repository=repository, version_id=str(version_id), revenue_frames=frames,
+            rule_version=str(active["rule_version"]), cache_dir=cache_root,
+            **({} if mode == "legacy" else {"worker_count": workers, "validation_mode": mode}),
         )
     finally:
         for patch in reversed(patches):
@@ -192,10 +205,22 @@ def run_gmv_cache_benchmark(
         "equivalenceMs": round(equivalence_ms, 1),
         "fingerprintMs": round(equivalence_ms, 1),
         "cacheWriteMs": round(sum(timings.get("build_gmv_export_cache", [])), 1),
+        "lookupMs": round(sum(timings.get("load_trusted_reference", [])), 1),
+        "candidateMs": round(sum(timings.get("_run_fast_export_gate", [])), 1),
+        "validationMs": round(sum(timings.get("compare_gmv_artifact_semantics", [])), 1),
+        "publishMs": round(sum(timings.get("build_gmv_export_cache", [])), 1),
         "totalMs": round(total_ms, 1),
         "artifactBytes": artifact_bytes,
         "artifactCount": len(manifest.artifacts),
-        "equivalenceStatus": "BASELINE_FINGERPRINT_CAPTURED",
+        "builderMode": manifest.builder_mode,
+        "equivalenceStatus": manifest.equivalence_status,
+        "contentFingerprint": manifest.content_fingerprint,
+        "referenceStatus": manifest.reference_status,
+        "validationMode": manifest.validation_mode,
+        "shadowStatus": manifest.shadow_status,
+        "referenceId": manifest.reference_id,
+        "generationPath": manifest.generation_path,
+        "error": manifest.error,
         "artifactFingerprints": fingerprints,
         "peakRssBytes": _peak_rss_bytes(),
     }
@@ -206,7 +231,7 @@ def main() -> None:
     parser.add_argument("--db-path", required=True)
     parser.add_argument("--version-id", required=True)
     parser.add_argument("--cache-dir", required=True)
-    parser.add_argument("--mode", default="legacy", choices=("legacy",))
+    parser.add_argument("--mode", default="shadow", choices=("legacy", "fast", "shadow", "trusted_warm"))
     parser.add_argument("--workers", type=int, default=LEGACY_WORKERS)
     parser.add_argument("--output")
     args = parser.parse_args()

@@ -45,7 +45,9 @@ def test_benchmark_writes_json_only_to_requested_cache(tmp_path):
     assert result["mode"] == "legacy"
     assert result["totalMs"] >= 0
     assert result["artifactBytes"] > 0
-    assert result["equivalenceStatus"] == "BASELINE_FINGERPRINT_CAPTURED"
+    assert result["equivalenceStatus"] == "NOT_RUN"
+    assert result["builderMode"] == "legacy"
+    assert result["error"] is None
     assert set(result["artifactFingerprints"]) == EXPECTED_ARTIFACT_KEYS
     cache_dir = tmp_path / "benchmark-cache"
     assert cache_dir.is_dir()
@@ -87,6 +89,35 @@ def test_benchmark_rejects_formal_cache_path(tmp_path):
         assert "formal runtime cache" in str(exc)
     else:
         raise AssertionError("formal cache path must fail closed")
+
+
+def test_fast_benchmark_accepts_bounded_worker_count(tmp_path):
+    db_path, _, _, receipt = _active(tmp_path)
+    result = run_gmv_cache_benchmark(
+        db_path=db_path, version_id=receipt.version_id,
+        cache_dir=tmp_path / "benchmark-cache-fast", mode="fast", workers=1,
+    )
+    assert result["mode"] == "fast"
+    assert result["artifactCount"] == 11
+
+
+def test_trusted_warm_benchmark_reuses_manifest_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr("backend.services.gmv_refund_service._gmv_baseline_status", lambda **kwargs: "PASS")
+    db_path, _, _, receipt = _active(tmp_path)
+    cache_dir = tmp_path / "benchmark-cache-warm"
+    shadow = run_gmv_cache_benchmark(
+        db_path=db_path, version_id=receipt.version_id,
+        cache_dir=cache_dir, mode="shadow", workers=1,
+    )
+    warm = run_gmv_cache_benchmark(
+        db_path=db_path, version_id=receipt.version_id,
+        cache_dir=cache_dir, mode="trusted_warm", workers=1,
+    )
+    assert shadow["contentFingerprint"] == warm["contentFingerprint"]
+    assert warm["referenceStatus"] == "HIT"
+    assert warm["shadowStatus"] == "PASS"
+    assert warm["lookupMs"] >= 0
+    assert warm["validationMs"] >= 0
 
 
 def test_benchmark_cli_writes_json_only_under_cache(monkeypatch, tmp_path):

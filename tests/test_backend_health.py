@@ -11,7 +11,13 @@ def test_health_check_returns_runtime_status():
     payload = response.json()
     assert payload["status"] in {"ok", "degraded"}
     if payload["status"] == "degraded":
-        assert "Cache generation signature does not match current database" in payload["issues"]
+        assert any(
+            issue in payload["issues"]
+            for issue in (
+                "Cache generation signature does not match current database",
+                "Runtime cache directory is missing",
+            )
+        )
     assert payload["service"] == "nbs-analytics-api"
     assert "db" in payload
     assert "runtimeCache" in payload

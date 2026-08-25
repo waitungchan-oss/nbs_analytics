@@ -115,7 +115,7 @@ def test_active_read_rejects_cache_with_incomplete_summary_contract(tmp_path):
     manifest = artifacts.cache_manifest
     summaries_record = manifest.artifacts["summaries"]
     summaries_path = (
-        tmp_path / "cache" / receipt.version_id / manifest.cache_key.replace(":", "-")
+        tmp_path / "cache" / receipt.version_id / manifest.generation_path
         / str(summaries_record["path"])
     )
     summaries_path.write_text(

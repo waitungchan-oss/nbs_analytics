@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_FILE = str(BASE_DIR / "nbs_marketing_data.db")
+DB_FILE = os.environ.get("NBS_ANALYTICS_DB_FILE", str(BASE_DIR / "nbs_marketing_data.db"))
 CONFIG_FILE = str(BASE_DIR / "rules_config.json")
 
 DEFAULT_BRANCH_MAPPING = {

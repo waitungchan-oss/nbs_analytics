@@ -1,6 +1,8 @@
 import inspect
+from pathlib import Path
 
 from fastapi.testclient import TestClient
+from config import DB_FILE
 
 from backend.main import create_app
 from backend.routers import decisions as decisions_router
@@ -105,7 +107,7 @@ def test_decision_router_keeps_generation_orchestration_outside_transport_layer(
 def test_decision_router_wires_snapshot_to_project_persistent_paths():
     paths = decisions_router.SNAPSHOT_PATHS
 
-    assert paths.db_path == decisions_router.PROJECT_ROOT / "nbs_marketing_data.db"
+    assert paths.db_path == Path(DB_FILE)
     assert paths.cache_dir == decisions_router.PROJECT_ROOT / ".nbs_runtime_cache"
     assert paths.runtime_dir == decisions_router.PROJECT_ROOT / ".nbs_runtime"
     assert paths.rules_config_path == decisions_router.PROJECT_ROOT / "rules_config.json"
