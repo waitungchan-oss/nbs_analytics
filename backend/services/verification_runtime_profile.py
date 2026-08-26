@@ -67,6 +67,15 @@ def _profile_ref(value: str, label: str, profile_id: str) -> str:
     return value
 
 
+def _runtime_dir_ref(value: str, label: str, profile_id: str) -> str:
+    # The runtime evidence root is the profile directory itself, or a
+    # profile-scoped subdirectory beneath it. Anything else is another
+    # profile's runtime or an escape attempt.
+    if value != f"verification/{profile_id}" and not value.startswith(f"verification/{profile_id}/"):
+        raise VerificationRuntimeProfileError(f"{label} must be scoped to profileId")
+    return value
+
+
 @dataclass(frozen=True)
 class ProfileDatabase:
     snapshot_ref: str
@@ -146,21 +155,36 @@ class CacheInventory:
 
 @dataclass(frozen=True)
 class ProfileRuntime:
+    runtime_dir: str
     generation_ref: str
+    generation_fingerprint: str
     cache_inventory: CacheInventory
 
     @classmethod
     def from_dict(cls, value: object, *, profile_id: str | None = None) -> "ProfileRuntime":
         if not isinstance(value, Mapping):
             raise VerificationRuntimeProfileError("runtime must be an object")
-        _exact_keys(value, frozenset({"generationRef", "cacheInventory"}), "runtime")
+        _exact_keys(value, frozenset({"runtimeDir", "generationRef", "generationFingerprint", "cacheInventory"}), "runtime")
+        runtime_dir = _relative_ref(value["runtimeDir"], "runtime.runtimeDir")
+        if profile_id is not None:
+            runtime_dir = _runtime_dir_ref(runtime_dir, "runtime.runtimeDir", profile_id)
         generation_ref = _relative_ref(value["generationRef"], "runtime.generationRef")
         if profile_id is not None:
             generation_ref = _profile_ref(generation_ref, "runtime.generationRef", profile_id)
-        return cls(generation_ref, CacheInventory.from_dict(value["cacheInventory"]))
+        return cls(
+            runtime_dir,
+            generation_ref,
+            _fingerprint(value["generationFingerprint"], "runtime.generationFingerprint"),
+            CacheInventory.from_dict(value["cacheInventory"]),
+        )
 
     def to_dict(self) -> dict[str, object]:
-        return {"generationRef": self.generation_ref, "cacheInventory": self.cache_inventory.to_dict()}
+        return {
+            "runtimeDir": self.runtime_dir,
+            "generationRef": self.generation_ref,
+            "generationFingerprint": self.generation_fingerprint,
+            "cacheInventory": self.cache_inventory.to_dict(),
+        }
 
 
 @dataclass(frozen=True)

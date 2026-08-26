@@ -131,7 +131,12 @@ def build_verification_profile(
                 "readOnly": True,
             },
             "baseline": {"registryFingerprint": baseline_fingerprint, "requiredMay2026Total": "HKD 12,057,968"},
-            "runtime": {"generationRef": f"verification/{profile_id}/generation.json", "cacheInventory": _cache_inventory(project)},
+            "runtime": {
+                "runtimeDir": f"verification/{profile_id}",
+                "generationRef": f"verification/{profile_id}/generation.json",
+                "generationFingerprint": canonical_fingerprint(generation_payload),
+                "cacheInventory": _cache_inventory(project),
+            },
             "services": {"profileNamespace": profile_id, "ports": dict(ports)},
             "createdAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         }

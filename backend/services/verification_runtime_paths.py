@@ -37,7 +37,12 @@ def resolve_verification_paths(profile: VerificationRuntimeProfile, *, project_r
     profile_path = profile_dir / "profile.json"
     snapshot_ref = Path(profile.database.snapshot_ref)
     generation_ref = Path(profile.runtime.generation_ref)
-    if snapshot_ref.parts[:2] != ("verification", profile.profile_id) or generation_ref.parts[:2] != ("verification", profile.profile_id):
+    runtime_ref = Path(profile.runtime.runtime_dir)
+    if (
+        snapshot_ref.parts[:2] != ("verification", profile.profile_id)
+        or generation_ref.parts[:2] != ("verification", profile.profile_id)
+        or runtime_ref.parts[:2] != ("verification", profile.profile_id)
+    ):
         raise VerificationRuntimePathError("profile artifact refs do not match profile identity")
     snapshot_relative = snapshot_ref.parts[2:]
     generation_relative = generation_ref.parts[2:]
@@ -45,7 +50,7 @@ def resolve_verification_paths(profile: VerificationRuntimeProfile, *, project_r
         raise VerificationRuntimePathError("profile artifact refs must name files")
     db_path = profile_dir.joinpath(*snapshot_relative)
     generation_path = profile_dir.joinpath(*generation_relative)
-    runtime_dir = profile_dir
+    runtime_dir = profile_dir.joinpath(*runtime_ref.parts[2:])
     cache_path = profile_dir / "cache"
     current = profile_dir
     while current != project and current != current.parent:

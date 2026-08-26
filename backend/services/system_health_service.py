@@ -101,7 +101,7 @@ def build_system_health(
             f"Backup storage exceeds 3 GB: {backups['totalBytes']} bytes"
         )
     runtime_cache = _directory_inventory(cache_path)
-    if not runtime_cache["exists"]:
+    if not runtime_cache["exists"] and not read_only:
         issues.append("Runtime cache directory is missing")
 
     status = "ok"
@@ -124,7 +124,7 @@ def build_system_health(
         "historyRecordId": matching_history.get("id") if matching_history else None,
         "matched": None if not operation_id else matching_history is not None,
     }
-    if operation_id and not matching_history:
+    if operation_id and not matching_history and not read_only:
         issues.append(f"Upload evidence missing for generation operation: {operation_id}")
     if matching_history and matching_history.get("cacheError"):
         issues.append(f"Upload cache generation error: {matching_history['cacheError']}")

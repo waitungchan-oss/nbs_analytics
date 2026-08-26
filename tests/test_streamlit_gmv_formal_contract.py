@@ -18,7 +18,7 @@ def _function_source(name: str) -> str:
     raise AssertionError(f"{name} not found")
 
 
-def test_gmv_tab_reads_active_scope_without_manual_load_gate():
+def test_gmv_tab_reads_active_scope_without_a_manual_load_gate():
     source = _function_source("_render_gmv_exclusion_tab")
 
     assert "載入正式淨 GMV" not in source

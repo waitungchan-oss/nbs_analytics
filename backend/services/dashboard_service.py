@@ -276,8 +276,8 @@ def _data_freshness(analysis_tour: pd.DataFrame, analysis_others: pd.DataFrame, 
     }
 
 
-def build_dashboard_summary(filters: dict, *, db_path=None) -> dict:
-    db_tour, db_others = load_all_data_from_db(db_path=db_path)
+def build_dashboard_summary(filters: dict, *, db_path=None, read_only: bool = False) -> dict:
+    db_tour, db_others = load_all_data_from_db(db_path=db_path, read_only=read_only)
     analysis_tour, analysis_others, scope_audit = build_revenue_scope_frames(db_tour, db_others)
     branch_mapping, target_branches, cruise_depts, sales_reps = _current_rules()
     _, s1, s2 = build_dashboard_data(

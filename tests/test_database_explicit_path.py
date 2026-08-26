@@ -48,3 +48,12 @@ def test_snapshot_sqlite_database_is_integrity_checked(tmp_path):
     assert database.validate_sqlite_database(destination)["ok"] is True
     snapshot_tour, _ = database.load_all_data_from_db(db_path=destination)
     assert snapshot_tour["來源單據號"].tolist() == ["SNAP001"]
+
+
+def test_read_only_database_load_uses_read_only_connection(tmp_path):
+    db_path = tmp_path / "readonly.db"
+    _seed(db_path, "RO001")
+
+    tour, _ = database.load_all_data_from_db(db_path=db_path, read_only=True)
+
+    assert tour["來源單據號"].tolist() == ["RO001"]
