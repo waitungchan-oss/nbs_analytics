@@ -31,8 +31,15 @@ def resolve_db_path(db_path: str | Path | None = None) -> Path:
     return Path(db_path if db_path is not None else DB_FILE)
 
 
-def get_db_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
-    return sqlite3.connect(resolve_db_path(db_path))
+def get_db_connection(
+    db_path: str | Path | None = None,
+    *,
+    read_only: bool = False,
+) -> sqlite3.Connection:
+    path = resolve_db_path(db_path)
+    if read_only:
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    return sqlite3.connect(path)
 
 
 def _sqlite_backup_copy(source_path: Path, destination_path: Path) -> None:
@@ -316,8 +323,9 @@ def upsert_to_db(
 def load_all_data_from_db(
     *,
     db_path: str | Path | None = None,
+    read_only: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    conn = get_db_connection(db_path)
+    conn = get_db_connection(db_path, read_only=read_only)
     try:
         df_tour, df_others = pd.DataFrame(), pd.DataFrame()
         if _table_exists(conn, "tour_data"):

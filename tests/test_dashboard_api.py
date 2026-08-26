@@ -97,7 +97,7 @@ def test_dashboard_summary_contract_has_fixed_kpi_and_ranking_fields(monkeypatch
     monkeypatch.setattr(
         dashboard_service,
         "load_all_data_from_db",
-        lambda *, db_path=None: (pd.DataFrame(), pd.DataFrame()),
+        lambda *, db_path=None, read_only=False: (pd.DataFrame(), pd.DataFrame()),
     )
     monkeypatch.setattr(
         dashboard_service,

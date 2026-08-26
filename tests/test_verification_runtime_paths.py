@@ -224,3 +224,40 @@ def test_health_without_profile_keeps_primary_defaults(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(health, "build_system_health", lambda **kwargs: captured.update(kwargs) or {"status": "degraded"})
     health.health_check()
     assert captured["db_path"] == Path(health.DB_FILE)
+
+
+def test_runtime_dir_subdir_ref_resolves_under_profile_dir(tmp_path: Path) -> None:
+    import json
+    import sqlite3
+    import subprocess
+    from pathlib import Path
+
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    db = project / "nbs_marketing_data.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("create table sample (value text)")
+    runtime = project / ".nbs_runtime"
+    runtime.mkdir()
+    (runtime / "data_generation.json").write_text(json.dumps({
+        "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
+        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": "a" * 64},
+    }), encoding="utf-8")
+    (project / "data").mkdir()
+    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
+    profile_path = build_verification_profile(
+        project_root=project, source_db=db, source_runtime=runtime,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        ports={"api": 18601, "streamlit": 18502, "vue": 15173},
+    )
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile_id = payload["profileId"]
+    payload["runtime"]["runtimeDir"] = f"verification/{profile_id}/runtime"
+    unsigned = {key: value for key, value in payload.items() if key != "profileFingerprint"}
+    from backend.agents.evidence_models import canonical_fingerprint
+    payload["profileFingerprint"] = canonical_fingerprint(unsigned)
+    profile_path.write_text(json.dumps(payload), encoding="utf-8")
+    _, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head="a" * 40)
+    assert paths.runtime_dir == profile_path.parent / "runtime"
+    assert paths.db_path == profile_path.parent / "snapshot.sqlite"

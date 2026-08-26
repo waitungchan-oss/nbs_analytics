@@ -31,7 +31,9 @@ def _payload(tmp_path: Path) -> dict:
             "requiredMay2026Total": "HKD 12,057,968",
         },
         "runtime": {
+            "runtimeDir": "verification/profile-20260817-001",
             "generationRef": "verification/profile-20260817-001/generation.json",
+            "generationFingerprint": "f" * 64,
             "cacheInventory": {"fileCount": 3, "totalBytes": 10, "fingerprint": "e" * 64},
         },
         "services": {
@@ -107,4 +109,48 @@ def test_loader_rejects_refs_from_another_profile(tmp_path: Path) -> None:
         {key: value for key, value in payload.items() if key != "profileFingerprint"}
     )
     with pytest.raises(VerificationRuntimeProfileError, match="profileId"):
+        VerificationRuntimeProfile.from_dict(payload)
+
+
+def test_loader_rejects_runtime_dir_escape_and_foreign_runtime_dir(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    payload["runtime"]["runtimeDir"] = "../outside"
+    payload["profileFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in payload.items() if key != "profileFingerprint"}
+    )
+    with pytest.raises(VerificationRuntimeProfileError, match="relative"):
+        VerificationRuntimeProfile.from_dict(payload)
+
+    payload = _payload(tmp_path)
+    payload["runtime"]["runtimeDir"] = "verification/other-profile"
+    payload["profileFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in payload.items() if key != "profileFingerprint"}
+    )
+    with pytest.raises(VerificationRuntimeProfileError, match="profileId"):
+        VerificationRuntimeProfile.from_dict(payload)
+
+
+def test_loader_accepts_runtime_dir_profile_root_and_subdir(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    profile = VerificationRuntimeProfile.from_dict(payload, expected_git_head="a" * 40)
+    assert profile.runtime.runtime_dir == "verification/profile-20260817-001"
+
+    payload = _payload(tmp_path)
+    payload["runtime"]["runtimeDir"] = "verification/profile-20260817-001/runtime"
+    payload["profileFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in payload.items() if key != "profileFingerprint"}
+    )
+    profile = VerificationRuntimeProfile.from_dict(payload, expected_git_head="a" * 40)
+    assert profile.runtime.runtime_dir == "verification/profile-20260817-001/runtime"
+
+
+def test_loader_rejects_missing_runtime_fields(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    del payload["runtime"]["generationFingerprint"]
+    with pytest.raises(VerificationRuntimeProfileError, match="exact"):
+        VerificationRuntimeProfile.from_dict(payload)
+
+    payload = _payload(tmp_path)
+    del payload["runtime"]["runtimeDir"]
+    with pytest.raises(VerificationRuntimeProfileError, match="exact"):
         VerificationRuntimeProfile.from_dict(payload)

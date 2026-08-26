@@ -132,7 +132,7 @@ def test_revenue_scope_excludes_writeoff_order():
 
 def test_dashboard_context_uses_read_only_loaded_frames(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None, read_only=False: (tour, others))
 
     context = dashboard_service.build_dashboard_context()
 
@@ -145,7 +145,7 @@ def test_dashboard_context_uses_read_only_loaded_frames(monkeypatch):
 
 def test_dashboard_summary_returns_kpis_without_export_generation(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None, read_only=False: (tour, others))
 
     summary = dashboard_service.build_dashboard_summary(
         {
@@ -174,7 +174,7 @@ def test_dashboard_summary_returns_kpis_without_export_generation(monkeypatch):
 
 def test_dashboard_summary_accepts_month_number_filter(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None, read_only=False: (tour, others))
 
     summary = dashboard_service.build_dashboard_summary(
         {
@@ -198,7 +198,7 @@ def test_dashboard_summary_returns_combined_branch_and_specialist_totals(monkeyp
     monkeypatch.setattr(
         dashboard_service,
         "load_all_data_from_db",
-        lambda *, db_path=None: (pd.concat([tour, specialist]), others),
+        lambda *, db_path=None, read_only=False: (pd.concat([tour, specialist]), others),
     )
     monkeypatch.setattr(
         dashboard_service,
@@ -232,7 +232,7 @@ def test_dashboard_summary_returns_combined_branch_and_specialist_totals(monkeyp
 
 def test_dashboard_summary_returns_phase2b_stability_baseline_for_official_month(monkeypatch):
     tour, others = _sample_frames()
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None, read_only=False: (tour, others))
     monkeypatch.setattr(
         dashboard_service,
         "build_dashboard_data",
@@ -401,7 +401,7 @@ def test_dashboard_summary_filters_rankings_and_returns_freshness(monkeypatch):
     monkeypatch.setattr(
         dashboard_service,
         "load_all_data_from_db",
-        lambda *, db_path=None: (pd.concat([tour, specialist]), pd.concat([others, july])),
+        lambda *, db_path=None, read_only=False: (pd.concat([tour, specialist]), pd.concat([others, july])),
     )
     monkeypatch.setattr(
         dashboard_service,
@@ -462,7 +462,7 @@ def test_dashboard_context_uses_persisted_business_rules(monkeypatch):
         captured["sales_reps"] = sales_reps
         return None, pd.DataFrame({"文本": ["測試分社"]}), pd.DataFrame()
 
-    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None: (tour, others))
+    monkeypatch.setattr(dashboard_service, "load_all_data_from_db", lambda *, db_path=None, read_only=False: (tour, others))
     monkeypatch.setattr(
         dashboard_service,
         "load_business_rules_snapshot",
