@@ -1015,7 +1015,7 @@ def _run_fast_export_gate(
         build_gmv_artifact_semantic_records, compare_gmv_artifact_semantics,
     )
     from backend.services.gmv_export_intermediate_service import (
-        build_gmv_export_base_preparation, build_gmv_report_facts,
+        build_gmv_export_base_preparation, build_gmv_report_fact_set,
     )
     from backend.services.gmv_export_serializer_service import (
         SerializerJob, SerializerPublicationGate, bounded_serializer_timeout_seconds,
@@ -1040,9 +1040,6 @@ def _run_fast_export_gate(
     total_adjusted["others"].attrs["gmv_refund_dimension"] = "總退款"
     paid_adjusted["tour"].attrs["gmv_refund_dimension"] = "已退款"
     paid_adjusted["others"].attrs["gmv_refund_dimension"] = "已退款"
-    adjusted_scope_masks = _gmv_scope_masks_for_adjusted_frames(
-        total_adjusted["tour"], total_adjusted["others"],
-    )
     total_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, total_adjusted)
     paid_summary_rows = _gmv_summary_rows(revenue_frames.formal_tour, revenue_frames.formal_others, paid_adjusted)
     audit_workbooks = build_formal_gmv_workbooks(
@@ -1069,17 +1066,20 @@ def _run_fast_export_gate(
         )
         scope_files = (("all", "ex.xlsx"), ("no_writeoff", "ex_no_writeoff.xlsx"), ("official", "ex_no_writeoff_refund_transfer.xlsx"))
         for dimension_key, dimension_label, adjusted in job_specs:
+            fact_set = build_gmv_report_fact_set(
+                preparation=prep,
+                adjusted_tour=adjusted["tour"],
+                adjusted_others=adjusted["others"],
+                dimension=dimension_label,
+                rules=rules,
+                include_branch_salesperson_sheet=True,
+            )
             for scope_id, filename in scope_files:
-                tour_mask, others_mask = adjusted_scope_masks[scope_id]
-                tour = adjusted["tour"].loc[tour_mask].copy()
-                others = adjusted["others"].loc[others_mask].copy()
-                tour.attrs["gmv_refund_dimension"] = dimension_label
-                others.attrs["gmv_refund_dimension"] = dimension_label
-                facts = build_gmv_report_facts(
-                    adjusted_tour=tour, adjusted_others=others, scope_id=scope_id,
-                    rules=rules, include_branch_salesperson_sheet=(scope_id == "official"), dimension=dimension_label,
-                )
-                fact_jobs.append((f"{dimension_key}.workbook.{filename}", facts, gate_dir / f"{dimension_key}.{filename}"))
+                fact_jobs.append((
+                    f"{dimension_key}.workbook.{filename}",
+                    fact_set.facts_by_scope[scope_id],
+                    gate_dir / f"{dimension_key}.{filename}",
+                ))
         facts_schema_status = "PASS" if all(
             facts.schema_fingerprint and facts.data_fingerprint for _, facts, _ in fact_jobs
         ) else "FAIL"

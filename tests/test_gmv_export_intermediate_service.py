@@ -187,3 +187,51 @@ def test_report_facts_rejects_unknown_refund_dimension():
         assert "dimension" in str(exc)
     else:
         raise AssertionError("unknown refund dimension must fail closed")
+
+
+def test_report_fact_set_reuses_preparation_for_three_scopes():
+    from backend.services.gmv_export_intermediate_service import (
+        build_gmv_export_base_preparation,
+        build_gmv_report_fact_set,
+    )
+
+    tour, others, _, _, _ = semantic_fixture()
+    preparation = build_gmv_export_base_preparation(
+        version_id="v1", revenue_generation_token="r1", rules_fingerprint="rules-1",
+        export_schema_version="schema-1", pipeline_fingerprint="pipeline-1",
+        tour=tour, others=others,
+    )
+    rules = (
+        {"1A": "銅鑼灣分社", "2B": "上環服務點", "3C": "元朗服務點"},
+        ["銅鑼灣分社", "上環服務點", "元朗服務點"],
+        ["郵輪部"], ["Alice", "Bob", "Ben", "Carol", "Specialist"], [],
+    )
+    result = build_gmv_report_fact_set(
+        preparation=preparation, adjusted_tour=tour, adjusted_others=others,
+        dimension="總退款", rules=rules, include_branch_salesperson_sheet=True,
+    )
+
+    assert set(result.facts_by_scope) == {"all", "no_writeoff", "official"}
+    assert result.aggregation_count == 1
+    assert result.preparation_fingerprint
+    assert "分社經營統計_含銷售員" not in result.facts_by_scope["all"].sheets
+    assert "分社經營統計_含銷售員" in result.facts_by_scope["official"].sheets
+
+
+def test_dashboard_intermediate_preserves_scoped_report_contract():
+    import pipeline
+
+    tour, others, _, _, _ = semantic_fixture()
+    intermediate = pipeline.build_dashboard_intermediate(
+        tour, others,
+        branch_mapping={"1A": "銅鑼灣分社", "2B": "上環服務點", "3C": "元朗服務點"},
+        target_branches_s3=["銅鑼灣分社", "上環服務點", "元朗服務點"],
+        cruise_depts=["郵輪部"],
+        sales_rep_list=["Alice", "Bob", "Ben", "Carol", "Specialist"],
+    )
+    _, branch, facts = pipeline.build_dashboard_data_from_intermediate(
+        intermediate, scope_id="official", include_branch_salesperson_sheet=True,
+    )
+    assert intermediate.source_fingerprint
+    assert "分社經營統計_含銷售員" in facts
+    assert branch is not None

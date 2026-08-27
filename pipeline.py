@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import io
 import itertools
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -36,6 +38,90 @@ from config import (
 )
 
 COL_SUBTABLE_BRANCH = "副表_銷售點"
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardIntermediate:
+    tour: pd.DataFrame
+    others: pd.DataFrame
+    branch_mapping: dict
+    target_branches_s3: list[str]
+    cruise_depts: list[str]
+    sales_rep_list: list[str]
+    scope_masks: dict[str, tuple[pd.Series, pd.Series]]
+    source_fingerprint: str
+
+
+def build_dashboard_intermediate(
+    tour: pd.DataFrame,
+    others: pd.DataFrame,
+    *,
+    branch_mapping: dict,
+    target_branches_s3: list[str],
+    cruise_depts: list[str],
+    sales_rep_list: list[str],
+) -> DashboardIntermediate:
+    """Normalize dashboard inputs once before scope-specific aggregation."""
+    normalized_tour = normalize_runtime_columns(tour.copy(deep=True))
+    normalized_others = normalize_runtime_columns(others.copy(deep=True))
+    for frame in (normalized_tour, normalized_others):
+        if "統一日期" in frame.columns:
+            frame["統一日期"] = pd.to_datetime(frame["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    def masks(frame: pd.DataFrame) -> dict[str, pd.Series]:
+        all_mask = pd.Series(True, index=frame.index, dtype=bool)
+        no_writeoff = all_mask.copy()
+        official = all_mask.copy()
+        if "收款類型" in frame.columns:
+            no_writeoff &= ~frame["收款類型"].astype(str).str.strip().eq("掛賬核銷")
+        if "收款方式" in frame.columns:
+            official &= ~frame["收款方式"].astype(str).str.strip().eq("TT 退款轉團款")
+        official &= no_writeoff
+        return {"all": all_mask, "no_writeoff": no_writeoff, "official": official}
+
+    payload = pd.util.hash_pandas_object(normalized_tour, index=True).values.tobytes()
+    payload += pd.util.hash_pandas_object(normalized_others, index=True).values.tobytes()
+    tour_masks = masks(normalized_tour)
+    others_masks = masks(normalized_others)
+    return DashboardIntermediate(
+        tour=normalized_tour,
+        others=normalized_others,
+        branch_mapping=dict(branch_mapping),
+        target_branches_s3=list(target_branches_s3),
+        cruise_depts=list(cruise_depts),
+        sales_rep_list=list(sales_rep_list),
+        scope_masks={
+            scope: (tour_masks[scope], others_masks[scope])
+            for scope in ("all", "no_writeoff", "official")
+        },
+        source_fingerprint=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def build_dashboard_data_from_intermediate(
+    intermediate: DashboardIntermediate,
+    *,
+    scope_id: str,
+    make_workbook: bool = False,
+    include_branch_salesperson_sheet: bool = True,
+    return_facts: bool = True,
+):
+    """Run the legacy-compatible report builder on prepared, scoped frames."""
+    if scope_id not in intermediate.scope_masks:
+        raise ValueError(f"unsupported dashboard scope: {scope_id}")
+    tour_mask, others_mask = intermediate.scope_masks[scope_id]
+    return build_dashboard_data(
+        intermediate.tour.loc[tour_mask].copy(),
+        intermediate.others.loc[others_mask].copy(),
+        intermediate.branch_mapping,
+        intermediate.target_branches_s3,
+        intermediate.cruise_depts,
+        intermediate.sales_rep_list,
+        make_workbook=make_workbook,
+        include_branch_salesperson_sheet=include_branch_salesperson_sheet,
+        return_facts=return_facts,
+        _already_normalized=True,
+    )
 
 
 def read_excel_source(source) -> tuple[pd.DataFrame, str]:
@@ -666,11 +752,13 @@ def build_dashboard_data(
     make_workbook: bool = True,
     include_branch_salesperson_sheet: bool = False,
     return_facts: bool = False,
+    _already_normalized: bool = False,
 ):
-    df_tour_matched = normalize_runtime_columns(df_tour_matched)
-    df_others_matched = normalize_runtime_columns(df_others_matched)
-    df_tour_matched["統一日期"] = pd.to_datetime(df_tour_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df_others_matched["統一日期"] = pd.to_datetime(df_others_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if not _already_normalized:
+        df_tour_matched = normalize_runtime_columns(df_tour_matched)
+        df_others_matched = normalize_runtime_columns(df_others_matched)
+        df_tour_matched["統一日期"] = pd.to_datetime(df_tour_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df_others_matched["統一日期"] = pd.to_datetime(df_others_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
 
     all_days = sorted(list(set(df_tour_matched["統一日期"].dropna()) | set(df_others_matched["統一日期"].dropna())))
     branch_list = [f"{c}{n}" for c, n in branch_mapping.items() if n != TARGET_DEPT_FOR_REP]

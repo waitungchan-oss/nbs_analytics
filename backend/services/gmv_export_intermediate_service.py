@@ -40,6 +40,14 @@ class GmvReportFacts:
     data_fingerprint: str
 
 
+@dataclass(frozen=True, slots=True)
+class GmvReportFactSet:
+    dimension: str
+    facts_by_scope: Mapping[str, GmvReportFacts]
+    preparation_fingerprint: str
+    aggregation_count: int
+
+
 def _stable_frame_fingerprint(frame: pd.DataFrame, *, order_insensitive: bool = True) -> str:
     normalized = app_workflows.normalize_runtime_columns(frame.copy())
     columns = sorted(str(column) for column in normalized.columns)
@@ -185,4 +193,52 @@ def build_gmv_report_facts(
         data_fingerprint=hashlib.sha256(
             json.dumps(data_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest(),
+    )
+
+
+def _scope_frame(frame: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
+    """Apply a preparation mask safely to an adjusted frame."""
+    if frame.empty:
+        return frame.copy()
+    if len(mask) == len(frame) and mask.index.equals(frame.index):
+        return frame.loc[mask].copy()
+    if len(mask) == len(frame):
+        return frame.loc[mask.to_numpy(dtype=bool)].copy()
+    aligned = mask.reindex(frame.index, fill_value=False)
+    return frame.loc[aligned].copy()
+
+
+def build_gmv_report_fact_set(
+    *, preparation: GmvExportBasePreparation,
+    adjusted_tour: pd.DataFrame,
+    adjusted_others: pd.DataFrame,
+    dimension: str,
+    rules: tuple[dict, list[str], list[str], list[str], list[str]],
+    include_branch_salesperson_sheet: bool,
+) -> GmvReportFactSet:
+    """Build all scope facts from one normalized preparation boundary."""
+    if dimension not in {"總退款", "已退款"}:
+        raise ValueError(f"unsupported GMV refund dimension: {dimension}")
+    facts_by_scope: dict[str, GmvReportFacts] = {}
+    for scope_id in ("all", "no_writeoff", "official"):
+        tour_mask, others_mask = preparation.scope_masks[scope_id]
+        scoped_tour = _scope_frame(adjusted_tour, tour_mask)
+        scoped_others = _scope_frame(adjusted_others, others_mask)
+        scoped_tour.attrs["gmv_refund_dimension"] = dimension
+        scoped_others.attrs["gmv_refund_dimension"] = dimension
+        facts_by_scope[scope_id] = build_gmv_report_facts(
+            adjusted_tour=scoped_tour,
+            adjusted_others=scoped_others,
+            scope_id=scope_id,
+            rules=rules,
+            include_branch_salesperson_sheet=(include_branch_salesperson_sheet and scope_id == "official"),
+            dimension=dimension,
+        )
+    return GmvReportFactSet(
+        dimension=dimension,
+        facts_by_scope=facts_by_scope,
+        preparation_fingerprint=hashlib.sha256(
+            json.dumps(dict(preparation.source_fingerprints), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        aggregation_count=1,
     )
