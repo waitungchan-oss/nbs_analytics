@@ -318,6 +318,11 @@ def _render_upload_audit_notice() -> None:
     else:
         st.error(audit.get("message", "上傳批次沒有寫入。"))
 
+    cache_build = audit.get("cache_build") or {}
+    if cache_build:
+        with st.expander("查看 Cache rebuild 結果", expanded=False):
+            st.json(cache_build)
+
     preflight_report = audit.get("preflight_report") or {}
     if preflight_report:
         if preflight_report.get("status") == "matched":
@@ -880,6 +885,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                     "preflight_report": execution.response.get("preflightReport") or {},
                     "stability_gate": execution.response.get("stabilityGate"),
                     "stage_timings": execution.response.get("stageTimings") or [],
+                    "cache_build": execution.response.get("cacheBuild") or {},
                 }
                 st.rerun()
                 return execution.response
@@ -945,6 +951,7 @@ def _render_upload_area(has_db_data: bool) -> None:
                         "drift_diagnosis": preflight.get("driftDiagnosis") or {},
                         "preflight_report": preflight,
                         "stage_timings": response.get("stageTimings") or [],
+                        "cache_build": response.get("cacheBuild") or {},
                     }
                     upload_status.update(label=response.get("message") or "上傳完成", state="complete")
                 st.rerun()

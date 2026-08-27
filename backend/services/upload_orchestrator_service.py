@@ -76,6 +76,10 @@ def _response_base(operation: UploadOperation, preflight: dict) -> dict[str, Any
         "upsertSummary": None, "stabilityGate": None, "rollbackResult": None,
         "historyRecordId": None, "historyError": None, "writeCommitted": False,
         "cacheState": "unchanged", "cacheError": None, "dataGeneration": {},
+        "cacheBuild": {
+            "builderMode": None, "validationMode": None, "equivalenceStatus": "NOT_RUN",
+            "stageTimings": [], "fallbackReason": None, "activePointerSwapped": False,
+        },
         "stageTimings": list(preflight.get("stageTimings") or []),
         "receiptExclusion": preflight.get("receiptExclusion") or {},
     }
@@ -156,9 +160,30 @@ def _commit_matched_upload(
         except Exception as exc:
             cache_error = f"{type(exc).__name__}: {exc}"
             cache_state = "refresh_required"
+    cache_build = dict(base["cacheBuild"])
     if final_status == "accepted" and cache_error is None and accepted_cache_rebuilder is not None:
-        accepted_cache_rebuilder()
-        cache_state = "streamlit_rebuilt"
+        try:
+            cache_result = accepted_cache_rebuilder()
+            manifest = getattr(cache_result, "cache_manifest", None)
+            if manifest is not None:
+                cache_build.update({
+                    "builderMode": getattr(manifest, "builder_mode", None),
+                    "validationMode": getattr(manifest, "validation_mode", None),
+                    "equivalenceStatus": getattr(manifest, "equivalence_status", "NOT_RUN"),
+                    "fallbackReason": getattr(manifest, "error", None),
+                    "activePointerSwapped": getattr(manifest, "status", None) == "ready",
+                })
+                performance = getattr(manifest, "performance", {}) or {}
+                cache_build["stageTimings"] = list(performance.get("stageTimings") or [])
+                if performance.get("totalMs") is not None:
+                    cache_build["totalMs"] = performance["totalMs"]
+            elif isinstance(cache_result, dict):
+                cache_build.update({key: cache_result[key] for key in cache_build if key in cache_result})
+            cache_state = "streamlit_rebuilt"
+        except Exception as exc:
+            cache_error = f"{type(exc).__name__}: {exc}"
+            cache_state = "fallback"
+            cache_build["fallbackReason"] = cache_error
 
     public_status = "success"
     message = f"上傳批次已寫入；SQLite 最新收款日期：{latest_data_date or '—'}。"
@@ -183,6 +208,7 @@ def _commit_matched_upload(
         "quarantine_path": rollback.get("quarantinePath"), "post_rollback_gate": rollback.get("postRollbackGate"),
         "rollback_error": rollback.get("rollbackError"), "stage_timings": all_timings,
         "cache_state": cache_state, "cache_error": cache_error, "data_generation": generation,
+        "cache_build": cache_build,
         "receipt_exclusion_revision": receipt_exclusion_revision,
         "receipt_exclusion_rule_ids": receipt_exclusion_rule_ids,
         "receipt_exclusion_match_count": len(receipt_exclusion.get("matchedRules") or []),
@@ -209,6 +235,7 @@ def _commit_matched_upload(
         "rollbackResult": rollback, "historyRecordId": history_id, "historyError": history_error,
         "writeCommitted": final_status == "accepted", "cacheState": cache_state,
         "cacheError": cache_error, "dataGeneration": generation, "stageTimings": all_timings,
+        "cacheBuild": cache_build,
         "receiptExclusion": {
             **(preflight.get("receiptExclusion") or {}),
             "registryRevision": receipt_exclusion_revision,
