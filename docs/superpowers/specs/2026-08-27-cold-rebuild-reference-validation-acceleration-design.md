@@ -105,9 +105,8 @@ class TrustedReferenceIdentity:
 @dataclass(frozen=True, slots=True)
 class TrustedReferenceSnapshot:
     identity: TrustedReferenceIdentity
-    artifacts: Mapping[str, CanonicalWorkbook]
+    artifact_digests: Mapping[str, Mapping[str, object]]
     artifact_fingerprints: Mapping[str, str]
-    metric_digests: Mapping[str, Mapping[str, object]]
     created_at: str
     source: str  # "legacy_materialized" or "validated_ready"
 
@@ -128,7 +127,7 @@ def publish_trusted_reference(
 ) -> Path
 ```
 
-Snapshot 必須以 temporary file 寫入、fsync（若平台支援）、checksum 驗證後才更新 active pointer。pointer 只指向完整 immutable snapshot；讀取端拒絕 symlink、path escape、unknown schema、identity mismatch、hash mismatch、缺 artifact 或非 regular file。
+Snapshot 只保存 bounded schema/row-count/metric digest 與 artifact hash，不保存 canonical rows、原始 Excel 或其他 business detail。必須以 temporary file 寫入、fsync（若平台支援）、checksum 驗證後才更新 active pointer。pointer 只指向完整 immutable snapshot；讀取端拒絕 symlink、path escape、unknown schema、identity mismatch、hash mismatch、缺 artifact 或非 regular file。
 
 `source="validated_ready"` 只能由已通過 semantic equivalence、package checksum、baseline 與 generation gate 的 READY manifest 建立；不能由未驗證 candidate 建立。
 

@@ -114,7 +114,7 @@ Expected: FAIL because the service and contract do not exist.
 
 - [ ] **Step 3: Implement immutable snapshot and pointer validation**
 
-Use JSON metadata plus canonical artifact/digest payloads under a cache-root-relative directory. Reject unknown schema, identity mismatch, path escape, symlink, non-regular files, checksum mismatch and missing artifact. Publish via temporary file and `os.replace` only after complete validation.
+Use JSON metadata plus bounded artifact digest payloads under a cache-root-relative directory; never persist canonical rows or raw business fields. Reject unknown schema, identity mismatch, path escape, symlink, non-regular files, checksum mismatch and missing artifact. Publish via temporary file and `os.replace` only after complete validation.
 
 - [ ] **Step 4: Verify failure safety**
 
