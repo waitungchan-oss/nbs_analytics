@@ -118,6 +118,7 @@ class GmvFastCandidate:
     shadow_status: str
     reference_status: str
     performance: dict[str, object] | None = None
+    unaffected_aggregation_calls: int | None = None
 
 
 GMV_EXPORT_SCHEMA_VERSION = "gmv-formal-export-v2"
@@ -1262,6 +1263,9 @@ def _run_fast_export_gate(
             shadow_status=shadow_status,
             reference_status="HIT" if reference_manifest is not None else "MISS",
             performance={
+                "aggregationMode": "full_candidate",
+                "unaffectedAggregationCalls": 2,
+                "affectedAggregationCalls": 0,
                 "stageTimings": [
                     {"stage": "preparation", "ms": round(prep_ms, 1)},
                     {"stage": "facts", "ms": round(facts_ms, 1)},

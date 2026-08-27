@@ -398,6 +398,13 @@ def run_isolated_production_rebuild_benchmark(
             "equivalenceStatus": manifest.equivalence_status,
             "fallbackReason": manifest.error if manifest.builder_mode == "legacy_fallback" else None,
             "activePointerUnchangedOnFailure": True,
+            "unaffectedAggregationCalls": (
+                int(manifest.performance["unaffectedAggregationCalls"])
+                if manifest.builder_mode == "fast"
+                and manifest.performance.get("unaffectedAggregationCalls") is not None
+                else None
+            ),
+            "peakRssBytes": manifest.performance.get("peakRssBytes"),
         }
 
     def warm_reader(current_case: BenchmarkCase, read_root: Path) -> Mapping[str, object]:

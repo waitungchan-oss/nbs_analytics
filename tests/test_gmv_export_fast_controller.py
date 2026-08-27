@@ -174,6 +174,24 @@ def test_fast_controller_warm_reference_does_not_call_legacy(monkeypatch, tmp_pa
     assert calls == ["fast"]
 
 
+def test_fast_candidate_exposes_full_candidate_aggregation_telemetry():
+    import backend.services.gmv_refund_service as service
+
+    candidate = service.GmvFastCandidate(
+        artifacts={}, total_adjusted={}, paid_adjusted={}, total_summary_rows=[],
+        paid_summary_rows=[], shadow_status="PASS", reference_status="HIT",
+        performance={
+            "aggregationMode": "full_candidate",
+            "unaffectedAggregationCalls": 2,
+            "affectedAggregationCalls": 0,
+        },
+    )
+
+    assert candidate.performance["aggregationMode"] == "full_candidate"
+    assert candidate.performance["unaffectedAggregationCalls"] == 2
+    assert candidate.performance["affectedAggregationCalls"] == 0
+
+
 def test_fast_controller_cold_miss_seeds_reference_once_before_fast(monkeypatch, tmp_path):
     import backend.services.gmv_export_cache_service as cache_service
     import backend.services.gmv_refund_service as service
