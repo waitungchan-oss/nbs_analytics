@@ -301,6 +301,21 @@ def publish_gmv_export_cache_manifest(*, cache_dir: Path, manifest: GmvExportCac
         raise ValueError("only a complete ready GMV cache can become active")
     if set(manifest.artifacts) != CANONICAL_CACHE_ARTIFACT_KEYS:
         raise ValueError("GMV cache artifact contract is incomplete")
+    root = _cache_root(cache_dir)
+    version_root = root / _validate_component(manifest.version_id, "version id")
+    generation_root = (version_root / manifest.generation_path).resolve()
+    generation_root.relative_to(version_root.resolve())
+    for record in manifest.artifacts.values():
+        artifact_name = _validate_component(str(record.get("path", "")), "artifact name")
+        artifact_path = (generation_root / artifact_name).resolve()
+        artifact_path.relative_to(generation_root)
+        if not artifact_path.is_file():
+            raise ValueError(f"artifact file is missing: {artifact_name}")
+        content = artifact_path.read_bytes()
+        if len(content) != int(record.get("bytes", -1)):
+            raise ValueError(f"artifact file size mismatch: {artifact_name}")
+        if hashlib.sha256(content).hexdigest() != str(record.get("sha256", "")):
+            raise ValueError(f"artifact file checksum mismatch: {artifact_name}")
     _write_active_pointer(cache_dir, manifest.version_id, manifest)
 
 
