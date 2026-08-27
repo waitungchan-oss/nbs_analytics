@@ -56,3 +56,63 @@ def test_legacy_export_produces_three_workbooks():
     assert payload["export_cache_version"] == app_workflows.EXPORT_CACHE_VERSION
     assert elapsed_ms >= 0
     assert all(len(payload[key]) > 0 for key in keys)
+
+
+def test_facts_controller_builds_intermediate_once_and_publishes_equivalent_artifacts(tmp_path):
+    from openpyxl import Workbook
+
+    from backend.services.export_fast_path_service import build_fast_export_job_from_facts
+    from backend.services.export_intermediate_service import ExportScope, build_scope_report_facts
+
+    tour, others = _fixture_frames()
+    calls = {"facts": 0}
+
+    def facts_builder(intermediate):
+        calls["facts"] += 1
+        return {
+            scope.value: build_scope_report_facts(intermediate, scope)
+            for scope in ExportScope
+        }
+
+    def writer(facts, path):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "營收"
+        sheet.append(["scope", "rows"])
+        sheet.append([facts.scope_id, len(facts.tour) + len(facts.others)])
+        workbook.save(path)
+
+    def reference_builder(raw_tour, raw_others):
+        return {
+            key: _reference_workbook(scope, len(raw_tour) + len(raw_others))
+            for key, scope in {
+                "ex": "all", "ex_no_writeoff": "no_writeoff",
+                "ex_no_writeoff_refund_transfer": "official",
+            }.items()
+        }
+
+    result = build_fast_export_job_from_facts(
+        tour, others, generation_token="generation-1", rules_fingerprint="rules-1",
+        export_schema_version="schema-1", cache_root=tmp_path,
+        reference_builder=reference_builder, facts_builder=facts_builder,
+        writer=writer, worker_count=2,
+    )
+
+    assert result.status == "READY"
+    assert result.manifest_path is not None
+    assert calls["facts"] == 1
+    assert not (tmp_path / ".staging").exists()
+
+
+def _reference_workbook(scope, rows):
+    from io import BytesIO
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "營收"
+    sheet.append(["scope", "rows"])
+    sheet.append([scope, rows])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
