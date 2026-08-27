@@ -128,6 +128,20 @@ def ensure_numeric(df: pd.DataFrame, col_name: str) -> pd.DataFrame:
     return df
 
 
+def _format_date_with_fallback(source: pd.Series, fallback: pd.Series) -> pd.Series:
+    """Format dates without relying on deprecated mixed-dtype fill behavior."""
+    parsed = pd.to_datetime(source, errors="coerce").dt.strftime("%Y-%m-%d").astype("string")
+    return parsed.fillna(fallback.astype("string"))
+
+
+def _fill_numeric_columns(df: pd.DataFrame, columns: list[str] | tuple[str, ...]) -> pd.DataFrame:
+    """Fill only declared numeric columns, leaving text/null columns untouched."""
+    for column in columns:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+    return df
+
+
 def apply_fuzzy(val: Any, std_list: list[str], ctx: str, anomaly_log: list[dict]) -> str:
     val_str = str(val).strip()
     if pd.isna(val) or not val_str:
@@ -724,7 +738,7 @@ def build_dashboard_data(
                 else work.copy()
             )
             work["統計日期"] = (
-                pd.to_datetime(work[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(work["統一日期"])
+                _format_date_with_fallback(work[COL_TRANS_TIME], work["統一日期"])
                 if COL_TRANS_TIME in work.columns
                 else work["統一日期"]
             )
@@ -741,7 +755,7 @@ def build_dashboard_data(
             if work.empty:
                 return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "票務交易數量"])
             work["統計日期"] = (
-                pd.to_datetime(work[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(work["統一日期"])
+                _format_date_with_fallback(work[COL_TRANS_TIME], work["統一日期"])
                 if COL_TRANS_TIME in work.columns
                 else work["統一日期"]
             )
@@ -818,7 +832,7 @@ def build_dashboard_data(
         else df_tour_matched.copy()
     )
     df_tour_dedup["日期"] = (
-        pd.to_datetime(df_tour_dedup[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(df_tour_dedup["統一日期"])
+        _format_date_with_fallback(df_tour_dedup[COL_TRANS_TIME], df_tour_dedup["統一日期"])
         if COL_TRANS_TIME in df_tour_dedup.columns
         else df_tour_dedup["統一日期"]
     )
@@ -840,7 +854,7 @@ def build_dashboard_data(
 
     df_ticket = df_others_matched.copy()
     df_ticket["日期"] = (
-        pd.to_datetime(df_ticket[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(df_ticket["統一日期"])
+        _format_date_with_fallback(df_ticket[COL_TRANS_TIME], df_ticket["統一日期"])
         if COL_TRANS_TIME in df_ticket.columns
         else df_ticket["統一日期"]
     )
@@ -865,7 +879,8 @@ def build_dashboard_data(
             return pd.DataFrame(columns=["文本", "日期", "月份", t_name, "郵輪交易人數"])
         t = df_sub[df_sub["文本"] != "郵輪"].groupby([grp_col, "日期", "月份"])["交易人數"].sum().reset_index(name=t_name)
         c = df_sub[df_sub["文本"] == "郵輪"].groupby([grp_col, "日期", "月份"])["交易人數"].sum().reset_index(name="郵輪交易人數")
-        res = df_sub[[grp_col, "日期", "月份"]].drop_duplicates().merge(t, how="left").merge(c, how="left").fillna(0)
+        res = df_sub[[grp_col, "日期", "月份"]].drop_duplicates().merge(t, how="left").merge(c, how="left")
+        _fill_numeric_columns(res, (t_name, "郵輪交易人數"))
         return res[(res[t_name] > 0) | (res["郵輪交易人數"] > 0)].rename(columns={grp_col: "文本"}).sort_values(["文本", "日期"])
 
     result_s8 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH, "交易人數")
@@ -887,7 +902,7 @@ def build_dashboard_data(
             return pd.DataFrame(columns=[grp_col, type_col, "天數", "日期", "月份", "交易金額"])
         df_m = df_sub.copy()
         df_m["日期"] = (
-            pd.to_datetime(df_m[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(df_m["統一日期"])
+            _format_date_with_fallback(df_m[COL_TRANS_TIME], df_m["統一日期"])
             if COL_TRANS_TIME in df_m.columns
             else df_m["統一日期"]
         )
