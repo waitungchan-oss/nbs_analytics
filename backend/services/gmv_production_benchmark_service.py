@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import sqlite3
+from pathlib import Path
 from typing import Mapping
 
 
@@ -64,6 +67,62 @@ class BenchmarkSummary:
     warm_reads: tuple[BenchmarkRunEvidence, ...]
     status: str
     failure_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class IsolatedBenchmarkFixture:
+    db_path: Path
+    cache_dir: Path
+    database_sha256: str
+    schema_table_count: int
+    scenario_manifest: Mapping[str, Mapping[str, object]]
+    database_mutated: bool = False
+
+
+def _validate_fixture_root(root: str | Path) -> Path:
+    path = Path(root).expanduser().resolve()
+    project_root = Path(__file__).resolve().parents[2]
+    temp_root = Path(__import__("tempfile").gettempdir()).resolve()
+    if path == project_root or ".nbs_runtime_cache" in {part.lower() for part in path.parts}:
+        raise ValueError("fixture root must be isolated from formal runtime")
+    if path != temp_root and temp_root not in path.parents:
+        raise ValueError("fixture root must be under an isolated temporary directory")
+    return path
+
+
+def create_isolated_benchmark_fixture(
+    case: BenchmarkCase, *, root: str | Path
+) -> IsolatedBenchmarkFixture:
+    """Create a disposable schema fixture without loading formal business rows."""
+    fixture_root = _validate_fixture_root(root)
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    db_path = fixture_root / "fixture.sqlite3"
+    cache_dir = fixture_root / "cache"
+    cache_dir.mkdir(exist_ok=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS tour_data (id INTEGER PRIMARY KEY)")
+        connection.execute("CREATE TABLE IF NOT EXISTS others_data (id INTEGER PRIMARY KEY)")
+        from backend.services.gmv_refund_repository import migrate_gmv_schema
+
+        migrate_gmv_schema(db_path)
+        schema_table_count = int(connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
+        ).fetchone()[0])
+    scenario_names = (
+        "status_transition", "amount_change", "tt_method_transition",
+        "over_refund", "multi_member", "unmatched",
+    )
+    scenario_manifest = {
+        name: {"enabled": name in case.scenario_flags, "rowCount": 0}
+        for name in scenario_names
+    }
+    return IsolatedBenchmarkFixture(
+        db_path=db_path,
+        cache_dir=cache_dir,
+        database_sha256=hashlib.sha256(db_path.read_bytes()).hexdigest(),
+        schema_table_count=schema_table_count,
+        scenario_manifest=scenario_manifest,
+    )
 
 
 def build_benchmark_case(
