@@ -24,6 +24,11 @@ from .gmv_refund_models import (
     money_to_minor,
     refund_state_sha256,
 )
+from .gmv_incremental_rebuild import (
+    RebuildFingerprints,
+    build_incremental_plan,
+    resolve_rebuild_strategy,
+)
 from .gmv_refund_repository import GmvRefundRepository
 from .upload_lock_service import acquire_upload_lease
 
@@ -118,6 +123,18 @@ class GmvFastCandidate:
 GMV_EXPORT_SCHEMA_VERSION = "gmv-formal-export-v2"
 GMV_PIPELINE_FINGERPRINT = "pipeline-gmv-fast-v1"
 GMV_SERIALIZER_VERSION = "gmv-openpyxl-serializer-v1"
+
+
+def _source_receipt_universe_count(frames: RevenueFrames) -> int:
+    receipts = set()
+    for frame in (frames.formal_tour, frames.formal_others):
+        if "來源單據號" in frame.columns:
+            receipts.update(
+                str(value).strip()
+                for value in frame["來源單據號"].tolist()
+                if str(value).strip()
+            )
+    return len(receipts)
 
 
 def _canonical_frame_sha256(frame: pd.DataFrame) -> str:
@@ -513,6 +530,25 @@ def confirm_refund_batch(
                 "SELECT version_id FROM gmv_scope_versions WHERE status = 'ACTIVE'"
             ).fetchone()
             previous_version_id = previous[0] if previous else None
+            if previous_version_id:
+                rebuild_plan = build_incremental_plan(
+                    base_version_id=str(previous_version_id),
+                    state_delta=state_delta,
+                    fingerprints=RebuildFingerprints(
+                        base_revenue_generation_token=preview.revenue_generation_token,
+                        current_revenue_generation_token=preview.revenue_generation_token,
+                        base_rules_fingerprint=preview.rule_version,
+                        current_rules_fingerprint=preview.rule_version,
+                        base_source_fingerprint=preview.revenue_generation_token,
+                        current_source_fingerprint=preview.revenue_generation_token,
+                    ),
+                    source_receipt_universe_count=_source_receipt_universe_count(frames),
+                )
+                if resolve_rebuild_strategy(rebuild_plan, incremental_available=False) == "BLOCKED":
+                    raise ValueError(
+                        "incremental rebuild blocked: "
+                        + ",".join(reason.value for reason in rebuild_plan.reason_codes)
+                    )
             if previous_version_id:
                 conn.execute("UPDATE gmv_scope_versions SET status = 'RETIRED' WHERE version_id = ?", (previous_version_id,))
             proposed_states = {
