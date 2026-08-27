@@ -140,7 +140,7 @@ def test_isolated_runner_uses_existing_cache_service_without_mutating_fixture_db
     assert len(summary.runs) == 3
     assert len(summary.warm_reads) == 3
     assert all(item.equivalence_status in {"PASS", "FAIL", "NOT_RUN"} for item in summary.runs)
-    assert summary.status == "INCONCLUSIVE"
+    assert summary.status == "PASS"
     assert hashlib.sha256(fixture.db_path.read_bytes()).hexdigest() == before
 
 

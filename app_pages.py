@@ -3103,6 +3103,7 @@ def _render_gmv_exclusion_tab() -> None:
                         repository=repository, version_id=receipt.version_id,
                         revenue_frames=revenue_frames, rule_version=REVENUE_SCOPE_LABEL,
                         cache_dir=cache_dir, worker_count=3,
+                        affected_source_receipt_nos=receipt.affected_source_receipt_nos,
                     )
                     if artifacts.cache_manifest.status != "ready":
                         raise RuntimeError(artifacts.cache_manifest.error or "GMV export cache failed")

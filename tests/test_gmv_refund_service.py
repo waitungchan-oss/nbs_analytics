@@ -16,6 +16,7 @@ from backend.services.gmv_refund_service import (
     confirm_refund_batch,
     filter_revenue_frames_for_receipts,
     rebuild_affected_reconciliation_rows,
+    _apply_affected_gmv_refund_adjustments,
     preview_refund_batch,
     revenue_state_token,
 )
@@ -94,6 +95,25 @@ def test_rebuild_affected_reconciliation_rows_passes_bounded_inputs(monkeypatch)
     assert result == ("reconciliation", "adjustment")
     assert captured["frames"].formal_tour["來源單據號"].tolist() == ["S-1"]
     assert tuple(captured["states"]) == ("F-1",)
+
+
+def test_affected_refund_adjustment_aggregates_only_affected_receipts():
+    frames = _frames()
+    refunds = pd.DataFrame([
+        {"來源單據號": "S-1", "退款原幣金額": 20, "退款狀態": "已退款"},
+        {"來源單據號": "S-99", "退款原幣金額": 999, "退款狀態": "已退款"},
+    ])
+
+    result = _apply_affected_gmv_refund_adjustments(
+        frames, refunds, refund_status="已退款",
+        affected_source_receipt_nos=("S-1",),
+    )
+
+    assert result["refund_total"] == 20
+    assert result["applied_refund_total"] == 20
+    assert result["unmatched_source_ids"] == []
+    assert result["tour"]["收款原幣金額"].tolist() == [80.0]
+    assert result["adjusted_detail"]["來源單據號"].tolist() == ["S-1"]
 
 
 def _seed_current(db_path):

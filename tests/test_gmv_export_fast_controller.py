@@ -174,6 +174,59 @@ def test_fast_controller_warm_reference_does_not_call_legacy(monkeypatch, tmp_pa
     assert calls == ["fast"]
 
 
+def test_fast_controller_passes_affected_receipts_to_candidate(monkeypatch, tmp_path):
+    import backend.services.gmv_export_cache_service as cache_service
+    import backend.services.gmv_refund_service as service
+    import backend.services.gmv_trusted_reference_service as reference_service
+
+    class Repository:
+        db_path = tmp_path / "nbs.sqlite"
+
+        def load_active_scope(self):
+            return {
+                "version_id": "v1",
+                "revenue_generation_token": "revenue-v1",
+                "refund_state_sha256": "a" * 64,
+            }
+
+    class Reference:
+        status = "TRUSTED"
+        content_fingerprint = "a" * 64
+        reference_id = "gmv-trusted-reference-v1:" + "a" * 64
+
+        def to_dict(self):
+            return {"referenceId": self.reference_id, "contentFingerprint": self.content_fingerprint}
+
+    class Manifest:
+        status = "ready"
+
+    candidate = service.GmvFastCandidate(
+        artifacts={}, total_adjusted={"adjusted_detail": pd.DataFrame()},
+        paid_adjusted={"adjusted_detail": pd.DataFrame()}, total_summary_rows=[],
+        paid_summary_rows=[], shadow_status="PASS", reference_status="HIT",
+        performance={"aggregationMode": "affected_only", "unaffectedAggregationCalls": 0},
+    )
+    captured = {}
+    monkeypatch.setattr(reference_service, "load_trusted_reference", lambda **kwargs: Reference())
+    monkeypatch.setattr(cache_service, "load_gmv_export_cache", lambda **kwargs: None)
+    monkeypatch.setattr(cache_service, "build_gmv_export_cache", lambda **kwargs: Manifest())
+    monkeypatch.setattr(service, "_gmv_baseline_status", lambda **kwargs: "PASS")
+
+    def fake_gate(**kwargs):
+        captured["affected"] = kwargs["affected_source_receipt_nos"]
+        return candidate
+
+    monkeypatch.setattr(service, "_run_fast_export_gate", fake_gate)
+    result = service.build_gmv_formal_artifacts_fast_or_legacy(
+        repository=Repository(), version_id="v1", revenue_frames=_frames(),
+        rule_version="rules", cache_dir=tmp_path,
+        affected_source_receipt_nos=(" S-2 ", "S-1", "S-2"),
+    )
+
+    assert result.cache_manifest.status == "ready"
+    assert captured["affected"] == ("S-1", "S-2")
+
+
 def test_fast_candidate_exposes_full_candidate_aggregation_telemetry():
     import backend.services.gmv_refund_service as service
 
