@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
+
+import pandas as pd
 
 from backend.services.gmv_refund_models import (
     IncrementalRebuildPlan,
     RefundStateDelta,
     RebuildDecision,
     RebuildReasonCode,
+    canonical_payload_sha256,
     normalize_text,
 )
+
+
+_METRIC_KEY_COLUMNS = (
+    "period_basis", "period_key", "dimension_type", "dimension_key",
+    "dimension_label", "refund_dimension", "metric_name", "quantity_basis",
+)
+_METRIC_VALUE_COLUMNS = ("metric_amount_minor", "metric_count")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,3 +142,90 @@ def resolve_rebuild_strategy(
     if plan.decision is RebuildDecision.FULL_REBUILD_REQUIRED:
         return "FULL_REBUILD"
     return "INCREMENTAL" if incremental_available else "FULL_REBUILD"
+
+
+def _aggregate_metric_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    required = set(_METRIC_KEY_COLUMNS + _METRIC_VALUE_COLUMNS)
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("metric schema is missing: " + ",".join(missing))
+    if frame.empty:
+        return pd.DataFrame(columns=[*_METRIC_KEY_COLUMNS, *_METRIC_VALUE_COLUMNS]).set_index(list(_METRIC_KEY_COLUMNS))
+    work = frame.loc[:, [*_METRIC_KEY_COLUMNS, *_METRIC_VALUE_COLUMNS]].copy()
+    for column in _METRIC_VALUE_COLUMNS:
+        work[column] = pd.to_numeric(work[column], errors="coerce")
+        if work[column].isna().any():
+            raise ValueError(f"metric column is not numeric: {column}")
+    return work.groupby(list(_METRIC_KEY_COLUMNS), dropna=False, sort=True)[list(_METRIC_VALUE_COLUMNS)].sum()
+
+
+def build_incremental_metric_snapshot(
+    base_metrics: pd.DataFrame,
+    old_affected_metrics: pd.DataFrame,
+    new_affected_metrics: pd.DataFrame,
+) -> pd.DataFrame:
+    """Apply old/new affected metric deltas without re-aggregating unaffected facts."""
+    base = _aggregate_metric_rows(base_metrics)
+    old = _aggregate_metric_rows(old_affected_metrics)
+    new = _aggregate_metric_rows(new_affected_metrics)
+    result = base.subtract(old, fill_value=0).add(new, fill_value=0)
+    if (result < 0).any().any():
+        raise ValueError("metric delta is negative")
+    result = result.reset_index()
+    result["metric_amount_minor"] = result["metric_amount_minor"].astype("int64")
+    result["metric_count"] = result["metric_count"].astype("int64")
+    return result.loc[:, [*_METRIC_KEY_COLUMNS, *_METRIC_VALUE_COLUMNS]]
+
+
+@dataclass(frozen=True, slots=True)
+class EquivalenceReport:
+    status: str
+    incremental_fingerprint: str
+    reference_fingerprint: str
+    first_mismatch: dict[str, str] | None
+
+
+def _canonical_frame_payload(frame: pd.DataFrame) -> dict[str, object]:
+    columns = sorted(str(column) for column in frame.columns)
+    work = frame.loc[:, columns].copy()
+    rows = []
+    for row in work.itertuples(index=False, name=None):
+        normalized = []
+        for value in row:
+            try:
+                if pd.isna(value):
+                    normalized.append("")
+                    continue
+            except (TypeError, ValueError):
+                pass
+            normalized.append(str(value).strip())
+        rows.append(tuple(normalized))
+    return {"columns": columns, "rows": sorted(rows)}
+
+
+def compare_incremental_to_reference(
+    incremental: Mapping[str, pd.DataFrame],
+    reference: Mapping[str, pd.DataFrame],
+) -> EquivalenceReport:
+    """Compare named semantic layers, independent of row ordering or XLSX bytes."""
+    layers = sorted(set(incremental) | set(reference))
+    incremental_payload = {layer: _canonical_frame_payload(incremental[layer]) for layer in layers if layer in incremental}
+    reference_payload = {layer: _canonical_frame_payload(reference[layer]) for layer in layers if layer in reference}
+    incremental_fingerprint = canonical_payload_sha256(incremental_payload)
+    reference_fingerprint = canonical_payload_sha256(reference_payload)
+    if incremental_fingerprint == reference_fingerprint and set(incremental) == set(reference):
+        return EquivalenceReport("PASS", incremental_fingerprint, reference_fingerprint, None)
+    for layer in layers:
+        if layer not in incremental or layer not in reference:
+            return EquivalenceReport(
+                "FAIL", incremental_fingerprint, reference_fingerprint,
+                {"layer": layer, "reason": "MISSING_LAYER"},
+            )
+        left = canonical_payload_sha256(_canonical_frame_payload(incremental[layer]))
+        right = canonical_payload_sha256(_canonical_frame_payload(reference[layer]))
+        if left != right:
+            return EquivalenceReport(
+                "FAIL", incremental_fingerprint, reference_fingerprint,
+                {"layer": layer, "incrementalDigest": left, "referenceDigest": right},
+            )
+    return EquivalenceReport("FAIL", incremental_fingerprint, reference_fingerprint, {"layer": "<unknown>", "reason": "PAYLOAD_MISMATCH"})

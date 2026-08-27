@@ -8,8 +8,12 @@ from backend.services.gmv_incremental_rebuild import (
     IncrementalRebuildThresholds,
     RebuildFingerprints,
     build_incremental_plan,
+    build_incremental_metric_snapshot,
+    compare_incremental_to_reference,
     resolve_rebuild_strategy,
 )
+import pandas as pd
+import pytest
 
 
 def _delta(**kwargs):
@@ -164,3 +168,62 @@ def test_eligible_plan_uses_full_fallback_until_incremental_engine_is_available(
 
     assert resolve_rebuild_strategy(plan, incremental_available=False) == "FULL_REBUILD"
     assert resolve_rebuild_strategy(plan, incremental_available=True) == "INCREMENTAL"
+
+
+def _metric_frame(amount, count, *, order="ALL"):
+    return pd.DataFrame(
+        [{
+            "period_basis": "ORIGINAL_ORDER",
+            "period_key": "2026-08",
+            "dimension_type": "SCOPE",
+            "dimension_key": order,
+            "dimension_label": order,
+            "refund_dimension": "REFUNDED",
+            "metric_name": "APPLIED_REFUND",
+            "quantity_basis": "NOT_APPLICABLE",
+            "metric_amount_minor": amount,
+            "metric_count": count,
+        }]
+    )
+
+
+def test_metric_delta_replaces_only_affected_contribution():
+    result = build_incremental_metric_snapshot(
+        _metric_frame(200, 2),
+        _metric_frame(100, 1),
+        _metric_frame(80, 1),
+    )
+
+    assert result.iloc[0]["metric_amount_minor"] == 180
+    assert result.iloc[0]["metric_count"] == 2
+
+
+def test_metric_delta_rejects_negative_result_instead_of_publishing():
+    with pytest.raises(ValueError, match="metric delta is negative"):
+        build_incremental_metric_snapshot(
+            _metric_frame(50, 1),
+            _metric_frame(100, 1),
+            _metric_frame(0, 0),
+        )
+
+
+def test_equivalence_ignores_row_order_but_compares_semantic_values():
+    first = pd.DataFrame([{"來源單據號": "S-1", "amount": 100}, {"來源單據號": "S-2", "amount": 200}])
+    second = first.iloc[::-1].reset_index(drop=True)
+
+    report = compare_incremental_to_reference(
+        {"REFUNDED": first}, {"REFUNDED": second}
+    )
+
+    assert report.status == "PASS"
+    assert report.first_mismatch is None
+
+
+def test_equivalence_reports_first_layer_and_row_mismatch():
+    report = compare_incremental_to_reference(
+        {"REFUNDED": pd.DataFrame([{"來源單據號": "S-1", "amount": 101}])},
+        {"REFUNDED": pd.DataFrame([{"來源單據號": "S-1", "amount": 100}])},
+    )
+
+    assert report.status == "FAIL"
+    assert report.first_mismatch["layer"] == "REFUNDED"
