@@ -145,6 +145,77 @@ class RefundChangeSet:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RefundStateDelta:
+    new_refund_order_nos: tuple[str, ...] = ()
+    unchanged_refund_order_nos: tuple[str, ...] = ()
+    status_changed_refund_order_nos: tuple[str, ...] = ()
+    amount_changed_refund_order_nos: tuple[str, ...] = ()
+    identity_conflict_refund_order_nos: tuple[str, ...] = ()
+    affected_source_receipt_nos: tuple[str, ...] = ()
+    classification_counts: Mapping[str, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.classification_counts is None:
+            object.__setattr__(self, "classification_counts", {
+                "NEW": len(self.new_refund_order_nos),
+                "UNCHANGED": len(self.unchanged_refund_order_nos),
+                "STATUS_CHANGED": len(self.status_changed_refund_order_nos),
+                "AMOUNT_CHANGED": len(self.amount_changed_refund_order_nos),
+                "REFUND_IDENTITY_CONFLICT": len(self.identity_conflict_refund_order_nos),
+            })
+
+
+def classify_refund_state_delta(
+    current: Mapping[str, RefundCurrentState],
+    proposed: Sequence[RefundCurrentState],
+) -> RefundStateDelta:
+    """Classify an incoming current-state projection deterministically."""
+    buckets: dict[str, list[str]] = {
+        "NEW": [], "UNCHANGED": [], "STATUS_CHANGED": [],
+        "AMOUNT_CHANGED": [], "REFUND_IDENTITY_CONFLICT": [],
+    }
+    affected: set[str] = set()
+    seen: set[str] = set()
+    for candidate in proposed:
+        order_no = normalize_text(candidate.refund_order_no)
+        if order_no in seen:
+            buckets["REFUND_IDENTITY_CONFLICT"].append(order_no)
+            affected.add(normalize_text(candidate.source_receipt_no))
+            continue
+        seen.add(order_no)
+        prior = current.get(order_no)
+        if prior is None:
+            buckets["NEW"].append(order_no)
+            affected.add(normalize_text(candidate.source_receipt_no))
+            continue
+        same_identity = (
+            normalize_text(prior.source_receipt_no) == normalize_text(candidate.source_receipt_no)
+            and normalize_text(prior.currency_code) == normalize_text(candidate.currency_code)
+        )
+        if not same_identity:
+            buckets["REFUND_IDENTITY_CONFLICT"].append(order_no)
+            affected.update((normalize_text(prior.source_receipt_no), normalize_text(candidate.source_receipt_no)))
+        elif prior.refund_amount_minor != candidate.refund_amount_minor:
+            buckets["AMOUNT_CHANGED"].append(order_no)
+            affected.add(normalize_text(candidate.source_receipt_no))
+        elif normalize_text(prior.refund_status) != normalize_text(candidate.refund_status):
+            buckets["STATUS_CHANGED"].append(order_no)
+            affected.add(normalize_text(candidate.source_receipt_no))
+        else:
+            buckets["UNCHANGED"].append(order_no)
+    for values in buckets.values():
+        values.sort()
+    return RefundStateDelta(
+        new_refund_order_nos=tuple(buckets["NEW"]),
+        unchanged_refund_order_nos=tuple(buckets["UNCHANGED"]),
+        status_changed_refund_order_nos=tuple(buckets["STATUS_CHANGED"]),
+        amount_changed_refund_order_nos=tuple(buckets["AMOUNT_CHANGED"]),
+        identity_conflict_refund_order_nos=tuple(buckets["REFUND_IDENTITY_CONFLICT"]),
+        affected_source_receipt_nos=tuple(sorted(item for item in affected if item)),
+    )
+
+
 def classify_refund_changes(
     incoming: Sequence[RefundObservation],
     current: Mapping[str, RefundCurrentState],

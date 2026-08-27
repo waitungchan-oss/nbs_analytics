@@ -16,7 +16,7 @@ from typing import Sequence
 
 from openpyxl import load_workbook
 
-from .gmv_export_intermediate_service import GmvReportFacts
+from .gmv_export_intermediate_service import GmvReportFactSet, GmvReportFacts
 
 
 DIMENSION_BY_LABEL = {"總退款": "total", "已退款": "paid"}
@@ -27,6 +27,14 @@ CANONICAL_WORKBOOK_SCOPES = {
     "ex_no_writeoff_refund_transfer.xlsx": "official",
     "audit.xlsx": "official",
 }
+CANONICAL_SERIALIZER_SCOPES = (
+    ("total", "ex.xlsx", "all"),
+    ("total", "ex_no_writeoff.xlsx", "no_writeoff"),
+    ("total", "ex_no_writeoff_refund_transfer.xlsx", "official"),
+    ("paid", "ex.xlsx", "all"),
+    ("paid", "ex_no_writeoff.xlsx", "no_writeoff"),
+    ("paid", "ex_no_writeoff_refund_transfer.xlsx", "official"),
+)
 SERIALIZER_MIN_TIMEOUT_SECONDS = 120
 SERIALIZER_MAX_TIMEOUT_SECONDS = 300
 SERIALIZER_ROWS_PER_EXTRA_TIMEOUT_SECOND = 5_000
@@ -69,6 +77,35 @@ class SerializerResult:
     bytes_written: int
     duration_ms: int
     error: str | None
+
+
+def build_gmv_serializer_jobs(
+    *,
+    total_facts: GmvReportFactSet,
+    paid_facts: GmvReportFactSet,
+    staging_dir: Path,
+    publication_gate: SerializerPublicationGate,
+) -> tuple[SerializerJob, ...]:
+    """Create the six canonical workbook jobs from facts only."""
+    if total_facts.dimension != "總退款" or paid_facts.dimension != "已退款":
+        raise ValueError("serializer fact sets have invalid refund dimensions")
+    if not publication_gate.ready:
+        raise ValueError("serializer publication gate is not ready")
+    jobs: list[SerializerJob] = []
+    facts_by_dimension = {"total": total_facts, "paid": paid_facts}
+    for dimension, filename, scope_id in CANONICAL_SERIALIZER_SCOPES:
+        fact_set = facts_by_dimension[dimension]
+        facts = fact_set.facts_by_scope.get(scope_id)
+        if facts is None or facts.scope_id != scope_id:
+            raise ValueError(f"missing facts for {dimension}.{scope_id}")
+        artifact_id = f"{dimension}.workbook.{filename}"
+        jobs.append(SerializerJob(
+            artifact_id=artifact_id,
+            facts=facts,
+            artifact_path=Path(staging_dir) / f"{dimension}-{filename}",
+            publication_gate=publication_gate,
+        ))
+    return tuple(jobs)
 
 
 def bounded_serializer_timeout_seconds(jobs: Sequence[SerializerJob]) -> int:

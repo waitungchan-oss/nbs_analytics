@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -17,6 +18,7 @@ import pandas as pd
 from .gmv_refund_models import (
     RefundCurrentState,
     RefundObservation,
+    classify_refund_state_delta,
     canonical_payload_sha256,
     classify_refund_changes,
     money_to_minor,
@@ -110,6 +112,7 @@ class GmvFastCandidate:
     paid_summary_rows: list[dict[str, object]]
     shadow_status: str
     reference_status: str
+    performance: dict[str, object] | None = None
 
 
 GMV_EXPORT_SCHEMA_VERSION = "gmv-formal-export-v2"
@@ -459,6 +462,12 @@ def confirm_refund_batch(
         proposed = {
             state.refund_order_no: state for state in preview.proposed_states
         }
+        state_delta = classify_refund_state_delta(current, tuple(proposed.values()))
+        if state_delta.identity_conflict_refund_order_nos:
+            raise ValueError(
+                "refund identity conflict: "
+                + ",".join(state_delta.identity_conflict_refund_order_nos)
+            )
         with repository.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             confirmation_payload = {
@@ -971,6 +980,9 @@ def build_gmv_formal_artifacts_fast_or_legacy(
             reference_manifest_sha256=hashlib.sha256(
                 (json.dumps(reference.to_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
             ).hexdigest(),
+            performance=candidate.performance or {},
+            fallback={"used": False, "reason": None},
+            refund_state_sha256=str(active.get("refund_state_sha256") or "") or None,
         )
         if candidate_manifest.status != "ready":
             raise RuntimeError(candidate_manifest.error or "fast cache publication failed")
@@ -1018,10 +1030,11 @@ def _run_fast_export_gate(
         build_gmv_export_base_preparation, build_gmv_report_fact_set,
     )
     from backend.services.gmv_export_serializer_service import (
-        SerializerJob, SerializerPublicationGate, bounded_serializer_timeout_seconds,
+        SerializerPublicationGate, build_gmv_serializer_jobs, bounded_serializer_timeout_seconds,
         serialize_gmv_workbooks_parallel,
     )
 
+    gate_started = time.perf_counter()
     active = repository.load_active_scope()
     if active is None or str(active["version_id"]) != str(version_id):
         raise ValueError("GMV version is not active for fast export")
@@ -1050,23 +1063,25 @@ def _run_fast_export_gate(
         provenance={"version_id": version_id, "revenue_generation_token": generation_token},
     )
     rules = _current_rules()
+    prep_started = time.perf_counter()
     prep = build_gmv_export_base_preparation(
         version_id=version_id, revenue_generation_token=generation_token,
         rules_fingerprint=rule_version, export_schema_version="gmv-formal-export-v2",
         pipeline_fingerprint="pipeline-gmv-fast-v1", tour=revenue_frames.formal_tour,
         others=revenue_frames.formal_others,
     )
+    prep_ms = (time.perf_counter() - prep_started) * 1000
     checksum_status = _gmv_preparation_checksum_status(prep)
     with tempfile.TemporaryDirectory(prefix="gmv-fast-gate-", dir=cache_dir) as raw_dir:
         gate_dir = Path(raw_dir)
-        fact_jobs = []
         job_specs = (
             ("total", "總退款", total_adjusted),
             ("paid", "已退款", paid_adjusted),
         )
-        scope_files = (("all", "ex.xlsx"), ("no_writeoff", "ex_no_writeoff.xlsx"), ("official", "ex_no_writeoff_refund_transfer.xlsx"))
+        fact_sets = {}
+        facts_started = time.perf_counter()
         for dimension_key, dimension_label, adjusted in job_specs:
-            fact_set = build_gmv_report_fact_set(
+            fact_sets[dimension_key] = build_gmv_report_fact_set(
                 preparation=prep,
                 adjusted_tour=adjusted["tour"],
                 adjusted_others=adjusted["others"],
@@ -1074,25 +1089,27 @@ def _run_fast_export_gate(
                 rules=rules,
                 include_branch_salesperson_sheet=True,
             )
-            for scope_id, filename in scope_files:
-                fact_jobs.append((
-                    f"{dimension_key}.workbook.{filename}",
-                    fact_set.facts_by_scope[scope_id],
-                    gate_dir / f"{dimension_key}.{filename}",
-                ))
         facts_schema_status = "PASS" if all(
-            facts.schema_fingerprint and facts.data_fingerprint for _, facts, _ in fact_jobs
+            facts.schema_fingerprint and facts.data_fingerprint
+            for fact_set in fact_sets.values()
+            for facts in fact_set.facts_by_scope.values()
         ) else "FAIL"
+        facts_ms = (time.perf_counter() - facts_started) * 1000
         staging_gate = SerializerPublicationGate(
             "PENDING", checksum_status, facts_schema_status, baseline_status,
             "PENDING", staging_only=True,
         )
-        jobs = [SerializerJob(artifact_id, facts, path, staging_gate) for artifact_id, facts, path in fact_jobs]
+        jobs = build_gmv_serializer_jobs(
+            total_facts=fact_sets["total"], paid_facts=fact_sets["paid"],
+            staging_dir=gate_dir, publication_gate=staging_gate,
+        )
+        serialization_started = time.perf_counter()
         results = serialize_gmv_workbooks_parallel(
             jobs,
             max_workers=max(1, min(worker_count, 3)),
             timeout_seconds=bounded_serializer_timeout_seconds(jobs),
         )
+        serialization_ms = (time.perf_counter() - serialization_started) * 1000
         if not all(result.status == "READY" for result in results):
             failures = "; ".join(
                 f"{result.artifact_id}:{result.status}:{result.error or 'unknown'}"
@@ -1120,6 +1137,7 @@ def _run_fast_export_gate(
         # It must run before the active cache pointer can be published.
         reference_records = reference_manifest.artifacts
         candidate_records = build_gmv_artifact_semantic_records(candidate, _gmv_artifact_kinds())
+        equivalence_started = time.perf_counter()
         comparison = compare_gmv_artifact_semantics(
             {
                 key: artifact.to_dict() if hasattr(artifact, "to_dict") else artifact
@@ -1127,6 +1145,7 @@ def _run_fast_export_gate(
             },
             candidate_records,
         )
+        equivalence_ms = (time.perf_counter() - equivalence_started) * 1000
         equivalence_status = comparison.status
         shadow_status = comparison.status
         if comparison.status != "PASS" or comparison.mismatch_count:
@@ -1147,6 +1166,16 @@ def _run_fast_export_gate(
             paid_summary_rows=paid_summary_rows,
             shadow_status=shadow_status,
             reference_status="HIT" if reference_manifest is not None else "MISS",
+            performance={
+                "stageTimings": [
+                    {"stage": "preparation", "ms": round(prep_ms, 1)},
+                    {"stage": "facts", "ms": round(facts_ms, 1)},
+                    {"stage": "serialization", "ms": round(serialization_ms, 1)},
+                    {"stage": "equivalence", "ms": round(equivalence_ms, 1)},
+                    {"stage": "publish", "ms": 0.0},
+                ],
+                "totalMs": round((time.perf_counter() - gate_started) * 1000, 1),
+            },
         )
 
 
