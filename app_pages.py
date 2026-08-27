@@ -2318,7 +2318,7 @@ def _render_ai_and_exports(cache: dict) -> None:
                 f"（{str(cache.get('export_fast_fallback_reason') or 'bounded failure')[:180]}）"
             )
         fast_package_path = Path(str(cache.get("export_fast_package_path", "")))
-        if export_loaded and fast_package_path.is_file():
+        if export_loaded and cache.get("export_fast_package_verified") and fast_package_path.is_file():
             st.download_button(
                 "📦 一鍵下載完整報表包 ZIP",
                 fast_package_path.read_bytes(),

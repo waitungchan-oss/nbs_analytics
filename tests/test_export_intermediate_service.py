@@ -130,6 +130,85 @@ def test_scope_inputs_apply_official_exclusions_without_database_access(monkeypa
     assert official_inputs.others["收款原幣金額"].sum() == 25
 
 
+def test_scope_inputs_exclude_entire_order_when_any_row_matches_rule():
+    from backend.services.export_intermediate_service import (
+        ExportScope,
+        build_export_intermediate,
+        build_scope_report_inputs,
+    )
+
+    tour, others = _frames()
+    others = pd.concat(
+        [
+            others,
+            others.iloc[[0]].assign(**{"來源單據號": "T-002", "收款原幣金額": 15}),
+        ],
+        ignore_index=True,
+    )
+    intermediate = build_export_intermediate(
+        tour,
+        others,
+        generation_token="generation-1",
+        rules_fingerprint="rules-1",
+        schema_version="schema-1",
+    )
+
+    official = build_scope_report_inputs(intermediate, ExportScope.OFFICIAL)
+
+    assert "T-002" not in set(official.tour["來源單據號"])
+    assert "T-002" not in set(official.others["來源單據號"])
+
+
+def test_scope_facts_reuse_intermediate_and_include_amount_quantity_aggregates():
+    from backend.services.export_intermediate_service import (
+        ExportScope,
+        build_export_intermediate,
+        build_scope_report_facts,
+    )
+
+    tour, others = _frames()
+    intermediate = build_export_intermediate(
+        tour,
+        others,
+        generation_token="generation-1",
+        rules_fingerprint="rules-1",
+        schema_version="schema-1",
+    )
+
+    facts = build_scope_report_facts(intermediate, ExportScope.OFFICIAL)
+
+    assert facts.scope_id == "official"
+    assert {"amount_by_date_branch", "quantity_by_date_branch"} <= set(facts.aggregates)
+    assert facts.schema_fingerprint
+    assert facts.data_fingerprint
+    assert facts.tour["收款原幣金額"].sum() == 100
+    assert facts.others["收款原幣金額"].sum() == 25
+
+
+def test_scope_facts_do_not_mutate_intermediate_frames():
+    from backend.services.export_intermediate_service import (
+        ExportScope,
+        build_export_intermediate,
+        build_scope_report_facts,
+    )
+
+    tour, others = _frames()
+    intermediate = build_export_intermediate(
+        tour,
+        others,
+        generation_token="generation-1",
+        rules_fingerprint="rules-1",
+        schema_version="schema-1",
+    )
+    before_tour = intermediate.classified_tour.copy(deep=True)
+    before_others = intermediate.classified_others.copy(deep=True)
+
+    build_scope_report_facts(intermediate, ExportScope.NO_WRITEOFF)
+
+    pd.testing.assert_frame_equal(before_tour, intermediate.classified_tour)
+    pd.testing.assert_frame_equal(before_others, intermediate.classified_others)
+
+
 def test_source_fingerprint_changes_when_business_frame_changes():
     from backend.services.export_intermediate_service import build_export_intermediate
 

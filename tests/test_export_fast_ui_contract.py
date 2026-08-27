@@ -14,6 +14,14 @@ def test_export_workflow_exposes_rollout_gate_and_manifest_loader():
     assert 'fast_mode in {ExportRolloutMode.OPT_IN.value, ExportRolloutMode.DEFAULT.value}' in source
 
 
+def test_export_workflow_uses_shared_facts_controller_for_fast_path():
+    source = (ROOT / "app_workflows.py").read_text(encoding="utf-8")
+
+    assert "build_fast_export_job_from_facts" in source
+    assert "_write_export_facts_workbook" in source
+    assert "build_scope_report_facts" in source
+
+
 def test_export_center_has_zip_download_without_rebuild_on_download():
     source = (ROOT / "app_pages.py").read_text(encoding="utf-8")
 

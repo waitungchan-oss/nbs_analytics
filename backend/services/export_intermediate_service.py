@@ -33,6 +33,16 @@ class DashboardReportInputs:
 
 
 @dataclass(frozen=True, slots=True)
+class DashboardReportFacts:
+    scope_id: str
+    tour: pd.DataFrame
+    others: pd.DataFrame
+    aggregates: Mapping[str, pd.DataFrame]
+    schema_fingerprint: str
+    data_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExportIntermediateModel:
     generation_token: str
     rules_fingerprint: str
@@ -65,25 +75,36 @@ def _classification(frame: pd.DataFrame, source: str) -> pd.DataFrame:
     return result
 
 
-def _build_shared_aggregates(tour: pd.DataFrame, others: pd.DataFrame) -> Mapping[str, pd.DataFrame]:
-    amount_columns = [COL_ORDER_ID, COL_BRANCH, "統一日期", COL_TRANS_TIME, COL_MONEY, "_export_source"]
+def _aggregate_by_date_branch(
+    tour: pd.DataFrame,
+    others: pd.DataFrame,
+    value_column: str,
+) -> pd.DataFrame:
+    amount_columns = [COL_ORDER_ID, COL_BRANCH, "統一日期", COL_TRANS_TIME, value_column, "_export_source"]
     frames = []
     for frame in (tour, others):
         selected = frame.reindex(columns=[column for column in amount_columns if column in frame.columns]).copy()
         if not selected.empty:
             frames.append(selected)
     if not frames:
-        return {"amount_by_date_branch": pd.DataFrame(columns=[COL_BRANCH, "統一日期", "_export_source", COL_MONEY])}
+        return pd.DataFrame(columns=[COL_BRANCH, "統一日期", "_export_source", value_column])
     combined = pd.concat(frames, ignore_index=True, sort=False)
-    combined[COL_MONEY] = pd.to_numeric(combined.get(COL_MONEY, 0), errors="coerce").fillna(0)
+    combined[value_column] = pd.to_numeric(combined.get(value_column, 0), errors="coerce").fillna(0)
     aggregate = (
-        combined.groupby([COL_BRANCH, "統一日期", "_export_source"], dropna=False)[COL_MONEY]
+        combined.groupby([COL_BRANCH, "統一日期", "_export_source"], dropna=False)[value_column]
         .sum()
         .reset_index()
         .sort_values([COL_BRANCH, "統一日期", "_export_source"])
         .reset_index(drop=True)
     )
-    return {"amount_by_date_branch": aggregate}
+    return aggregate
+
+
+def _build_shared_aggregates(tour: pd.DataFrame, others: pd.DataFrame) -> Mapping[str, pd.DataFrame]:
+    return {
+        "amount_by_date_branch": _aggregate_by_date_branch(tour, others, COL_MONEY),
+        "quantity_by_date_branch": _aggregate_by_date_branch(tour, others, "數量"),
+    }
 
 
 def build_export_intermediate(
@@ -114,20 +135,38 @@ def build_export_intermediate(
     )
 
 
-def _scope_mask(frame: pd.DataFrame, scope: ExportScope) -> pd.Series:
-    mask = pd.Series(True, index=frame.index)
-    if scope in (ExportScope.NO_WRITEOFF, ExportScope.OFFICIAL) and "收款類型" in frame.columns:
-        mask &= ~frame["收款類型"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_RECEIPT_TYPES)
-    if scope is ExportScope.OFFICIAL and "收款方式" in frame.columns:
-        mask &= ~frame["收款方式"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_PAYMENT_METHODS)
-    return mask
+def _scope_excluded_order_ids(
+    intermediate: ExportIntermediateModel,
+    scope: ExportScope,
+) -> set[str]:
+    if scope is ExportScope.ALL:
+        return set()
+    excluded_ids: set[str] = set()
+    for frame in (intermediate.classified_tour, intermediate.classified_others):
+        if frame.empty or COL_ORDER_ID not in frame.columns:
+            continue
+        mask = pd.Series(False, index=frame.index)
+        if "收款類型" in frame.columns:
+            mask |= frame["收款類型"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_RECEIPT_TYPES)
+        if scope is ExportScope.OFFICIAL and "收款方式" in frame.columns:
+            mask |= frame["收款方式"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_PAYMENT_METHODS)
+        excluded_ids.update(frame.loc[mask, COL_ORDER_ID].astype(str).str.strip())
+    return excluded_ids
+
+
+def _scope_frame(frame: pd.DataFrame, excluded_order_ids: set[str]) -> pd.DataFrame:
+    if frame.empty or not excluded_order_ids or COL_ORDER_ID not in frame.columns:
+        return frame.copy(deep=True)
+    keep = ~frame[COL_ORDER_ID].astype(str).str.strip().isin(excluded_order_ids)
+    return frame.loc[keep].copy(deep=True)
 
 
 def build_scope_report_inputs(intermediate: ExportIntermediateModel, scope: ExportScope) -> DashboardReportInputs:
     if not isinstance(scope, ExportScope):
         scope = ExportScope(str(scope))
-    tour = intermediate.classified_tour.loc[_scope_mask(intermediate.classified_tour, scope)].copy(deep=True)
-    others = intermediate.classified_others.loc[_scope_mask(intermediate.classified_others, scope)].copy(deep=True)
+    excluded_order_ids = _scope_excluded_order_ids(intermediate, scope)
+    tour = _scope_frame(intermediate.classified_tour, excluded_order_ids)
+    others = _scope_frame(intermediate.classified_others, excluded_order_ids)
     return DashboardReportInputs(
         scope_id=scope.value,
         tour=tour,
@@ -136,11 +175,42 @@ def build_scope_report_inputs(intermediate: ExportIntermediateModel, scope: Expo
     )
 
 
+def build_scope_report_facts(
+    intermediate: ExportIntermediateModel,
+    scope: ExportScope,
+) -> DashboardReportFacts:
+    if not isinstance(scope, ExportScope):
+        scope = ExportScope(str(scope))
+    inputs = build_scope_report_inputs(intermediate, scope)
+    aggregates = _build_shared_aggregates(inputs.tour, inputs.others)
+    schema_payload = {
+        "scope": scope.value,
+        "tour": [str(column) for column in inputs.tour.columns],
+        "others": [str(column) for column in inputs.others.columns],
+        "aggregates": {key: [str(column) for column in value.columns] for key, value in aggregates.items()},
+    }
+    data_payload = {
+        "tour": _frame_fingerprint(inputs.tour),
+        "others": _frame_fingerprint(inputs.others),
+        "aggregates": {key: _frame_fingerprint(value) for key, value in aggregates.items()},
+    }
+    return DashboardReportFacts(
+        scope_id=scope.value,
+        tour=inputs.tour,
+        others=inputs.others,
+        aggregates=aggregates,
+        schema_fingerprint=hashlib.sha256(repr(schema_payload).encode("utf-8")).hexdigest(),
+        data_fingerprint=hashlib.sha256(repr(data_payload).encode("utf-8")).hexdigest(),
+    )
+
+
 __all__ = [
+    "DashboardReportFacts",
     "DashboardReportInputs",
     "EXPORT_INTERMEDIATE_SCHEMA",
     "ExportIntermediateModel",
     "ExportScope",
     "build_export_intermediate",
     "build_scope_report_inputs",
+    "build_scope_report_facts",
 ]
