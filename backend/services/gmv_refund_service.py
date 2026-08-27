@@ -137,6 +137,31 @@ def _source_receipt_universe_count(frames: RevenueFrames) -> int:
     return len(receipts)
 
 
+def filter_revenue_frames_for_receipts(
+    frames: RevenueFrames,
+    source_receipt_nos: tuple[str, ...] | list[str],
+) -> RevenueFrames:
+    """Return a schema-preserving RevenueFrames subset for affected receipts."""
+    receipts = {
+        str(value).strip()
+        for value in source_receipt_nos
+        if str(value).strip()
+    }
+
+    def filter_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        if not receipts or "來源單據號" not in frame.columns:
+            return frame.iloc[0:0].copy()
+        mask = frame["來源單據號"].astype("string").str.strip().isin(receipts)
+        return frame.loc[mask].copy()
+
+    return RevenueFrames(
+        raw_tour=filter_frame(frames.raw_tour),
+        raw_others=filter_frame(frames.raw_others),
+        formal_tour=filter_frame(frames.formal_tour),
+        formal_others=filter_frame(frames.formal_others),
+    )
+
+
 def _canonical_frame_sha256(frame: pd.DataFrame) -> str:
     if frame.empty:
         return canonical_payload_sha256({"columns": sorted(map(str, frame.columns)), "rows": []})
@@ -326,6 +351,40 @@ def _fault(stage: str, fault_after: str | None) -> None:
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def rebuild_affected_reconciliation_rows(
+    conn,
+    *,
+    version_id: str,
+    frames: RevenueFrames,
+    states: Mapping[str, RefundCurrentState],
+    observation_ids: Mapping[str, str],
+    revenue_token: str,
+    rule_version: str,
+    affected_source_receipt_nos: tuple[str, ...] | list[str],
+) -> tuple[str, str]:
+    """Recompute reconciliation only for the supplied affected receipts."""
+    affected = {
+        str(value).strip()
+        for value in affected_source_receipt_nos
+        if str(value).strip()
+    }
+    bounded_states = {
+        order_no: state
+        for order_no, state in states.items()
+        if str(state.source_receipt_no).strip() in affected
+    }
+    bounded_frames = filter_revenue_frames_for_receipts(frames, tuple(sorted(affected)))
+    return _insert_reconciliation_rows(
+        conn,
+        version_id,
+        bounded_frames,
+        bounded_states,
+        observation_ids,
+        revenue_token,
+        rule_version,
+    )
 
 
 def _insert_reconciliation_rows(conn, version_id: str, frames: RevenueFrames, states: Mapping[str, object], observation_ids: Mapping[str, str], revenue_token: str, rule_version: str) -> tuple[str, str]:

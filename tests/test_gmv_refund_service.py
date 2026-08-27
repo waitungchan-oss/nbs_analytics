@@ -14,6 +14,8 @@ from backend.services.gmv_refund_service import (
     rebuild_gmv_scope,
     rollback_gmv_scope,
     confirm_refund_batch,
+    filter_revenue_frames_for_receipts,
+    rebuild_affected_reconciliation_rows,
     preview_refund_batch,
     revenue_state_token,
 )
@@ -43,6 +45,55 @@ def _frames():
         formal_tour=formal_tour,
         formal_others=pd.DataFrame(),
     )
+
+
+def test_filter_revenue_frames_for_receipts_keeps_only_affected_rows():
+    filtered = filter_revenue_frames_for_receipts(_frames(), (" S-1 ",))
+
+    assert filtered.raw_tour["來源單據號"].tolist() == ["S-1"]
+    assert filtered.formal_tour["來源單據號"].tolist() == ["S-1"]
+    assert filtered.raw_others.empty
+    assert filtered.formal_others.empty
+
+
+def test_filter_revenue_frames_for_receipts_preserves_empty_frame_schema():
+    frames = _frames()
+    filtered = filter_revenue_frames_for_receipts(frames, ())
+
+    assert filtered.formal_tour.empty
+    assert list(filtered.formal_tour.columns) == list(frames.formal_tour.columns)
+    assert filtered.formal_others.empty
+    assert list(filtered.formal_others.columns) == list(frames.formal_others.columns)
+
+
+def test_rebuild_affected_reconciliation_rows_passes_bounded_inputs(monkeypatch):
+    captured = {}
+
+    def capture(conn, version_id, frames, states, observation_ids, revenue_token, rule_version):
+        captured["frames"] = frames
+        captured["states"] = states
+        return "reconciliation", "adjustment"
+
+    monkeypatch.setattr("backend.services.gmv_refund_service._insert_reconciliation_rows", capture)
+    states = {
+        "F-1": RefundCurrentState("F-1", "S-1", 100, "已退款", "B-1", "sha-1"),
+        "F-2": RefundCurrentState("F-2", "S-2", 200, "已退款", "B-1", "sha-2"),
+    }
+
+    result = rebuild_affected_reconciliation_rows(
+        None,
+        version_id="V-2",
+        frames=_frames(),
+        states=states,
+        observation_ids={"F-1": "O-1", "F-2": "O-2"},
+        revenue_token="rev-1",
+        rule_version="rules-1",
+        affected_source_receipt_nos=("S-1",),
+    )
+
+    assert result == ("reconciliation", "adjustment")
+    assert captured["frames"].formal_tour["來源單據號"].tolist() == ["S-1"]
+    assert tuple(captured["states"]) == ("F-1",)
 
 
 def _seed_current(db_path):
