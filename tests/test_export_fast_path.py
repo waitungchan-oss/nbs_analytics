@@ -59,6 +59,7 @@ def test_legacy_export_produces_three_workbooks():
 
 
 def test_facts_controller_builds_intermediate_once_and_publishes_equivalent_artifacts(tmp_path):
+    import json
     from openpyxl import Workbook
 
     from backend.services.export_fast_path_service import build_fast_export_job_from_facts
@@ -102,6 +103,12 @@ def test_facts_controller_builds_intermediate_once_and_publishes_equivalent_arti
     assert result.manifest_path is not None
     assert calls["facts"] == 1
     assert not (tmp_path / ".staging").exists()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert set(manifest["telemetry"]["serialization_ms"]) == {
+        "ex.xlsx", "ex_no_writeoff.xlsx", "ex_no_writeoff_refund_transfer.xlsx",
+    }
+    assert all(value >= 0 for value in manifest["telemetry"]["serialization_ms"].values())
+    assert (tmp_path / "export-package-generation-1.zip").is_file()
 
 
 def _reference_workbook(scope, rows):

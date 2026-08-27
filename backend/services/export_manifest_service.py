@@ -6,8 +6,9 @@ import hashlib
 import json
 import os
 import re
+import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Mapping
@@ -43,6 +44,7 @@ class ExportManifest:
     equivalence_status: str
     artifacts: Mapping[str, ManifestArtifact]
     path: Path
+    telemetry: Mapping[str, object] = field(default_factory=dict)
 
 
 def _safe(value: str) -> str:
@@ -65,6 +67,8 @@ def publish_export_manifest(
     export_schema_version: str,
     artifacts: Mapping[str, ExportArtifact],
     equivalence_status: str,
+    telemetry: Mapping[str, object] | None = None,
+    equivalence_report: Mapping[str, object] | None = None,
 ) -> Path:
     root = Path(root)
     artifact_dir = root / "artifacts" / _safe(generation_token)
@@ -80,6 +84,7 @@ def publish_export_manifest(
             "sha256": hashlib.sha256(artifact.content).hexdigest(),
             "size": len(artifact.content),
         }
+    telemetry_payload = dict(telemetry or {})
     payload = {
         "schema": EXPORT_MANIFEST_SCHEMA,
         "status": "READY" if equivalence_status == "PASS" else "FAILED",
@@ -88,8 +93,37 @@ def publish_export_manifest(
         "export_schema_version": str(export_schema_version),
         "equivalence_status": str(equivalence_status),
         "artifacts": manifest_artifacts,
+        "telemetry": telemetry_payload,
     }
+    _atomic_write(
+        root / "equivalence-report.json",
+        json.dumps(dict(equivalence_report or {"status": equivalence_status, "mismatch_count": 0}), ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8"),
+    )
     manifest_path = root / "manifest.json"
+    staging_manifest_path = root / ".manifest-staging.json"
+    staging_artifacts = {
+        key: ManifestArtifact(
+            key=item["key"], filename=item["filename"], path=item["path"],
+            sha256=item["sha256"], size=int(item["size"]),
+        )
+        for key, item in manifest_artifacts.items()
+    }
+    _atomic_write(staging_manifest_path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8"))
+    staging_manifest = ExportManifest(
+        EXPORT_MANIFEST_SCHEMA, payload["status"], str(generation_token),
+        str(rules_fingerprint), str(export_schema_version), str(equivalence_status),
+        staging_artifacts, staging_manifest_path, telemetry_payload,
+    )
+    package_started = time.perf_counter()
+    package_path = build_export_package(staging_manifest, root)
+    telemetry_payload["package_ms"] = round((time.perf_counter() - package_started) * 1000)
+    payload["telemetry"] = telemetry_payload
+    _atomic_write(staging_manifest_path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8"))
+    package_path = build_export_package(staging_manifest, root)
+    if not verify_export_package(package_path, staging_manifest):
+        staging_manifest_path.unlink(missing_ok=True)
+        raise ValueError("export package verification failed")
+    staging_manifest_path.unlink(missing_ok=True)
     _atomic_write(manifest_path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8"))
     return manifest_path
 
@@ -110,7 +144,7 @@ def load_ready_export_manifest(path: Path) -> ExportManifest | None:
             if hashlib.sha256(content).hexdigest() != item["sha256"] or len(content) != int(item["size"]):
                 return None
             artifacts[key] = ManifestArtifact(key, item["filename"], item["path"], item["sha256"], int(item["size"]))
-        return ExportManifest(payload["schema"], payload["status"], payload["generation_token"], payload["rules_fingerprint"], payload["export_schema_version"], payload["equivalence_status"], artifacts, path)
+        return ExportManifest(payload["schema"], payload["status"], payload["generation_token"], payload["rules_fingerprint"], payload["export_schema_version"], payload["equivalence_status"], artifacts, path, payload.get("telemetry") or {})
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -124,7 +158,35 @@ def build_export_package(manifest: ExportManifest, root: Path | None = None) -> 
         with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as package:
             for artifact in manifest.artifacts.values():
                 package.write(root / artifact.path, arcname=artifact.filename)
+            package.write(manifest.path, arcname="export-manifest.json")
+            equivalence_path = root / "equivalence-report.json"
+            if not equivalence_path.is_file():
+                _atomic_write(
+                    equivalence_path,
+                    json.dumps({"status": manifest.equivalence_status, "mismatch_count": 0}, sort_keys=True).encode("utf-8"),
+                )
+            package.write(equivalence_path, arcname="equivalence-report.json")
         os.replace(temporary_path, package_path)
     finally:
         temporary_path.unlink(missing_ok=True)
     return package_path
+
+
+def verify_export_package(package_path: Path, manifest: ExportManifest) -> bool:
+    """Verify package membership and workbook bytes against a READY manifest."""
+    try:
+        expected = {artifact.filename for artifact in manifest.artifacts.values()} | {
+            "export-manifest.json", "equivalence-report.json",
+        }
+        with zipfile.ZipFile(package_path) as package:
+            if set(package.namelist()) != expected:
+                return False
+            packaged_manifest = json.loads(package.read("export-manifest.json"))
+            if packaged_manifest.get("schema") != EXPORT_MANIFEST_SCHEMA or packaged_manifest.get("status") != "READY":
+                return False
+            for artifact in manifest.artifacts.values():
+                if hashlib.sha256(package.read(artifact.filename)).hexdigest() != artifact.sha256:
+                    return False
+        return True
+    except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError, zipfile.BadZipFile):
+        return False

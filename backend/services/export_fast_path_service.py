@@ -222,6 +222,21 @@ def build_fast_export_job_from_facts(
             export_schema_version=export_schema_version,
             artifacts={key: ExportArtifact(key, f"{key}.xlsx", content) for key, content in candidates.items()},
             equivalence_status="PASS",
+            telemetry={
+                "intermediate_ms": intermediate_ms,
+                "facts_ms": facts_ms,
+                "serialization_ms": {
+                    result.artifact_id: result.duration_ms for result in serializer_results
+                },
+                "equivalence_ms": equivalence_ms,
+                "reference_ms": reference_ms,
+                "worker_count": min(int(worker_count), len(jobs)),
+            },
+            equivalence_report={
+                "status": equivalence.status,
+                "mismatch_count": equivalence.mismatch_count,
+                "mismatch_examples": list(equivalence.mismatch_examples),
+            },
         )
         return ExportJobResult(
             job_id=str(generation_token), status="READY", manifest_path=manifest_path,
