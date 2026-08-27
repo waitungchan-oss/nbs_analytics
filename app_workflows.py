@@ -40,9 +40,11 @@ from backend.services.cache_generation_service import (  # noqa: E402
 from backend.services.export_fast_path_service import (  # noqa: E402
     ExportRolloutMode,
     build_fast_export_job,
+    build_fast_export_job_from_facts,
 )
 from backend.services.export_intermediate_service import (  # noqa: E402
     ExportScope,
+    build_scope_report_facts,
     build_scope_report_inputs,
 )
 from backend.services.export_manifest_service import (  # noqa: E402
@@ -1102,11 +1104,34 @@ def _build_export_fast_candidate(scope_id: str, intermediate) -> bytes:
     return _buffer_to_bytes(excel_buf) or b""
 
 
+def _build_export_facts(intermediate) -> dict[str, object]:
+    return {
+        scope.value: build_scope_report_facts(intermediate, scope)
+        for scope in ExportScope
+    }
+
+
+def _write_export_facts_workbook(facts, path: Path) -> None:
+    branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
+    excel_buf, _, _ = build_dashboard_data(
+        facts.tour.copy(deep=True),
+        facts.others.copy(deep=True),
+        branch_mapping,
+        target_branches,
+        cruise_depts,
+        sales_reps,
+        make_workbook=True,
+        include_branch_salesperson_sheet=facts.scope_id == ExportScope.OFFICIAL.value,
+        _already_normalized=True,
+    )
+    path.write_bytes(_buffer_to_bytes(excel_buf) or b"")
+
+
 def _build_fast_export_job_for_cache(cache: dict):
     cache_key = cache.get("export_cache_key")
     if not cache_key:
         return None
-    return build_fast_export_job(
+    return build_fast_export_job_from_facts(
         cache.get("raw_t", pd.DataFrame()),
         cache.get("raw_o", pd.DataFrame()),
         generation_token=cache_key,
@@ -1114,7 +1139,8 @@ def _build_fast_export_job_for_cache(cache: dict):
         export_schema_version=OFFICIAL_EXPORT_SCHEMA_CONTRACT,
         cache_root=EXPORT_FAST_CACHE_DIR / cache_key,
         reference_builder=_compute_export_workbooks,
-        candidate_builder=_build_export_fast_candidate,
+        facts_builder=_build_export_facts,
+        writer=_write_export_facts_workbook,
         worker_count=3,
         baseline_status=str(cache.get("export_baseline_status", "UNKNOWN")),
     )

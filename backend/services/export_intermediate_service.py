@@ -135,20 +135,38 @@ def build_export_intermediate(
     )
 
 
-def _scope_mask(frame: pd.DataFrame, scope: ExportScope) -> pd.Series:
-    mask = pd.Series(True, index=frame.index)
-    if scope in (ExportScope.NO_WRITEOFF, ExportScope.OFFICIAL) and "收款類型" in frame.columns:
-        mask &= ~frame["收款類型"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_RECEIPT_TYPES)
-    if scope is ExportScope.OFFICIAL and "收款方式" in frame.columns:
-        mask &= ~frame["收款方式"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_PAYMENT_METHODS)
-    return mask
+def _scope_excluded_order_ids(
+    intermediate: ExportIntermediateModel,
+    scope: ExportScope,
+) -> set[str]:
+    if scope is ExportScope.ALL:
+        return set()
+    excluded_ids: set[str] = set()
+    for frame in (intermediate.classified_tour, intermediate.classified_others):
+        if frame.empty or COL_ORDER_ID not in frame.columns:
+            continue
+        mask = pd.Series(False, index=frame.index)
+        if "收款類型" in frame.columns:
+            mask |= frame["收款類型"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_RECEIPT_TYPES)
+        if scope is ExportScope.OFFICIAL and "收款方式" in frame.columns:
+            mask |= frame["收款方式"].astype(str).str.strip().isin(OFFICIAL_EXCLUDED_PAYMENT_METHODS)
+        excluded_ids.update(frame.loc[mask, COL_ORDER_ID].astype(str).str.strip())
+    return excluded_ids
+
+
+def _scope_frame(frame: pd.DataFrame, excluded_order_ids: set[str]) -> pd.DataFrame:
+    if frame.empty or not excluded_order_ids or COL_ORDER_ID not in frame.columns:
+        return frame.copy(deep=True)
+    keep = ~frame[COL_ORDER_ID].astype(str).str.strip().isin(excluded_order_ids)
+    return frame.loc[keep].copy(deep=True)
 
 
 def build_scope_report_inputs(intermediate: ExportIntermediateModel, scope: ExportScope) -> DashboardReportInputs:
     if not isinstance(scope, ExportScope):
         scope = ExportScope(str(scope))
-    tour = intermediate.classified_tour.loc[_scope_mask(intermediate.classified_tour, scope)].copy(deep=True)
-    others = intermediate.classified_others.loc[_scope_mask(intermediate.classified_others, scope)].copy(deep=True)
+    excluded_order_ids = _scope_excluded_order_ids(intermediate, scope)
+    tour = _scope_frame(intermediate.classified_tour, excluded_order_ids)
+    others = _scope_frame(intermediate.classified_others, excluded_order_ids)
     return DashboardReportInputs(
         scope_id=scope.value,
         tour=tour,

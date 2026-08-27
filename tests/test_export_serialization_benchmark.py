@@ -29,3 +29,18 @@ def test_legacy_export_measurement_has_three_artifacts_and_stage_timings():
     assert all(item.bytes_written > 0 for item in result.artifacts.values())
     assert result.timings["serialization_ms"] >= 0
     assert result.timings["total_ms"] >= result.timings["serialization_ms"]
+
+
+def test_serialization_benchmark_reports_separate_stage_contract():
+    from scripts.benchmark_data_export_serialization import build_benchmark_report
+
+    tour, others = _frames()
+    report = build_benchmark_report(tour, others, samples=1, worker_count=1)
+
+    assert report["database_mutated"] is False
+    assert report["formal_scope"] == "不含掛賬核銷與TT退款轉團款"
+    assert report["equivalence_status"] == "PASS"
+    assert report["legacy"]["serialization_ms"] >= 0
+    assert set(report["fast"]["serialization_ms"]) == {
+        "ex.xlsx", "ex_no_writeoff.xlsx", "ex_no_writeoff_refund_transfer.xlsx",
+    }
