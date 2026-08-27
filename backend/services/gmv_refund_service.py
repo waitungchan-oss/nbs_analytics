@@ -49,6 +49,7 @@ class GmvActivationReceipt:
     previous_version_id: str | None
     revenue_generation_token: str
     refund_state_sha256: str
+    affected_source_receipt_nos: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +162,79 @@ def filter_revenue_frames_for_receipts(
         formal_tour=filter_frame(frames.formal_tour),
         formal_others=filter_frame(frames.formal_others),
     )
+
+
+def _apply_affected_gmv_refund_adjustments(
+    frames: RevenueFrames,
+    refunds: pd.DataFrame,
+    *,
+    refund_status: str | None,
+    affected_source_receipt_nos: tuple[str, ...],
+    base_detail: pd.DataFrame | None = None,
+) -> dict[str, object]:
+    """Apply refund changes to bounded receipts and compose a full read frame.
+
+    The expensive refund aggregation is deliberately bounded to the affected
+    receipt set.  Existing deductions (when supplied from the previous cache)
+    are copied by stable table/source/ordinal identity; untouched revenue rows
+    never enter the refund aggregation call.
+    """
+    from app_workflows import _apply_gmv_refund_adjustments, _attach_gmv_row_ordinals
+    from app_workflows import _order_id_series, normalize_runtime_columns, COL_MONEY
+
+    affected = {
+        str(value).strip() for value in affected_source_receipt_nos if str(value).strip()
+    }
+    bounded_frames = filter_revenue_frames_for_receipts(frames, tuple(sorted(affected)))
+    bounded_refunds = refunds.copy()
+    if "來源單據號" in bounded_refunds.columns:
+        bounded_refunds = bounded_refunds.loc[
+            bounded_refunds["來源單據號"].astype("string").str.strip().isin(affected)
+        ].copy()
+    bounded = _apply_gmv_refund_adjustments(
+        bounded_frames.formal_tour, bounded_frames.formal_others,
+        bounded_refunds, refund_status=refund_status,
+    )
+
+    prior: dict[tuple[str, str, int], float] = {}
+    if isinstance(base_detail, pd.DataFrame) and not base_detail.empty:
+        for _, row in base_detail.iterrows():
+            prior[(str(row.get("資料表", "")), str(row.get("來源單據號", "")).strip(), int(row.get("__gmv_row_ordinal", 0) or 0))] = float(row.get("退款扣減金額", 0) or 0)
+
+    bounded_by_key: dict[tuple[str, str, int], tuple[float, float]] = {}
+    for table_name, frame in (("旅行團", bounded["tour"]), ("其他業務", bounded["others"])):
+        for _, row in frame.iterrows():
+            key = (table_name, str(row.get("來源單據號", "")).strip(), int(row.get("__gmv_row_ordinal", 0) or 0))
+            bounded_by_key[key] = (
+                float(row.get("退款前收款原幣金額", row.get(COL_MONEY, 0)) or 0),
+                float(row.get("退款扣減金額", 0) or 0),
+            )
+
+    def compose(table_name: str, frame: pd.DataFrame) -> pd.DataFrame:
+        work = _attach_gmv_row_ordinals(table_name, normalize_runtime_columns(frame.copy()))
+        work["退款前收款原幣金額"] = pd.to_numeric(work.get(COL_MONEY, 0), errors="coerce").fillna(0.0)
+        work["退款扣減金額"] = 0.0
+        work["資料表"] = table_name
+        ids = _order_id_series(work)
+        for position, (_, row) in enumerate(work.iterrows()):
+            key = (table_name, str(ids.iloc[position]).strip(), int(row.get("__gmv_row_ordinal", 0) or 0))
+            if key in bounded_by_key:
+                work.at[row.name, "退款扣減金額"] = bounded_by_key[key][1]
+            else:
+                work.at[row.name, "退款扣減金額"] = prior.get(key, 0.0)
+        work[COL_MONEY] = (work["退款前收款原幣金額"] - work["退款扣減金額"]).clip(lower=0.0)
+        return work
+
+    adjusted_tour = compose("旅行團", frames.formal_tour)
+    adjusted_others = compose("其他業務", frames.formal_others)
+    detail_parts = [frame.loc[frame["退款扣減金額"] > 0].copy() for frame in (adjusted_tour, adjusted_others)]
+    detail = pd.concat(detail_parts, ignore_index=True, sort=False) if any(not part.empty for part in detail_parts) else pd.DataFrame()
+    if not detail.empty:
+        detail["退款後收款原幣金額"] = detail[COL_MONEY]
+        detail["退款維度"] = refund_status or "總退款"
+    result = dict(bounded)
+    result.update({"tour": adjusted_tour, "others": adjusted_others, "adjusted_detail": detail})
+    return result
 
 
 def _canonical_frame_sha256(frame: pd.DataFrame) -> str:
@@ -524,6 +598,10 @@ def confirm_refund_batch(
                 previous_version_id=duplicate["previous_version_id"],
                 revenue_generation_token=str(duplicate["revenue_generation_token"]),
                 refund_state_sha256=str(duplicate["refund_state_sha256"]),
+                affected_source_receipt_nos=tuple(sorted({
+                    observation.source_receipt_no for observation in preview.observations
+                    if observation.source_receipt_no
+                })),
             )
         current = repository.load_current_refunds()
         if refund_state_sha256(current) != preview.current_state_sha256:
@@ -649,7 +727,11 @@ def confirm_refund_batch(
             )
             _fault("after_activation_event", fault_after)
             conn.commit()
-        return GmvActivationReceipt(batch_id, version_id, event_id, previous_version_id, preview.revenue_generation_token, preview.proposed_state_sha256)
+        return GmvActivationReceipt(
+            batch_id, version_id, event_id, previous_version_id,
+            preview.revenue_generation_token, preview.proposed_state_sha256,
+            tuple(sorted(state_delta.affected_source_receipt_nos)),
+        )
 
 
 def load_gmv_scope_status(repository: GmvRefundRepository, current_revenue_token: str) -> dict[str, object]:
@@ -974,6 +1056,8 @@ def build_gmv_formal_artifacts_fast_or_legacy(
     *, repository: GmvRefundRepository, version_id: str,
     revenue_frames: RevenueFrames, rule_version: str, cache_dir=None,
     worker_count: int = 3, validation_mode: str = "trusted_warm",
+    affected_source_receipt_nos: tuple[str, ...] | list[str] = (),
+    baseline_status_override: str | None = None,
 ) -> GmvFormalArtifacts:
     """Use trusted warm validation and a private legacy seed on cold miss."""
     cache_root = cache_dir or ".nbs_runtime_cache"
@@ -1033,16 +1117,21 @@ def build_gmv_formal_artifacts_fast_or_legacy(
             )
             write_trusted_reference(cache_dir=cache_root, manifest=reference)
 
-        baseline_status = _gmv_baseline_status(
+        baseline_status = baseline_status_override or _gmv_baseline_status(
             repository=repository,
             generation_token=source["revenueGenerationToken"],
             cache_dir=cache_root,
         )
 
+        affected_receipts = tuple(sorted({
+            str(value).strip() for value in affected_source_receipt_nos
+            if str(value).strip()
+        }))
         candidate = _run_fast_export_gate(
             repository=repository, version_id=version_id, revenue_frames=revenue_frames,
             rule_version=rule_version, cache_dir=cache_root, worker_count=worker_count,
             reference_manifest=reference, baseline_status=baseline_status,
+            affected_source_receipt_nos=affected_receipts,
         )
         if candidate is None:
             raise RuntimeError("fast export candidate is empty")
@@ -1109,6 +1198,7 @@ def build_gmv_formal_artifacts_fast_or_legacy(
 def _run_fast_export_gate(
     *, repository: GmvRefundRepository, version_id: str, revenue_frames: RevenueFrames,
     rule_version: str, cache_dir, worker_count: int, reference_manifest, baseline_status: str,
+    affected_source_receipt_nos: tuple[str, ...] = (),
 ) -> GmvFastCandidate:
     """Execute the real preparation/facts/serializer/equivalence gate.
 
@@ -1139,12 +1229,37 @@ def _run_fast_export_gate(
     generation_token = str(active["revenue_generation_token"])
     total_rows = _refund_frame_from_reconciliation(repository, version_id, "TOTAL_REFUND")
     paid_rows = _refund_frame_from_reconciliation(repository, version_id, "REFUNDED")
-    total_adjusted = _apply_gmv_refund_adjustments(
-        revenue_frames.formal_tour, revenue_frames.formal_others, total_rows,
-    )
-    paid_adjusted = _apply_gmv_refund_adjustments(
-        revenue_frames.formal_tour, revenue_frames.formal_others, paid_rows, refund_status="已退款",
-    )
+    if affected_source_receipt_nos:
+        total_adjusted = _apply_affected_gmv_refund_adjustments(
+            revenue_frames, total_rows, refund_status=None,
+            affected_source_receipt_nos=affected_source_receipt_nos,
+        )
+        paid_adjusted = _apply_affected_gmv_refund_adjustments(
+            revenue_frames, paid_rows, refund_status="已退款",
+            affected_source_receipt_nos=affected_source_receipt_nos,
+        )
+        # Reconciliation snapshots contain the complete dimension totals. The
+        # bounded adjustment result is enriched from them so summaries remain
+        # equivalent without re-running aggregation over unaffected revenue.
+        for adjusted, dimension in ((total_adjusted, "TOTAL_REFUND"), (paid_adjusted, "REFUNDED")):
+            snapshot = repository.load_reconciliation_snapshot(version_id, dimension)
+            amounts = pd.Series(
+                snapshot["refund_detail_amount_minor"].astype(float).div(100).to_numpy(),
+                index=snapshot["source_receipt_no"].astype(str),
+            ) if not snapshot.empty else pd.Series(dtype=float)
+            adjusted["refund_amounts"] = amounts
+            adjusted["refund_total"] = float(amounts.sum())
+            adjusted["applied_refund_total"] = float(snapshot["applied_refund_amount_minor"].sum() / 100) if not snapshot.empty else 0.0
+            adjusted["over_refund_total"] = float(snapshot["over_refund_amount_minor"].sum() / 100) if not snapshot.empty else 0.0
+            adjusted["matched_source_ids"] = set(snapshot.loc[snapshot["match_status"] == "FORMAL_MATCHED", "source_receipt_no"].astype(str))
+            adjusted["unmatched_source_ids"] = snapshot.loc[snapshot["match_status"] != "FORMAL_MATCHED", "source_receipt_no"].astype(str).tolist()
+    else:
+        total_adjusted = _apply_gmv_refund_adjustments(
+            revenue_frames.formal_tour, revenue_frames.formal_others, total_rows,
+        )
+        paid_adjusted = _apply_gmv_refund_adjustments(
+            revenue_frames.formal_tour, revenue_frames.formal_others, paid_rows, refund_status="已退款",
+        )
     total_adjusted["tour"].attrs["gmv_refund_dimension"] = "總退款"
     total_adjusted["others"].attrs["gmv_refund_dimension"] = "總退款"
     paid_adjusted["tour"].attrs["gmv_refund_dimension"] = "已退款"
@@ -1263,9 +1378,14 @@ def _run_fast_export_gate(
             shadow_status=shadow_status,
             reference_status="HIT" if reference_manifest is not None else "MISS",
             performance={
-                "aggregationMode": "full_candidate",
-                "unaffectedAggregationCalls": 2,
-                "affectedAggregationCalls": 0,
+                "aggregationMode": "affected_only" if affected_source_receipt_nos else "full_candidate",
+                "unaffectedAggregationCalls": 0 if affected_source_receipt_nos else 2,
+                "affectedAggregationCalls": 2 if affected_source_receipt_nos else 0,
+                "affectedReceiptCount": len(affected_source_receipt_nos),
+                "aggregationContract": (
+                    "refund_aggregation_bounded_to_affected_receipts"
+                    if affected_source_receipt_nos else "full_candidate_legacy_compatibility"
+                ),
                 "stageTimings": [
                     {"stage": "preparation", "ms": round(prep_ms, 1)},
                     {"stage": "facts", "ms": round(facts_ms, 1)},

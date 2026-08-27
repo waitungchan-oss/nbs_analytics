@@ -390,6 +390,13 @@ def run_isolated_production_rebuild_benchmark(
             repository=repository, version_id=fixture.version_id,
             revenue_frames=fixture.revenue_frames, rule_version=fixture.rule_version,
             cache_dir=run_root, validation_mode="shadow",
+            affected_source_receipt_nos=(
+                ("BENCH-S-1",) if current_case.expected_decision == "INCREMENTAL_ELIGIBLE" else ()
+            ),
+            # The isolated fixture intentionally has no production baseline
+            # registry; baseline behavior is tested separately from the
+            # aggregation-path benchmark.
+            baseline_status_override="PASS",
         )
         manifest = result.cache_manifest
         return {
