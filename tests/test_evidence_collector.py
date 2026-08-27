@@ -385,6 +385,25 @@ def test_review_collection_skips_tracked_process_reports_and_denied_data_without
     assert "formal rows" not in serialized
 
 
+def test_review_collection_marks_denied_superpowers_artifacts_as_preserved(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / ".superpowers/sdd").mkdir(parents=True)
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    report = tmp_path / ".superpowers/sdd/task-report.md"
+    report.write_text("process-only report", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    report.write_text("process-only report changed", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+    assert bundle.repository["dirtyFiles"] == [".superpowers/sdd/task-report.md"]
+    assert bundle.repository["preservedDirtyFiles"] == [".superpowers/sdd/task-report.md"]
+
+
 def test_review_collection_keeps_legal_tracked_root_source_while_skipping_process_and_sensitive_paths(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)

@@ -246,3 +246,58 @@ def test_equivalence_failure_preserves_previous_trusted_reference_pointer(tmp_pa
     assert first.status == "READY"
     assert second.status == "FALLBACK"
     assert pointer.read_text(encoding="utf-8") == pointer_before
+
+
+def test_manifest_failure_preserves_previous_trusted_reference_pointer(tmp_path, monkeypatch):
+    from backend.services.export_intermediate_service import ExportScope, build_scope_report_facts
+    from backend.services.export_fast_path_service import build_fast_export_job_from_facts
+    import backend.services.export_fast_path_service as fast_service
+
+    tour, others = _frames()
+    from io import BytesIO
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active.title = "營收"
+    workbook.active.append(["來源單據號", "收款原幣金額"])
+    workbook.active.append(["T-001", 100])
+    output = BytesIO()
+    workbook.save(output)
+    candidate_artifact = {"value": output.getvalue()}
+
+    def facts_builder(intermediate):
+        return {
+            scope.value: build_scope_report_facts(intermediate, scope)
+            for scope in ExportScope
+        }
+
+    def writer(_facts, path):
+        path.write_bytes(candidate_artifact["value"])
+
+    def reference_builder(_tour, _others):
+        return {key: candidate_artifact["value"] for key in ("ex", "ex_no_writeoff", "ex_no_writeoff_refund_transfer")}
+
+    kwargs = {
+        "generation_token": "generation-manifest-pointer-safety-1",
+        "rules_fingerprint": "rules-1",
+        "export_schema_version": "schema-1",
+        "cache_root": tmp_path,
+        "reference_builder": reference_builder,
+        "facts_builder": facts_builder,
+        "writer": writer,
+        "worker_count": 1,
+    }
+    first = build_fast_export_job_from_facts(tour, others, **kwargs)
+    pointer = tmp_path / "trusted_reference" / "active.json"
+    pointer_before = pointer.read_text(encoding="utf-8")
+
+    def fail_manifest(*_args, **_kwargs):
+        raise OSError("manifest write failure")
+
+    monkeypatch.setattr(fast_service, "publish_export_manifest", fail_manifest)
+    kwargs["generation_token"] = "generation-manifest-pointer-safety-2"
+    second = build_fast_export_job_from_facts(tour, others, **kwargs)
+
+    assert first.status == "READY"
+    assert second.status == "FALLBACK"
+    assert pointer.read_text(encoding="utf-8") == pointer_before

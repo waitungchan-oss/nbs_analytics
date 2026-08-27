@@ -256,6 +256,24 @@ def test_strict_review_blocks_unattributed_dirty_file(tmp_path):
     assert report["verdict"] == "blocked"
 
 
+def test_strict_review_allows_explicitly_preserved_process_artifact(tmp_path):
+    bundle = review_bundle(dirty=[".superpowers/sdd/task-report.md"])
+    bundle = EvidenceBundle(
+        schema_version=bundle.schema_version, task=bundle.task,
+        repository={
+            **bundle.repository,
+            "preservedDirtyFiles": [".superpowers/sdd/task-report.md"],
+        },
+        guardrails=bundle.guardrails, evidence=bundle.evidence,
+    )
+    report = build_review_report(
+        bundle, context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=ReviewRunner(), runtime_root=runtime_path(tmp_path),
+        instructions="contract", strict=True,
+    )
+    assert report["verdict"] == "pass"
+
+
 def test_strict_review_rejects_truncated_evidence(tmp_path):
     bundle = review_bundle()
     bundle = EvidenceBundle(

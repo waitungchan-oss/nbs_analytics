@@ -442,6 +442,7 @@ class EvidenceCollector:
         )
         untracked_command = None
         untracked_paths: list[str] = []
+        preserved_dirty_paths: list[str] = []
         if head_ref == "WORKTREE":
             untracked_command = self._run(
                 "git-untracked-files",
@@ -454,6 +455,8 @@ class EvidenceCollector:
                 try:
                     self.policy.resolve_read_path(self.project_root / relative)
                 except PermissionError:
+                    if relative.startswith(".superpowers/"):
+                        preserved_dirty_paths.append(relative)
                     continue
                 untracked_paths.append(relative)
         tracked_paths = changed.stdout.splitlines()
@@ -470,6 +473,8 @@ class EvidenceCollector:
                 resolver(candidate_path)
             except PermissionError:
                 # Policy-denied process reports and sensitive files stay out of Review evidence.
+                if relative.startswith(".superpowers/") and relative not in preserved_dirty_paths:
+                    preserved_dirty_paths.append(relative)
                 continue
             if relative in untracked_set:
                 patch = self._run(
@@ -506,6 +511,7 @@ class EvidenceCollector:
                 "baseSha": base_sha,
                 "headRef": head_ref,
                 "headSha": head_sha,
+                "preservedDirtyFiles": sorted(preserved_dirty_paths),
                 "diffFileLimitExceeded": changed.truncated
                 or bool(untracked_command and untracked_command.truncated)
                 or len(selected_paths) > 50,

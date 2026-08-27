@@ -311,12 +311,12 @@ def build_fast_export_job_from_facts(
             equivalence_examples = list(equivalence.mismatch_examples)
         if equivalence_status != "PASS":
             raise ValueError(f"semantic equivalence failed: {equivalence_mismatch_count} mismatch(es)")
+        snapshot = None
         if not digest_matches:
             snapshot = materialize_trusted_reference(
                 Path(cache_root), identity, reference,
                 artifact_digests=candidate_digests,
             )
-            publish_trusted_reference(Path(cache_root), snapshot)
         manifest_path = publish_export_manifest(
             Path(cache_root), generation_token=generation_token,
             rules_fingerprint=rules_fingerprint,
@@ -347,6 +347,11 @@ def build_fast_export_job_from_facts(
                 "deep_diff_skipped": deep_diff_skipped,
             },
         )
+        # The active reference pointer is published only after the export
+        # manifest has reached READY. This keeps reference provenance bound to
+        # a verified package when manifest publication fails.
+        if snapshot is not None:
+            publish_trusted_reference(Path(cache_root), snapshot)
         return ExportJobResult(
             job_id=str(generation_token), status="READY", manifest_path=manifest_path,
             fallback_reason=None,

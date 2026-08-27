@@ -369,7 +369,14 @@ def build_review_report(
     dirty_files = bundle.repository.get("dirtyFiles") or []
     if not isinstance(dirty_files, list) or not all(isinstance(item, str) for item in dirty_files):
         raise ValueError("Review repository dirtyFiles must be a list of strings")
-    unattributed_dirty = sorted(set(dirty_files) - set(evidence_payload["gitDiff"]["files"]))
+    preserved_dirty = bundle.repository.get("preservedDirtyFiles") or []
+    if not isinstance(preserved_dirty, list) or not all(isinstance(item, str) for item in preserved_dirty):
+        raise ValueError("Review repository preservedDirtyFiles must be a list of strings")
+    unattributed_dirty = sorted(
+        set(dirty_files)
+        - set(evidence_payload["gitDiff"]["files"])
+        - set(preserved_dirty)
+    )
     if strict and unattributed_dirty:
         return finish(_report(
             "blocked",
