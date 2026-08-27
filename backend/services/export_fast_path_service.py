@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -12,9 +14,20 @@ from typing import Callable, Mapping
 
 import pandas as pd
 
-from .export_equivalence_service import compare_export_sets
+from .export_equivalence_service import (
+    build_workbook_metric_digest,
+    compare_export_digests,
+    compare_export_sets,
+)
 from .export_intermediate_service import ExportScope, build_export_intermediate
 from .export_manifest_service import ExportArtifact, publish_export_manifest
+from .export_reference_cache_service import (
+    TrustedReferenceIdentity,
+    load_trusted_reference,
+    materialize_trusted_reference,
+    publish_trusted_reference,
+    trusted_reference_identity_fingerprint,
+)
 from .export_serializer_service import ExportSerializerJob, serialize_export_jobs_parallel
 
 
@@ -46,6 +59,15 @@ def _bounded_reason(exc: Exception) -> str:
     return f"{type(exc).__name__}: {str(exc)[:180]}"
 
 
+def _source_fingerprint(intermediate) -> str:
+    encoded = json.dumps(
+        dict(sorted(intermediate.source_fingerprints.items())),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def build_fast_export_job(
     raw_tour: pd.DataFrame,
     raw_others: pd.DataFrame,
@@ -58,6 +80,7 @@ def build_fast_export_job(
     candidate_builder: Callable[[str, object], bytes],
     worker_count: int = 3,
     baseline_status: str = "PASS",
+    pipeline_fingerprint: str = "export-pipeline-v1",
 ) -> ExportJobResult:
     started = time.perf_counter()
     job_id = str(generation_token)
@@ -154,6 +177,7 @@ def build_fast_export_job_from_facts(
     writer: Callable[[object, Path], None],
     worker_count: int = 3,
     baseline_status: str = "PASS",
+    pipeline_fingerprint: str = "export-pipeline-v1",
 ) -> ExportJobResult:
     """Build complete export artifacts from one shared facts preparation."""
     started = time.perf_counter()
@@ -205,17 +229,56 @@ def build_fast_export_job_from_facts(
             key: (staging_dir / f"{key}.xlsx").read_bytes()
             for key in EXPORT_KEYS
         }
-        reference_started = time.perf_counter()
-        reference_payload = dict(reference_builder(raw_tour.copy(deep=True), raw_others.copy(deep=True)))
-        reference_ms = round((time.perf_counter() - reference_started) * 1000)
-        reference = {key: reference_payload.get(key) for key in EXPORT_KEYS}
-        if not all(isinstance(value, bytes) and value for value in reference.values()):
-            raise ValueError("legacy reference export contract invalid")
-        equivalence_started = time.perf_counter()
-        equivalence = compare_export_sets(reference, candidates)
-        equivalence_ms = round((time.perf_counter() - equivalence_started) * 1000)
-        if equivalence.status != "PASS":
-            raise ValueError(f"semantic equivalence failed: {equivalence.mismatch_count} mismatch(es)")
+        identity = TrustedReferenceIdentity(
+            source_fingerprint=_source_fingerprint(intermediate),
+            generation_token=str(generation_token),
+            rules_fingerprint=str(rules_fingerprint),
+            export_schema_version=str(export_schema_version),
+            pipeline_fingerprint=str(pipeline_fingerprint),
+        )
+        reference_lookup_started = time.perf_counter()
+        trusted_reference = load_trusted_reference(Path(cache_root), identity)
+        reference_lookup_ms = round((time.perf_counter() - reference_lookup_started) * 1000)
+        candidate_digests = {
+            key: build_workbook_metric_digest(value)
+            for key, value in candidates.items()
+        }
+        reference_status = "HIT" if trusted_reference is not None else "MATERIALIZED"
+        deep_diff_skipped = False
+        reference_materialize_ms = 0
+        equivalence_deep_diff_ms = 0
+        equivalence_digest_started = time.perf_counter()
+        digest_matches = (
+            trusted_reference is not None
+            and compare_export_digests(trusted_reference.artifact_digests, candidate_digests)
+        )
+        equivalence_digest_ms = round((time.perf_counter() - equivalence_digest_started) * 1000)
+        if digest_matches:
+            equivalence_status = "PASS"
+            equivalence_mismatch_count = 0
+            equivalence_examples = []
+            deep_diff_skipped = True
+        else:
+            reference_started = time.perf_counter()
+            reference_payload = dict(reference_builder(raw_tour.copy(deep=True), raw_others.copy(deep=True)))
+            reference_materialize_ms = round((time.perf_counter() - reference_started) * 1000)
+            reference = {key: reference_payload.get(key) for key in EXPORT_KEYS}
+            if not all(isinstance(value, bytes) and value for value in reference.values()):
+                raise ValueError("legacy reference export contract invalid")
+            equivalence_started = time.perf_counter()
+            equivalence = compare_export_sets(reference, candidates)
+            equivalence_deep_diff_ms = round((time.perf_counter() - equivalence_started) * 1000)
+            equivalence_status = equivalence.status
+            equivalence_mismatch_count = equivalence.mismatch_count
+            equivalence_examples = list(equivalence.mismatch_examples)
+        if equivalence_status != "PASS":
+            raise ValueError(f"semantic equivalence failed: {equivalence_mismatch_count} mismatch(es)")
+        if not digest_matches:
+            snapshot = materialize_trusted_reference(
+                Path(cache_root), identity, reference,
+                artifact_digests=candidate_digests,
+            )
+            publish_trusted_reference(Path(cache_root), snapshot)
         manifest_path = publish_export_manifest(
             Path(cache_root), generation_token=generation_token,
             rules_fingerprint=rules_fingerprint,
@@ -228,14 +291,22 @@ def build_fast_export_job_from_facts(
                 "serialization_ms": {
                     result.artifact_id: result.duration_ms for result in serializer_results
                 },
-                "equivalence_ms": equivalence_ms,
-                "reference_ms": reference_ms,
+                "reference_lookup_ms": reference_lookup_ms,
+                "reference_materialize_ms": reference_materialize_ms,
+                "equivalence_digest_ms": equivalence_digest_ms,
+                "equivalence_deep_diff_ms": equivalence_deep_diff_ms if not digest_matches else 0,
                 "worker_count": min(int(worker_count), len(jobs)),
             },
             equivalence_report={
-                "status": equivalence.status,
-                "mismatch_count": equivalence.mismatch_count,
-                "mismatch_examples": list(equivalence.mismatch_examples),
+                "status": equivalence_status,
+                "mismatch_count": equivalence_mismatch_count,
+                "mismatch_examples": equivalence_examples,
+                "deep_diff_skipped": deep_diff_skipped,
+            },
+            reference={
+                "status": reference_status,
+                "identity_fingerprint": trusted_reference_identity_fingerprint(identity),
+                "deep_diff_skipped": deep_diff_skipped,
             },
         )
         return ExportJobResult(
@@ -245,8 +316,10 @@ def build_fast_export_job_from_facts(
                 "intermediate_ms": intermediate_ms,
                 "facts_ms": facts_ms,
                 "serialization_ms": serialization_ms,
-                "reference_ms": reference_ms,
-                "equivalence_ms": equivalence_ms,
+                "reference_lookup_ms": reference_lookup_ms,
+                "reference_materialize_ms": reference_materialize_ms,
+                "equivalence_digest_ms": equivalence_digest_ms,
+                "equivalence_deep_diff_ms": equivalence_deep_diff_ms if not digest_matches else 0,
                 "total_ms": round((time.perf_counter() - started) * 1000),
             },
         )

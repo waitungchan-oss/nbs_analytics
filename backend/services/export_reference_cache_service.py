@@ -51,6 +51,11 @@ def _identity_fingerprint(identity: TrustedReferenceIdentity) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def trusted_reference_identity_fingerprint(identity: TrustedReferenceIdentity) -> str:
+    """Return the stable public identity key used by pointers and manifests."""
+    return _identity_fingerprint(identity)
+
+
 def _snapshot_payload(snapshot: TrustedReferenceSnapshot) -> dict[str, object]:
     return {
         "schema": SCHEMA,
@@ -199,4 +204,5 @@ __all__ = [
     "load_trusted_reference",
     "materialize_trusted_reference",
     "publish_trusted_reference",
+    "trusted_reference_identity_fingerprint",
 ]

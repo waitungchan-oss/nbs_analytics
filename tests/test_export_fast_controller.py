@@ -140,3 +140,109 @@ def test_rollout_mode_controls_whether_ready_fast_result_is_selected():
     assert select_export_path(ExportRolloutMode.OPT_IN, fast_ready=True) == "fast"
     assert select_export_path(ExportRolloutMode.DEFAULT, fast_ready=True) == "fast"
     assert select_export_path(ExportRolloutMode.DEFAULT, fast_ready=False) == "legacy"
+
+
+def test_same_identity_reuses_trusted_reference_without_legacy_builder(tmp_path):
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from backend.services.export_intermediate_service import ExportScope, build_scope_report_facts
+    from backend.services.export_fast_path_service import build_fast_export_job_from_facts
+
+    workbook = Workbook()
+    workbook.active.title = "營收"
+    workbook.active.append(["來源單據號", "收款原幣金額"])
+    workbook.active.append(["T-001", 100])
+    output = BytesIO()
+    workbook.save(output)
+    artifact = output.getvalue()
+    tour, others = _frames()
+    calls = []
+
+    def facts_builder(intermediate):
+        return {
+            scope.value: build_scope_report_facts(intermediate, scope)
+            for scope in ExportScope
+        }
+
+    def writer(_facts, path):
+        path.write_bytes(artifact)
+
+    def reference_builder(_tour, _others):
+        calls.append("legacy")
+        return {key: artifact for key in ("ex", "ex_no_writeoff", "ex_no_writeoff_refund_transfer")}
+
+    kwargs = {
+        "generation_token": "generation-cache-hit",
+        "rules_fingerprint": "rules-1",
+        "export_schema_version": "schema-1",
+        "cache_root": tmp_path,
+        "reference_builder": reference_builder,
+        "facts_builder": facts_builder,
+        "writer": writer,
+        "worker_count": 1,
+    }
+    first = build_fast_export_job_from_facts(tour, others, **kwargs)
+    second = build_fast_export_job_from_facts(tour, others, **kwargs)
+
+    assert first.status == "READY"
+    assert second.status == "READY"
+    assert calls == ["legacy"]
+    assert second.timings["reference_lookup_ms"] >= 0
+
+
+def test_equivalence_failure_preserves_previous_trusted_reference_pointer(tmp_path):
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from backend.services.export_intermediate_service import ExportScope, build_scope_report_facts
+    from backend.services.export_fast_path_service import build_fast_export_job_from_facts
+
+    def workbook_bytes(amount):
+        workbook = Workbook()
+        workbook.active.title = "營收"
+        workbook.active.append(["來源單據號", "收款原幣金額"])
+        workbook.active.append(["T-001", amount])
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()
+
+    reference_artifact = workbook_bytes(100)
+    changed_artifact = workbook_bytes(101)
+    candidate_artifact = reference_artifact
+    tour, others = _frames()
+
+    def facts_builder(intermediate):
+        return {
+            scope.value: build_scope_report_facts(intermediate, scope)
+            for scope in ExportScope
+        }
+
+    def writer(_facts, path):
+        path.write_bytes(candidate_artifact)
+
+    def reference_builder(_tour, _others):
+        return {key: reference_artifact for key in ("ex", "ex_no_writeoff", "ex_no_writeoff_refund_transfer")}
+
+    kwargs = {
+        "generation_token": "generation-pointer-safety",
+        "rules_fingerprint": "rules-1",
+        "export_schema_version": "schema-1",
+        "cache_root": tmp_path,
+        "reference_builder": reference_builder,
+        "facts_builder": facts_builder,
+        "writer": writer,
+        "worker_count": 1,
+    }
+    first = build_fast_export_job_from_facts(tour, others, **kwargs)
+    pointer = tmp_path / "trusted_reference" / "active.json"
+    pointer_before = pointer.read_text(encoding="utf-8")
+
+    candidate_artifact = changed_artifact
+    second = build_fast_export_job_from_facts(tour, others, **kwargs)
+
+    assert first.status == "READY"
+    assert second.status == "FALLBACK"
+    assert pointer.read_text(encoding="utf-8") == pointer_before

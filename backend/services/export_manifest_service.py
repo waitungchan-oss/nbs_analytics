@@ -45,6 +45,7 @@ class ExportManifest:
     artifacts: Mapping[str, ManifestArtifact]
     path: Path
     telemetry: Mapping[str, object] = field(default_factory=dict)
+    reference: Mapping[str, object] = field(default_factory=dict)
 
 
 def _safe(value: str) -> str:
@@ -69,6 +70,7 @@ def publish_export_manifest(
     equivalence_status: str,
     telemetry: Mapping[str, object] | None = None,
     equivalence_report: Mapping[str, object] | None = None,
+    reference: Mapping[str, object] | None = None,
 ) -> Path:
     root = Path(root)
     artifact_dir = root / "artifacts" / _safe(generation_token)
@@ -94,6 +96,7 @@ def publish_export_manifest(
         "equivalence_status": str(equivalence_status),
         "artifacts": manifest_artifacts,
         "telemetry": telemetry_payload,
+        "reference": dict(reference or {}),
     }
     _atomic_write(
         root / "equivalence-report.json",
@@ -113,6 +116,7 @@ def publish_export_manifest(
         EXPORT_MANIFEST_SCHEMA, payload["status"], str(generation_token),
         str(rules_fingerprint), str(export_schema_version), str(equivalence_status),
         staging_artifacts, staging_manifest_path, telemetry_payload,
+        dict(reference or {}),
     )
     package_started = time.perf_counter()
     package_path = build_export_package(staging_manifest, root)
@@ -144,7 +148,7 @@ def load_ready_export_manifest(path: Path) -> ExportManifest | None:
             if hashlib.sha256(content).hexdigest() != item["sha256"] or len(content) != int(item["size"]):
                 return None
             artifacts[key] = ManifestArtifact(key, item["filename"], item["path"], item["sha256"], int(item["size"]))
-        return ExportManifest(payload["schema"], payload["status"], payload["generation_token"], payload["rules_fingerprint"], payload["export_schema_version"], payload["equivalence_status"], artifacts, path, payload.get("telemetry") or {})
+        return ExportManifest(payload["schema"], payload["status"], payload["generation_token"], payload["rules_fingerprint"], payload["export_schema_version"], payload["equivalence_status"], artifacts, path, payload.get("telemetry") or {}, payload.get("reference") or {})
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
