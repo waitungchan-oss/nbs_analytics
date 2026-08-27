@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import io
 import itertools
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -36,6 +38,90 @@ from config import (
 )
 
 COL_SUBTABLE_BRANCH = "副表_銷售點"
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardIntermediate:
+    tour: pd.DataFrame
+    others: pd.DataFrame
+    branch_mapping: dict
+    target_branches_s3: list[str]
+    cruise_depts: list[str]
+    sales_rep_list: list[str]
+    scope_masks: dict[str, tuple[pd.Series, pd.Series]]
+    source_fingerprint: str
+
+
+def build_dashboard_intermediate(
+    tour: pd.DataFrame,
+    others: pd.DataFrame,
+    *,
+    branch_mapping: dict,
+    target_branches_s3: list[str],
+    cruise_depts: list[str],
+    sales_rep_list: list[str],
+) -> DashboardIntermediate:
+    """Normalize dashboard inputs once before scope-specific aggregation."""
+    normalized_tour = normalize_runtime_columns(tour.copy(deep=True))
+    normalized_others = normalize_runtime_columns(others.copy(deep=True))
+    for frame in (normalized_tour, normalized_others):
+        if "統一日期" in frame.columns:
+            frame["統一日期"] = pd.to_datetime(frame["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    def masks(frame: pd.DataFrame) -> dict[str, pd.Series]:
+        all_mask = pd.Series(True, index=frame.index, dtype=bool)
+        no_writeoff = all_mask.copy()
+        official = all_mask.copy()
+        if "收款類型" in frame.columns:
+            no_writeoff &= ~frame["收款類型"].astype(str).str.strip().eq("掛賬核銷")
+        if "收款方式" in frame.columns:
+            official &= ~frame["收款方式"].astype(str).str.strip().eq("TT 退款轉團款")
+        official &= no_writeoff
+        return {"all": all_mask, "no_writeoff": no_writeoff, "official": official}
+
+    payload = pd.util.hash_pandas_object(normalized_tour, index=True).values.tobytes()
+    payload += pd.util.hash_pandas_object(normalized_others, index=True).values.tobytes()
+    tour_masks = masks(normalized_tour)
+    others_masks = masks(normalized_others)
+    return DashboardIntermediate(
+        tour=normalized_tour,
+        others=normalized_others,
+        branch_mapping=dict(branch_mapping),
+        target_branches_s3=list(target_branches_s3),
+        cruise_depts=list(cruise_depts),
+        sales_rep_list=list(sales_rep_list),
+        scope_masks={
+            scope: (tour_masks[scope], others_masks[scope])
+            for scope in ("all", "no_writeoff", "official")
+        },
+        source_fingerprint=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def build_dashboard_data_from_intermediate(
+    intermediate: DashboardIntermediate,
+    *,
+    scope_id: str,
+    make_workbook: bool = False,
+    include_branch_salesperson_sheet: bool = True,
+    return_facts: bool = True,
+):
+    """Run the legacy-compatible report builder on prepared, scoped frames."""
+    if scope_id not in intermediate.scope_masks:
+        raise ValueError(f"unsupported dashboard scope: {scope_id}")
+    tour_mask, others_mask = intermediate.scope_masks[scope_id]
+    return build_dashboard_data(
+        intermediate.tour.loc[tour_mask].copy(),
+        intermediate.others.loc[others_mask].copy(),
+        intermediate.branch_mapping,
+        intermediate.target_branches_s3,
+        intermediate.cruise_depts,
+        intermediate.sales_rep_list,
+        make_workbook=make_workbook,
+        include_branch_salesperson_sheet=include_branch_salesperson_sheet,
+        return_facts=return_facts,
+        _already_normalized=True,
+    )
 
 
 def read_excel_source(source) -> tuple[pd.DataFrame, str]:
@@ -125,6 +211,20 @@ def format_date_to_daily(date_series: pd.Series) -> pd.Series:
 def ensure_numeric(df: pd.DataFrame, col_name: str) -> pd.DataFrame:
     if col_name in df.columns:
         df[col_name] = pd.to_numeric(df[col_name], errors="coerce").fillna(0)
+    return df
+
+
+def _format_date_with_fallback(source: pd.Series, fallback: pd.Series) -> pd.Series:
+    """Format dates without relying on deprecated mixed-dtype fill behavior."""
+    parsed = pd.to_datetime(source, errors="coerce").dt.strftime("%Y-%m-%d").astype("string")
+    return parsed.fillna(fallback.astype("string"))
+
+
+def _fill_numeric_columns(df: pd.DataFrame, columns: list[str] | tuple[str, ...]) -> pd.DataFrame:
+    """Fill only declared numeric columns, leaving text/null columns untouched."""
+    for column in columns:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
     return df
 
 
@@ -652,11 +752,13 @@ def build_dashboard_data(
     make_workbook: bool = True,
     include_branch_salesperson_sheet: bool = False,
     return_facts: bool = False,
+    _already_normalized: bool = False,
 ):
-    df_tour_matched = normalize_runtime_columns(df_tour_matched)
-    df_others_matched = normalize_runtime_columns(df_others_matched)
-    df_tour_matched["統一日期"] = pd.to_datetime(df_tour_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df_others_matched["統一日期"] = pd.to_datetime(df_others_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if not _already_normalized:
+        df_tour_matched = normalize_runtime_columns(df_tour_matched)
+        df_others_matched = normalize_runtime_columns(df_others_matched)
+        df_tour_matched["統一日期"] = pd.to_datetime(df_tour_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df_others_matched["統一日期"] = pd.to_datetime(df_others_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
 
     all_days = sorted(list(set(df_tour_matched["統一日期"].dropna()) | set(df_others_matched["統一日期"].dropna())))
     branch_list = [f"{c}{n}" for c, n in branch_mapping.items() if n != TARGET_DEPT_FOR_REP]
@@ -724,7 +826,7 @@ def build_dashboard_data(
                 else work.copy()
             )
             work["統計日期"] = (
-                pd.to_datetime(work[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(work["統一日期"])
+                _format_date_with_fallback(work[COL_TRANS_TIME], work["統一日期"])
                 if COL_TRANS_TIME in work.columns
                 else work["統一日期"]
             )
@@ -741,7 +843,7 @@ def build_dashboard_data(
             if work.empty:
                 return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "票務交易數量"])
             work["統計日期"] = (
-                pd.to_datetime(work[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(work["統一日期"])
+                _format_date_with_fallback(work[COL_TRANS_TIME], work["統一日期"])
                 if COL_TRANS_TIME in work.columns
                 else work["統一日期"]
             )
@@ -818,7 +920,7 @@ def build_dashboard_data(
         else df_tour_matched.copy()
     )
     df_tour_dedup["日期"] = (
-        pd.to_datetime(df_tour_dedup[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(df_tour_dedup["統一日期"])
+        _format_date_with_fallback(df_tour_dedup[COL_TRANS_TIME], df_tour_dedup["統一日期"])
         if COL_TRANS_TIME in df_tour_dedup.columns
         else df_tour_dedup["統一日期"]
     )
@@ -840,7 +942,7 @@ def build_dashboard_data(
 
     df_ticket = df_others_matched.copy()
     df_ticket["日期"] = (
-        pd.to_datetime(df_ticket[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(df_ticket["統一日期"])
+        _format_date_with_fallback(df_ticket[COL_TRANS_TIME], df_ticket["統一日期"])
         if COL_TRANS_TIME in df_ticket.columns
         else df_ticket["統一日期"]
     )
@@ -865,7 +967,8 @@ def build_dashboard_data(
             return pd.DataFrame(columns=["文本", "日期", "月份", t_name, "郵輪交易人數"])
         t = df_sub[df_sub["文本"] != "郵輪"].groupby([grp_col, "日期", "月份"])["交易人數"].sum().reset_index(name=t_name)
         c = df_sub[df_sub["文本"] == "郵輪"].groupby([grp_col, "日期", "月份"])["交易人數"].sum().reset_index(name="郵輪交易人數")
-        res = df_sub[[grp_col, "日期", "月份"]].drop_duplicates().merge(t, how="left").merge(c, how="left").fillna(0)
+        res = df_sub[[grp_col, "日期", "月份"]].drop_duplicates().merge(t, how="left").merge(c, how="left")
+        _fill_numeric_columns(res, (t_name, "郵輪交易人數"))
         return res[(res[t_name] > 0) | (res["郵輪交易人數"] > 0)].rename(columns={grp_col: "文本"}).sort_values(["文本", "日期"])
 
     result_s8 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH, "交易人數")
@@ -887,7 +990,7 @@ def build_dashboard_data(
             return pd.DataFrame(columns=[grp_col, type_col, "天數", "日期", "月份", "交易金額"])
         df_m = df_sub.copy()
         df_m["日期"] = (
-            pd.to_datetime(df_m[COL_TRANS_TIME], errors="coerce").dt.strftime("%Y-%m-%d").fillna(df_m["統一日期"])
+            _format_date_with_fallback(df_m[COL_TRANS_TIME], df_m["統一日期"])
             if COL_TRANS_TIME in df_m.columns
             else df_m["統一日期"]
         )
