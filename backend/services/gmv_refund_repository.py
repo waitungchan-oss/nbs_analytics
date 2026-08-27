@@ -394,6 +394,31 @@ class GmvRefundRepository:
                 params=(version_id, refund_dimension),
             )
 
+    def load_reconciliation_snapshot_for_receipts(
+        self, version_id: str, refund_dimension: str,
+        source_receipt_nos: list[str] | tuple[str, ...],
+    ) -> pd.DataFrame:
+        """Load only affected receipts for an incremental rebuild."""
+        if refund_dimension not in {"TOTAL_REFUND", "REFUNDED"}:
+            raise ValueError("unsupported refund dimension")
+        receipts = tuple(dict.fromkeys(str(value).strip() for value in source_receipt_nos if str(value).strip()))
+        if not receipts:
+            return pd.DataFrame(columns=[
+                "source_receipt_no", "refund_detail_amount_minor",
+                "applied_refund_amount_minor", "over_refund_amount_minor",
+                "match_status", "reason_code",
+            ])
+        placeholders = ",".join("?" for _ in receipts)
+        with self.connect() as conn:
+            return pd.read_sql_query(
+                "SELECT source_receipt_no, refund_detail_amount_minor, "
+                "applied_refund_amount_minor, over_refund_amount_minor, "
+                "match_status, reason_code FROM gmv_reconciliation_results "
+                f"WHERE version_id = ? AND refund_dimension = ? AND source_receipt_no IN ({placeholders}) "
+                "ORDER BY source_receipt_no",
+                conn, params=(version_id, refund_dimension, *receipts),
+            )
+
     def load_scope_history(self, limit: int = 20) -> tuple[dict[str, object], ...]:
         if limit < 1:
             raise ValueError("limit must be positive")
