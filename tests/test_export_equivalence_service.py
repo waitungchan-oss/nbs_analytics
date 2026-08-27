@@ -63,3 +63,27 @@ def test_export_set_equivalence_requires_the_same_keys():
 
     assert report.status == "FAIL"
     assert report.mismatch_count == 1
+
+
+def test_equal_semantic_workbooks_have_equal_metric_digest():
+    from backend.services.export_equivalence_service import (
+        build_workbook_metric_digest,
+        compare_export_digests,
+    )
+
+    first = _workbook_bytes()
+    second = _workbook_bytes()
+
+    assert compare_export_digests(
+        {"ex": build_workbook_metric_digest(first)},
+        {"ex": build_workbook_metric_digest(second)},
+    )
+
+
+def test_digest_mismatch_does_not_hide_deep_diff():
+    from backend.services.export_equivalence_service import compare_export_digests
+
+    assert not compare_export_digests(
+        {"ex": {"row_count": 1}},
+        {"ex": {"row_count": 2}},
+    )

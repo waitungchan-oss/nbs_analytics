@@ -88,6 +88,49 @@ def canonicalize_workbook(
     )
 
 
+def build_workbook_metric_digest(
+    data: bytes,
+    *,
+    money_columns: tuple[str, ...] = (),
+    stable_key_columns: tuple[str, ...] = (),
+) -> Mapping[str, object]:
+    """Build bounded semantic metadata without retaining workbook rows."""
+    canonical = canonicalize_workbook(
+        data,
+        money_columns=money_columns,
+        stable_key_columns=stable_key_columns,
+    )
+    sheets = []
+    for name, headers, rows in canonical.sheets:
+        encoded_rows = json.dumps(
+            rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        sheets.append({
+            "name": name,
+            "headers": list(headers),
+            "row_count": len(rows),
+            "row_fingerprint": hashlib.sha256(encoded_rows).hexdigest(),
+        })
+    return {
+        "schema_fingerprint": canonical.schema_fingerprint,
+        "sheets": sheets,
+    }
+
+
+def compare_export_digests(
+    reference: Mapping[str, Mapping[str, object]],
+    candidate: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """Return true only when bounded semantic digest payloads match."""
+    if set(reference) != set(candidate):
+        return False
+    return all(
+        json.dumps(reference[key], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        == json.dumps(candidate[key], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for key in reference
+    )
+
+
 def compare_workbooks(
     reference: bytes,
     candidate: bytes,
