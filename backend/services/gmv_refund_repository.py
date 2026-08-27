@@ -419,6 +419,114 @@ class GmvRefundRepository:
                 conn, params=(version_id, refund_dimension, *receipts),
             )
 
+    def load_snapshot_completeness(
+        self,
+        version_id: str,
+        *,
+        required_source_receipt_nos: tuple[str, ...] = (),
+        required_dimensions: tuple[str, ...] = ("TOTAL_REFUND", "REFUNDED"),
+    ) -> dict[str, object]:
+        """Report whether a version has every required receipt/dimension row."""
+        dimensions = tuple(dict.fromkeys(required_dimensions))
+        if not set(dimensions) <= {"TOTAL_REFUND", "REFUNDED"}:
+            raise ValueError("unsupported refund dimension")
+        required = tuple(dict.fromkeys(str(value).strip() for value in required_source_receipt_nos if str(value).strip()))
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT source_receipt_no, refund_dimension FROM gmv_reconciliation_results "
+                "WHERE version_id = ?",
+                (version_id,),
+            ).fetchall()
+        found: dict[str, set[str]] = {}
+        for receipt, dimension in rows:
+            found.setdefault(receipt, set()).add(dimension)
+        missing = tuple(
+            receipt for receipt in required
+            if not set(dimensions) <= found.get(receipt, set())
+        )
+        return {
+            "version_id": version_id,
+            "complete": not missing,
+            "missing_source_receipt_nos": missing,
+            "result_count": len(rows),
+        }
+
+    def copy_unaffected_snapshot_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        base_version_id: str,
+        new_version_id: str,
+        affected_source_receipt_nos: tuple[str, ...] | list[str],
+    ) -> dict[str, int]:
+        """Copy only unaffected rows into a new version within the caller transaction."""
+        if base_version_id == new_version_id:
+            raise ValueError("base and new GMV versions must differ")
+        receipts = tuple(dict.fromkeys(str(value).strip() for value in affected_source_receipt_nos if str(value).strip()))
+        if conn.execute("SELECT 1 FROM gmv_scope_versions WHERE version_id = ?", (base_version_id,)).fetchone() is None:
+            raise ValueError("base GMV version does not exist")
+        if conn.execute("SELECT 1 FROM gmv_scope_versions WHERE version_id = ?", (new_version_id,)).fetchone() is None:
+            raise ValueError("new GMV version does not exist")
+        destination_has_rows = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM gmv_reconciliation_results WHERE version_id = ?) "
+            "OR EXISTS(SELECT 1 FROM gmv_adjustment_snapshot WHERE version_id = ?)",
+            (new_version_id, new_version_id),
+        ).fetchone()[0]
+        if destination_has_rows:
+            raise ValueError("new GMV version must be empty")
+
+        conn.execute("CREATE TEMP TABLE _gmv_affected_receipts (source_receipt_no TEXT PRIMARY KEY)")
+        conn.execute("CREATE TEMP TABLE _gmv_result_map (old_result_id TEXT PRIMARY KEY, new_result_id TEXT UNIQUE)")
+        try:
+            conn.executemany(
+                "INSERT INTO _gmv_affected_receipts VALUES (?)",
+                ((receipt,) for receipt in receipts),
+            )
+            conn.execute(
+                "INSERT INTO _gmv_result_map(old_result_id, new_result_id) "
+                "SELECT result_id, lower(hex(randomblob(16))) "
+                "FROM gmv_reconciliation_results "
+                "WHERE version_id = ? AND source_receipt_no NOT IN "
+                "(SELECT source_receipt_no FROM _gmv_affected_receipts)",
+                (base_version_id,),
+            )
+            results = conn.execute(
+                "INSERT INTO gmv_reconciliation_results "
+                "(result_id, version_id, source_receipt_no, refund_dimension, match_status, reason_code, "
+                "refund_detail_amount_minor, original_receipt_amount_minor, applied_refund_amount_minor, "
+                "over_refund_amount_minor, refund_row_count, revenue_generation_token, rule_version) "
+                "SELECT m.new_result_id, ?, r.source_receipt_no, r.refund_dimension, r.match_status, r.reason_code, "
+                "r.refund_detail_amount_minor, r.original_receipt_amount_minor, r.applied_refund_amount_minor, "
+                "r.over_refund_amount_minor, r.refund_row_count, r.revenue_generation_token, r.rule_version "
+                "FROM gmv_reconciliation_results AS r "
+                "JOIN _gmv_result_map AS m ON m.old_result_id = r.result_id",
+                (new_version_id,),
+            ).rowcount
+            members = conn.execute(
+                "INSERT INTO gmv_reconciliation_members "
+                "(result_id, refund_order_no, observation_id, contributed_amount_minor) "
+                "SELECT m.new_result_id, x.refund_order_no, x.observation_id, x.contributed_amount_minor "
+                "FROM gmv_reconciliation_members AS x "
+                "JOIN _gmv_result_map AS m ON m.old_result_id = x.result_id"
+            ).rowcount
+            adjustments = conn.execute(
+                "INSERT INTO gmv_adjustment_snapshot "
+                "(version_id, source_table, source_row_fingerprint, source_receipt_no, original_order_period, "
+                "refund_period, refund_before_amount_minor, applied_refund_amount_minor, refund_after_amount_minor, "
+                "allocation_ratio_ppm, branch_code, salesperson_key, business_type) "
+                "SELECT ?, source_table, source_row_fingerprint, source_receipt_no, original_order_period, "
+                "refund_period, refund_before_amount_minor, applied_refund_amount_minor, refund_after_amount_minor, "
+                "allocation_ratio_ppm, branch_code, salesperson_key, business_type "
+                "FROM gmv_adjustment_snapshot AS a "
+                "WHERE a.version_id = ? AND a.source_receipt_no NOT IN "
+                "(SELECT source_receipt_no FROM _gmv_affected_receipts)",
+                (new_version_id, base_version_id),
+            ).rowcount
+            return {"results": results, "members": members, "adjustments": adjustments}
+        finally:
+            conn.execute("DROP TABLE _gmv_result_map")
+            conn.execute("DROP TABLE _gmv_affected_receipts")
+
     def load_scope_history(self, limit: int = 20) -> tuple[dict[str, object], ...]:
         if limit < 1:
             raise ValueError("limit must be positive")
