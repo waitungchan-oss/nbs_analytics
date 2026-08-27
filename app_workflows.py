@@ -48,6 +48,7 @@ from backend.services.export_intermediate_service import (  # noqa: E402
 from backend.services.export_manifest_service import (  # noqa: E402
     build_export_package,
     load_ready_export_manifest,
+    verify_export_package,
 )
 
 config_module = importlib.reload(config_module)
@@ -1129,10 +1130,15 @@ def _load_fast_export_artifacts(cache: dict, manifest_path: str | Path) -> bool:
         loaded[key] = (root / artifact.path).read_bytes()
     if not all(loaded.get(key) for key in ("ex", "ex_no_writeoff", "ex_no_writeoff_refund_transfer")):
         return False
+    package_path = build_export_package(manifest, root)
+    if not verify_export_package(package_path, manifest):
+        return False
     cache.update(
         loaded,
         export_fast_manifest_path=str(manifest.path),
-        export_fast_package_path=str(build_export_package(manifest, root)),
+        export_fast_package_path=str(package_path),
+        export_fast_package_verified=True,
+        export_fast_timings=dict(manifest.telemetry),
         export_fast_status="ready",
         export_fast_mode=EXPORT_FAST_PATH_MODE,
         export_cache_status="ready",

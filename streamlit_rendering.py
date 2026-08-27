@@ -477,7 +477,24 @@ def _render_export_status_card(cache: dict, export_loaded: bool) -> None:
     path = str(cache.get("export_cache_path", "") or "")
     export_cache_version = str(cache.get("export_cache_version", "") or "")
     official_export_schema = str(cache.get("official_export_schema", "") or "")
-    if export_loaded:
+    fast_status = str(cache.get("export_fast_status", "") or "").upper()
+    fast_timings = cache.get("export_fast_timings") or {}
+    if fast_status in {"PREPARING", "VERIFYING"}:
+        label = fast_status
+        badge_class = "nbs-badge-info"
+        title = "Export fast path 正在準備"
+        note = "系統正在建立 shared intermediate 或驗證 Excel artifacts。"
+    elif fast_status == "FALLBACK":
+        label = "FALLBACK"
+        badge_class = "nbs-badge-warning"
+        title = "Export fast path 已回退相容路徑"
+        note = "高速結果未通過 gate，現有 legacy 報表仍可使用。"
+    elif fast_status == "READY":
+        label = "READY"
+        badge_class = "nbs-badge-success"
+        title = "Export fast path 已驗證完成"
+        note = "三份報表已通過 equivalence、checksum 與 manifest 驗證。"
+    elif export_loaded:
         label = "Loaded"
         badge_class = "nbs-badge-success"
         title = "Export workbooks 已載入，可直接下載"
@@ -495,8 +512,15 @@ def _render_export_status_card(cache: dict, export_loaded: bool) -> None:
     path_note = f"Cache path：{path}" if path else "Cache path：尚未建立"
     version_note = f"Cache version：{export_cache_version}" if export_cache_version else "Cache version：未知"
     schema_note = f"Official schema：{official_export_schema}" if official_export_schema else "Official schema：尚未標記"
+    timing_note = ""
+    if fast_timings:
+        timing_note = (
+            f"<br>Fast timings：intermediate {fast_timings.get('intermediate_ms', 0)}ms"
+            f"｜serialization {fast_timings.get('serialization_ms', 0)}"
+            f"｜package {fast_timings.get('package_ms', 0)}ms"
+        )
     st.markdown(
-        f'<div class="nbs-export-status-card"><div><div class="nbs-export-status-title">{escape(title)}</div><div class="nbs-export-status-meta">{escape(note)}<br>{escape(path_note)}<br>{escape(version_note)}<br>{escape(schema_note)}</div></div><div class="nbs-badge {badge_class}">{escape(label)}</div></div>',
+        f'<div class="nbs-export-status-card"><div><div class="nbs-export-status-title">{escape(title)}</div><div class="nbs-export-status-meta">{escape(note)}<br>{escape(path_note)}<br>{escape(version_note)}<br>{escape(schema_note)}{timing_note}</div></div><div class="nbs-badge {badge_class}">{escape(label)}</div></div>',
         unsafe_allow_html=True,
     )
 
