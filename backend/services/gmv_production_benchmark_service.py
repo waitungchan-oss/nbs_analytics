@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 import sqlite3
+import statistics
 from pathlib import Path
 from typing import Callable, Mapping
 import time
@@ -59,6 +61,7 @@ class BenchmarkRunEvidence:
     unaffected_aggregation_calls: int | None
     peak_rss_bytes: int | None
     equivalence_status: str
+    reference_peak_rss_bytes: int | None = None
     fallback_reason: str | None = None
     active_pointer_unchanged_on_failure: bool = True
 
@@ -72,6 +75,7 @@ class BenchmarkRunEvidence:
             "recomputedRows": self.recomputed_rows,
             "unaffectedAggregationCalls": self.unaffected_aggregation_calls,
             "peakRssBytes": self.peak_rss_bytes,
+            "referencePeakRssBytes": self.reference_peak_rss_bytes,
             "equivalenceStatus": self.equivalence_status,
             "fallbackReason": self.fallback_reason,
             "activePointerUnchangedOnFailure": self.active_pointer_unchanged_on_failure,
@@ -93,6 +97,22 @@ class BenchmarkSummary:
             "runs": [item.to_dict() for item in self.runs],
             "warmReads": [item.to_dict() for item in self.warm_reads],
             "status": self.status,
+            "failureReasons": list(self.failure_reasons),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkGateResult:
+    status: str
+    median_ms: float | None
+    p95_ms: float | None
+    failure_reasons: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "medianMs": self.median_ms,
+            "p95Ms": self.p95_ms,
             "failureReasons": list(self.failure_reasons),
         }
 
@@ -238,6 +258,10 @@ def run_production_rebuild_benchmark(
                 if candidate_result.get("peakRssBytes") is not None else None
             ),
             equivalence_status=str(candidate_result.get("equivalenceStatus", "NOT_RUN")),
+            reference_peak_rss_bytes=(
+                int(full_result["peakRssBytes"])
+                if full_result.get("peakRssBytes") is not None else None
+            ),
             fallback_reason=(str(candidate_result["fallbackReason"])
                              if candidate_result.get("fallbackReason") else None),
             active_pointer_unchanged_on_failure=bool(
@@ -283,6 +307,48 @@ def run_production_rebuild_benchmark(
         status=status,
         failure_reasons=tuple(sorted(set(failure_reasons))),
     )
+
+
+def _nearest_rank_p95(values: list[float]) -> float:
+    return sorted(values)[max(1, math.ceil(len(values) * 0.95)) - 1]
+
+
+def evaluate_benchmark_gates(
+    summary: BenchmarkSummary, *, rss_multiplier: float = 1.5
+) -> BenchmarkGateResult:
+    """Evaluate evidence without treating inconclusive instrumentation as pass."""
+    if rss_multiplier < 1:
+        raise ValueError("rss_multiplier must be at least 1")
+    reasons: list[str] = []
+    runs = list(summary.runs)
+    if not runs:
+        return BenchmarkGateResult("INCONCLUSIVE", None, None, ("NO_COLD_RUNS",))
+    timings = [float(item.stage_ms.get("incrementalShadow", 0.0)) for item in runs]
+    median_ms = round(statistics.median(timings), 3)
+    p95_ms = round(_nearest_rank_p95(timings), 3)
+    if any(item.equivalence_status != "PASS" for item in runs):
+        reasons.append("SEMANTIC_EQUIVALENCE_FAILED")
+    if summary.case.expected_decision == "INCREMENTAL_ELIGIBLE":
+        if any(item.unaffected_aggregation_calls is None for item in runs):
+            return BenchmarkGateResult(
+                "INCONCLUSIVE", median_ms, p95_ms,
+                tuple(sorted(set(reasons + ["MISSING_AGGREGATION_INSTRUMENTATION"]))),
+            )
+        if any(item.unaffected_aggregation_calls != 0 for item in runs):
+            reasons.append("UNSAFE_UNAFFECTED_AGGREGATION")
+    for item in runs:
+        if item.peak_rss_bytes is not None and item.reference_peak_rss_bytes:
+            if item.peak_rss_bytes > item.reference_peak_rss_bytes * rss_multiplier:
+                reasons.append("RSS_GUARD_EXCEEDED")
+    if any(item.active_pointer_unchanged_on_failure is False for item in runs):
+        reasons.append("ACTIVE_POINTER_CHANGED_ON_FAILURE")
+    if reasons:
+        return BenchmarkGateResult("FAIL", median_ms, p95_ms, tuple(sorted(set(reasons))))
+    if summary.case.expected_decision == "FULL_REBUILD_REQUIRED" and any(
+        item.decision != "FULL_REBUILD_REQUIRED" for item in runs
+    ):
+        return BenchmarkGateResult("FAIL", median_ms, p95_ms, ("GUARDRAIL_DID_NOT_FALL_BACK",))
+    return BenchmarkGateResult("PASS", median_ms, p95_ms)
 
 
 def run_isolated_production_rebuild_benchmark(

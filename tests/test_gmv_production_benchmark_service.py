@@ -142,3 +142,82 @@ def test_isolated_runner_uses_existing_cache_service_without_mutating_fixture_db
     assert all(item.equivalence_status in {"PASS", "FAIL", "NOT_RUN"} for item in summary.runs)
     assert summary.status == "INCONCLUSIVE"
     assert hashlib.sha256(fixture.db_path.read_bytes()).hexdigest() == before
+
+
+def _evidence(**kwargs):
+    from backend.services.gmv_production_benchmark_service import BenchmarkRunEvidence
+
+    values = {
+        "mode": "incremental-shadow",
+        "decision": "INCREMENTAL_ELIGIBLE",
+        "stage_ms": {"fullCold": 100.0, "incrementalShadow": 25.0},
+        "affected_rows": 1,
+        "copied_rows": 99,
+        "recomputed_rows": 1,
+        "unaffected_aggregation_calls": 0,
+        "peak_rss_bytes": 100,
+        "reference_peak_rss_bytes": 100,
+        "equivalence_status": "PASS",
+    }
+    values.update(kwargs)
+    return BenchmarkRunEvidence(**values)
+
+
+def test_benchmark_gate_requires_equivalence_and_zero_unaffected_calls():
+    from backend.services.gmv_production_benchmark_service import (
+        BenchmarkSummary,
+        build_benchmark_case,
+        evaluate_benchmark_gates,
+    )
+
+    case = build_benchmark_case(affected_ratio=0.01, receipt_count=100)
+    summary = BenchmarkSummary(case, (_evidence(),) * 3, (), "PASS")
+    gate = evaluate_benchmark_gates(summary)
+
+    assert gate.status == "PASS"
+    assert gate.median_ms == 25.0
+    assert gate.p95_ms == 25.0
+
+    failed = BenchmarkSummary(
+        case,
+        (_evidence(equivalence_status="FAIL"), _evidence(), _evidence()),
+        (),
+        "FAIL",
+    )
+    assert evaluate_benchmark_gates(failed).status == "FAIL"
+
+    inconclusive = BenchmarkSummary(
+        case,
+        (_evidence(unaffected_aggregation_calls=None),) * 3,
+        (),
+        "INCONCLUSIVE",
+    )
+    assert evaluate_benchmark_gates(inconclusive).status == "INCONCLUSIVE"
+
+
+def test_benchmark_gate_rejects_rss_regression_and_requires_full_fallback():
+    from backend.services.gmv_production_benchmark_service import (
+        BenchmarkSummary,
+        build_benchmark_case,
+        evaluate_benchmark_gates,
+    )
+
+    case = build_benchmark_case(affected_ratio=0.01, receipt_count=100)
+    rss_summary = BenchmarkSummary(
+        case,
+        (_evidence(peak_rss_bytes=151, reference_peak_rss_bytes=100),) * 3,
+        (),
+        "PASS",
+    )
+    gate = evaluate_benchmark_gates(rss_summary)
+    assert gate.status == "FAIL"
+    assert "RSS_GUARD_EXCEEDED" in gate.failure_reasons
+
+    over = build_benchmark_case(affected_ratio=0.25, receipt_count=100)
+    over_summary = BenchmarkSummary(
+        over,
+        (_evidence(decision="FULL_REBUILD_REQUIRED"),) * 3,
+        (),
+        "INCONCLUSIVE",
+    )
+    assert evaluate_benchmark_gates(over_summary).status == "PASS"
