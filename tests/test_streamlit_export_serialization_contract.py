@@ -20,6 +20,9 @@ def test_export_status_card_surfaces_stage_timings_and_bounded_states():
     assert "VERIFYING" in source
     assert "serialization_ms" in source
     assert "package_ms" in source
+    assert "export_fast_reference_status" in source
+    assert "deep_diff_skipped" in source
+    assert "SKIPPED" in source
 
 
 def test_export_download_path_uses_verified_artifact_without_rebuilding():

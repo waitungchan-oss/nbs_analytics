@@ -51,6 +51,44 @@ class ExportJobResult:
     timings: Mapping[str, int]
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceRolloutDecision:
+    mode: str
+    reason: str
+
+
+def decide_reference_rollout(evidence: Mapping[str, object]) -> ReferenceRolloutDecision:
+    """Apply a bounded, fail-closed gate to trusted-reference promotion."""
+    requested = str(evidence.get("requested_mode", ExportRolloutMode.SHADOW.value)).lower()
+    allowed = {item.value for item in ExportRolloutMode}
+    if requested not in allowed:
+        return ReferenceRolloutDecision(ExportRolloutMode.SHADOW.value, "INVALID_REQUESTED_MODE")
+    if requested == ExportRolloutMode.DISABLED.value:
+        return ReferenceRolloutDecision(ExportRolloutMode.DISABLED.value, "DISABLED_BY_CONFIGURATION")
+    if requested == ExportRolloutMode.SHADOW.value:
+        return ReferenceRolloutDecision(ExportRolloutMode.SHADOW.value, "SHADOW_BY_CONFIGURATION")
+
+    required = {
+        "equivalence_status": "PASS",
+        "baseline_status": "PASS",
+        "database_mutated": False,
+        "stale_count": 0,
+        "corrupt_count": 0,
+        "fallback_count": 0,
+    }
+    for key, expected in required.items():
+        if evidence.get(key) != expected:
+            return ReferenceRolloutDecision(ExportRolloutMode.SHADOW.value, f"{key.upper()}_GATE_FAILED")
+    if evidence.get("reference_status") not in {"HIT", "MATERIALIZED"}:
+        return ReferenceRolloutDecision(ExportRolloutMode.SHADOW.value, "REFERENCE_STATUS_INVALID")
+    hit = evidence.get("same_identity_hit")
+    if not isinstance(hit, Mapping) or hit.get("reference_status") != "HIT" or hit.get("equivalence_status") != "PASS":
+        return ReferenceRolloutDecision(ExportRolloutMode.SHADOW.value, "CACHE_HIT_BENCHMARK_FAILED")
+    if requested == ExportRolloutMode.DEFAULT.value:
+        return ReferenceRolloutDecision(ExportRolloutMode.DEFAULT.value, "ALL_REFERENCE_GATES_PASSED")
+    return ReferenceRolloutDecision(ExportRolloutMode.OPT_IN.value, "OPT_IN_REFERENCE_GATES_PASSED")
+
+
 def _serialize_scope(builder: Callable, scope_id: str, intermediate) -> tuple[str, bytes]:
     return scope_id, builder(scope_id, intermediate)
 
@@ -346,7 +384,9 @@ __all__ = [
     "EXPORT_KEYS",
     "ExportJobResult",
     "ExportRolloutMode",
+    "ReferenceRolloutDecision",
     "build_fast_export_job",
     "build_fast_export_job_from_facts",
     "select_export_path",
+    "decide_reference_rollout",
 ]

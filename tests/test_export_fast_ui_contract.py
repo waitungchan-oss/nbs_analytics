@@ -29,3 +29,10 @@ def test_export_center_has_zip_download_without_rebuild_on_download():
     assert '一鍵下載完整報表包 ZIP' in source
     assert 'fast_package_path.read_bytes()' in source
     assert '不會重新 aggregation' in source
+
+
+def test_export_ui_exposes_reference_cache_states():
+    source = (ROOT / "streamlit_rendering.py").read_text(encoding="utf-8")
+    assert "REFERENCE HIT" in source
+    assert "REFERENCE MATERIALIZED" in source
+    assert "DEEP DIFF SKIPPED" in source

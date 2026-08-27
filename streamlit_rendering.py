@@ -479,6 +479,8 @@ def _render_export_status_card(cache: dict, export_loaded: bool) -> None:
     official_export_schema = str(cache.get("official_export_schema", "") or "")
     fast_status = str(cache.get("export_fast_status", "") or "").upper()
     fast_timings = cache.get("export_fast_timings") or {}
+    reference_status = str(cache.get("export_fast_reference_status", "") or "").upper()
+    deep_diff_skipped = bool(cache.get("export_fast_deep_diff_skipped", False))
     if fast_status in {"PREPARING", "VERIFYING"}:
         label = fast_status
         badge_class = "nbs-badge-info"
@@ -519,8 +521,18 @@ def _render_export_status_card(cache: dict, export_loaded: bool) -> None:
             f"｜serialization {fast_timings.get('serialization_ms', 0)}"
             f"｜package {fast_timings.get('package_ms', 0)}ms"
         )
+    reference_note = ""
+    if reference_status:
+        reference_label = {
+            "HIT": "REFERENCE HIT",
+            "MATERIALIZED": "REFERENCE MATERIALIZED",
+        }.get(reference_status, f"REFERENCE {reference_status}")
+        diff_label = "DEEP DIFF SKIPPED" if deep_diff_skipped else "DEEP DIFF EXECUTED"
+        reference_note = (
+            f"<br>{reference_label}｜{diff_label}"
+        )
     st.markdown(
-        f'<div class="nbs-export-status-card"><div><div class="nbs-export-status-title">{escape(title)}</div><div class="nbs-export-status-meta">{escape(note)}<br>{escape(path_note)}<br>{escape(version_note)}<br>{escape(schema_note)}{timing_note}</div></div><div class="nbs-badge {badge_class}">{escape(label)}</div></div>',
+        f'<div class="nbs-export-status-card"><div><div class="nbs-export-status-title">{escape(title)}</div><div class="nbs-export-status-meta">{escape(note)}<br>{escape(path_note)}<br>{escape(version_note)}<br>{escape(schema_note)}{reference_note}{timing_note}</div></div><div class="nbs-badge {badge_class}">{escape(label)}</div></div>',
         unsafe_allow_html=True,
     )
 

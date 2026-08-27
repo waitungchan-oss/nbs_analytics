@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 from typing import Any
 
 import pandas as pd
@@ -64,12 +65,13 @@ def build_benchmark_report(
 
     legacy_measurement = measure_legacy_export(_reference_builder, raw_tour, raw_others)
     fast_runs = []
+    cache_scenarios = []
     for index in range(samples):
         cache_root = Path(tempfile.mkdtemp(prefix=f"nbs-export-benchmark-{index}-"))
         try:
-            result = build_fast_export_job_from_facts(
-                raw_tour,
-                raw_others,
+            kwargs = dict(
+                raw_tour=raw_tour,
+                raw_others=raw_others,
                 generation_token=f"benchmark-{index}",
                 rules_fingerprint="benchmark-rules",
                 export_schema_version="benchmark-schema",
@@ -79,21 +81,67 @@ def build_benchmark_report(
                 writer=_write_dashboard_facts,
                 worker_count=worker_count,
             )
+            # First run establishes the trusted reference.  The second run
+            # deliberately reuses the exact identity to measure the real HIT
+            # path instead of inferring it from a cold-run timing.
+            result = build_fast_export_job_from_facts(**kwargs)
             manifest = load_ready_export_manifest(result.manifest_path) if result.manifest_path else None
             if result.status != "READY" or manifest is None:
                 raise RuntimeError(result.fallback_reason or "fast export benchmark did not reach READY")
-            fast_runs.append({
+            first_run = {
                 "status": result.status,
                 "timings": dict(result.timings),
                 "serialization_ms": dict(manifest.telemetry.get("serialization_ms") or {}),
                 "package_ms": int(manifest.telemetry.get("package_ms", 0)),
                 "artifact_bytes": {key: item.size for key, item in manifest.artifacts.items()},
                 "equivalence_status": manifest.equivalence_status,
+                "reference_status": str((manifest.reference or {}).get("status", "UNKNOWN")),
+                "deep_diff_skipped": bool((manifest.reference or {}).get("deep_diff_skipped", False)),
+            }
+            fast_runs.append(first_run)
+
+            hit_started = time.perf_counter()
+            hit_result = build_fast_export_job_from_facts(**kwargs)
+            hit_elapsed_ms = round((time.perf_counter() - hit_started) * 1000)
+            hit_manifest = load_ready_export_manifest(hit_result.manifest_path) if hit_result.manifest_path else None
+            if hit_result.status != "READY" or hit_manifest is None:
+                raise RuntimeError(hit_result.fallback_reason or "trusted reference cache-hit benchmark did not reach READY")
+            cache_scenarios.append({
+                "scenario": "same_identity_cache_hit",
+                "status": hit_result.status,
+                "elapsed_ms": hit_elapsed_ms,
+                "reference_status": str((hit_manifest.reference or {}).get("status", "UNKNOWN")),
+                "deep_diff_skipped": bool((hit_manifest.reference or {}).get("deep_diff_skipped", False)),
+                "equivalence_status": hit_manifest.equivalence_status,
+                "reference_lookup_ms": int(hit_result.timings.get("reference_lookup_ms", 0)),
+                "equivalence_digest_ms": int(hit_result.timings.get("equivalence_digest_ms", 0)),
+                "equivalence_deep_diff_ms": int(hit_result.timings.get("equivalence_deep_diff_ms", 0)),
+            })
+            stale_result = build_fast_export_job_from_facts(
+                **dict(kwargs, rules_fingerprint="benchmark-rules-stale")
+            )
+            stale_manifest = load_ready_export_manifest(stale_result.manifest_path) if stale_result.manifest_path else None
+            if stale_result.status != "READY" or stale_manifest is None:
+                raise RuntimeError(stale_result.fallback_reason or "stale identity benchmark did not reach READY")
+            cache_scenarios.append({
+                "scenario": "stale_identity_materialization",
+                "status": stale_result.status,
+                "elapsed_ms": int(stale_result.timings.get("total_ms", 0)),
+                "reference_status": str((stale_manifest.reference or {}).get("status", "UNKNOWN")),
+                "deep_diff_skipped": bool((stale_manifest.reference or {}).get("deep_diff_skipped", False)),
+                "equivalence_status": stale_manifest.equivalence_status,
+                "reference_lookup_ms": int(stale_result.timings.get("reference_lookup_ms", 0)),
+                "equivalence_digest_ms": int(stale_result.timings.get("equivalence_digest_ms", 0)),
+                "equivalence_deep_diff_ms": int(stale_result.timings.get("equivalence_deep_diff_ms", 0)),
             })
         finally:
             shutil.rmtree(cache_root, ignore_errors=True)
     last = fast_runs[-1]
     fast_timings = last["timings"]
+    cache_hit_scenario = next(
+        (item for item in cache_scenarios if item["scenario"] == "same_identity_cache_hit"),
+        None,
+    )
     return {
         "schema_version": "data-export-serialization-benchmark-v1",
         "database_mutated": False,
@@ -118,10 +166,42 @@ def build_benchmark_report(
             "equivalence_deep_diff_ms": int(
                 fast_timings.get("equivalence_deep_diff_ms", fast_timings.get("equivalence_ms", 0))
             ),
-            "cache_hit_ms": int(fast_timings.get("cache_hit_ms", 0)),
+            "cache_hit_ms": int(cache_hit_scenario["elapsed_ms"] if cache_hit_scenario else 0),
+            "reference_status": last.get("reference_status", "UNKNOWN"),
+            "deep_diff_skipped": last.get("deep_diff_skipped", False),
             "artifact_bytes": last["artifact_bytes"],
             "runs": fast_runs,
+            "scenarios": cache_scenarios,
         },
+    }
+
+
+def build_reference_benchmark_report(
+    raw_tour: pd.DataFrame,
+    raw_others: pd.DataFrame,
+    *,
+    worker_count: int = 3,
+) -> dict[str, Any]:
+    """Return bounded named scenarios for the trusted-reference rollout gate."""
+    report = build_benchmark_report(
+        raw_tour, raw_others, samples=1, worker_count=worker_count
+    )
+    scenarios = report["fast"].get("scenarios", [])
+    first = report["fast"]["runs"][0]
+    hit = next(item for item in scenarios if item["scenario"] == "same_identity_cache_hit")
+    stale = next(item for item in scenarios if item["scenario"] == "stale_identity_materialization")
+    return {
+        "schema_version": "trusted-reference-benchmark-v1",
+        "database_mutated": report["database_mutated"],
+        "equivalence_status": report["equivalence_status"],
+        "first_materialization": {
+            "reference_status": first["reference_status"],
+            "deep_diff_skipped": first["deep_diff_skipped"],
+            "equivalence_status": first["equivalence_status"],
+            "total_ms": first["timings"]["total_ms"],
+        },
+        "same_identity_hit": hit,
+        "stale_identity": stale,
     }
 
 

@@ -58,3 +58,24 @@ def test_benchmark_reports_reference_and_equivalence_stages():
         "equivalence_deep_diff_ms",
         "cache_hit_ms",
     } <= set(report["fast"])
+
+
+def test_benchmark_executes_real_hit_and_stale_identity_scenarios():
+    from scripts.benchmark_data_export_serialization import build_benchmark_report
+
+    report = build_benchmark_report(*_frames(), samples=1, worker_count=1)
+    scenarios = {item["scenario"]: item for item in report["fast"]["scenarios"]}
+
+    hit = scenarios["same_identity_cache_hit"]
+    assert hit["status"] == "READY"
+    assert hit["reference_status"] == "HIT"
+    assert hit["deep_diff_skipped"] is True
+    assert hit["equivalence_status"] == "PASS"
+    assert hit["equivalence_deep_diff_ms"] == 0
+    assert report["fast"]["cache_hit_ms"] == hit["elapsed_ms"]
+
+    stale = scenarios["stale_identity_materialization"]
+    assert stale["status"] == "READY"
+    assert stale["reference_status"] == "MATERIALIZED"
+    assert stale["deep_diff_skipped"] is False
+    assert stale["equivalence_status"] == "PASS"

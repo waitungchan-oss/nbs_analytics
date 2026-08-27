@@ -27,3 +27,11 @@ def test_export_ui_surfaces_bounded_fallback_and_zip_status():
     source = (Path(__file__).resolve().parents[1] / "app_pages.py").read_text(encoding="utf-8")
     assert "高速匯出驗證失敗，已使用相容匯出路徑" in source
     assert "export_fast_status" in source
+
+
+def test_reference_rollout_decision_is_explicit_and_fail_closed():
+    from backend.services.export_fast_path_service import decide_reference_rollout
+
+    decision = decide_reference_rollout({"requested_mode": "unknown"})
+    assert decision.mode == "shadow"
+    assert decision.reason == "INVALID_REQUESTED_MODE"
