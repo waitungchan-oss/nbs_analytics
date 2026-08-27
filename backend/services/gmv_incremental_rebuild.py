@@ -93,6 +93,28 @@ def build_rebuild_stage_telemetry(stage_timings_ms: Mapping[str, float]) -> dict
     }
 
 
+def resolve_incremental_rollout_mode(raw_mode: str | None) -> str:
+    """Resolve rollout mode with a safe shadow default and fail-closed fallback."""
+    mode = normalize_text(raw_mode).lower()
+    return mode if mode in {"shadow", "opt_in", "default"} else "shadow"
+
+
+def should_publish_incremental_result(
+    *,
+    mode: str,
+    equivalence_status: str,
+    baseline_status: str,
+    conservation_status: str,
+) -> bool:
+    """Only opt-in/default modes with all independent gates may publish."""
+    return (
+        resolve_incremental_rollout_mode(mode) in {"opt_in", "default"}
+        and equivalence_status == "PASS"
+        and baseline_status == "PASS"
+        and conservation_status == "PASS"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class IncrementalRebuildThresholds:
     max_affected_receipt_count: int = 100_000

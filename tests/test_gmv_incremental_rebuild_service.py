@@ -13,6 +13,8 @@ from backend.services.gmv_incremental_rebuild import (
     resolve_rebuild_strategy,
     validate_rebuild_plan_freshness,
     build_rebuild_stage_telemetry,
+    resolve_incremental_rollout_mode,
+    should_publish_incremental_result,
 )
 import pandas as pd
 import pytest
@@ -270,6 +272,28 @@ def test_stage_telemetry_rejects_unknown_or_negative_values():
         build_rebuild_stage_telemetry({"unknown": 1})
     with pytest.raises(ValueError, match="non-negative"):
         build_rebuild_stage_telemetry({"plan": -1})
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, "shadow"),
+    ("OPT_IN", "opt_in"),
+    ("default", "default"),
+    ("unsafe", "shadow"),
+])
+def test_incremental_rollout_mode_is_fail_closed(raw, expected):
+    assert resolve_incremental_rollout_mode(raw) == expected
+
+
+def test_incremental_publish_requires_safe_evidence_and_enabled_mode():
+    assert should_publish_incremental_result(
+        mode="opt_in", equivalence_status="PASS", baseline_status="PASS", conservation_status="PASS"
+    ) is True
+    assert should_publish_incremental_result(
+        mode="shadow", equivalence_status="PASS", baseline_status="PASS", conservation_status="PASS"
+    ) is False
+    assert should_publish_incremental_result(
+        mode="opt_in", equivalence_status="FAIL", baseline_status="PASS", conservation_status="PASS"
+    ) is False
 
 
 def test_equivalence_reports_first_layer_and_row_mismatch():
