@@ -93,6 +93,7 @@ def build_benchmark_report(
         finally:
             shutil.rmtree(cache_root, ignore_errors=True)
     last = fast_runs[-1]
+    fast_timings = last["timings"]
     return {
         "schema_version": "data-export-serialization-benchmark-v1",
         "database_mutated": False,
@@ -108,7 +109,16 @@ def build_benchmark_report(
         "fast": {
             "serialization_ms": last["serialization_ms"],
             "package_ms": last["package_ms"],
-            "total_ms": last["timings"]["total_ms"],
+            "total_ms": fast_timings["total_ms"],
+            "reference_lookup_ms": int(fast_timings.get("reference_lookup_ms", 0)),
+            "reference_materialize_ms": int(
+                fast_timings.get("reference_materialize_ms", fast_timings.get("reference_ms", 0))
+            ),
+            "equivalence_digest_ms": int(fast_timings.get("equivalence_digest_ms", 0)),
+            "equivalence_deep_diff_ms": int(
+                fast_timings.get("equivalence_deep_diff_ms", fast_timings.get("equivalence_ms", 0))
+            ),
+            "cache_hit_ms": int(fast_timings.get("cache_hit_ms", 0)),
             "artifact_bytes": last["artifact_bytes"],
             "runs": fast_runs,
         },

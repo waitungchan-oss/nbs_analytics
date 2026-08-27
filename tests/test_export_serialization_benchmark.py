@@ -44,3 +44,17 @@ def test_serialization_benchmark_reports_separate_stage_contract():
     assert set(report["fast"]["serialization_ms"]) == {
         "ex.xlsx", "ex_no_writeoff.xlsx", "ex_no_writeoff_refund_transfer.xlsx",
     }
+
+
+def test_benchmark_reports_reference_and_equivalence_stages():
+    from scripts.benchmark_data_export_serialization import build_benchmark_report
+
+    report = build_benchmark_report(*_frames(), samples=1, worker_count=1)
+
+    assert {
+        "reference_lookup_ms",
+        "reference_materialize_ms",
+        "equivalence_digest_ms",
+        "equivalence_deep_diff_ms",
+        "cache_hit_ms",
+    } <= set(report["fast"])
