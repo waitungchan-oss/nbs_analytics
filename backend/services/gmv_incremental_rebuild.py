@@ -45,6 +45,76 @@ class RebuildFingerprints:
         )
 
 
+def validate_rebuild_plan_freshness(
+    plan: IncrementalRebuildPlan,
+    *,
+    current_base_version_id: str,
+    current_revenue_generation_token: str,
+    current_rules_fingerprint: str,
+    current_source_fingerprint: str,
+) -> tuple[bool, str | None]:
+    """Prevent an incremental plan from publishing against changed inputs."""
+    checks = (
+        ("BASE_VERSION_CHANGED", plan.base_version_id, current_base_version_id),
+        (
+            "REVENUE_GENERATION_CHANGED",
+            plan.revenue_generation_token,
+            current_revenue_generation_token,
+        ),
+        ("RULES_FINGERPRINT_CHANGED", plan.rules_fingerprint, current_rules_fingerprint),
+        ("SOURCE_FINGERPRINT_CHANGED", plan.source_fingerprint, current_source_fingerprint),
+    )
+    for reason, expected, actual in checks:
+        if normalize_text(expected) != normalize_text(actual):
+            return False, reason
+    return True, None
+
+
+_REBUILD_TELEMETRY_STAGES = frozenset({"plan", "affected", "aggregate", "equivalence", "publish"})
+
+
+def build_rebuild_stage_telemetry(stage_timings_ms: Mapping[str, float]) -> dict[str, object]:
+    """Return a stable, bounded telemetry payload for one rebuild attempt."""
+    if not isinstance(stage_timings_ms, Mapping):
+        raise ValueError("stage timings must be a mapping")
+    stages: dict[str, float] = {}
+    for raw_stage, raw_value in stage_timings_ms.items():
+        stage = normalize_text(raw_stage)
+        if stage not in _REBUILD_TELEMETRY_STAGES:
+            raise ValueError(f"unknown rebuild telemetry stage name: {stage}")
+        value = float(raw_value)
+        if value < 0:
+            raise ValueError("stage timing must be non-negative")
+        stages[stage] = round(value, 3)
+    return {
+        "schemaVersion": "gmv-rebuild-telemetry-v1",
+        "stages": dict(sorted(stages.items())),
+        "totalMs": round(sum(stages.values()), 3),
+    }
+
+
+def resolve_incremental_rollout_mode(raw_mode: str | None) -> str:
+    """Resolve rollout mode with a safe shadow default and fail-closed fallback."""
+    mode = normalize_text(raw_mode).lower()
+    return mode if mode in {"shadow", "opt_in", "default"} else "shadow"
+
+
+def should_publish_incremental_result(
+    *,
+    mode: str,
+    equivalence_status: str,
+    baseline_status: str,
+    conservation_status: str,
+) -> bool:
+    """Only opt-in/default modes with all independent gates may publish."""
+    return (
+        resolve_incremental_rollout_mode(mode) in {"opt_in", "default"}
+        and equivalence_status == "PASS"
+        and baseline_status == "PASS"
+        and conservation_status == "PASS"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class IncrementalRebuildThresholds:
     max_affected_receipt_count: int = 100_000

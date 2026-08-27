@@ -11,6 +11,10 @@ from backend.services.gmv_incremental_rebuild import (
     build_incremental_metric_snapshot,
     compare_incremental_to_reference,
     resolve_rebuild_strategy,
+    validate_rebuild_plan_freshness,
+    build_rebuild_stage_telemetry,
+    resolve_incremental_rollout_mode,
+    should_publish_incremental_result,
 )
 import pandas as pd
 import pytest
@@ -217,6 +221,79 @@ def test_equivalence_ignores_row_order_but_compares_semantic_values():
 
     assert report.status == "PASS"
     assert report.first_mismatch is None
+
+
+def test_stale_plan_is_rejected_when_any_publish_fingerprint_changes():
+    plan = build_incremental_plan(
+        base_version_id="v1",
+        state_delta=_delta(affected_source_receipt_nos=("R-1",)),
+        fingerprints=_matching_fingerprints(),
+    )
+
+    assert validate_rebuild_plan_freshness(
+        plan,
+        current_base_version_id="v1",
+        current_revenue_generation_token="revenue-v1",
+        current_rules_fingerprint="rules-v2",
+        current_source_fingerprint="source-v1",
+    ) == (False, "RULES_FINGERPRINT_CHANGED")
+
+
+def test_fresh_plan_passes_stale_plan_guard():
+    plan = build_incremental_plan(
+        base_version_id="v1",
+        state_delta=_delta(affected_source_receipt_nos=("R-1",)),
+        fingerprints=_matching_fingerprints(),
+    )
+
+    assert validate_rebuild_plan_freshness(
+        plan,
+        current_base_version_id="v1",
+        current_revenue_generation_token="revenue-v1",
+        current_rules_fingerprint="rules-v1",
+        current_source_fingerprint="source-v1",
+    ) == (True, None)
+
+
+def test_stage_telemetry_is_bounded_and_total_is_deterministic():
+    telemetry = build_rebuild_stage_telemetry(
+        {"plan": 1.25, "affected": 2.5, "publish": 0.25}
+    )
+
+    assert telemetry == {
+        "schemaVersion": "gmv-rebuild-telemetry-v1",
+        "stages": {"affected": 2.5, "plan": 1.25, "publish": 0.25},
+        "totalMs": 4.0,
+    }
+
+
+def test_stage_telemetry_rejects_unknown_or_negative_values():
+    with pytest.raises(ValueError, match="stage name"):
+        build_rebuild_stage_telemetry({"unknown": 1})
+    with pytest.raises(ValueError, match="non-negative"):
+        build_rebuild_stage_telemetry({"plan": -1})
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, "shadow"),
+    ("OPT_IN", "opt_in"),
+    ("default", "default"),
+    ("unsafe", "shadow"),
+])
+def test_incremental_rollout_mode_is_fail_closed(raw, expected):
+    assert resolve_incremental_rollout_mode(raw) == expected
+
+
+def test_incremental_publish_requires_safe_evidence_and_enabled_mode():
+    assert should_publish_incremental_result(
+        mode="opt_in", equivalence_status="PASS", baseline_status="PASS", conservation_status="PASS"
+    ) is True
+    assert should_publish_incremental_result(
+        mode="shadow", equivalence_status="PASS", baseline_status="PASS", conservation_status="PASS"
+    ) is False
+    assert should_publish_incremental_result(
+        mode="opt_in", equivalence_status="FAIL", baseline_status="PASS", conservation_status="PASS"
+    ) is False
 
 
 def test_equivalence_reports_first_layer_and_row_mismatch():

@@ -1,9 +1,11 @@
 import json
 import hashlib
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from backend.services.gmv_export_cache_service import (
     LEGACY_CACHE_SCHEMA_VERSION,
@@ -12,6 +14,7 @@ from backend.services.gmv_export_cache_service import (
     build_gmv_export_cache,
     gmv_export_cache_key,
     load_gmv_export_cache,
+    publish_gmv_export_cache_manifest,
 )
 
 
@@ -90,6 +93,18 @@ def test_incomplete_artifact_set_is_failed_and_preserves_active_pointer(tmp_path
     assert failed.status == "failed"
     assert "artifact contract" in (failed.error or "")
     assert loaded == active
+
+
+def test_publish_rejects_manifest_with_missing_generation_files(tmp_path: Path):
+    active = build_gmv_export_cache(cache_dir=tmp_path, **_inputs())
+    pointer = tmp_path / "version-1" / "active.json"
+    before = pointer.read_bytes()
+    forged = replace(active, generation_path="generations/missing")
+
+    with pytest.raises(ValueError, match="artifact file"):
+        publish_gmv_export_cache_manifest(cache_dir=tmp_path, manifest=forged)
+
+    assert pointer.read_bytes() == before
 
 
 def test_cache_miss_for_wrong_identity_and_partial_artifact(tmp_path: Path):
