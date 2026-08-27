@@ -7,6 +7,7 @@ import json
 import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from enum import Enum
 from typing import Mapping, Sequence
 
 
@@ -164,6 +165,69 @@ class RefundStateDelta:
                 "AMOUNT_CHANGED": len(self.amount_changed_refund_order_nos),
                 "REFUND_IDENTITY_CONFLICT": len(self.identity_conflict_refund_order_nos),
             })
+
+
+class RebuildDecision(str, Enum):
+    INCREMENTAL_ELIGIBLE = "INCREMENTAL_ELIGIBLE"
+    FULL_REBUILD_REQUIRED = "FULL_REBUILD_REQUIRED"
+    BLOCKED = "BLOCKED"
+
+
+class RebuildReasonCode(str, Enum):
+    IDENTITY_CONFLICT = "REFUND_IDENTITY_CONFLICT"
+    FINGERPRINT_MISMATCH = "FINGERPRINT_MISMATCH"
+    SNAPSHOT_INCOMPLETE = "SNAPSHOT_INCOMPLETE"
+    AFFECTED_SET_TOO_LARGE = "AFFECTED_SET_TOO_LARGE"
+    INVALID_REFUND_STATE = "INVALID_REFUND_STATE"
+
+
+def _stable_unique_text(values: Sequence[str]) -> tuple[str, ...]:
+    return tuple(sorted({normalized for value in values if (normalized := normalize_text(value))}))
+
+
+@dataclass(frozen=True, slots=True)
+class IncrementalRebuildPlan:
+    base_version_id: str
+    affected_source_receipt_nos: tuple[str, ...]
+    affected_refund_ids: tuple[str, ...]
+    affected_count: int
+    unaffected_copy_candidate_count: int
+    revenue_generation_token: str
+    rules_fingerprint: str
+    source_fingerprint: str
+    decision: RebuildDecision
+    reason_codes: tuple[RebuildReasonCode, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "base_version_id", normalize_text(self.base_version_id))
+        object.__setattr__(self, "affected_source_receipt_nos", _stable_unique_text(self.affected_source_receipt_nos))
+        object.__setattr__(self, "affected_refund_ids", _stable_unique_text(self.affected_refund_ids))
+        object.__setattr__(self, "reason_codes", tuple(sorted(set(self.reason_codes), key=lambda item: item.value)))
+        if not self.base_version_id:
+            raise ValueError("base_version_id is required")
+        if self.affected_count < 0 or self.unaffected_copy_candidate_count < 0:
+            raise ValueError("rebuild counts cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class IncrementalRebuildResult:
+    version_id: str
+    recomputed_receipts: int
+    copied_receipts: int
+    recomputed_rows: int
+    copied_rows: int
+    dimensions: tuple[str, ...]
+    equivalence_status: str
+    fallback_used: bool
+    publish_status: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "version_id", normalize_text(self.version_id))
+        object.__setattr__(self, "dimensions", tuple(normalize_text(item) for item in self.dimensions))
+        if not self.version_id:
+            raise ValueError("version_id is required")
+        if any(value < 0 for value in (self.recomputed_receipts, self.copied_receipts, self.recomputed_rows, self.copied_rows)):
+            raise ValueError("rebuild counts cannot be negative")
 
 
 def classify_refund_state_delta(
