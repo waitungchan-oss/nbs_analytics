@@ -1018,7 +1018,7 @@ def _run_fast_export_gate(
         build_gmv_export_base_preparation, build_gmv_report_fact_set,
     )
     from backend.services.gmv_export_serializer_service import (
-        SerializerJob, SerializerPublicationGate, bounded_serializer_timeout_seconds,
+        SerializerPublicationGate, build_gmv_serializer_jobs, bounded_serializer_timeout_seconds,
         serialize_gmv_workbooks_parallel,
     )
 
@@ -1059,14 +1059,13 @@ def _run_fast_export_gate(
     checksum_status = _gmv_preparation_checksum_status(prep)
     with tempfile.TemporaryDirectory(prefix="gmv-fast-gate-", dir=cache_dir) as raw_dir:
         gate_dir = Path(raw_dir)
-        fact_jobs = []
         job_specs = (
             ("total", "總退款", total_adjusted),
             ("paid", "已退款", paid_adjusted),
         )
-        scope_files = (("all", "ex.xlsx"), ("no_writeoff", "ex_no_writeoff.xlsx"), ("official", "ex_no_writeoff_refund_transfer.xlsx"))
+        fact_sets = {}
         for dimension_key, dimension_label, adjusted in job_specs:
-            fact_set = build_gmv_report_fact_set(
+            fact_sets[dimension_key] = build_gmv_report_fact_set(
                 preparation=prep,
                 adjusted_tour=adjusted["tour"],
                 adjusted_others=adjusted["others"],
@@ -1074,20 +1073,19 @@ def _run_fast_export_gate(
                 rules=rules,
                 include_branch_salesperson_sheet=True,
             )
-            for scope_id, filename in scope_files:
-                fact_jobs.append((
-                    f"{dimension_key}.workbook.{filename}",
-                    fact_set.facts_by_scope[scope_id],
-                    gate_dir / f"{dimension_key}.{filename}",
-                ))
         facts_schema_status = "PASS" if all(
-            facts.schema_fingerprint and facts.data_fingerprint for _, facts, _ in fact_jobs
+            facts.schema_fingerprint and facts.data_fingerprint
+            for fact_set in fact_sets.values()
+            for facts in fact_set.facts_by_scope.values()
         ) else "FAIL"
         staging_gate = SerializerPublicationGate(
             "PENDING", checksum_status, facts_schema_status, baseline_status,
             "PENDING", staging_only=True,
         )
-        jobs = [SerializerJob(artifact_id, facts, path, staging_gate) for artifact_id, facts, path in fact_jobs]
+        jobs = build_gmv_serializer_jobs(
+            total_facts=fact_sets["total"], paid_facts=fact_sets["paid"],
+            staging_dir=gate_dir, publication_gate=staging_gate,
+        )
         results = serialize_gmv_workbooks_parallel(
             jobs,
             max_workers=max(1, min(worker_count, 3)),

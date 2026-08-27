@@ -25,6 +25,55 @@ def _gate():
     return SerializerPublicationGate("PASS", "PASS", "PASS", "PASS", "PASS")
 
 
+def _fact_set(dimension):
+    from backend.services.gmv_export_intermediate_service import GmvReportFactSet
+    return GmvReportFactSet(
+        dimension=dimension,
+        facts_by_scope={scope: _facts(dimension, scope) for scope in ("all", "no_writeoff", "official")},
+        preparation_fingerprint="prep",
+        aggregation_count=1,
+    )
+
+
+def test_build_serializer_jobs_has_fixed_six_workbook_contract(tmp_path):
+    from backend.services.gmv_export_serializer_service import build_gmv_serializer_jobs
+
+    jobs = build_gmv_serializer_jobs(
+        total_facts=_fact_set("總退款"), paid_facts=_fact_set("已退款"),
+        staging_dir=tmp_path, publication_gate=_gate(),
+    )
+    assert [job.artifact_id for job in jobs] == [
+        "total.workbook.ex.xlsx", "total.workbook.ex_no_writeoff.xlsx",
+        "total.workbook.ex_no_writeoff_refund_transfer.xlsx", "paid.workbook.ex.xlsx",
+        "paid.workbook.ex_no_writeoff.xlsx", "paid.workbook.ex_no_writeoff_refund_transfer.xlsx",
+    ]
+    assert all(job.facts.dimension in {"總退款", "已退款"} for job in jobs)
+
+
+def test_build_serializer_jobs_rejects_invalid_dimension_or_gate(tmp_path):
+    from backend.services.gmv_export_serializer_service import SerializerPublicationGate, build_gmv_serializer_jobs
+
+    try:
+        build_gmv_serializer_jobs(
+            total_facts=_fact_set("已退款"), paid_facts=_fact_set("已退款"),
+            staging_dir=tmp_path, publication_gate=_gate(),
+        )
+    except ValueError as exc:
+        assert "dimension" in str(exc)
+    else:
+        raise AssertionError("invalid dimensions must fail closed")
+    try:
+        build_gmv_serializer_jobs(
+            total_facts=_fact_set("總退款"), paid_facts=_fact_set("已退款"),
+            staging_dir=tmp_path,
+            publication_gate=SerializerPublicationGate("FAIL", "PASS", "PASS", "PASS", "PASS"),
+        )
+    except ValueError as exc:
+        assert "gate" in str(exc)
+    else:
+        raise AssertionError("failed publication gate must fail closed")
+
+
 def test_serializer_publication_gate_rejects_shadow_mismatch():
     from backend.services.gmv_export_serializer_service import SerializerPublicationGate
 
