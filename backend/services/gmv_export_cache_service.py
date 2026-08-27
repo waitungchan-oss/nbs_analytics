@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,9 @@ class GmvExportCacheManifest:
     shadow_status: str = "NOT_RUN"
     reference_manifest_sha256: str | None = None
     reference_status: str = "N/A"
+    performance: dict[str, object] = field(default_factory=dict)
+    fallback: dict[str, object] = field(default_factory=dict)
+    refund_state_sha256: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -71,6 +74,9 @@ class GmvExportCacheManifest:
             "shadowStatus": self.shadow_status,
             "referenceManifestSha256": self.reference_manifest_sha256,
             "referenceStatus": self.reference_status,
+            "performance": self.performance,
+            "fallback": self.fallback,
+            "refundStateSha256": self.refund_state_sha256,
         }
 
     @classmethod
@@ -95,6 +101,9 @@ class GmvExportCacheManifest:
             shadow_status=str(payload.get("shadowStatus", "NOT_RUN")),
             reference_manifest_sha256=(str(payload["referenceManifestSha256"]) if payload.get("referenceManifestSha256") else None),
             reference_status=str(payload.get("referenceStatus", "N/A")),
+            performance=dict(payload.get("performance") or {}),
+            fallback=dict(payload.get("fallback") or {}),
+            refund_state_sha256=(str(payload["refundStateSha256"]) if payload.get("refundStateSha256") else None),
         )
 
 
@@ -217,6 +226,9 @@ def build_gmv_export_cache(
     reference_manifest_sha256: str | None = None,
     reference_status: str = "N/A",
     ready_error: str | None = None,
+    performance: dict[str, object] | None = None,
+    fallback: dict[str, object] | None = None,
+    refund_state_sha256: str | None = None,
 ) -> GmvExportCacheManifest:
     cache_key = gmv_export_cache_key(
         version_id=version_id,
@@ -263,7 +275,7 @@ def build_gmv_export_cache(
             CACHE_SCHEMA_VERSION, "ready", artifacts, round((time.perf_counter() - started) * 1000), ready_error,
             builder_mode, equivalence_status, len(artifacts), str(generation_path),
             content_fingerprint, reference_id, validation_mode, shadow_status, reference_manifest_sha256,
-            reference_status,
+            reference_status, performance or {}, fallback or {}, refund_state_sha256,
         )
         _write_manifest(target / "manifest.json", manifest)
         if publish_active:
@@ -275,7 +287,7 @@ def build_gmv_export_cache(
             CACHE_SCHEMA_VERSION, "failed", {}, round((time.perf_counter() - started) * 1000),
             f"serialize_artifacts: {type(exc).__name__}: {exc}", builder_mode, equivalence_status, 0,
             content_fingerprint, reference_id, validation_mode, shadow_status, reference_manifest_sha256,
-            reference_status,
+            reference_status, performance or {}, fallback or {}, refund_state_sha256,
         )
         _write_manifest(target / "manifest.json", manifest)
         return manifest
