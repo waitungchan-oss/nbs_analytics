@@ -66,7 +66,7 @@ def test_project_policy_allows_only_named_root_worker_governance_file():
 def test_context_collection_truncates_documents_and_never_reads_db(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)
-    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/superpowers").mkdir(parents=True)
     brief = tmp_path / "docs/brief.md"
     brief.write_text("\n".join(f"line-{i}" for i in range(20)), encoding="utf-8")
     (tmp_path / "secret.db").write_text("formal rows", encoding="utf-8")
@@ -261,6 +261,31 @@ def test_review_diff_uses_review_only_excerpt_budget_without_broadening_context(
     assert len(ordinary.stdout) == 200
 
 
+def test_review_launch_fingerprint_uses_full_status_when_excerpt_is_truncated(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path, review_command_characters=40)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    for index in range(20):
+        (tmp_path / "docs" / f"changed-{index:02d}.md").write_text("new", encoding="utf-8")
+
+    collector = EvidenceCollector(tmp_path)
+    bundle = collector.collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+    raw = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all", "--",
+         ".", ":(exclude)docs/superpowers", ":(exclude).superpowers"],
+        cwd=tmp_path, text=True, capture_output=True, check=True,
+    ).stdout
+
+    assert next(item for item in bundle.commands if item.label == "review-launch-worktree-fingerprint").truncated
+    assert bundle.repository["reviewLaunchWorktreeFingerprint"] == __import__("hashlib").sha256(
+        raw.encode()
+    ).hexdigest()
+
+
 def test_review_file_lists_use_review_excerpt_budget_for_tracked_and_untracked_paths(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path, review_command_characters=1200)
@@ -402,6 +427,69 @@ def test_review_collection_marks_denied_superpowers_artifacts_as_preserved(tmp_p
 
     assert bundle.repository["dirtyFiles"] == [".superpowers/sdd/task-report.md"]
     assert bundle.repository["preservedDirtyFiles"] == [".superpowers/sdd/task-report.md"]
+
+
+def test_review_collection_only_preserves_explicit_process_path(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs/superpowers").mkdir(parents=True)
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    process_note = tmp_path / "docs/superpowers/plan.md"
+    process_note.write_text("process-only", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief,
+        base_ref="HEAD",
+        head_ref="WORKTREE",
+        preserve_dirty_paths=("docs/superpowers/plan.md",),
+    )
+
+    assert bundle.repository["preservedDirtyFiles"] == ["docs/superpowers/plan.md"]
+    assert not bundle.evidence
+
+
+def test_review_collection_only_preserves_explicit_tracked_process_path(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs/superpowers").mkdir(parents=True)
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    process_note = tmp_path / "docs/superpowers/process.md"
+    process_note.write_text("process-only", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    process_note.write_text("process-only changed", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief,
+        base_ref="HEAD",
+        head_ref="WORKTREE",
+        preserve_dirty_paths=("docs/superpowers/process.md",),
+    )
+
+    assert bundle.repository["preservedDirtyFiles"] == ["docs/superpowers/process.md"]
+    assert not bundle.evidence
+
+
+def test_review_collection_rejects_preserve_allowlist_outside_process_artifacts(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+
+    with pytest.raises(PermissionError, match="process artifacts"):
+        EvidenceCollector(tmp_path).collect_review(
+            brief,
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            preserve_dirty_paths=("tests/test_real_change.py",),
+        )
 
 
 def test_review_collection_keeps_legal_tracked_root_source_while_skipping_process_and_sensitive_paths(tmp_path):

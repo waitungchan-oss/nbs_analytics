@@ -1,0 +1,106 @@
+<h2>正式淨 GMV：SQLite 架構方案</h2>
+<p class="subtitle">目標：雙正式口徑、可追溯／可回滾，並且不增加現有 Dashboard 的 page-load 計算。</p>
+
+<div class="section">
+  <div class="label">建議方案的資料流</div>
+  <div class="mockup">
+    <div class="mockup-header">方案 A｜同一 SQLite 的獨立 GMV Ledger + 預計算 Snapshot</div>
+    <div class="mockup-body">
+      <svg viewBox="0 0 1180 420" width="100%" role="img" aria-label="正式營收與正式淨 GMV 雙口徑架構圖">
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L0,6 L9,3 z" fill="#64748b"></path>
+          </marker>
+          <style>
+            .box{fill:#fff;stroke:#94a3b8;stroke-width:2;rx:12}
+            .source{fill:#eff6ff;stroke:#3b82f6}
+            .ledger{fill:#f5f3ff;stroke:#8b5cf6}
+            .snap{fill:#ecfdf5;stroke:#10b981}
+            .consumer{fill:#fff7ed;stroke:#f97316}
+            .muted{fill:#f8fafc;stroke:#cbd5e1}
+            .t{font:600 18px system-ui;fill:#0f172a;text-anchor:middle}
+            .s{font:14px system-ui;fill:#475569;text-anchor:middle}
+            .line{stroke:#64748b;stroke-width:2;fill:none;marker-end:url(#arrow)}
+            .dash{stroke:#94a3b8;stroke-dasharray:7 6;stroke-width:2;fill:none;marker-end:url(#arrow)}
+          </style>
+        </defs>
+
+        <rect class="box source" x="30" y="56" width="210" height="90"></rect>
+        <text class="t" x="135" y="91">現有正式營收明細</text>
+        <text class="s" x="135" y="118">tour_data / others_data</text>
+
+        <rect class="box source" x="30" y="258" width="210" height="90"></rect>
+        <text class="t" x="135" y="293">退款明細檔</text>
+        <text class="s" x="135" y="320">總退款 + 已退款</text>
+
+        <rect class="box ledger" x="330" y="225" width="250" height="145"></rect>
+        <text class="t" x="455" y="260">GMV Refund Ledger</text>
+        <text class="s" x="455" y="289">批次 / 明細 / 對帳結果</text>
+        <text class="s" x="455" y="315">Preflight → 人工確認</text>
+        <text class="s" x="455" y="341">版本化生效 / 可回滾</text>
+
+        <rect class="box snap" x="665" y="192" width="250" height="112"></rect>
+        <text class="t" x="790" y="229">GMV Active Snapshot</text>
+        <text class="s" x="790" y="257">原訂單月份：正式淨 GMV</text>
+        <text class="s" x="790" y="280">退款月份：營運分析</text>
+
+        <rect class="box consumer" x="990" y="194" width="160" height="108"></rect>
+        <text class="t" x="1070" y="229">新 Consumer</text>
+        <text class="s" x="1070" y="256">GMV Dashboard</text>
+        <text class="s" x="1070" y="279">GMV Export</text>
+
+        <rect class="box muted" x="330" y="35" width="250" height="112"></rect>
+        <text class="t" x="455" y="72">既有正式口徑</text>
+        <text class="s" x="455" y="99">現有 Dashboard / Export</text>
+        <text class="s" x="455" y="122">Forecast / WAPE / Backtest</text>
+
+        <path class="line" d="M240 101 L330 91"></path>
+        <path class="line" d="M240 303 L330 298"></path>
+        <path class="dash" d="M240 126 C350 180, 550 185, 665 222"></path>
+        <path class="line" d="M580 298 C625 298, 620 248, 665 248"></path>
+        <path class="line" d="M915 248 L990 248"></path>
+      </svg>
+      <p style="margin:6px 12px 12px;color:#475569"><strong>效能隔離：</strong>退款引擎只在確認／切換版本時執行；頁面只讀 active snapshot。既有正式口徑的 cache token 不因 GMV 版本改變而失效。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">方案比較</div>
+  <div class="cards">
+    <div class="card" data-choice="a" onclick="toggleSelect(this)" style="border:2px solid #10b981">
+      <div class="card-body">
+        <h3>A｜同一 SQLite、獨立 gmv_ 區域（推薦）</h3>
+        <p>以 <code>gmv_</code> tables/views 建立 ledger、version 與 snapshot；與現有資料可在同一 transaction 內生成一致結果。</p>
+        <div class="pros-cons">
+          <div class="pros"><h4>優點</h4><ul><li>原子性最好</li><li>備份與回滾一致</li><li>讀取路徑最短</li></ul></div>
+          <div class="cons"><h4>代價</h4><ul><li>需正式 schema migration</li><li>需嚴格表名前綴與權限邊界</li></ul></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" data-choice="b" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <h3>B｜獨立 gmv_adjustments.db</h3>
+        <p>退款 ledger 與 snapshot 放在第二個 SQLite 檔，再以 attach 或 application layer 合併讀取。</p>
+        <div class="pros-cons">
+          <div class="pros"><h4>優點</h4><ul><li>物理隔離清楚</li><li>現有 DB schema 變動較少</li></ul></div>
+          <div class="cons"><h4>代價</h4><ul><li>跨檔一致性與備份較複雜</li><li>部署、health check 增加</li></ul></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" data-choice="c" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <h3>C｜只存退款明細、頁面即時計算</h3>
+        <p>每次頁面載入都 join 現有營收與退款明細，動態重算正式淨 GMV。</p>
+        <div class="pros-cons">
+          <div class="pros"><h4>優點</h4><ul><li>初期 table 較少</li><li>計算邏輯直觀</li></ul></div>
+          <div class="cons"><h4>不符合需求</h4><ul><li>增加 page-load 時間</li><li>版本重現與回滾較弱</li></ul></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">請點選你認可的方案；建議選 A。選擇只記錄設計偏好，不會修改任何資料。</p>

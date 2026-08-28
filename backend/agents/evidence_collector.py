@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import subprocess
@@ -197,6 +198,24 @@ class EvidenceCollector:
             stderr=completed.stderr[:limit],
             truncated=len(completed.stdout) > limit or len(completed.stderr) > limit,
         )
+
+    def _run_full_stdout(self, argv: list[str]) -> tuple[int, str]:
+        """Run an allowlisted command and retain full stdout for hashing only."""
+        if not argv or argv[0] not in self._COMMAND_EXECUTABLES:
+            raise PermissionError(f"Command is not allowlisted: {argv[0] if argv else '<empty>'}")
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=self.project_root,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+                shell=False,
+            )
+        except FileNotFoundError:
+            return 127, ""
+        return completed.returncode, completed.stdout
 
     def _rg_fallback_command(
         self, label: str, argv: list[str], limit: int
@@ -422,10 +441,27 @@ class EvidenceCollector:
         )
 
     def collect_review(
-        self, brief_path: Path, base_ref: str = "main", head_ref: str = "WORKTREE"
+        self,
+        brief_path: Path,
+        base_ref: str = "main",
+        head_ref: str = "WORKTREE",
+        preserve_dirty_paths: tuple[str, ...] = (),
     ) -> EvidenceBundle:
         head_ref = normalize_review_head_ref(head_ref)
         repository, commands = self._repository()
+        launch_worktree_argv = [
+            "git", "status", "--porcelain", "--untracked-files=all", "--",
+            ".", ":(exclude)docs/superpowers", ":(exclude).superpowers",
+        ]
+        launch_worktree_command = self._run(
+            "review-launch-worktree-fingerprint",
+            launch_worktree_argv,
+            command_character_limit=self.policy.review_max_command_characters,
+        )
+        launch_exit_code, launch_full_stdout = self._run_full_stdout(launch_worktree_argv)
+        launch_worktree_fingerprint = hashlib.sha256(
+            launch_full_stdout.encode()
+        ).hexdigest()
         base_sha, base_command = self._resolve_ref("git-base", base_ref)
         head_command = None
         head_sha = None
@@ -443,6 +479,19 @@ class EvidenceCollector:
         untracked_command = None
         untracked_paths: list[str] = []
         preserved_dirty_paths: list[str] = []
+        process_artifact_prefixes = ("docs/superpowers/", ".superpowers/")
+        explicit_preserved_paths = set()
+        for relative in preserve_dirty_paths:
+            path = Path(relative)
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or not relative.startswith(process_artifact_prefixes)
+            ):
+                raise PermissionError(
+                    "Explicit preserved dirty paths must be process artifacts under docs/superpowers/ or .superpowers/."
+                )
+            explicit_preserved_paths.add(relative)
         if head_ref == "WORKTREE":
             untracked_command = self._run(
                 "git-untracked-files",
@@ -452,6 +501,9 @@ class EvidenceCollector:
             for relative in untracked_command.stdout.splitlines():
                 if not relative or relative.startswith("/") or ".." in Path(relative).parts:
                     raise PermissionError(f"Unsafe untracked path: {relative}")
+                if relative in explicit_preserved_paths:
+                    preserved_dirty_paths.append(relative)
+                    continue
                 try:
                     self.policy.resolve_read_path(self.project_root / relative)
                 except PermissionError:
@@ -460,7 +512,14 @@ class EvidenceCollector:
                     continue
                 untracked_paths.append(relative)
         tracked_paths = changed.stdout.splitlines()
+        for relative in tracked_paths:
+            if relative in explicit_preserved_paths:
+                preserved_dirty_paths.append(relative)
         selected_paths = sorted(dict.fromkeys([*tracked_paths, *untracked_paths]))
+        selected_paths = [
+            relative for relative in selected_paths
+            if relative not in explicit_preserved_paths
+        ]
         untracked_set = set(untracked_paths)
         patches: list[EvidenceItem] = []
         patch_commands: list[CommandEvidence] = []
@@ -512,6 +571,8 @@ class EvidenceCollector:
                 "headRef": head_ref,
                 "headSha": head_sha,
                 "preservedDirtyFiles": sorted(preserved_dirty_paths),
+                "reviewLaunchWorktreeFingerprint": launch_worktree_fingerprint,
+                "reviewLaunchWorktreeProbeExitCode": launch_exit_code,
                 "diffFileLimitExceeded": changed.truncated
                 or bool(untracked_command and untracked_command.truncated)
                 or len(selected_paths) > 50,
@@ -522,6 +583,7 @@ class EvidenceCollector:
             },
             evidence=tuple(patches),
             commands=commands + (
+                launch_worktree_command,
                 base_command,
                 *(tuple() if head_command is None else (head_command,)),
                 changed,

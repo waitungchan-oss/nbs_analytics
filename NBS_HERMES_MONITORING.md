@@ -561,3 +561,22 @@ monthly-governance, health, and service-identity checks to the profile, and
 skips mutating monitor history. Missing, stale, or mismatched profile evidence
 is reported as `blocked_runner_capability`; no-profile invocation retains the
 primary runtime behavior.
+
+## Verification session gate and Hermes profile separation
+
+Hermes 是 read-only system acceptance。在 verification chain 內，Hermes 的 report
+必須綁定到 `verification-session-v1` 的 session 與 source fingerprint（session
+evidence input/output binding）；綁定缺失或 fingerprint 不一致時 fail closed，
+不會被當作 PASS。
+
+Hermes 必須在明確 profile 下執行：
+
+- `primary-runtime`：正式 runtime 的 read-only acceptance；
+- `isolated-profile`：隔離 verification profile 的 read-only acceptance。
+
+兩種 profile 的結果 cannot be mixed；mixed evidence 在 attestation 階段被拒絕。
+Hermes 只 read-only 執行並輸出 bounded results；只有 trusted controller
+（`scripts/verification_chain.py`）會把 bounded session gate artifact 寫入
+session 目錄。只有 Strict Review PASS、full pytest PASS、Hermes PASS 三個
+required gates 都通過後，`completion-attestation-v1` 才能宣稱 `complete`；
+Review PASS、full verification PASS 或 Hermes PASS 本身都不等於整輪完成。

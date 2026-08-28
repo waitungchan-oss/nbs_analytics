@@ -1,0 +1,57 @@
+<h2>方案 A｜完整資料流與邊界</h2>
+<p class="subtitle">同一個 SQLite、獨立 <code>gmv_</code> 資料區；原始正式營收保持不變，正式淨 GMV 由 active snapshot 提供。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Write path：只有退款確認時執行</div>
+  <div class="mockup-body">
+    <svg viewBox="0 0 1320 500" width="100%" role="img" aria-label="GMV 退款 ledger 完整資料流">
+      <defs>
+        <marker id="a2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#64748b"/></marker>
+        <style>
+          .b{fill:#fff;stroke:#94a3b8;stroke-width:2;rx:12}.raw{fill:#eff6ff;stroke:#3b82f6}.stage{fill:#fff7ed;stroke:#f97316}.ledger{fill:#f5f3ff;stroke:#8b5cf6}.snap{fill:#ecfdf5;stroke:#10b981}.view{fill:#f0fdfa;stroke:#14b8a6}.consumer{fill:#fdf2f8;stroke:#ec4899}.off{fill:#f8fafc;stroke:#cbd5e1}
+          .t{font:600 16px system-ui;fill:#0f172a;text-anchor:middle}.s{font:13px system-ui;fill:#475569;text-anchor:middle}.l{stroke:#64748b;stroke-width:2;fill:none;marker-end:url(#a2)}.d{stroke:#94a3b8;stroke-width:2;stroke-dasharray:7 6;fill:none;marker-end:url(#a2)}
+        </style>
+      </defs>
+
+      <rect class="b raw" x="24" y="45" width="205" height="90"/><text class="t" x="126" y="79">現有 Canonical Revenue</text><text class="s" x="126" y="105">tour_data / others_data</text>
+      <rect class="b stage" x="24" y="310" width="205" height="90"/><text class="t" x="126" y="344">退款明細 Upload</text><text class="s" x="126" y="370">總退款 + 已退款</text>
+
+      <rect class="b stage" x="285" y="286" width="220" height="138"/><text class="t" x="395" y="320">Preflight + 對帳引擎</text><text class="s" x="395" y="348">schema / 重複 / 狀態</text><text class="s" x="395" y="372">正式匹配 / 規則排除</text><text class="s" x="395" y="396">找不到 / 超額退款</text>
+
+      <rect class="b ledger" x="570" y="225" width="230" height="220"/><text class="t" x="685" y="260">GMV Refund Ledger</text><text class="s" x="685" y="292">gmv_refund_batches</text><text class="s" x="685" y="318">gmv_refund_items</text><text class="s" x="685" y="344">gmv_reconciliation_results</text><text class="s" x="685" y="370">gmv_scope_versions</text><text class="s" x="685" y="405">不可變批次 + rule version</text>
+
+      <rect class="b snap" x="870" y="210" width="230" height="110"/><text class="t" x="985" y="245">Active GMV Snapshot</text><text class="s" x="985" y="272">月度 KPI + 完整明細</text><text class="s" x="985" y="297">預先計算、可切回舊版</text>
+      <rect class="b view" x="870" y="354" width="230" height="90"/><text class="t" x="985" y="388">Current Read Views</text><text class="s" x="985" y="415">只指向 active version</text>
+
+      <rect class="b consumer" x="1160" y="207" width="140" height="116"/><text class="t" x="1230" y="241">第一階段</text><text class="s" x="1230" y="269">GMV Dashboard</text><text class="s" x="1230" y="294">GMV Export</text>
+      <rect class="b off" x="1160" y="355" width="140" height="90"/><text class="t" x="1230" y="389">保持隔離</text><text class="s" x="1230" y="416">Forecast / WAPE</text>
+
+      <path class="d" d="M229 105 C420 160, 690 160, 870 235"/><path class="l" d="M229 355 L285 355"/><path class="d" d="M229 115 C260 180, 295 245, 330 286"/><path class="l" d="M505 355 L570 355"/><path class="l" d="M800 290 L870 265"/><path class="l" d="M985 320 L985 354"/><path class="l" d="M1100 265 L1160 265"/>
+    </svg>
+  </div>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">雙日期口徑（已確認 C）</div>
+    <div class="mockup-body" style="padding:18px">
+      <h3>正式淨 GMV</h3>
+      <p>退款扣回<strong>原訂單／收款月份</strong>，用於重述該期實際留下的 GMV。</p>
+      <h3>退款營運分析</h3>
+      <p>同時保存<strong>實際退款月份</strong>，用於觀察退款事件與現金流。</p>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">效能隔離</div>
+    <div class="mockup-body" style="padding:18px">
+      <p><strong>確認時：</strong>對帳、分配、cap、聚合、建立 snapshot。</p>
+      <p><strong>讀頁時：</strong>只查 active snapshot/read view，不執行退款引擎。</p>
+      <p><strong>Cache：</strong>GMV generation token 與既有正式營收 token 分離。</p>
+    </div>
+  </div>
+</div>
+
+<div class="option" data-choice="approve-architecture" onclick="toggleSelect(this)" style="margin-top:20px;border:2px solid #10b981">
+  <div class="letter">✓</div>
+  <div class="content"><h3>確認這一段架構</h3><p>同一 SQLite、四層 gmv_ ledger/version/snapshot/view，第一階段只服務 GMV Dashboard 與 Export。</p></div>
+</div>

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +19,7 @@ from backend.agents.evidence_models import (
     estimate_tokens,
 )
 from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
+from backend.agents.verification_session import VerificationSession
 
 
 REVIEW_EVIDENCE_SCHEMA = "review-evidence-v1"
@@ -49,6 +54,56 @@ _MEMORY_CONTEXT_KEYS = {
     "schemaVersion", "status", "consumerId", "integrationMode", "authority",
     "evidenceFingerprint", "hintCount", "diagnostics",
 }
+
+# Task 4: session-bound, resumable Review batches.
+_BATCH_SCHEMA = "review-batch-v1"
+_BATCH_REPORT_KEYS = _REPORT_KEYS | {
+    "sessionId", "batchId", "batchFingerprint", "sessionFingerprint", "resultFingerprint",
+}
+_MAX_PATCH_CHARS = 16000
+_DEFAULT_BATCH_PATCH_BUDGET = 12000
+
+
+def compact_review_evidence_payload(payload: dict, *, max_patch_chars: int = 16000, max_tail_chars: int = 4000) -> dict:
+    """Return bounded Review data while preserving source and payload identity semantics.
+
+    ``bundleFingerprint`` remains the immutable identity of the collected source
+    bundle. Truncation is represented by patch metadata and a recomputed
+    ``gitDiff.diffFingerprint``; it must not silently redefine the source bundle
+    identity used by strict freshness checks.
+    """
+    if max_patch_chars <= 0 or max_tail_chars <= 0:
+        raise ValueError("Review payload bounds must be positive")
+    compact = json.loads(json.dumps(payload, ensure_ascii=False))
+    source_bundle_fingerprint = compact.get("bundleFingerprint")
+    if not isinstance(source_bundle_fingerprint, str) or not source_bundle_fingerprint:
+        source_unsigned = {key: value for key, value in compact.items() if key != "bundleFingerprint"}
+        source_bundle_fingerprint = canonical_fingerprint(source_unsigned)
+    git_diff = compact["gitDiff"]
+    bounded_patches = []
+    for patch in git_diff["patches"]:
+        content = patch.get("content", "")
+        truncated = bool(patch.get("metadata", {}).get("truncated"))
+        if len(content) > max_patch_chars:
+            content = content[:max_patch_chars]
+            truncated = True
+        bounded_patches.append({
+            "kind": patch.get("kind", "diff"),
+            "source": patch["source"],
+            "content": content,
+            "metadata": {"truncated": truncated},
+        })
+        git_diff["truncated"] = bool(git_diff["truncated"] or truncated)
+    git_diff["patches"] = bounded_patches
+    for command in compact["verification"]["commands"]:
+        command["stdoutTail"] = command["stdoutTail"][-max_tail_chars:]
+        command["stderrTail"] = command["stderrTail"][-max_tail_chars:]
+    unsigned_git_diff = {key: value for key, value in git_diff.items() if key != "diffFingerprint"}
+    git_diff["diffFingerprint"] = canonical_fingerprint(unsigned_git_diff)
+    unsigned = {key: value for key, value in compact.items() if key != "bundleFingerprint"}
+    # v1 keeps bundleFingerprint as the immutable source fingerprint. The public
+    # payload is bounded, but does not silently redefine the v1 identity.
+    return {**unsigned, "bundleFingerprint": source_bundle_fingerprint}
 
 
 def _validate_task_contract(task: object) -> dict:
@@ -199,7 +254,7 @@ def build_review_evidence_payload(
     }
     if memory_hub_context is not None:
         unsigned["memoryHubContext"] = memory_hub_context
-    return {**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)}
+    return compact_review_evidence_payload({**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)})
 
 
 def _memory_hub_observation(payload: object) -> dict:
@@ -332,9 +387,10 @@ def build_review_report(
     runtime_root: Path,
     instructions: str,
     strict: bool = True,
-    input_token_limit: int = 16000,
-    output_token_limit: int = 2000,
+    input_token_limit: int = 24000,
+    output_token_limit: int = 3000,
     memory_hub_evidence: dict | None = None,
+    runner_diagnostics: list[str] | None = None,
 ) -> dict:
     if input_token_limit <= 0 or output_token_limit <= 0:
         raise ValueError("Review Agent token budgets must be positive")
@@ -413,27 +469,41 @@ def build_review_report(
             review_fingerprint,
             residual_risk=["Collector must split or reduce Review evidence."],
         ))
+    if runner_diagnostics:
+        return finish(_report(
+            "blocked",
+            review_fingerprint,
+            residual_risk=runner_diagnostics[:4],
+        ))
     if runner is None:
         return finish(_report(
             "blocked",
             review_fingerprint,
             residual_risk=["No AgentRunner was configured; use --collect-only or --agent-command."],
         ))
-    result = AgentRuntime(
-        validated_runtime_root,
-        input_token_limit=input_token_limit,
-        output_token_limit=output_token_limit,
-    ).run(
-        "review",
-        bundle,
-        runner,
-        output_schema=REVIEW_REPORT_SCHEMA,
-        instructions=runtime_instructions,
-        evidence_payload=evidence_payload,
-        output_validator=lambda value: _validate_report(
-            value, review_fingerprint, strict=strict,
-        ),
-    )
+    try:
+        result = AgentRuntime(
+            validated_runtime_root,
+            input_token_limit=input_token_limit,
+            output_token_limit=output_token_limit,
+            budget_section="review",
+        ).run(
+            "review",
+            bundle,
+            runner,
+            output_schema=REVIEW_REPORT_SCHEMA,
+            instructions=runtime_instructions,
+            evidence_payload=evidence_payload,
+            output_validator=lambda value: _validate_report(
+                value, review_fingerprint, strict=strict,
+            ),
+        )
+    except subprocess.TimeoutExpired:
+        return finish(_report(
+            "blocked",
+            review_fingerprint,
+            residual_risk=["Strict review runner timeout; rerun with a ready compatible runner and bounded payload."],
+        ))
     if result.get("status") == "context_overflow":
         return _report(
             "context_overflow",
@@ -451,14 +521,313 @@ def _extend_unique(target: list[Any], values: list[Any]) -> None:
             target.append(value)
 
 
+@dataclass(frozen=True)
+class ReviewBatch:
+    """Immutable, session-bound Review batch with a deterministic identity."""
+
+    session_id: str
+    batch_id: str
+    session_fingerprint: str
+    files: tuple[str, ...]
+    patch_fingerprint: str
+    payload_fingerprint: str
+    bundle: EvidenceBundle
+
+    @property
+    def batch_fingerprint(self) -> str:
+        return canonical_fingerprint({
+            "schemaVersion": _BATCH_SCHEMA,
+            "sessionId": self.session_id,
+            "batchId": self.batch_id,
+            "sessionFingerprint": self.session_fingerprint,
+            "files": list(self.files),
+            "patchFingerprint": self.patch_fingerprint,
+        })
+
+    def to_dict(self) -> dict:
+        return {
+            "schemaVersion": _BATCH_SCHEMA,
+            "sessionId": self.session_id,
+            "batchId": self.batch_id,
+            "sessionFingerprint": self.session_fingerprint,
+            "files": list(self.files),
+            "patchFingerprint": self.patch_fingerprint,
+            "payloadFingerprint": self.payload_fingerprint,
+            "batchFingerprint": self.batch_fingerprint,
+        }
+
+
+def plan_review_batches(
+    session: VerificationSession,
+    bundle: EvidenceBundle,
+    *,
+    patch_token_budget: int = _DEFAULT_BATCH_PATCH_BUDGET,
+) -> tuple[ReviewBatch, ...]:
+    """Deterministically split a Review bundle into session-bound batches.
+
+    Patches are sorted by source and greedily grouped by the patch token
+    budget. Every batch stores the full session source fingerprint, declared
+    files, a bounded patch fingerprint and a bounded payload fingerprint; no
+    SQLite rows, Excel payloads, secrets or full logs enter the identity.
+    """
+    if not isinstance(session, VerificationSession):
+        raise ValueError("plan_review_batches requires a VerificationSession")
+    if bundle.schema_version != REVIEW_EVIDENCE_SCHEMA:
+        raise ValueError("Unexpected Review evidence schema")
+    if patch_token_budget <= 0:
+        raise ValueError("Review batch patch token budget must be positive")
+    patches = sorted(
+        (item for item in bundle.evidence if item.kind == "diff"),
+        key=lambda item: item.source,
+    )
+    groups: list[list[EvidenceItem]] = []
+    current: list[EvidenceItem] = []
+    current_tokens = 0
+    for patch in patches:
+        patch_tokens = estimate_tokens(patch.content[:_MAX_PATCH_CHARS])
+        if current and current_tokens + patch_tokens > patch_token_budget:
+            groups.append(current)
+            current = []
+            current_tokens = 0
+        current.append(patch)
+        current_tokens += patch_tokens
+    if current or not groups:
+        groups.append(current)
+
+    batches: list[ReviewBatch] = []
+    for index, group in enumerate(groups):
+        files = tuple(sorted(patch.source for patch in group))
+        bounded_patches = [
+            {
+                "kind": patch.kind,
+                "source": patch.source,
+                "content": patch.content[:_MAX_PATCH_CHARS],
+            }
+            for patch in group
+        ]
+        patch_fingerprint = canonical_fingerprint({
+            "files": list(files),
+            "patches": bounded_patches,
+        })
+        payload_fingerprint = canonical_fingerprint({
+            "schemaVersion": _BATCH_SCHEMA,
+            "sessionFingerprint": session.source_fingerprint,
+            "files": list(files),
+            "patchFingerprint": patch_fingerprint,
+        })
+        bounded_bundle = EvidenceBundle(
+            schema_version=bundle.schema_version,
+            task=bundle.task,
+            repository=bundle.repository,
+            guardrails=bundle.guardrails,
+            evidence=tuple(
+                EvidenceItem(
+                    kind=item.kind,
+                    source=item.source,
+                    content=item.content[:_MAX_PATCH_CHARS],
+                    metadata=dict(item.metadata) if item.metadata else {},
+                )
+                for item in group
+            ),
+            commands=bundle.commands,
+        )
+        batches.append(ReviewBatch(
+            session_id=session.session_id,
+            batch_id=f"batch-{index + 1:03d}",
+            session_fingerprint=session.source_fingerprint,
+            files=files,
+            patch_fingerprint=patch_fingerprint,
+            payload_fingerprint=payload_fingerprint,
+            bundle=bounded_bundle,
+        ))
+    return tuple(batches)
+
+
+def _batch_result_path(runtime_root: Path, batch: ReviewBatch) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", batch.session_id):
+        raise ValueError("Review batch sessionId is not a safe path component")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", batch.batch_id):
+        raise ValueError("Review batch batchId is not a safe path component")
+    return runtime_root / "review" / "batches" / batch.session_id / f"{batch.batch_id}.json"
+
+
+def _load_batch_result(path: Path) -> dict | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _batch_result_is_reusable(stored: dict, batch: ReviewBatch) -> bool:
+    if stored.get("schemaVersion") != REVIEW_REPORT_SCHEMA:
+        return False
+    if stored.get("sessionId") != batch.session_id:
+        return False
+    if stored.get("batchId") != batch.batch_id:
+        return False
+    if stored.get("batchFingerprint") != batch.batch_fingerprint:
+        return False
+    content = {key: stored[key] for key in _REPORT_KEYS if key in stored}
+    return stored.get("resultFingerprint") == canonical_fingerprint(content)
+
+
+def _bind_batch_report(batch: ReviewBatch, report: dict) -> dict:
+    content = {key: report[key] for key in _REPORT_KEYS}
+    return {
+        **report,
+        "sessionId": batch.session_id,
+        "batchId": batch.batch_id,
+        "batchFingerprint": batch.batch_fingerprint,
+        "sessionFingerprint": batch.session_fingerprint,
+        "resultFingerprint": canonical_fingerprint(content),
+    }
+
+
+def _write_batch_result(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent, text=True
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def run_review_batch(
+    batch: ReviewBatch,
+    runner: AgentRunner | None,
+    *,
+    runtime_root: Path,
+    context_summary: dict | None = None,
+    verification: list[dict] | None = None,
+    instructions: str = "",
+    strict: bool = False,
+    input_token_limit: int = 16000,
+    output_token_limit: int = 3000,
+    memory_hub_evidence: dict | None = None,
+    runner_diagnostics: list[str] | None = None,
+) -> dict:
+    """Run one batch exactly once and store a bounded, session-bound result.
+
+    A stored result is reused only when the report schema, session ID, batch
+    ID, batch fingerprint and result fingerprint all match. Otherwise the
+    runner is invoked exactly once and the bounded result is persisted below
+    ``<runtime_root>/review/batches/<sessionId>/``.
+    """
+    if not isinstance(batch, ReviewBatch):
+        raise ValueError("run_review_batch requires a ReviewBatch")
+    result_path = _batch_result_path(runtime_root, batch)
+    cached = _load_batch_result(result_path)
+    if cached is not None and _batch_result_is_reusable(cached, batch):
+        return cached
+    if input_token_limit <= 0 or output_token_limit <= 0:
+        raise ValueError("Review batch token budgets must be positive")
+    context_summary = context_summary or {}
+    verification = verification or []
+    evidence_payload = build_review_evidence_payload(
+        batch.bundle, context_summary=context_summary, verification=verification,
+        memory_hub_context=(
+            _memory_hub_observation(memory_hub_evidence)
+            if memory_hub_evidence is not None else None
+        ),
+    )
+    memory_observation = (
+        _memory_hub_observation(memory_hub_evidence)
+        if memory_hub_evidence is not None else None
+    )
+    finish = lambda report: _attach_memory_observation(report, memory_observation)
+    review_fingerprint = agent_request_fingerprint(
+        batch.bundle,
+        instructions=instructions,
+        output_schema=REVIEW_REPORT_SCHEMA,
+        evidence_payload=evidence_payload,
+    )
+    request_text = json.dumps(
+        {"instructions": instructions, "evidence": evidence_payload},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if estimate_tokens(request_text) > input_token_limit:
+        return _bind_batch_report(batch, finish(_report(
+            "context_overflow",
+            review_fingerprint,
+            residual_risk=["Review batch payload exceeds the input token budget."],
+        )))
+    if runner_diagnostics:
+        return _bind_batch_report(batch, finish(_report(
+            "blocked",
+            review_fingerprint,
+            residual_risk=runner_diagnostics[:4],
+        )))
+    if runner is None:
+        return _bind_batch_report(batch, finish(_report(
+            "blocked",
+            review_fingerprint,
+            residual_risk=["No AgentRunner was configured for this batch."],
+        )))
+    result = runner.run({
+        "instructions": instructions,
+        "evidence": evidence_payload,
+        "bundleFingerprint": review_fingerprint,
+    })
+    validated = _validate_report(result, review_fingerprint, strict=strict)
+    if estimate_tokens(json.dumps(validated, ensure_ascii=False)) > output_token_limit:
+        raise ValueError("Review batch output token budget exceeded")
+    bound = _bind_batch_report(batch, finish(validated))
+    _write_batch_result(result_path, bound)
+    return bound
+
+
+def _validate_session_coverage(
+    reports: list[dict],
+    session_fingerprint: str,
+    expected_batch_ids: tuple[str, ...] | None,
+) -> None:
+    batch_ids: list[str] = []
+    for report in reports:
+        if not isinstance(report, dict) or not _BATCH_REPORT_KEYS <= set(report):
+            raise ValueError("Review batch report is missing session binding fields")
+        if report["sessionFingerprint"] != session_fingerprint:
+            raise ValueError(
+                "Review batch report source fingerprint does not match the session"
+            )
+        batch_ids.append(report["batchId"])
+    if expected_batch_ids is not None:
+        expected = list(expected_batch_ids)
+        if sorted(batch_ids) != sorted(expected) or len(set(batch_ids)) != len(batch_ids):
+            raise ValueError(
+                "Review batch coverage is incomplete: expected exactly one result "
+                "per planned batch"
+            )
+
+
 def merge_review_batches(
     reports: list[dict],
     *,
-    fingerprint: str,
+    fingerprint: str | None = None,
+    session_fingerprint: str | None = None,
+    expected_batch_ids: tuple[str, ...] | None = None,
     output_token_limit: int | None = None,
 ) -> dict:
     if not reports:
         raise ValueError("Review batch reports cannot be empty")
+    if (fingerprint is None) == (session_fingerprint is None):
+        raise ValueError(
+            "Review batch aggregation requires exactly one of fingerprint or session_fingerprint"
+        )
+    merge_fingerprint = session_fingerprint if session_fingerprint is not None else fingerprint
+    if session_fingerprint is not None:
+        _validate_session_coverage(reports, session_fingerprint, expected_batch_ids)
     verdicts = [
         value if value in _VERDICT_ORDER else "invalid_bundle"
         for value in (report.get("verdict") for report in reports)
@@ -486,7 +855,7 @@ def merge_review_batches(
     )
     merged = _report(
         verdict,
-        fingerprint,
+        merge_fingerprint,
         findings=findings,
         requirement_coverage=requirement_coverage,
         test_coverage=test_coverage,
@@ -505,7 +874,7 @@ def merge_review_batches(
     ]
     return _report(
         "context_overflow",
-        fingerprint,
+        merge_fingerprint,
         findings=high_risk_findings,
         baseline_risk=merged["baselineRisk"],
         residual_risk=["Merged Review Agent output exceeded the output token budget."],
@@ -526,6 +895,7 @@ def run_review_batches(
     input_token_limit: int = 16000,
     output_token_limit: int = 2000,
     memory_hub_evidence: dict | None = None,
+    runner_diagnostics: list[str] | None = None,
 ) -> dict:
     full_payload = build_review_evidence_payload(
         bundle, context_summary=context_summary, verification=verification,
@@ -558,6 +928,7 @@ def run_review_batches(
             input_token_limit=input_token_limit,
             output_token_limit=output_token_limit,
             memory_hub_evidence=memory_hub_evidence,
+            runner_diagnostics=runner_diagnostics,
         )
         for batch in batches
     ]

@@ -774,3 +774,18 @@ def test_non_string_telemetry_status_is_unknown_on_fresh_and_cache_hit(tmp_path,
     lines = (tmp_path / ".nbs_agent_runtime/telemetry/agent_runs.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(lines[-2])["result"] == "unknown"
     assert json.loads(lines[-1])["result"] == "unknown"
+def test_review_runtime_uses_review_budget_section(tmp_path):
+    from backend.agents.agent_runtime import AgentRuntime
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+    (config_dir / "token_budgets.json").write_text(
+        '{"context":{"inputTokens":12000,"outputTokens":1500},'
+        '"review":{"inputTokens":24000,"outputTokens":3000}}',
+        encoding="utf-8",
+    )
+
+    runtime = AgentRuntime(tmp_path / ".nbs_agent_runtime", budget_section="review")
+
+    assert runtime.input_token_limit == 24000
+    assert runtime.output_token_limit == 3000

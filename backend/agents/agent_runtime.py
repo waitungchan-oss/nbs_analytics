@@ -739,24 +739,26 @@ class AgentRuntime:
         runtime_root: Path,
         input_token_limit: int | None = None,
         output_token_limit: int | None = None,
+        budget_section: str = "context",
     ) -> None:
         self.runtime_root = runtime_root.resolve()
         if self.runtime_root.name != ".nbs_agent_runtime":
             raise PermissionError(
                 f"Agent runtime root must be named .nbs_agent_runtime: {self.runtime_root}"
             )
-        configured = self._load_configured_budgets()
+        self.budget_section = budget_section
+        configured = self._load_configured_budgets(budget_section)
         self.input_token_limit = input_token_limit or configured[0]
         self.output_token_limit = output_token_limit or configured[1]
         if self.input_token_limit <= 0 or self.output_token_limit <= 0:
             raise ValueError("Agent token budgets must be positive")
 
-    def _load_configured_budgets(self) -> tuple[int, int]:
+    def _load_configured_budgets(self, section: str | None = None) -> tuple[int, int]:
         config_path = self.runtime_root.parent / "agent_config" / "token_budgets.json"
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            context = config["context"]
-            return int(context["inputTokens"]), int(context["outputTokens"])
+            budget = config[section or self.budget_section]
+            return int(budget["inputTokens"]), int(budget["outputTokens"])
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return DEFAULT_INPUT_TOKEN_LIMIT, DEFAULT_OUTPUT_TOKEN_LIMIT
 
@@ -794,6 +796,14 @@ class AgentRuntime:
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
+            # Request locks are per-fingerprint and are only needed while the
+            # critical section is active. Keep the shared telemetry lock path
+            # stable because another process may be using that inode.
+            if path.name != "telemetry.lock":
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _write_json_atomic(path: Path, value: dict) -> None:
