@@ -386,6 +386,58 @@ def memory_hub_integration_artifact_report(project_root: Path = PROJECT_ROOT) ->
     return report
 
 
+def session_evidence_binding(
+    sessions_root: Path | str,
+    session_id: str,
+    profile: str | None = None,
+) -> dict:
+    """Read one session manifest (read-only) and build the bounded binding.
+
+    Task 6: Hermes binds its report to the session source fingerprint. The
+    manifest is only read; Hermes never writes or changes the session.
+    """
+    from backend.agents.verification_session import read_session
+
+    session = read_session(Path(sessions_root) / session_id / "session.json")
+    binding: dict = {
+        "status": "bound",
+        "sessionId": session.session_id,
+        "sourceFingerprint": session.source_fingerprint,
+    }
+    if profile is not None:
+        binding["profile"] = profile
+    return binding
+
+
+def attach_session_binding(
+    report: dict,
+    sessions_root: Path | str,
+    session_id: str,
+    profile: str | None = None,
+) -> dict:
+    """Attach a fail-closed session binding to a Hermes report.
+
+    A missing or invalid session manifest flips the report to ``fail`` and
+    records ``blocked_missing_session``; it never silently drops the binding.
+    """
+    try:
+        binding = session_evidence_binding(sessions_root, session_id, profile)
+    except (ValueError, OSError):
+        binding = {"status": "blocked_missing_session", "sessionId": session_id}
+    if binding.get("status") != "bound":
+        report["overallStatus"] = "fail"
+        report["sessionBinding"] = binding
+        report["sessionId"] = None
+        report["sourceFingerprint"] = None
+        return report
+    report["sessionBinding"] = binding
+    report["sessionId"] = binding["sessionId"]
+    report["sourceFingerprint"] = binding["sourceFingerprint"]
+    if binding.get("profile"):
+        report["profile"] = binding["profile"]
+    return report
+
+
 def build_check_plan(
     *,
     include_monitor: bool = True,
@@ -623,7 +675,19 @@ def run_checks(
     include_tests: bool = True,
     project_root: Path = PROJECT_ROOT,
     verification_profile: str | None = None,
+    session_id: str | None = None,
+    hermes_profile: str | None = None,
+    session_root: Path | str | None = None,
 ) -> dict:
+    sessions_root = session_root or (
+        Path(project_root) / ".nbs_agent_runtime" / "verification_sessions"
+    )
+
+    def _with_binding(report: dict) -> dict:
+        if session_id is not None:
+            attach_session_binding(report, sessions_root, session_id, hermes_profile)
+        return report
+
     profile_identity = None
     if verification_profile:
         try:
@@ -641,12 +705,12 @@ def run_checks(
                 "runtimeDir": str(paths.runtime_dir),
             }
         except Exception as exc:
-            return {
+            return _with_binding({
                 "overallStatus": "fail",
                 "projectRoot": str(project_root),
                 "verificationProfile": {"status": "blocked_runner_capability", "reason": type(exc).__name__},
                 "results": [],
-            }
+            })
     plan = build_check_plan(
         include_monitor=include_monitor,
         include_tests=include_tests,
@@ -654,12 +718,13 @@ def run_checks(
         verification_profile=verification_profile,
     )
     results = [run_step(step, project_root=project_root) for step in plan]
-    return {
+    report = {
         "overallStatus": compute_overall_status(results),
         "projectRoot": str(project_root),
         "results": results,
         **({"verificationProfile": profile_identity} if profile_identity else {}),
     }
+    return _with_binding(report)
 
 
 def _result_by_label(report: dict, label: str) -> dict:
@@ -749,6 +814,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
     parser.add_argument("--markdown", action="store_true", help="Print a concise Markdown report.")
     parser.add_argument("--verification-profile", help="Read-only verification profile path.")
+    parser.add_argument(
+        "--session",
+        help="Bind the report to one verification session (session evidence input/output binding).",
+    )
+    parser.add_argument(
+        "--session-root",
+        help="Sessions root for the binding (defaults to .nbs_agent_runtime/verification_sessions).",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("primary-runtime", "isolated-profile"),
+        help="Hermes profile used for this run (primary-runtime or isolated-profile).",
+    )
     return parser.parse_args(argv)
 
 
@@ -758,6 +836,9 @@ def main(argv: list[str] | None = None) -> int:
         include_monitor=not args.skip_monitor,
         include_tests=not args.skip_tests,
         verification_profile=args.verification_profile,
+        session_id=args.session,
+        hermes_profile=args.profile,
+        session_root=args.session_root,
     )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

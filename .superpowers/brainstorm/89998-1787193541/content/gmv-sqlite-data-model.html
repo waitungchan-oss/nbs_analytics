@@ -1,0 +1,78 @@
+<h2>第二段｜SQLite 資料模型</h2>
+<p class="subtitle">設計原則：confirmed batch 不可修改；active version 可切換；snapshot 只保存扣減 delta 與頁面需要的預聚合數字。</p>
+
+<div class="section">
+  <div class="label">A. Intake Ledger｜保存來源證據</div>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header"><code>gmv_refund_batches</code></div>
+      <div class="mockup-body" style="padding:16px">
+        <p><strong>用途：</strong>一次上傳／確認的退款批次。</p>
+        <p><code>batch_id</code> · <code>file_hash</code> · source filename · row count · preflight status · confirmed at/by · source checksum</p>
+        <p class="subtitle">同一 file hash 防止重複確認；confirmed 後不可覆寫。</p>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header"><code>gmv_refund_items</code></div>
+      <div class="mockup-body" style="padding:16px">
+        <p><strong>用途：</strong>標準化後的每筆退款來源列。</p>
+        <p><code>item_id</code> · <code>batch_id</code> · 收款單號 · 退款單號 · 退款狀態 · 退款金額 · 退款日期 · source row hash</p>
+        <p class="subtitle">同時保留原退款日期與原訂單期間關聯。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">B. Reconciliation Ledger｜保存計算解釋</div>
+  <div class="mockup">
+    <div class="mockup-header"><code>gmv_reconciliation_results</code></div>
+    <div class="mockup-body" style="padding:16px">
+      <p><strong>一筆來源單據 × 一個退款維度</strong>保存：<code>總退款</code>／<code>已退款</code>、匹配狀態、退款明細金額、原收款金額、實際扣減、超額退款、收入規則排除原因、rule version。</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>正式淨 GMV</h4><ul><li>只讀「已退款」</li><li>只計 FORMAL_MATCHED</li><li>扣減不超過原收款</li></ul></div>
+        <div class="cons"><h4>營運監控</h4><ul><li>「總退款」仍完整保存</li><li>規則排除與找不到不誤扣</li><li>異常中心可追溯</li></ul></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">C. Version + Snapshot｜正式生效與快速讀取</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-body">
+        <h3><code>gmv_scope_versions</code></h3>
+        <p><code>version_id</code>、batch、revenue generation token、rule version、draft/active/retired、previous version、activated at/by、calculation checksum。</p>
+        <p><strong>規則：</strong>同一時間只有一個 active version；切回前版不刪資料。</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h3><code>gmv_adjustment_snapshot</code></h3>
+        <p>只保存被退款影響的收款列：原收款月份、退款月份、來源單據、退款前金額、扣減金額、退款後金額、分配比例。</p>
+        <p><strong>稀疏 delta：</strong>不複製沒有退款的正式營收列。</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <h3><code>gmv_metric_snapshot</code></h3>
+        <p>預先保存 Dashboard 需要的月度／分社／銷售代表／業務類型聚合，以及「總退款」和「已退款」並列 KPI。</p>
+        <p><strong>頁面熱路徑：</strong>直接查小型聚合表。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">D. Stable Read Contract｜Consumer 不感知版本細節</div>
+  <div class="split">
+    <div class="mockup"><div class="mockup-header"><code>v_gmv_current_metrics</code></div><div class="mockup-body" style="padding:16px"><p>只返回 active version 的 Dashboard KPI／排名／月度趨勢。</p></div></div>
+    <div class="mockup"><div class="mockup-header"><code>v_gmv_current_adjustments</code></div><div class="mockup-body" style="padding:16px"><p>只返回 active version 的扣減明細，供完整報表及稽核 export 使用。</p></div></div>
+  </div>
+</div>
+
+<div class="option" data-choice="approve-data-model" onclick="toggleSelect(this)" style="margin-top:20px;border:2px solid #10b981">
+  <div class="letter">✓</div>
+  <div class="content"><h3>確認 SQLite 資料模型</h3><p>批次／明細／對帳／版本／稀疏扣減 snapshot／預聚合 metric snapshot／current views。</p></div>
+</div>

@@ -11,7 +11,10 @@ Review evidence 可選帶入 `memoryHubContext` observation。它只接受由 Co
 預先產生、已通過 fingerprint 與 bounded schema 驗證的 evidence；Review Agent 不得
 自行 query Memory Hub。該 observation 只供追溯，不是 diff、test、requirement 或 PASS
 證據；缺失、過期、consumer mismatch 或 malformed evidence 一律標記 `ignored`，canonical
-review 繼續照常執行。
+review 繼續照常執行。Memory Hub hints 是 optional、bounded、fresh、
+non-authoritative observations；malformed、stale、consumer-mismatch 或
+fingerprint-mismatch 的 hints 標記 `ignored`，不得改變 verdict、scope、baseline
+或任何 gate（cannot change verdict, scope, baseline, or any gate）。
 
 ## Required Input
 
@@ -165,6 +168,36 @@ Validation Runner 可以執行會在 Git ignored 或 temporary path 產生測試
 aggregator 合併各 batch，並在合併層確認所有 changed files、dirty-file attribution、
 fingerprint 與 truncation semantics；只有真正缺少該 batch 宣稱要提供的 patch，或
 bundle identity／fingerprint 不一致時，才可提出 evidence completeness finding。
+
+## Session-Aware Review Input Boundary
+
+Strict Review 只在一份已 seal 的 `verification-session-v1` 內執行。Review 的輸入
+邊界固定為：
+
+- approved brief / task contract；
+- current source-sealed diff（由 session manifest 的 head、brief、filtered
+  worktree 與 diff fingerprint 綁定）；
+- ready Context summary；
+- pre-review targeted `verification-v1` evidence；
+- runner capability receipt（static + live turn）；
+- optional Memory Hub observation（non-authoritative，見下）。
+
+Review 的 code-level `pass` 只需要上述 changed-surface targeted evidence、
+compile/static evidence 與 requirement coverage；它**不要求 full pytest 或
+Hermes**（does not require full pytest or Hermes）作為自身 PASS 的前置條件。
+full pytest 與 Hermes 是 Review PASS 之後的
+final acceptance gates，兩者都必須針對同一份 source seal 執行。Review `pass`
+本身不等於整輪完成；只有 trusted `VerificationChain` 輸出的
+`completion-attestation-v1` 且 status 為 `complete` 時，才能宣稱整輪完成。
+
+## Completion Attestation
+
+`completion-attestation-v1` 由 trusted controller（`VerificationChain.attest`）
+deterministic 產生，不呼叫 LLM。它只有在 Strict Review PASS、full pytest PASS、
+Hermes PASS、source fingerprint 一致、且 Hermes profile 明確（
+`primary-runtime` 或 `isolated-profile`，不混用）時才會輸出 `complete`。
+`review_passed`、`full_verification_passed` 與 `hermes_passed` 都是不同狀態，
+不互相取代，任何一個失敗都不會被其他 PASS 覆寫成 `complete`。
 
 ## PASS Gate
 

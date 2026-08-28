@@ -80,3 +80,54 @@ def test_hermes_targeted_pack_covers_implementation_agent_isolation_tests():
         "tests/test_implementation_agent_integration.py",
     ]:
         assert test_name in hermes_source
+
+
+# ---------------------------------------------------------------------------
+# Task 7: session verification chain contract boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_docs_define_two_stage_review_chain():
+    review = (ROOT / "docs/agents/REVIEW_AGENT_CONTRACT.md").read_text(encoding="utf-8")
+    hermes = (ROOT / "NBS_HERMES_MONITORING.md").read_text(encoding="utf-8")
+
+    assert "verification-session-v1" in review
+    assert "Completion Attestation" in review
+    assert "primary-runtime" in hermes
+    assert "isolated-profile" in hermes
+
+
+def test_review_doc_defines_session_aware_input_boundary():
+    review = (ROOT / "docs/agents/REVIEW_AGENT_CONTRACT.md").read_text(encoding="utf-8")
+
+    # Review consumes the source seal and pre-review targeted evidence only.
+    assert "source seal" in review
+    assert "pre-review targeted" in review
+    assert "verification-session-v1" in review
+    # Review must NOT require full pytest / Hermes for its own code-level PASS.
+    assert "full pytest" in review
+    assert "not require full pytest or Hermes" in review
+    # Final completion still requires both later gates via Completion Attestation.
+    assert "completion-attestation-v1" in review
+
+
+def test_review_doc_defines_memory_hub_non_authoritative_boundary():
+    review = (ROOT / "docs/agents/REVIEW_AGENT_CONTRACT.md").read_text(encoding="utf-8")
+
+    assert "non-authoritative" in review
+    assert "ignored" in review
+    assert "cannot change" in review
+
+
+def test_hermes_doc_defines_profile_separation_and_session_binding():
+    hermes = (ROOT / "NBS_HERMES_MONITORING.md").read_text(encoding="utf-8")
+
+    assert "primary-runtime" in hermes
+    assert "isolated-profile" in hermes
+    assert "cannot be mixed" in hermes
+    # Hermes must bind its report to the session source fingerprint.
+    assert "source fingerprint" in hermes
+    assert "verification-session-v1" in hermes
+    # Hermes stays read-only; the trusted controller alone records gate artifacts.
+    assert "read-only" in hermes
+    assert "completion-attestation-v1" in hermes

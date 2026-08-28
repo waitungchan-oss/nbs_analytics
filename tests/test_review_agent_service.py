@@ -1,3 +1,6 @@
+import json
+import subprocess
+
 import pytest
 
 from backend.agents.evidence_models import EvidenceBundle, EvidenceItem, canonical_fingerprint
@@ -5,6 +8,7 @@ from backend.agents.memory_hub_integration_models import build_memory_hub_integr
 from backend.agents.review_agent_service import (
     build_review_evidence_payload,
     build_review_report,
+    compact_review_evidence_payload,
     merge_review_batches,
     split_review_bundle_by_file,
 )
@@ -150,6 +154,22 @@ def test_review_payload_git_diff_fingerprint_is_deterministic_and_content_bound(
         review_bundle(content="+different"), context_summary=context_summary(), verification=verification(),
     )
     assert changed["gitDiff"]["diffFingerprint"] != git_diff["diffFingerprint"]
+
+
+def test_compact_review_payload_removes_unbounded_metadata_and_rebinds_fingerprint():
+    payload = build_review_evidence_payload(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+    )
+    payload["gitDiff"]["patches"][0]["metadata"] = {
+        "truncated": False, "secret": "do-not-send",
+    }
+    payload["verification"]["commands"][0]["stdoutTail"] = "x" * 5000
+
+    compact = compact_review_evidence_payload(payload)
+
+    assert "secret" not in json.dumps(compact, ensure_ascii=False)
+    assert len(compact["verification"]["commands"][0]["stdoutTail"]) == 4000
+    assert compact["bundleFingerprint"] == payload["bundleFingerprint"]
 
 
 def test_review_payload_uses_resolved_base_and_committed_head_identity():
@@ -368,6 +388,21 @@ def test_single_file_over_budget_returns_overflow_before_runner(tmp_path):
     assert runner.calls == 0
 
 
+def test_review_converts_runner_timeout_to_bounded_blocked_result(tmp_path):
+    class TimeoutRunner(ReviewRunner):
+        def run(self, payload):
+            raise subprocess.TimeoutExpired(cmd=["codex"], timeout=120)
+
+    report = build_review_report(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+        project_root=tmp_path, runner=TimeoutRunner(), runtime_root=runtime_path(tmp_path),
+        instructions="review-contract-v1", strict=True,
+    )
+
+    assert report["verdict"] == "blocked"
+    assert "timeout" in report["residualRisk"][0].lower()
+
+
 def test_review_rejects_output_over_budget(tmp_path):
     class VerboseReviewRunner(ReviewRunner):
         def run(self, payload):
@@ -557,3 +592,331 @@ def test_review_service_rejects_symlinked_runtime(tmp_path):
             runner=ReviewRunner(), runtime_root=symlink_runtime,
             instructions="contract", strict=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 4: session-bound, resumable Review batches
+# ---------------------------------------------------------------------------
+
+
+class BatchRunner:
+    def __init__(self, verdict="pass", findings=None):
+        self.verdict = verdict
+        self.findings = findings or []
+        self.calls = 0
+
+    def run(self, payload):
+        self.calls += 1
+        return {
+            "schemaVersion": "review-report-v1",
+            "verdict": self.verdict,
+            "findings": self.findings,
+            "requirementCoverage": ["objective"],
+            "testCoverage": ["targeted: passed"],
+            "baselineRisk": "none",
+            "residualRisk": ["Hermes pending"],
+            "hermesRequiredChecks": ["phase2-baseline"],
+            "reviewFingerprint": payload["bundleFingerprint"],
+        }
+
+
+def _session(**overrides):
+    from backend.agents.verification_session import VerificationSession
+
+    values = dict(
+        project_id="nbs_analytics",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        brief_path="docs/briefs/task.md",
+        brief_fingerprint="c" * 64,
+        worktree_fingerprint="d" * 64,
+        diff_fingerprint="e" * 64,
+        contract_fingerprint="f" * 64,
+        policy_fingerprint="0" * 64,
+    )
+    values.update(overrides)
+    return VerificationSession.create(**values)
+
+
+def multi_file_bundle():
+    return EvidenceBundle(
+        schema_version="review-evidence-v1",
+        task={"id": "x", "objective": "approved", "scope": ["backend"], "forbidden": []},
+        repository={
+            "branch": "feature", "head": "abc", "headRef": "WORKTREE", "base": "HEAD",
+            "baseSha": "a" * 40, "dirtyFiles": [],
+        },
+        guardrails={"mayBaseline": "HKD 12,057,968"},
+        evidence=tuple(
+            EvidenceItem(kind="diff", source=f"file-{index}.py", content="+change" * 5)
+            for index in range(3)
+        ),
+    )
+
+
+def _passing_report(session, batch_id, *, findings=None, batch_fingerprint="batch-fp"):
+    content = {
+        "schemaVersion": "review-report-v1",
+        "verdict": "changes_required" if findings else "pass",
+        "findings": findings or [],
+        "requirementCoverage": ["objective"],
+        "testCoverage": ["targeted: passed"],
+        "baselineRisk": "none",
+        "residualRisk": ["Hermes pending"],
+        "hermesRequiredChecks": ["phase2-baseline"],
+        "reviewFingerprint": "batch-review-fp",
+    }
+    return {
+        **content,
+        "sessionId": session.session_id,
+        "batchId": batch_id,
+        "batchFingerprint": batch_fingerprint,
+        "sessionFingerprint": session.source_fingerprint,
+        "resultFingerprint": canonical_fingerprint(content),
+    }
+
+
+def test_plan_review_batches_is_deterministic_and_session_bound():
+    from backend.agents.review_agent_service import plan_review_batches
+
+    session = _session()
+    bundle = multi_file_bundle()
+
+    first = plan_review_batches(session, bundle)
+    second = plan_review_batches(session, bundle)
+
+    assert [batch.batch_id for batch in first] == [batch.batch_id for batch in second]
+    assert [batch.batch_fingerprint for batch in first] == [batch.batch_fingerprint for batch in second]
+    assert [batch.patch_fingerprint for batch in first] == [batch.patch_fingerprint for batch in second]
+    for batch in first:
+        assert batch.session_id == session.session_id
+        assert batch.session_fingerprint == session.source_fingerprint
+        assert batch.batch_id
+        assert batch.batch_fingerprint
+        assert batch.payload_fingerprint
+        assert batch.files == tuple(sorted(batch.files))
+
+
+def test_plan_review_batches_splits_deterministically_by_budget():
+    from backend.agents.review_agent_service import plan_review_batches
+
+    session = _session()
+    batches = plan_review_batches(session, multi_file_bundle(), patch_token_budget=5)
+
+    assert [batch.batch_id for batch in batches] == ["batch-001", "batch-002", "batch-003"]
+    assert [batch.files for batch in batches] == [
+        ("file-0.py",), ("file-1.py",), ("file-2.py",),
+    ]
+
+
+def test_batch_identity_does_not_embed_patch_content():
+    from backend.agents.review_agent_service import plan_review_batches
+
+    session = _session()
+    bundle = EvidenceBundle(
+        schema_version="review-evidence-v1",
+        task={"id": "x", "objective": "approved", "scope": [], "forbidden": []},
+        repository={"branch": "feature", "head": "abc", "dirtyFiles": []},
+        guardrails={"mayBaseline": "HKD 12,057,968"},
+        evidence=(EvidenceItem(kind="diff", source="x.py", content="+secret-line" * 1000),),
+    )
+    batch = plan_review_batches(session, bundle)[0]
+
+    assert set(batch.to_dict()) == {
+        "schemaVersion", "sessionId", "batchId", "sessionFingerprint", "files",
+        "patchFingerprint", "payloadFingerprint", "batchFingerprint",
+    }
+    assert "secret-line" not in json.dumps(batch.to_dict(), ensure_ascii=False)
+
+
+def test_same_batch_fingerprint_reuses_completed_report(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    session = _session()
+    batches = plan_review_batches(session, review_bundle())
+    runner = BatchRunner()
+
+    first = run_review_batch(batches[0], runner, runtime_root=tmp_path)
+    second = run_review_batch(batches[0], runner, runtime_root=tmp_path)
+
+    assert first == second
+    assert runner.calls == 1
+
+
+def test_run_review_batch_reruns_when_stored_result_changes(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    runner = BatchRunner()
+
+    first = run_review_batch(batch, runner, runtime_root=tmp_path)
+    assert runner.calls == 1
+
+    result_path = tmp_path / "review" / "batches" / session.session_id / f"{batch.batch_id}.json"
+    stored = json.loads(result_path.read_text(encoding="utf-8"))
+    stored["residualRisk"] = ["tampered"]
+    result_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    second = run_review_batch(batch, runner, runtime_root=tmp_path)
+    assert second["residualRisk"] == ["Hermes pending"]
+    assert runner.calls == 2
+
+
+def test_run_review_batch_binds_session_identity(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    report = run_review_batch(batch, BatchRunner(), runtime_root=tmp_path)
+
+    assert report["sessionId"] == session.session_id
+    assert report["batchId"] == batch.batch_id
+    assert report["batchFingerprint"] == batch.batch_fingerprint
+    assert report["sessionFingerprint"] == session.source_fingerprint
+    assert report["resultFingerprint"]
+    assert report["verdict"] == "pass"
+    assert set(report) == {
+        "schemaVersion", "verdict", "findings", "requirementCoverage", "testCoverage",
+        "baselineRisk", "residualRisk", "hermesRequiredChecks", "reviewFingerprint",
+        "sessionId", "batchId", "batchFingerprint", "sessionFingerprint", "resultFingerprint",
+    }
+
+
+def test_reuse_is_scoped_to_session(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    first_session = _session()
+    second_session = _session(head_sha="c" * 40)
+    runner = BatchRunner()
+
+    first = run_review_batch(plan_review_batches(first_session, review_bundle())[0], runner, runtime_root=tmp_path)
+    second = run_review_batch(plan_review_batches(second_session, review_bundle())[0], runner, runtime_root=tmp_path)
+
+    assert runner.calls == 2
+    assert first["sessionId"] == first_session.session_id
+    assert second["sessionId"] == second_session.session_id
+
+
+def test_aggregator_rejects_missing_batch_and_preserves_findings():
+    from backend.agents.review_agent_service import merge_review_batches
+
+    session = _session()
+    reports = [_passing_report(session, "batch-001")]
+
+    with pytest.raises(ValueError, match="coverage"):
+        merge_review_batches(
+            reports, session_fingerprint=session.source_fingerprint,
+            expected_batch_ids=("batch-001", "batch-002"),
+        )
+
+
+def test_aggregator_rejects_duplicate_batch_ids():
+    from backend.agents.review_agent_service import merge_review_batches
+
+    session = _session()
+    reports = [_passing_report(session, "batch-001"), _passing_report(session, "batch-001")]
+
+    with pytest.raises(ValueError, match="coverage"):
+        merge_review_batches(
+            reports, session_fingerprint=session.source_fingerprint,
+            expected_batch_ids=("batch-001",),
+        )
+
+
+def test_aggregator_rejects_session_fingerprint_mismatch():
+    from backend.agents.review_agent_service import merge_review_batches
+
+    session = _session()
+    other = _session(head_sha="c" * 40)
+    reports = [_passing_report(other, "batch-001")]
+
+    with pytest.raises(ValueError, match="source fingerprint"):
+        merge_review_batches(
+            reports, session_fingerprint=session.source_fingerprint,
+            expected_batch_ids=("batch-001",),
+        )
+
+
+def test_aggregator_requires_exactly_one_fingerprint_mode():
+    from backend.agents.review_agent_service import merge_review_batches
+
+    session = _session()
+    reports = [_passing_report(session, "batch-001")]
+
+    with pytest.raises(ValueError, match="exactly one"):
+        merge_review_batches(reports)
+    with pytest.raises(ValueError, match="exactly one"):
+        merge_review_batches(reports, fingerprint="a", session_fingerprint=session.source_fingerprint)
+
+
+def test_aggregator_session_mode_merges_unique_findings_preserving_severity():
+    from backend.agents.review_agent_service import merge_review_batches
+
+    session = _session()
+    critical = {"severity": "critical", "file": "a.py", "line": 1, "rule": "r", "evidence": "e", "impact": "i", "recommendedAction": "f"}
+    low = {"severity": "low", "file": "b.py", "line": 2, "rule": "r", "evidence": "e", "impact": "i", "recommendedAction": "f"}
+    reports = [
+        _passing_report(session, "batch-001", findings=[critical]),
+        _passing_report(session, "batch-002", findings=[low, dict(low)]),
+    ]
+
+    merged = merge_review_batches(
+        reports, session_fingerprint=session.source_fingerprint,
+        expected_batch_ids=("batch-001", "batch-002"),
+    )
+
+    assert merged["verdict"] == "changes_required"
+    assert merged["findings"] == [critical, low]
+    assert merged["reviewFingerprint"] == session.source_fingerprint
+
+
+def test_aggregator_session_mode_overflow_returns_context_overflow():
+    from backend.agents.review_agent_service import merge_review_batches
+
+    session = _session()
+    findings = [
+        {
+            "severity": "high", "file": f"f-{index}.py", "line": 1, "rule": "r",
+            "evidence": "x" * 100, "impact": "i", "recommendedAction": "f",
+        }
+        for index in range(2)
+    ]
+    reports = [
+        _passing_report(session, f"batch-00{index + 1}", findings=[finding])
+        for index, finding in enumerate(findings)
+    ]
+
+    merged = merge_review_batches(
+        reports, session_fingerprint=session.source_fingerprint,
+        expected_batch_ids=("batch-001", "batch-002"), output_token_limit=50,
+    )
+
+    assert merged["verdict"] == "context_overflow"
+    assert merged["findings"] == findings
+
+
+def test_session_batch_flow_plan_run_merge_and_resume(tmp_path):
+    from backend.agents.review_agent_service import (
+        merge_review_batches,
+        plan_review_batches,
+        run_review_batch,
+    )
+
+    session = _session()
+    batches = plan_review_batches(session, multi_file_bundle(), patch_token_budget=5)
+    runner = BatchRunner()
+
+    reports = [run_review_batch(batch, runner, runtime_root=tmp_path) for batch in batches]
+    merged = merge_review_batches(
+        reports, session_fingerprint=session.source_fingerprint,
+        expected_batch_ids=tuple(batch.batch_id for batch in batches),
+    )
+
+    assert merged["verdict"] == "pass"
+    assert merged["reviewFingerprint"] == session.source_fingerprint
+    assert runner.calls == 3
+
+    resumed = [run_review_batch(batch, runner, runtime_root=tmp_path) for batch in batches]
+    assert runner.calls == 3
+    assert resumed == reports

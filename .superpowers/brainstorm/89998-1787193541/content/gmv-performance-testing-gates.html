@@ -1,0 +1,69 @@
+<h2>第四段｜效能與驗收 Gate</h2>
+<p class="subtitle">「不影響現有網頁讀取時間」以結構隔離 + benchmark 雙重保證，不以主觀感受判斷。</p>
+
+<div class="section">
+  <div class="label">Hot-path 隔離</div>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header">現有首頁／經營分析大盤</div>
+      <div class="mockup-body" style="padding:18px">
+        <h3>零新增 GMV 工作</h3>
+        <ul>
+          <li>不查詢任何 <code>gmv_</code> table/view</li>
+          <li>不驗證 migration、不重算退款</li>
+          <li>既有 revenue cache token 不變</li>
+          <li>Forecast／WAPE／Backtest 路徑不變</li>
+        </ul>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">正式淨 GMV 看板／匯出</div>
+      <div class="mockup-body" style="padding:18px">
+        <h3>使用者進入後才載入</h3>
+        <ul>
+          <li>Dashboard 只查 <code>v_gmv_current_metrics</code></li>
+          <li>索引鍵：active version + period + dimension</li>
+          <li>完整 Excel 只在按下載時生成</li>
+          <li>workbook cache key：version + export schema</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">可測量效能標準</div>
+  <div class="cards">
+    <div class="card"><div class="card-body"><h3>首頁結構 Gate</h3><p>以 query spy／contract test 證明現有首頁載入不呼叫 GMV repository，也不使現有 cache 失效。</p></div></div>
+    <div class="card"><div class="card-body"><h3>首頁 Benchmark</h3><p>同機器、同資料，變更前後各 10 次 warm run；median regression 不超過 <strong>300 ms</strong>，且不超過基準的 <strong>5%</strong>。</p></div></div>
+    <div class="card"><div class="card-body"><h3>GMV Read Model</h3><p>active metric snapshot indexed query 目標 <strong>&lt; 100 ms</strong>；GMV 看板資料準備目標 <strong>&lt; 1.5 s</strong>。</p></div></div>
+    <div class="card"><div class="card-body"><h3>DB 體積 Gate</h3><p>版本只存稀疏 adjustment，不複製未受影響營收列；測試檢查 snapshot row count 與退款影響範圍一致。</p></div></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">Migration 與索引</div>
+  <div class="mockup"><div class="mockup-header">部署／maintenance path，禁止放入 Streamlit page render</div><div class="mockup-body" style="padding:18px">
+    <p>Migration 前建立 SQLite backup，使用 schema version 與 idempotent validation；部署時一次執行。必要索引涵蓋 <code>batch_id</code>、<code>source_receipt_no</code>、<code>version_id</code>、<code>(version_id, period, dimension)</code> 與唯一 active pointer。</p>
+  </div></div>
+</div>
+
+<div class="section">
+  <div class="label">驗收矩陣</div>
+  <div class="mockup"><div class="mockup-header">從計算正確到實際 UI</div><div class="mockup-body" style="padding:18px">
+    <ol>
+      <li><strong>Unit：</strong>總退款／已退款、期間 C、cap、比例分配、匹配分類。</li>
+      <li><strong>Repository：</strong>migration、duplicate file、stale generation、atomic commit、rollback、event log。</li>
+      <li><strong>Parity：</strong>同一退款檔的正式淨 GMV與現有 session-only 已退款結果一致。</li>
+      <li><strong>Dashboard：</strong>雙正式口徑並列、總退款保留、active version／資料期間／來源批次清楚顯示。</li>
+      <li><strong>Export：</strong>完整報表同時含總退款與已退款，正式 sheet 使用已退款；稽核 sheet 可追到 batch/version。</li>
+      <li><strong>Performance：</strong>首頁 query contract + 10-run benchmark + GMV indexed read。</li>
+      <li><strong>Release：</strong>完整 pytest、findings-first review、Hermes、實際 Streamlit UI 驗收。</li>
+    </ol>
+  </div></div>
+</div>
+
+<div class="option" data-choice="approve-performance" onclick="toggleSelect(this)" style="margin-top:20px;border:2px solid #10b981">
+  <div class="letter">✓</div>
+  <div class="content"><h3>確認效能與驗收設計</h3><p>首頁零 GMV query、部署式 migration、indexed snapshot、按需 export、可量化 benchmark 與完整驗收。</p></div>
+</div>

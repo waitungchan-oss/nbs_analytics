@@ -1,0 +1,67 @@
+<h2>第三段｜生效、失敗與回滾狀態機</h2>
+<p class="subtitle">正式淨 GMV 採 fail closed：任何 stale、checksum 或 transaction 問題都保留上一個 active version。</p>
+
+<div class="mockup">
+  <div class="mockup-header">確認與生效流程</div>
+  <div class="mockup-body">
+    <svg viewBox="0 0 1280 405" width="100%" role="img" aria-label="GMV 正式版本生效狀態機">
+      <defs><marker id="a3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#64748b"/></marker><style>
+        .b{fill:#fff;stroke:#94a3b8;stroke-width:2;rx:12}.ok{fill:#ecfdf5;stroke:#10b981}.warn{fill:#fff7ed;stroke:#f97316}.bad{fill:#fef2f2;stroke:#ef4444}.info{fill:#eff6ff;stroke:#3b82f6}.t{font:600 16px system-ui;fill:#0f172a;text-anchor:middle}.s{font:13px system-ui;fill:#475569;text-anchor:middle}.l{stroke:#64748b;stroke-width:2;fill:none;marker-end:url(#a3)}.r{stroke:#ef4444;stroke-width:2;fill:none;marker-end:url(#a3)}
+      </style></defs>
+
+      <rect class="b info" x="30" y="55" width="175" height="90"/><text class="t" x="117" y="88">退款 Preflight</text><text class="s" x="117" y="114">只讀／不改正式口徑</text>
+      <rect class="b warn" x="265" y="45" width="210" height="110"/><text class="t" x="370" y="78">人工確認</text><text class="s" x="370" y="105">固定 file hash</text><text class="s" x="370" y="128">固定 revenue generation</text>
+      <rect class="b info" x="535" y="35" width="220" height="130"/><text class="t" x="645" y="68">取得 Shared Write Lease</text><text class="s" x="645" y="94">再次驗證 checksum</text><text class="s" x="645" y="118">再次驗證 generation</text><text class="s" x="645" y="142">開始單一 transaction</text>
+      <rect class="b info" x="815" y="35" width="215" height="130"/><text class="t" x="922" y="68">原子寫入</text><text class="s" x="922" y="94">batch / item / reconcile</text><text class="s" x="922" y="118">version / snapshots</text><text class="s" x="922" y="142">activation event</text>
+      <rect class="b ok" x="1090" y="45" width="165" height="110"/><text class="t" x="1172" y="79">Commit</text><text class="s" x="1172" y="105">切換 active</text><text class="s" x="1172" y="130">只刷新 GMV token</text>
+
+      <path class="l" d="M205 100 L265 100"/><path class="l" d="M475 100 L535 100"/><path class="l" d="M755 100 L815 100"/><path class="l" d="M1030 100 L1090 100"/>
+
+      <rect class="b bad" x="535" y="255" width="220" height="108"/><text class="t" x="645" y="289">Fail Closed</text><text class="s" x="645" y="315">要求重新 Preflight</text><text class="s" x="645" y="338">舊 active 完全不變</text>
+      <rect class="b bad" x="815" y="255" width="215" height="108"/><text class="t" x="922" y="289">Transaction Rollback</text><text class="s" x="922" y="315">不留下半套 snapshot</text><text class="s" x="922" y="338">舊 active 完全不變</text>
+      <path class="r" d="M645 165 L645 255"/><path class="r" d="M922 165 L922 255"/>
+    </svg>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">阻塞與警告規則</div>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header">必須阻塞</div>
+      <div class="mockup-body" style="padding:16px">
+        <ul>
+          <li>缺少必要欄位或沒有可用退款列</li>
+          <li>file hash／preflight fingerprint 不一致</li>
+          <li>正式營收 generation 已改變</li>
+          <li>同一批次已確認，禁止重複生效</li>
+          <li>snapshot checksum 或 transaction 寫入失敗</li>
+        </ul>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">可確認但必須顯示警告</div>
+      <div class="mockup-body" style="padding:16px">
+        <ul>
+          <li>SQLite 找不到或被收入規則排除</li>
+          <li>重複退款列、超額退款、未知狀態</li>
+          <li>未知狀態只進「總退款」，不進正式淨 GMV</li>
+          <li>使用者確認時保存 warning acknowledgement</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">Rollback 規則</div>
+  <div class="mockup"><div class="mockup-header"><code>gmv_scope_events</code>（append-only）</div><div class="mockup-body" style="padding:16px">
+    <p>每次 <code>ACTIVATE</code>／<code>ROLLBACK</code> 都新增事件，保存 from/to version、原因、操作者、時間及 checksum。Rollback 只切換 active pointer，不刪批次、明細、對帳結果或 snapshot。</p>
+    <p class="subtitle">因此可以回答：哪份退款檔、哪套收入 generation、哪個規則版本，在何時令正式淨 GMV 發生變化。</p>
+  </div></div>
+</div>
+
+<div class="option" data-choice="approve-lifecycle" onclick="toggleSelect(this)" style="margin-top:20px;border:2px solid #10b981">
+  <div class="letter">✓</div>
+  <div class="content"><h3>確認生效、錯誤與回滾設計</h3><p>Shared Write Lease + 單一 transaction + fail closed + append-only activation event。</p></div>
+</div>
