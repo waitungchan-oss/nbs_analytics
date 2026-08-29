@@ -11,6 +11,7 @@ from backend.agents.review_agent_service import (
     compact_review_evidence_payload,
     merge_review_batches,
     split_review_bundle_by_file,
+    validate_context_summary,
 )
 
 
@@ -85,6 +86,18 @@ def memory_evidence(*, status="ready", consumer_id="context-agent", hint_count=1
         policy_decision_fingerprints=("c" * 64,), source_refs=("docs/brief.md",),
         hint_count=hint_count, generated_at="2026-08-18T00:00:00+00:00",
     ).to_dict()
+
+
+def test_context_summary_accepts_read_only_memory_hints_from_context_agent():
+    summary = context_summary()
+    summary["memoryHints"] = {
+        "authority": "non_authoritative_memory",
+        "status": "ignored",
+        "hints": [],
+        "reason": "no_hints",
+    }
+
+    assert validate_context_summary(summary)["memoryHints"]["authority"] == "non_authoritative_memory"
 
 
 def test_review_optional_memory_observation_is_bounded_and_verdict_independent(tmp_path):
@@ -209,6 +222,7 @@ def test_review_runtime_instructions_bind_output_fingerprint_to_input_bundle(tmp
     runtime_instructions = runner.last_payload["instructions"]
     assert "reviewFingerprint" in runtime_instructions
     assert "payload.bundleFingerprint" in runtime_instructions
+    assert "nested evidence.bundleFingerprint" in runtime_instructions
 
 
 def test_strict_review_blocks_pass_without_verification(tmp_path):

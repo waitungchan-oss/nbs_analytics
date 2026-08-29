@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.agent_runtime import AgentRunner, AgentRuntime, agent_request_fingerprint
+from backend.agents.context_agent_service import _validate_memory_hints_payload
 from backend.agents.evidence_models import (
     ALLOWED_CONTEXT_STATUSES,
     ALLOWED_REVIEW_STATUSES,
@@ -46,6 +47,7 @@ _CONTEXT_KEYS = {
     "schemaVersion", "status", "taskUnderstanding", "systemBoundaries", "relevantFiles",
     "dependencies", "recommendedTests", "risks", "unknowns", "contextFingerprint",
 }
+_CONTEXT_OPTIONAL_KEYS = {"memoryHints"}
 _CONTEXT_LIST_FIELDS = (
     "taskUnderstanding", "systemBoundaries", "dependencies", "recommendedTests", "risks", "unknowns",
 )
@@ -120,7 +122,7 @@ def _validate_task_contract(task: object) -> dict:
 
 
 def validate_context_summary(summary: object) -> dict:
-    if not isinstance(summary, dict) or set(summary) != _CONTEXT_KEYS:
+    if not isinstance(summary, dict) or set(summary) - _CONTEXT_OPTIONAL_KEYS != _CONTEXT_KEYS:
         raise ValueError("Context summary schema is invalid")
     if summary["schemaVersion"] != "context-summary-v1":
         raise ValueError("Context summary schema is invalid")
@@ -145,6 +147,8 @@ def validate_context_summary(summary: object) -> dict:
             raise ValueError("Context summary relevantFiles is invalid")
     if not isinstance(summary["contextFingerprint"], str) or not summary["contextFingerprint"]:
         raise ValueError("Context summary contextFingerprint must be non-empty")
+    if "memoryHints" in summary:
+        _validate_memory_hints_payload(summary["memoryHints"])
     return summary
 
 
@@ -171,8 +175,11 @@ def _runtime_instructions(instructions: str, *, strict: bool) -> str:
     return (
         f"{instructions}\n\n[review-runtime]\n"
         f"strict={str(strict).lower()}\n"
-        "reviewFingerprint must equal the top-level payload.bundleFingerprint exactly; "
-        "copy that value verbatim and do not recompute, replace, or omit it."
+        "reviewFingerprint must equal the outer runner payload.bundleFingerprint exactly; "
+        "copy that value verbatim and do not recompute, replace, or omit it. "
+        "The nested evidence.bundleFingerprint is the source-evidence identity and "
+        "is intentionally distinct from the outer request fingerprint; do not report "
+        "that expected distinction as an integrity mismatch."
     )
 
 
