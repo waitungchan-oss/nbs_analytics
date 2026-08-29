@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.agent_runtime import _decode_json_or_codex_event_stream
 
 
 class RunnerProfileError(ValueError):
@@ -154,10 +155,16 @@ ALLOWED_RECEIPT_STATUSES = {
 _PROBE_TIMEOUT_SECONDS = 15
 _PROBE_MAX_OUTPUT_BYTES = 8 * 1024
 # Fixed, short, read-only probe command shape (model and prompt are filled in).
-_PROBE_ARGV_TEMPLATE = ("--ephemeral", "--json", "--model", "<model>", "<prompt>")
+_PROBE_ARGV_TEMPLATE = ("exec", "--ephemeral", "--json", "--model", "<model>", "<prompt>")
 _PROBE_PROMPT = (
     'Reply with only the JSON object {"status":"ok","model":"<your-model-name>"}.'
 )
+# Codex 0.150.x reports the selected gpt-5.4 slug as this stable display name
+# in a model-authored probe response.  Keep this allowlist narrow: an unknown
+# model name must still fail closed.
+_MODEL_DISPLAY_ALIASES = {
+    "gpt-5.4": frozenset({"gpt-5.4", "gpt-5", "gpt-5 codex"}),
+}
 _ENV_IDENTITY_KEYS = ("CODEX_HOME", "HOME")
 
 
@@ -339,7 +346,7 @@ def _run_live_probe(
         )
 
     try:
-        response = json.loads(completed.stdout)
+        response = _decode_json_or_codex_event_stream(completed.stdout)
     except json.JSONDecodeError:
         return _build_receipt(
             profile, status="blocked_runner_transport", cli_version=cli_version,
@@ -354,12 +361,16 @@ def _run_live_probe(
             current_expiry=current_expiry, diagnostics=("live probe response contract is invalid",),
         )
 
-    if response.get("model") != profile.model:
+    reported_model = response.get("model")
+    accepted_models = _MODEL_DISPLAY_ALIASES.get(
+        profile.model, frozenset({profile.model.casefold()})
+    )
+    if not isinstance(reported_model, str) or reported_model.casefold() not in accepted_models:
         return _build_receipt(
             profile, status="blocked_runner_transport", cli_version=cli_version,
             cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
             current_expiry=current_expiry,
-            diagnostics=(f"live probe model mismatch: {response.get('model')!r}",),
+            diagnostics=(f"live probe model mismatch: {reported_model!r}",),
         )
 
     return _build_receipt(

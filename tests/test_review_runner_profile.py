@@ -103,7 +103,7 @@ def _ready_profile(tmp_path, model="gpt-5.4"):
         "#!/bin/sh\n"
         "case \"$1\" in\n"
         "  --version) printf 'codex-cli 0.142.5\\n';;\n"
-        "  *) printf '{\"status\":\"ok\",\"model\":\"%s\"}\\n' \"$4\";;\n"
+        "  *) printf '{\"status\":\"ok\",\"model\":\"%s\"}\\n' \"$5\";;\n"
         "esac\n",
         encoding="utf-8",
     )
@@ -133,6 +133,59 @@ def test_probe_runner_turn_ready_requires_live_probe(tmp_path):
     assert receipt.environment_fingerprint
     assert receipt.expires_by_fingerprint
     assert receipt.diagnostics == ()
+
+
+def test_live_probe_invokes_codex_exec_subcommand(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+    observed = []
+
+    def fake_run(argv, **kwargs):
+        observed.append(argv)
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.142.5\n", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"status": "ok", "model": "gpt-5.4"}), stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "turn_ready"
+    probe_argv = next(argv for argv in observed if "--version" not in argv)
+    assert probe_argv[1:3] == ["exec", "--ephemeral"]
+
+
+def test_live_probe_decodes_codex_jsonl_agent_message(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+    profile.cache_path.write_text(
+        json.dumps({"models": [{"slug": "gpt-5.4", "model_messages": {"instructions_template": "base"}}]}),
+        encoding="utf-8",
+    )
+    event_stream = json.dumps({"type": "thread.started"}) + "\n" + json.dumps({
+        "type": "item.completed",
+        "item": {
+            "type": "agent_message",
+            "text": json.dumps({"status": "ok", "model": "gpt-5.4"}),
+        },
+    })
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.150.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=event_stream + "\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "turn_ready"
 
 
 def test_probe_runner_static_failure_blocks_capability_without_probe(tmp_path):
@@ -226,6 +279,32 @@ def test_live_probe_model_mismatch_is_transport_blocked(tmp_path, monkeypatch):
     receipt = probe_runner(profile)
     assert receipt.status == "blocked_runner_transport"
     assert any("model" in diagnostic for diagnostic in receipt.diagnostics)
+
+
+def test_live_probe_accepts_known_codex_display_name_alias(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.150.1\n", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0,
+            stdout=json.dumps({"status": "ok", "model": "GPT-5 Codex"}),
+            stderr="",
+        )
+
+    profile.cache_path.write_text(
+        json.dumps({"models": [{"slug": "gpt-5.4", "model_messages": {"instructions_template": "base"}}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "turn_ready"
 
 
 def test_live_probe_output_over_8kib_is_transport_blocked(tmp_path, monkeypatch):
