@@ -312,6 +312,7 @@ def test_hostile_runner_cannot_receive_pass_after_formal_state_write(agent_fixtu
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_production_sandbox_allows_exact_source_write(agent_fixture):
     report = agent_fixture.run_sandboxed_task(
         "allowed_runner.py",
@@ -323,6 +324,7 @@ def test_production_sandbox_allows_exact_source_write(agent_fixture):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_production_sandbox_blocks_external_formal_fixture(agent_fixture, tmp_path):
     external = tmp_path / "external-formal.db"
     external.write_bytes(b"FORMAL")
@@ -338,6 +340,7 @@ def test_production_sandbox_blocks_external_formal_fixture(agent_fixture, tmp_pa
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_production_sandbox_denies_transient_ignored_db_before_touch(agent_fixture):
     sentinel = agent_fixture.worktree / "sandbox/touched.txt"
     before = agent_fixture.formal_db.read_bytes()

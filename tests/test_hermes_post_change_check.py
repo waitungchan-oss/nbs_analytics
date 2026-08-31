@@ -143,6 +143,38 @@ def test_memory_sidecar_hermes_check_is_read_only_and_does_not_start_gateway():
     assert "append_memory_sidecar_telemetry" not in command
 
 
+def test_sandbox_capability_hermes_report_is_read_only_and_validates_receipt(tmp_path):
+    from backend.agents.sandbox_capability_preflight import SandboxCapabilityEvidence
+    from backend.agents.sandbox_capability_receipt import write_capability_evidence
+
+    evidence = SandboxCapabilityEvidence._build(
+        "blocked_environment", "darwin", "a" * 64, "b" * 64, "c" * 64,
+        {"applicationApplied": False, "filesystemPolicyEnforced": False,
+         "processPolicyEnforced": False, "networkPolicyEnforced": False},
+        "sandbox_apply_denied", ("bounded diagnostic",),
+        "2026-08-31T00:00:00Z", "2026-08-31T00:00:01Z",
+    )
+    path = tmp_path / ".nbs_agent_runtime/sandbox-capability/evidence.json"
+    write_capability_evidence(path, evidence)
+
+    report = post_check.sandbox_capability_artifact_report(tmp_path)
+
+    assert report["schemaVersion"] == "sandbox-capability-hermes-report-v1"
+    assert report["status"] == "blocked_environment"
+    assert report["failureCode"] == "sandbox_apply_denied"
+    assert report["artifactCount"] == 1
+    assert report["policy"] == "read-only"
+    assert report["invocations"] == report["writes"] == 0
+
+
+def test_sandbox_capability_hermes_report_marks_missing_receipt_blocked(tmp_path):
+    report = post_check.sandbox_capability_artifact_report(tmp_path)
+
+    assert report["status"] == "blocked"
+    assert report["artifactCount"] == 0
+    assert report["policy"] == "read-only"
+
+
 def test_memory_hub_integration_report_is_read_only_and_validates_evidence(tmp_path):
     from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
     run = tmp_path / ".nbs_agent_runtime" / "runs" / "run-1"

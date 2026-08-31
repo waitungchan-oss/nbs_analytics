@@ -57,6 +57,7 @@ def _sandbox_runner(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_allows_only_exact_approved_source_write(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -90,6 +91,7 @@ def test_sandboxed_runner_allows_only_exact_approved_source_write(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_excludes_secret_even_if_it_was_accidentally_tracked(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -142,6 +144,7 @@ def test_sandboxed_runner_excludes_secret_even_if_it_was_accidentally_tracked(tm
     ],
 )
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_excludes_common_tracked_credentials_but_keeps_governance_files(
     tmp_path, sensitive_path,
 ):
@@ -176,6 +179,7 @@ def test_sandboxed_runner_excludes_common_tracked_credentials_but_keeps_governan
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_denies_external_secret_read(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -201,6 +205,7 @@ def test_sandboxed_runner_denies_external_secret_read(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_denies_localhost_network_and_indirect_formal_write(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -248,6 +253,7 @@ def test_sandboxed_runner_denies_localhost_network_and_indirect_formal_write(tmp
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_kills_background_child_before_staging_validation(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -276,6 +282,7 @@ def test_sandboxed_runner_kills_background_child_before_staging_validation(tmp_p
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_denies_fork_and_setsid_before_late_child_can_start(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -312,6 +319,7 @@ def test_sandboxed_runner_denies_fork_and_setsid_before_late_child_can_start(tmp
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_second_call_overlays_first_unstaged_allowed_change(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -350,6 +358,7 @@ def test_sandboxed_runner_second_call_overlays_first_unstaged_allowed_change(tmp
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
 @pytest.mark.parametrize("kind", ["symlink", "directory"])
+@pytest.mark.sandbox
 def test_sandboxed_runner_repair_overlay_fails_closed_for_nonregular_actual_target(
     tmp_path, kind,
 ):
@@ -373,6 +382,7 @@ def test_sandboxed_runner_repair_overlay_fails_closed_for_nonregular_actual_targ
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_atomically_replaces_actual_hardlink_without_touching_external_inode(
     tmp_path, monkeypatch,
 ):
@@ -411,6 +421,7 @@ def test_sandboxed_runner_atomically_replaces_actual_hardlink_without_touching_e
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_denies_first_transient_ignored_db_write(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -450,6 +461,7 @@ def test_sandboxed_runner_denies_first_transient_ignored_db_write(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec contract")
+@pytest.mark.sandbox
 def test_sandboxed_runner_rejects_symlink_write_target(tmp_path):
     external = tmp_path / "external.py"
     external.write_text("value = 1\n", encoding="utf-8")

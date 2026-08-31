@@ -59,6 +59,8 @@ Hermes 只可 read-only 報告 workflow artifact、cap warning 與 retention sta
 
 Documentation sidecar 由 Store allowlist 的五個 artifact 組成：`documentation-evidence.json`、`documentation-proposal.json`、`documentation-preview.json`、`documentation-application.json`、`documentation-telemetry.json`。Hermes 只檢查 schema presence、status consistency、bounded counts、artifact cap 與 read-only permissions，並回報 `documentation-hermes-report-v1`；不得呼叫 `agent_workflow.py document`、runner、preview、apply、backup、Git 或 Obsidian write。Documentation PASS 不是 runtime acceptance，也不能批准 targets 或改變 Hermes/terminal state。
 
+Sandbox capability preflight receipt 位於 `.nbs_agent_runtime/sandbox-capability/evidence.json`，schema 為 `sandbox-capability-evidence-v1`。Hermes 只 read-only 驗證 receipt 的 exact schema、fingerprint 與 status，並回報 `sandbox-capability-hermes-report-v1`；`available` 才表示 nested macOS sandbox capability 可用，`blocked_environment`、`not_applicable` 或 `invalid_evidence` 都不是 sandbox gate PASS。Hermes 不會重新執行 probe、改寫 receipt、放寬 sandbox policy，亦不把 capability evidence 當成 Review、full pytest、baseline 或 UI acceptance。
+
 ### Agent Operations Read-only View
 
 Agent Operations 是現行 Streamlit read-only view，讀取 Phase 1 artifacts 並消費

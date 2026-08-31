@@ -304,6 +304,40 @@ def governance_graph_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
     return report
 
 
+def sandbox_capability_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
+    """Read-only inspection of the bounded sandbox capability receipt."""
+    from backend.agents.sandbox_capability_receipt import (
+        read_capability_evidence,
+        SandboxCapabilityError,
+    )
+
+    path = Path(project_root) / ".nbs_agent_runtime" / "sandbox-capability" / "evidence.json"
+    report = {
+        "schemaVersion": "sandbox-capability-hermes-report-v1",
+        "policy": "read-only",
+        "invocations": 0,
+        "writes": 0,
+        "status": "blocked",
+        "artifactCount": 0,
+        "failureCode": "receipt_missing",
+        "evidenceFingerprint": None,
+        "diagnostics": [],
+    }
+    if path.is_symlink() or not path.is_file():
+        return report
+    report["artifactCount"] = 1
+    try:
+        evidence = read_capability_evidence(path)
+    except (SandboxCapabilityError, OSError) as exc:
+        report["failureCode"] = "receipt_invalid"
+        report["diagnostics"] = [str(exc)[:256]]
+        return report
+    report["status"] = evidence.status
+    report["failureCode"] = evidence.failure_code
+    report["evidenceFingerprint"] = evidence.evidence_fingerprint
+    return report
+
+
 def short_term_offload_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
     """Read-only inspection of the isolated short-term offload root."""
     root = Path(project_root) / ".nbs_agent_runtime" / "short-term-offload"
@@ -503,6 +537,11 @@ def build_check_plan(
         "import json; "
         "print(json.dumps(memory_sidecar_artifact_report(), sort_keys=True))"
     )
+    sandbox_capability_artifact_report_code = (
+        "from scripts.hermes_post_change_check import sandbox_capability_artifact_report; "
+        "import json; "
+        "print(json.dumps(sandbox_capability_artifact_report(), sort_keys=True))"
+    )
     profile_args = ["--verification-profile", verification_profile] if verification_profile else []
     plan = [
         CheckStep("git-status", ["git", "status", "--short", "--branch"]),
@@ -544,6 +583,13 @@ def build_check_plan(
         CheckStep(
             "memory-sidecar-artifact-report",
             [py, "-c", memory_sidecar_artifact_report_code],
+            required=False,
+        )
+    )
+    plan.append(
+        CheckStep(
+            "sandbox-capability-artifact-report",
+            [py, "-c", sandbox_capability_artifact_report_code],
             required=False,
         )
     )
