@@ -19,4 +19,13 @@
 - Documentation Agent 只消費 `documentation-evidence-v1` 並輸出 `documentation-proposal-v1`；system map 與 ADR 必須明確 target approval，缺少 approved runner 時回傳 `blocked_missing_runner`。
 - Documentation sidecar 與 Agent Operations 永遠 read-only；不得 auto-apply、批准 targets、改變 Hermes/terminal state、修改 SQLite、baseline、runtime 或 Git。
 
+## Codex 額度使用固定規範（2026-08-28 起強制）
+
+依 `docs/agents/CODEX_CREDIT_SAVING_RUNBOOK.md` 執行，四條不可協商：
+
+1. 編排一律走本地 `scripts/agent_workflow.py` CLI；禁止在 Codex 對話內用 spawn_agent / wait_agent / send_message 做多 agent 編排與長輪詢。Context/Review/Implementation Agent 仍為一次性 bounded 呼叫（`--agent-command` 指向已批准 runner）。
+2. 每 Task 開新 session，目標 ≤ 15 turns；禁止跨 Task 延續長對話。Read-only 查詢先用本地工具（rg / git / system_manager.py），不開 session。
+3. 模型分級：高風險（revenue、baseline、business rules、upload、SQLite、export、架構、refactor）用 `gpt-5.6-luna` + `medium`；一般開發與維護用中階/便宜模型 + `low`。全域預設已設 `low`，高風險任務必須在 session 內明確切回。
+4. 不啟用非必要 plugins（config 已精簡）；不得為繞過以上規則新增 session、插件或 runner。
+
 正式口徑固定為「不含掛賬核銷與TT退款轉團款」；2026-05 baseline 固定為 `HKD 12,057,968`。
