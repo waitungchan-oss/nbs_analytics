@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.memory_sidecar_hint_models import MemoryHints
@@ -170,3 +171,25 @@ def test_run_live_ab_blocks_symlink_arm_or_source_traversal_with_marker(tmp_path
     result = subject.run_live_ab(profile, _manifest(tmp_path), "bounded question", ["../escape.json"], project_root=tmp_path, env={"DEEPSEEK_API_KEY": "x", "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1", "HERMES_SOURCE_ROOT": str(_hermes_source(tmp_path))})
     assert result.status == "blocked_runner_capability"
     assert result.diagnostic_path == "live-ab/acceptance-1/blocked.json"
+
+
+def test_run_local_cli_transport_is_explicit_and_writes_bound_receipt(tmp_path):
+    from backend.agents.hermes_cli_transport import CliInvokeRequest
+    from backend.agents.runner_identity import RunnerIdentity
+    from scripts import hermes_live_ab_runner as subject
+
+    executable = tmp_path / "hermes-cli"
+    executable.write_text(f"#!{sys.executable}\nimport json; print(json.dumps({{'model': 'deepseek-v4-flash', 'response': 'ok'}}))\n")
+    executable.chmod(0o700)
+    identity = RunnerIdentity.from_legacy_local_cli(runner_id="hermes-cli", provider="hermes", model="deepseek-v4-flash", profile="max", execution_environment="hermes-local")
+    request = CliInvokeRequest(identity=identity, executable=executable, argv=("run", "--json"), cwd=tmp_path, source_fingerprint="a" * 64, turn_fingerprint="b" * 64, manifest_fingerprint="c" * 64, command_shape_fingerprint="d" * 64)
+    result = subject.run_local_cli_transport(request, output_path=tmp_path / "receipt.json")
+    assert result.status == "ready"
+    payload = json.loads((tmp_path / "receipt.json").read_text())
+    assert payload["runnerIdentityFingerprint"] == identity.identity_fingerprint
+
+
+def test_existing_live_ab_default_does_not_select_local_cli(tmp_path):
+    from scripts import hermes_live_ab_runner as subject
+
+    assert "transport" not in subject.run_live_ab.__kwdefaults__
