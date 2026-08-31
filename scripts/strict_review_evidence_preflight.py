@@ -76,10 +76,11 @@ def main(argv: list[str] | None = None) -> int:
             "bundleFingerprint": canonical_fingerprint({"sessionId": args.session, "sourceFingerprint": source, "verification": verification}),
             "changedFiles": [], "coverage": {"targetedTests": "not_requested", "compileStatic": status, "diffCheck": "not_requested", "runnerCapability": "available", "contextCompatibility": "not_requested", "governanceLineage": governance["status"], "memoryReadiness": memory["status"]},
             "generatedEvidence": ["verification-v1.json"], "verificationPath": f".nbs_agent_runtime/verification_sessions/{args.session}/verification-v1.json",
-            "diagnostics": [], "createdAt": "deterministic-preflight", "preflightFingerprint": canonical_fingerprint({"sessionId": args.session, "sourceFingerprint": source, "verification": verification}),
+            "diagnostics": [], "createdAt": "deterministic-preflight",
         }
-        payload = merge_non_authoritative_observations(payload, governance=governance, memory=memory)
-        write_preflight_artifacts(output, payload, verification)
+        canonical_payload = payload
+        payload = merge_non_authoritative_observations(canonical_payload, governance=governance, memory=memory)
+        write_preflight_artifacts(output, canonical_payload, verification)
         _emit(payload)
         return 0 if status == "ready" else 1
     except (OSError, ValueError, PermissionError, RuntimeError) as exc:

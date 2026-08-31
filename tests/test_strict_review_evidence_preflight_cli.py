@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from scripts.strict_review_evidence_preflight import main
+from backend.agents.strict_review_preflight_models import validate_preflight_result
 
 
 def test_cli_help_is_available(capsys):
@@ -30,6 +31,7 @@ def test_cli_emits_one_bounded_json_and_writes_artifacts(tmp_path: Path, capsys)
     assert payload["sessionId"] == "s1"
     assert (output / "preflight.json").exists()
     assert (output / "verification-v1.json").exists()
+    assert validate_preflight_result(json.loads((output / "preflight.json").read_text(encoding="utf-8")))["status"] == "ready"
 
 
 def test_cli_rejects_output_outside_runtime(tmp_path: Path, capsys):
