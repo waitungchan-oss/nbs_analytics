@@ -435,6 +435,12 @@ def build_review_report(
     preserved_dirty = bundle.repository.get("preservedDirtyFiles") or []
     if not isinstance(preserved_dirty, list) or not all(isinstance(item, str) for item in preserved_dirty):
         raise ValueError("Review repository preservedDirtyFiles must be a list of strings")
+    if strict and not verification:
+        return finish(_report(
+            "blocked",
+            review_fingerprint,
+            residual_risk=["Strict review requires verification evidence."],
+        ))
     unattributed_dirty = sorted(
         set(dirty_files)
         - set(evidence_payload["gitDiff"]["files"])
@@ -445,12 +451,6 @@ def build_review_report(
             "blocked",
             review_fingerprint,
             residual_risk=[f"Strict review has unattributed dirty files: {', '.join(unattributed_dirty)}"],
-        ))
-    if strict and not verification:
-        return finish(_report(
-            "blocked",
-            review_fingerprint,
-            residual_risk=["Strict review requires verification evidence."],
         ))
     if strict and any(item["exitCode"] != 0 for item in verification):
         return finish(_report(
