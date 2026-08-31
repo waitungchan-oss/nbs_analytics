@@ -22,6 +22,8 @@ from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.memory_sidecar_hint_models import MemoryHint, MemoryHints
 from integrations.hermes_nbs_sidecar.plugin import ACTIVATION_SCHEMA, activation_binding_fingerprint
 from backend.agents.runner_capability_evidence import RunnerCapabilityEvidenceError
+from backend.agents.hermes_cli_transport import CliInvokeRequest, HermesCliTransportAdapter
+from backend.agents.hermes_cli_transport_receipt import CliTransportReceipt, write_cli_transport_receipt
 from scripts.hermes_isolated_profile import IsolatedHermesProfile
 from scripts.hermes_runner_capability_hook import _current_git_head, _git_status_porcelain, _validate_manifest
 from backend.agents.short_term_offload_policy import ShortTermOffloadPolicy
@@ -41,6 +43,35 @@ class LiveABRunResult:
     control_receipt_path: str | None
     treatment_receipt_path: str | None
     diagnostic_path: str | None
+
+
+@dataclass(frozen=True)
+class LocalCliTransportResult:
+    status: str
+    reason: str
+    receipt_path: str | None
+
+
+def run_local_cli_transport(
+    request: CliInvokeRequest,
+    *,
+    output_path: Path,
+    adapter: HermesCliTransportAdapter | None = None,
+) -> LocalCliTransportResult:
+    """Explicitly run one Local CLI request; existing Remote API callers are untouched."""
+    result = (adapter or HermesCliTransportAdapter()).invoke(request)
+    if result.status != "ready":
+        return LocalCliTransportResult(result.status, result.reason or "cli_transport_failed", None)
+    try:
+        receipt = CliTransportReceipt.from_result(
+            result,
+            source_fingerprint=request.source_fingerprint,
+            command_shape_fingerprint=request.command_shape_fingerprint or "0" * 64,
+        )
+        write_cli_transport_receipt(output_path, receipt)
+    except (OSError, ValueError, TypeError) as exc:
+        return LocalCliTransportResult("invalid_evidence", "receipt_write_failed", None)
+    return LocalCliTransportResult("ready", "", str(output_path))
 
 
 def _immutable_identity(project_root: Path) -> tuple[str, str]:
