@@ -483,14 +483,26 @@ class EvidenceCollector:
         explicit_preserved_paths = set()
         for relative in preserve_dirty_paths:
             path = Path(relative)
-            if (
-                path.is_absolute()
-                or ".." in path.parts
-                or not relative.startswith(process_artifact_prefixes)
-            ):
-                raise PermissionError(
-                    "Explicit preserved dirty paths must be process artifacts under docs/superpowers/ or .superpowers/."
-                )
+            if path.is_absolute() or ".." in path.parts:
+                raise PermissionError("Explicit preserved dirty path is unsafe")
+            if not relative.startswith(process_artifact_prefixes):
+                if path.suffix in {".py", ".js", ".mjs", ".vue"} and path.parts[0] in {
+                    "backend", "scripts", "tests",
+                }:
+                    tracked = subprocess.run(
+                        ["git", "ls-files", "--error-unmatch", "--", relative],
+                        cwd=self.project_root, capture_output=True, text=True, check=False,
+                    ).returncode == 0
+                    if tracked:
+                        raise PermissionError(
+                            "Tracked source and test files cannot be explicitly preserved."
+                        )
+                try:
+                    self.policy.resolve_read_path(self.project_root / relative)
+                except PermissionError as exc:
+                    raise PermissionError(
+                        "Explicit preserved dirty paths must be allowlisted or process artifacts."
+                    ) from exc
             explicit_preserved_paths.add(relative)
         if head_ref == "WORKTREE":
             untracked_command = self._run(

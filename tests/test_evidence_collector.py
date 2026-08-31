@@ -474,6 +474,29 @@ def test_review_collection_only_preserves_explicit_tracked_process_path(tmp_path
     assert not bundle.evidence
 
 
+def test_review_collection_preserves_explicit_allowlisted_dirty_file(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    user_file = tmp_path / "AGENTS.md"
+    user_file.write_text("# local note\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    user_file.write_text("# local note changed\n", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief,
+        base_ref="HEAD",
+        head_ref="WORKTREE",
+        preserve_dirty_paths=("AGENTS.md",),
+    )
+
+    assert bundle.repository["preservedDirtyFiles"] == ["AGENTS.md"]
+    assert not bundle.evidence
+
+
 def test_review_collection_rejects_preserve_allowlist_outside_process_artifacts(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)
@@ -483,13 +506,66 @@ def test_review_collection_rejects_preserve_allowlist_outside_process_artifacts(
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
 
-    with pytest.raises(PermissionError, match="process artifacts"):
+    with pytest.raises(PermissionError, match="allowlisted"):
         EvidenceCollector(tmp_path).collect_review(
             brief,
             base_ref="HEAD",
             head_ref="WORKTREE",
-            preserve_dirty_paths=("tests/test_real_change.py",),
+            preserve_dirty_paths=("outside.md",),
         )
+
+
+def test_review_collection_rejects_preserve_source_file(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "scripts").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    user_file = tmp_path / "scripts/user-owned.py"
+    user_file.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    user_file.write_text("VALUE = 2\n", encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="Tracked source and test files"):
+        EvidenceCollector(tmp_path).collect_review(
+            brief,
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            preserve_dirty_paths=("scripts/user-owned.py",),
+        )
+
+
+def test_review_collection_allows_explicit_untracked_source_boundary(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    allowlist = tmp_path / "agent_config/evidence_allowlist.json"
+    allowlist.write_text(
+        allowlist.read_text(encoding="utf-8").replace(
+            '"readRoots":["docs","backend","tests"]',
+            '"readRoots":["docs","backend","scripts","tests"]',
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "scripts").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    user_file = tmp_path / "scripts/user-owned.py"
+    user_file.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "docs/brief.md", "agent_config"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief,
+        base_ref="HEAD",
+        head_ref="WORKTREE",
+        preserve_dirty_paths=("scripts/user-owned.py",),
+    )
+
+    assert bundle.repository["preservedDirtyFiles"] == ["scripts/user-owned.py"]
+    assert not bundle.evidence
 
 
 def test_review_collection_keeps_legal_tracked_root_source_while_skipping_process_and_sensitive_paths(tmp_path):

@@ -5,6 +5,16 @@ from scripts.review_agent import _verification_freshness_diagnostics
 from scripts import review_agent
 
 
+def test_runner_diagnostics_keep_preflight_failure_when_provenance_is_present():
+    result = review_agent._merge_runner_diagnostics(
+        ["provenance-1", "provenance-2", "provenance-3", "provenance-4"],
+        ["cache schema is invalid"],
+        ["repair cache"],
+    )
+
+    assert result == ["cache schema is invalid", "repair cache", "provenance-1"]
+
+
 def test_review_cli_exposes_runner_preflight_options():
     args = _parser().parse_args([
         "--brief", "docs/brief.md",

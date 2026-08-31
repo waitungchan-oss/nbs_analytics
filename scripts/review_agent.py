@@ -29,6 +29,20 @@ from backend.agents.review_agent_service import (
 )
 
 
+def _merge_runner_diagnostics(
+    provenance: list[str], preflight: list[str], recovery: list[str], *, limit: int = 4,
+) -> list[str]:
+    """Keep bounded diagnostics while retaining a concrete preflight cause."""
+    if limit <= 0:
+        return []
+    primary = [*preflight, *recovery]
+    if not primary:
+        return provenance[:limit]
+    if not provenance:
+        return primary[:limit]
+    return [*primary[: max(1, limit - 1)], *provenance[:1]][:limit]
+
+
 def exit_code_for_verdict(verdict: str | None) -> int:
     if verdict in {None, "pass"}:
         return 0
@@ -252,7 +266,11 @@ def main(argv: list[str] | None = None) -> int:
                 if profile is not None:
                     preflight = preflight_runner(profile)
                     if preflight.status != "ready":
-                        runner_diagnostics = list(preflight.diagnostics) + list(preflight.recovery)
+                        runner_diagnostics = _merge_runner_diagnostics(
+                            provenance_diagnostics,
+                            list(preflight.diagnostics),
+                            list(preflight.recovery),
+                        )
                     else:
                         runner = SubprocessAgentRunner(
                             command, allowed_executables=policy.agent_executables,
