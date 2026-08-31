@@ -116,6 +116,25 @@ def test_gate_evidence_keeps_verification_v1_shape(tmp_path):
     assert metadata["gate"] == "full_pytest"
 
 
+def test_gate_metadata_can_bind_a_canonical_runner_identity(tmp_path):
+    from backend.agents.runner_identity import RunnerIdentity
+    from backend.agents.verification_evidence_writer import write_gate_evidence
+
+    identity = RunnerIdentity.from_dict({
+        "schemaVersion": "runner-identity-v1", "runnerId": "review", "transport": "local_cli",
+        "provider": "codex", "model": "gpt-5.4", "profile": "strict-review",
+        "executionEnvironment": "local-macos",
+    })
+    session = _session()
+    result = write_gate_evidence(
+        session, "full_pytest", [_command()], _session_dir(tmp_path, session), runner_identity=identity
+    )
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert json.loads(result.verification_path.read_text(encoding="utf-8")).keys() == {"commands"}
+    assert metadata["runnerIdentityFingerprint"] == identity.identity_fingerprint
+
+
 def test_gate_evidence_verification_file_passes_existing_validator(tmp_path):
     from backend.agents.verification_evidence_writer import validate_verification_v1, write_gate_evidence
 

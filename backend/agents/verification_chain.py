@@ -53,6 +53,7 @@ from backend.agents.verification_session import (
     read_session,
     write_session,
 )
+from backend.agents.runner_identity import RunnerIdentity
 
 GATE_RESULT_SCHEMA = "verification-gate-result-v1"
 TERMINAL_SCHEMA = "verification-terminal-v1"
@@ -240,11 +241,15 @@ class VerificationChain:
         *,
         runtime_root: Path | str,
         source_probe: SourceProbe | None = None,
+        runner_identity: RunnerIdentity | None = None,
     ) -> None:
         if not isinstance(session, VerificationSession):
             raise ValueError("VerificationChain requires a VerificationSession")
         self._session = session
         self._source_probe = source_probe
+        if runner_identity is not None and not isinstance(runner_identity, RunnerIdentity):
+            raise ValueError("runner_identity must be a RunnerIdentity")
+        self._runner_identity = runner_identity
         self._session_dir = _resolve_session_output_dir(runtime_root, session)
         self._last_result: GateResult | None = None
 
@@ -257,6 +262,7 @@ class VerificationChain:
         *,
         runtime_root: Path | str,
         source_probe: SourceProbe | None = None,
+        runner_identity: RunnerIdentity | None = None,
     ) -> "VerificationChain":
         """Persist a sealed session and bind the chain to its session directory.
 
@@ -267,7 +273,10 @@ class VerificationChain:
             raise ValueError("seal requires a VerificationSession")
         if session.status != "sealed":
             raise ValueError("seal requires a session with status 'sealed'")
-        chain = cls(session, runtime_root=runtime_root, source_probe=source_probe)
+        chain = cls(
+            session, runtime_root=runtime_root, source_probe=source_probe,
+            runner_identity=runner_identity,
+        )
         if source_probe is not None:
             try:
                 session.assert_fresh(**source_probe())
@@ -275,6 +284,14 @@ class VerificationChain:
                 raise StaleVerificationSession(f"cannot seal stale source: {exc}") from exc
         chain._persist()
         return chain
+
+    def bind_runner_identity(self, runner_identity: RunnerIdentity) -> None:
+        """Bind an explicitly resolved runner identity before the first gate."""
+        if not isinstance(runner_identity, RunnerIdentity):
+            raise ValueError("runner_identity must be a RunnerIdentity")
+        if self._session.status != "sealed":
+            raise InvalidGateTransition("runner identity must be bound before gates start")
+        self._runner_identity = runner_identity
 
     @classmethod
     def load(
@@ -550,7 +567,8 @@ class VerificationChain:
                 raise ValueError("pre_review requires commands or a runner callable")
             commands = runner()
         evidence = write_gate_evidence(
-            self._session, "pre_review", list(commands), self._gate_dir("pre_review")
+            self._session, "pre_review", list(commands), self._gate_dir("pre_review"),
+            runner_identity=self._runner_identity,
         )
         if evidence.status != "pass":
             return self._enter_terminal(
@@ -680,6 +698,7 @@ class VerificationChain:
                 "stderrTail": "",
             }],
             self._gate_dir("strict_review"),
+            runner_identity=self._runner_identity,
         )
         if status == "review_passed":
             return self._advance(
@@ -726,7 +745,8 @@ class VerificationChain:
                 raise ValueError("full verification requires commands or a runner callable")
             commands = runner()
         evidence = write_gate_evidence(
-            self._session, "full_pytest", list(commands), self._gate_dir("full_pytest")
+            self._session, "full_pytest", list(commands), self._gate_dir("full_pytest"),
+            runner_identity=self._runner_identity,
         )
         if evidence.status != "pass":
             return self._enter_terminal(
@@ -822,6 +842,7 @@ class VerificationChain:
                 "stderrTail": "",
             }],
             self._gate_dir("hermes"),
+            runner_identity=self._runner_identity,
         )
         _write_json_atomic(self._session_dir / "hermes-result.json", result)
         if not passed:

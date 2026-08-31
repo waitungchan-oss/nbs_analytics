@@ -12,6 +12,7 @@ from pathlib import Path
 
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.agent_runtime import _decode_json_or_codex_event_stream
+from backend.agents.runner_identity import RunnerIdentity, RunnerIdentityError
 
 
 class RunnerProfileError(ValueError):
@@ -24,6 +25,18 @@ class RunnerProfile:
     model: str
     cache_path: Path
     cli_version_floor: str = "0.142.5"
+
+    def to_runner_identity(
+        self, *, profile_name: str, execution_environment: str, provider: str
+    ) -> RunnerIdentity:
+        """Adapt an explicitly named Local CLI profile to the shared identity contract."""
+        return RunnerIdentity.from_legacy_local_cli(
+            runner_id=profile_name,
+            provider=provider,
+            model=self.model,
+            profile=profile_name,
+            execution_environment=execution_environment,
+        )
 
     @classmethod
     def from_dict(cls, payload: dict, *, base_dir: Path) -> "RunnerProfile":
@@ -181,6 +194,7 @@ class RunnerCapabilityReceipt:
     environment_fingerprint: str
     diagnostics: tuple[str, ...] = ()
     expires_by_fingerprint: str = ""
+    runner_identity: RunnerIdentity | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != _RECEIPT_SCHEMA:
@@ -200,27 +214,37 @@ class RunnerCapabilityReceipt:
             raise RunnerProfileError("diagnostics must be a list of strings")
         if not isinstance(self.expires_by_fingerprint, str):
             raise RunnerProfileError("expiresByFingerprint must be a string")
+        if self.runner_identity is not None:
+            if not isinstance(self.runner_identity, RunnerIdentity):
+                raise RunnerProfileError("runnerIdentity must be a RunnerIdentity")
+            if self.runner_identity.model != self.model:
+                raise RunnerProfileError("runnerIdentity model must match receipt model")
 
     @classmethod
     def from_dict(cls, payload: dict) -> "RunnerCapabilityReceipt":
         if not isinstance(payload, dict):
             raise RunnerProfileError("runner capability receipt must be an object")
-        if set(payload) != _RECEIPT_KEYS:
+        if set(payload) - (_RECEIPT_KEYS | {"runnerIdentity"}) or not _RECEIPT_KEYS <= set(payload):
             raise RunnerProfileError("runner capability receipt schema keys are invalid")
+        try:
+            runner_identity = (
+                RunnerIdentity.from_dict(payload["runnerIdentity"])
+                if "runnerIdentity" in payload else None
+            )
+        except RunnerIdentityError as exc:
+            raise RunnerProfileError(f"runnerIdentity is invalid: {exc}") from exc
         return cls(
-            schema_version=payload["schemaVersion"],
-            status=payload["status"],
-            executable=payload["executable"],
-            cli_version=payload["cliVersion"],
-            model=payload["model"],
-            cache_fingerprint=payload["cacheFingerprint"],
+            schema_version=payload["schemaVersion"], status=payload["status"],
+            executable=payload["executable"], cli_version=payload["cliVersion"],
+            model=payload["model"], cache_fingerprint=payload["cacheFingerprint"],
             environment_fingerprint=payload["environmentFingerprint"],
             diagnostics=tuple(payload["diagnostics"]),
             expires_by_fingerprint=payload["expiresByFingerprint"],
+            runner_identity=runner_identity,
         )
 
     def to_dict(self) -> dict:
-        return {
+        value = {
             "schemaVersion": self.schema_version,
             "status": self.status,
             "executable": self.executable,
@@ -231,6 +255,9 @@ class RunnerCapabilityReceipt:
             "diagnostics": list(self.diagnostics),
             "expiresByFingerprint": self.expires_by_fingerprint,
         }
+        if self.runner_identity is not None:
+            value["runnerIdentity"] = self.runner_identity.to_dict()
+        return value
 
 
 def _cache_fingerprint(path: Path) -> str:
@@ -384,6 +411,7 @@ def probe_runner(
     profile: RunnerProfile,
     *,
     receipt_path: Path | str | None = None,
+    runner_identity: RunnerIdentity | None = None,
 ) -> RunnerCapabilityReceipt:
     """Probe a Review runner's capability and return a bounded receipt.
 
@@ -419,6 +447,8 @@ def probe_runner(
         profile, cli_version=static.cli_version, cache_fingerprint=cache_fingerprint,
         environment_fingerprint=environment_fingerprint, current_expiry=current_expiry,
     )
+    if runner_identity is not None:
+        receipt = RunnerCapabilityReceipt(**{**receipt.__dict__, "runner_identity": runner_identity})
     if receipt_path is not None and receipt.status == "turn_ready":
         write_capability_receipt(receipt_path, receipt)
     return receipt

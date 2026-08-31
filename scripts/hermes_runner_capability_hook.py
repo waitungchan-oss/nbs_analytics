@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.runner_capability_evidence import RunnerCapabilityEvidenceError, RunnerCapabilityRun
+from backend.agents.runner_identity import RunnerIdentity
 
 
 MANIFEST_SCHEMA = "hermes-runner-capability-manifest-v1"
@@ -207,7 +208,7 @@ def _record(args: argparse.Namespace, project_root: Path) -> dict[str, Any]:
     activation_missing = _validate_receipt(manifest, receipt)
     run = RunnerCapabilityRun(
         run_id=receipt["runId"], sequence=receipt["sequence"], recall_mode=receipt["recallMode"], git_head=manifest["gitHead"], project_id=manifest["projectId"], workspace_kind=manifest["workspaceKind"],
-        workspace_fingerprint=manifest["workspaceFingerprint"], task_fingerprint=manifest["taskFingerprint"], brief_fingerprint=manifest["briefFingerprint"], allowed_files_fingerprint=manifest["allowedFilesFingerprint"], commands_fingerprint=manifest["commandsFingerprint"], provider=receipt["provider"], model=receipt["model"], reasoning_profile=receipt["reasoningProfile"], clean_worktree_fingerprint=receipt["cleanWorktreeFingerprint"], status=receipt["status"], cache_replay_detected=receipt["cacheReplayDetected"], input_tokens=receipt["inputTokens"], output_tokens=receipt["outputTokens"], p95_ms=receipt["p95Ms"], provenance_coverage=receipt["provenanceCoverage"], sensitive_capture_count=receipt["sensitiveCaptureCount"], writer_disabled=receipt["writerDisabled"], baseline_unchanged=receipt["baselineUnchanged"], formal_scope_unchanged=receipt["formalScopeUnchanged"], review_no_regression=receipt["reviewNoRegression"], hermes_no_regression=receipt["hermesNoRegression"],
+        workspace_fingerprint=manifest["workspaceFingerprint"], task_fingerprint=manifest["taskFingerprint"], brief_fingerprint=manifest["briefFingerprint"], allowed_files_fingerprint=manifest["allowedFilesFingerprint"], commands_fingerprint=manifest["commandsFingerprint"], provider=receipt["provider"], model=receipt["model"], reasoning_profile=receipt["reasoningProfile"], clean_worktree_fingerprint=receipt["cleanWorktreeFingerprint"], status=receipt["status"], cache_replay_detected=receipt["cacheReplayDetected"], input_tokens=receipt["inputTokens"], output_tokens=receipt["outputTokens"], p95_ms=receipt["p95Ms"], provenance_coverage=receipt["provenanceCoverage"], sensitive_capture_count=receipt["sensitiveCaptureCount"], writer_disabled=receipt["writerDisabled"], baseline_unchanged=receipt["baselineUnchanged"], formal_scope_unchanged=receipt["formalScopeUnchanged"], review_no_regression=receipt["reviewNoRegression"], hermes_no_regression=receipt["hermesNoRegression"], runner_identity=RunnerIdentity.from_legacy_hermes(runner_id="hermes-capability", provider=receipt["provider"], model=receipt["model"], profile=receipt["reasoningProfile"], execution_environment="hermes-local"),
     )
     payload = run.to_dict()
     _write_json(project_root, args.output, payload)

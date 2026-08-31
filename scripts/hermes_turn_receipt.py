@@ -40,6 +40,7 @@ from backend.agents.runner_capability_evidence import (
     RunnerCapabilityEvidenceError,
     RunnerCapabilityRun,
 )
+from backend.agents.runner_identity import RunnerIdentity
 from scripts.hermes_runner_capability_hook import (
     ACTIVATION_SCHEMA as HOOK_ACTIVATION_SCHEMA,
     _current_git_head,
@@ -357,6 +358,10 @@ def build_run(receipt: dict[str, Any], turn: dict[str, Any]) -> dict[str, Any]:
         writer_disabled=receipt["writerDisabled"], baseline_unchanged=receipt["baselineUnchanged"],
         formal_scope_unchanged=receipt["formalScopeUnchanged"], review_no_regression=receipt["reviewNoRegression"],
         hermes_no_regression=receipt["hermesNoRegression"],
+        runner_identity=RunnerIdentity.from_legacy_hermes(
+            runner_id="hermes-live-ab", provider=receipt["provider"], model=receipt["model"],
+            profile=receipt["reasoningProfile"], execution_environment="hermes-local",
+        ),
     )
     return run.to_dict()
 

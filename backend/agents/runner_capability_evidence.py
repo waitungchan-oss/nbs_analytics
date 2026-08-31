@@ -6,6 +6,7 @@ import re
 from typing import Any, Mapping
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.runner_identity import RunnerIdentity, RunnerIdentityError
 
 
 RUNNER_CAPABILITY_SCHEMA = "runner-capability-evidence-v1"
@@ -126,6 +127,7 @@ class RunnerCapabilityRun:
     formal_scope_unchanged: bool
     review_no_regression: bool
     hermes_no_regression: bool
+    runner_identity: RunnerIdentity | None = None
     run_fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -144,6 +146,13 @@ class RunnerCapabilityRun:
             raise RunnerCapabilityEvidenceError("provider and model must be live allowed identities")
         if self.reasoning_profile != ALLOWED_REASONING_PROFILE:
             raise RunnerCapabilityEvidenceError("reasoningProfile must be max")
+        if self.runner_identity is not None:
+            if not isinstance(self.runner_identity, RunnerIdentity):
+                raise RunnerCapabilityEvidenceError("runnerIdentity must be a RunnerIdentity")
+            if (self.runner_identity.provider != self.provider
+                    or self.runner_identity.model != self.model
+                    or self.runner_identity.profile != self.reasoning_profile):
+                raise RunnerCapabilityEvidenceError("runnerIdentity does not match runner fields")
         if self.status not in {"completed", "incomplete", "failed"}:
             raise RunnerCapabilityEvidenceError("status is unsupported")
         _require_bool(self.cache_replay_detected, field_name="cacheReplayDetected")
@@ -158,7 +167,7 @@ class RunnerCapabilityRun:
         object.__setattr__(self, "run_fingerprint", canonical_fingerprint(self.unsigned_dict()))
 
     def unsigned_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "runId": self.run_id, "sequence": self.sequence, "recallMode": self.recall_mode,
             "gitHead": self.git_head, "projectId": self.project_id, "workspaceKind": self.workspace_kind,
             "workspaceFingerprint": self.workspace_fingerprint, "taskFingerprint": self.task_fingerprint,
@@ -172,6 +181,7 @@ class RunnerCapabilityRun:
             "formalScopeUnchanged": self.formal_scope_unchanged, "reviewNoRegression": self.review_no_regression,
             "hermesNoRegression": self.hermes_no_regression,
         }
+        return value
 
     def to_dict(self) -> dict[str, Any]:
         return {**self.unsigned_dict(), "runFingerprint": self.run_fingerprint}
@@ -179,7 +189,17 @@ class RunnerCapabilityRun:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "RunnerCapabilityRun":
         expected = _RUN_FIELDS | {"runFingerprint"}
-        _require_exact_fields(value, expected, kind="runner capability run")
+        try:
+            runner_identity = (
+                RunnerIdentity.from_dict(value["runnerIdentity"])
+                if "runnerIdentity" in value else None
+            )
+        except RunnerIdentityError as exc:
+            raise RunnerCapabilityEvidenceError(f"runnerIdentity is invalid: {exc}") from exc
+        _require_exact_fields(
+            value, expected | ({"runnerIdentity"} if "runnerIdentity" in value else set()),
+            kind="runner capability run",
+        )
         run = cls(**{
             "run_id": value["runId"], "sequence": value["sequence"], "recall_mode": value["recallMode"],
             "git_head": value["gitHead"], "project_id": value["projectId"], "workspace_kind": value["workspaceKind"],
@@ -193,6 +213,7 @@ class RunnerCapabilityRun:
             "writer_disabled": value["writerDisabled"], "baseline_unchanged": value["baselineUnchanged"],
             "formal_scope_unchanged": value["formalScopeUnchanged"], "review_no_regression": value["reviewNoRegression"],
             "hermes_no_regression": value["hermesNoRegression"],
+            "runner_identity": runner_identity,
         })
         if value["runFingerprint"] != run.run_fingerprint:
             raise RunnerCapabilityEvidenceError("run fingerprint does not match payload")
@@ -277,11 +298,12 @@ class RunnerCapabilityComparison:
         object.__setattr__(self, "reasons", normalized_reasons)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "sameImmutableInputs": self.same_immutable_inputs, "distinctRunIds": self.distinct_run_ids,
             "cacheReplayDetected": self.cache_replay_detected, "tokenReductionRatio": self.token_reduction_ratio,
             "alternativeEvidence": self.alternative_evidence, "result": self.result, "reasons": list(self.reasons),
         }
+        return value
 
 
 def compare_capability_runs(control: RunnerCapabilityRun, treatment: RunnerCapabilityRun) -> RunnerCapabilityComparison:

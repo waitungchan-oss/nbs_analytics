@@ -264,6 +264,9 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         profile = None
                 if profile is not None:
+                    runner_identity = profile.to_runner_identity(
+                        profile_name="strict-review", execution_environment="local-macos", provider="codex"
+                    )
                     preflight = preflight_runner(profile)
                     if preflight.status != "ready":
                         runner_diagnostics = _merge_runner_diagnostics(

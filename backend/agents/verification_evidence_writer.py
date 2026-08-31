@@ -12,6 +12,7 @@ from typing import Iterable
 
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.verification_session import VerificationSession
+from backend.agents.runner_identity import RunnerIdentity
 
 
 _COMMAND_KEYS = {"label", "argv", "exitCode", "stdoutTail", "stderrTail"}
@@ -98,9 +99,10 @@ class GateEvidence:
     stdout_digest: str
     stderr_digest: str
     reuse_reason: str
+    runner_identity: RunnerIdentity | None = None
 
     def metadata_dict(self) -> dict:
-        return {
+        value = {
             "schemaVersion": _GATE_SCHEMA_VERSION,
             "gate": self.gate,
             "sessionId": self.session_id,
@@ -115,6 +117,10 @@ class GateEvidence:
             "stderrDigest": self.stderr_digest,
             "reuseReason": self.reuse_reason,
         }
+        if self.runner_identity is not None:
+            value["runnerIdentityFingerprint"] = self.runner_identity.identity_fingerprint
+            value["runnerIdentity"] = self.runner_identity.to_dict()
+        return value
 
 
 def _now_rfc3339() -> str:
@@ -200,6 +206,8 @@ def write_gate_evidence(
     gate: str,
     commands: Iterable[dict],
     output_dir: Path | str,
+    *,
+    runner_identity: RunnerIdentity | None = None,
 ) -> GateEvidence:
     """Write a gate's bounded evidence below its verification session directory.
 
@@ -212,6 +220,8 @@ def write_gate_evidence(
     """
     if not isinstance(session, VerificationSession):
         raise VerificationEvidenceError("gate evidence requires a VerificationSession")
+    if runner_identity is not None and not isinstance(runner_identity, RunnerIdentity):
+        raise VerificationEvidenceError("runner_identity must be a RunnerIdentity")
     if gate not in _ALLOWED_GATES:
         raise VerificationEvidenceError(f"gate is not allowlisted for gate evidence: {gate}")
 
@@ -252,6 +262,7 @@ def write_gate_evidence(
         "producer": PRODUCER_VERSION,
         "reuseReason": reuse_reason,
         "commands": normalized,
+        **({"runnerIdentity": runner_identity.to_dict()} if runner_identity is not None else {}),
     })
 
     evidence = GateEvidence(
@@ -269,6 +280,7 @@ def write_gate_evidence(
         stdout_digest=stdout_digest,
         stderr_digest=stderr_digest,
         reuse_reason=reuse_reason,
+        runner_identity=runner_identity,
     )
     _write_json_atomic(metadata_path, evidence.metadata_dict())
     return evidence

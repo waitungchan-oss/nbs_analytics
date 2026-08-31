@@ -55,6 +55,17 @@ def test_cache_identity_is_stable_and_artifacts_are_bounded_and_atomic(tmp_path:
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_cache_identity_accepts_canonical_runner_identity_fingerprint():
+    from backend.agents.runner_identity import RunnerIdentity
+
+    identity = RunnerIdentity.from_dict({
+        "schemaVersion": "runner-identity-v1", "runnerId": "review", "transport": "local_cli",
+        "provider": "codex", "model": "gpt-5.4", "profile": "strict-review",
+        "executionEnvironment": "local-macos",
+    })
+    assert cache_identity("a" * 64, ["python", "x"], "b" * 64, identity.identity_fingerprint)
+
+
 def test_artifact_writer_rejects_symlink_session_and_writes_two_bounded_files(tmp_path: Path):
     session_dir = tmp_path / "session"
     preflight = {"schemaVersion": "strict-review-preflight-v1", "diagnostics": ["x" * 1000]}

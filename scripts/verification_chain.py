@@ -251,16 +251,17 @@ def _run_command(argv: list[str], *, timeout: int, cwd: Path) -> dict:
 
 
 def _build_review_runner(args, policy: EvidencePolicy):
-    """Port of review_agent.py runner wiring; returns (runner, capability, diagnostics)."""
+    """Port of review_agent.py runner wiring; returns runner, capability, diagnostics, identity."""
     runner = None
     capability = None
     diagnostics: list[str] = []
+    identity = None
     if not args.agent_command:
         if args.strict:
             diagnostics.append(
                 "Strict review requires --agent-command with an explicit runner profile."
             )
-        return runner, capability, diagnostics
+        return runner, capability, diagnostics, identity
     command = shlex.split(args.agent_command)
     if not command:
         raise PermissionError("Agent command cannot be empty")
@@ -281,7 +282,10 @@ def _build_review_runner(args, policy: EvidencePolicy):
         ) / "models_cache.json"
         profile = RunnerProfile(executable, model, cache_path)
     if profile is not None:
-        receipt = probe_runner(profile)
+        identity = profile.to_runner_identity(
+            profile_name="strict-review", execution_environment="local-macos", provider="codex"
+        )
+        receipt = probe_runner(profile, runner_identity=identity)
         if receipt.status == "turn_ready":
             runner = SubprocessAgentRunner(
                 command, allowed_executables=policy.agent_executables,
@@ -297,7 +301,7 @@ def _build_review_runner(args, policy: EvidencePolicy):
             command, allowed_executables=policy.agent_executables,
             timeout_seconds=args.runner_timeout,
         )
-    return runner, capability, diagnostics
+    return runner, capability, diagnostics, identity
 
 
 def cmd_seal(args) -> int:
@@ -403,7 +407,9 @@ def cmd_run_review(args) -> int:
         if args.memory_evidence:
             memory_path = policy.resolve_input_path(Path(args.memory_evidence))
             memory_evidence = _read_object(str(memory_path), "Memory Hub evidence")
-        runner, capability, diagnostics = _build_review_runner(args, policy)
+        runner, capability, diagnostics, runner_identity = _build_review_runner(args, policy)
+        if runner_identity is not None:
+            chain.bind_runner_identity(runner_identity)
 
         pre = chain.run_pre_review(verification)
         if pre.status != "sealed":

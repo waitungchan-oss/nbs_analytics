@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.runner_identity import RunnerIdentity
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -19,8 +20,13 @@ def cache_identity(
     command: list[str],
     policy_fingerprint: str,
     runner_fingerprint: str,
+    runner_identity: RunnerIdentity | None = None,
 ) -> str:
     """Return the identity of one successful deterministic command result."""
+    if runner_identity is not None:
+        if not isinstance(runner_identity, RunnerIdentity):
+            raise ValueError("runner_identity must be a RunnerIdentity")
+        runner_fingerprint = runner_identity.identity_fingerprint
     for name, value in (("source", source_fingerprint), ("policy", policy_fingerprint), ("runner", runner_fingerprint)):
         if not isinstance(value, str) or not _SHA256.fullmatch(value):
             raise ValueError(f"{name} fingerprint is invalid")

@@ -23,6 +23,19 @@ def test_preflight_accepts_supported_runner_and_cache(tmp_path):
     assert result.cli_version == "codex-cli 0.142.5"
 
 
+def test_profile_adapter_returns_explicit_local_cli_identity(tmp_path):
+    from backend.agents.review_runner_profile import RunnerProfile
+
+    executable, cache = _profile(tmp_path)
+    identity = RunnerProfile(str(executable), "gpt-5.4", cache).to_runner_identity(
+        profile_name="strict-review", execution_environment="local-macos", provider="codex"
+    )
+
+    assert identity.transport == "local_cli"
+    assert identity.runner_id == "strict-review"
+    assert identity.model == "gpt-5.4"
+
+
 def test_preflight_blocks_missing_base_instructions(tmp_path):
     from backend.agents.review_runner_profile import RunnerProfile, preflight_runner
 
