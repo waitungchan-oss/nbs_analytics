@@ -59,6 +59,7 @@ from backend.agents.verification_chain import (
     git_source_probe,
 )
 from backend.agents.verification_evidence_writer import validate_verification_v1
+from backend.agents.strict_review_preflight_models import validate_preflight_result
 from backend.agents.verification_session import (
     StaleVerificationSession,
     VerificationSession,
@@ -132,6 +133,7 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--context")
     review.add_argument("--task-contract")
     review.add_argument("--verification")
+    review.add_argument("--preflight", help="Validated strict-review-preflight-v1 artifact.")
     review.add_argument("--memory-evidence")
     review.add_argument("--agent-command")
     review.add_argument("--runner-profile")
@@ -161,6 +163,12 @@ def _parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", parents=[_common_parser()])
     status.add_argument("--session", required=True)
+
+    preflight = subparsers.add_parser("run-preflight", parents=[_common_parser()])
+    preflight.add_argument("--session", required=True)
+    preflight.add_argument("--source-fingerprint")
+    preflight.add_argument("--output")
+    preflight.add_argument("--strict", action="store_true")
 
     return parser
 
@@ -195,6 +203,15 @@ def _read_object(path: str, label: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
+
+
+def validate_preflight_for_session(path: str, *, source_fingerprint: str) -> dict:
+    payload = validate_preflight_result(_read_object(path, "Preflight evidence"))
+    if payload["status"] != "ready":
+        raise ValueError("preflight evidence is not ready")
+    if payload["sourceFingerprint"] != source_fingerprint:
+        raise ValueError("preflight source fingerprint does not match session")
+    return payload
 
 
 def _read_verification(path: str) -> list[dict]:
@@ -344,6 +361,11 @@ def cmd_run_review(args) -> int:
         )
     try:
         policy = EvidencePolicy.from_project(project_root)
+        if args.preflight:
+            try:
+                validate_preflight_for_session(args.preflight, source_fingerprint=chain.session.source_fingerprint)
+            except ValueError as exc:
+                return _emit_error(str(exc), status="invalid_evidence", session_id=args.session)
         brief = (project_root / args.brief).resolve()
         if not brief.is_file():
             return _emit_error(f"brief not found: {args.brief}", status="invalid_evidence", session_id=args.session)
@@ -423,6 +445,18 @@ def cmd_run_review(args) -> int:
         return _emit_error(str(exc), session_id=args.session)
     _emit(result.to_dict())
     return exit_code_for_status(result.status)
+
+
+def cmd_run_preflight(args) -> int:
+    from scripts.strict_review_evidence_preflight import main as preflight_main
+    forwarded = ["--project-root", args.project_root, "--session", args.session]
+    if args.source_fingerprint:
+        forwarded += ["--source-fingerprint", args.source_fingerprint]
+    if args.output:
+        forwarded += ["--output", args.output]
+    if args.strict:
+        forwarded.append("--strict")
+    return preflight_main(forwarded)
 
 
 def cmd_run_full(args) -> int:
@@ -566,7 +600,7 @@ def cmd_status(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     command = argv[0] if argv and argv[0] in {
-        "seal", "run-review", "run-full", "run-hermes", "attest", "status",
+        "seal", "run-review", "run-full", "run-hermes", "attest", "status", "run-preflight",
     } else None
     try:
         args = _parser().parse_args(argv)
@@ -587,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
         "run-hermes": cmd_run_hermes,
         "attest": cmd_attest,
         "status": cmd_status,
+        "run-preflight": cmd_run_preflight,
     }
     try:
         return handlers[args.command](args)
