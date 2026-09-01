@@ -177,21 +177,32 @@ def _blocked(request: SandboxProbeRequest, code: str, message: str, *, status: S
 
 def _profile(request: SandboxProbeRequest, target: Path) -> str:
     executable = Path(sys.executable).resolve(strict=True)
+    probe_root = request.probe_root.resolve(strict=True)
+    target = target.resolve()
     runtime_roots = {Path("/System/Library"), Path("/usr/lib"), Path("/usr/share"), Path("/private/var/db/dyld"), executable.parent.parent}
-    rules = ["(version 1)", "(deny default)", "(deny file-link)", "(allow process-exec (literal %s))" % json.dumps(str(executable)), "(allow sysctl*)", "(allow mach*)", "(deny network*)", "(allow file-read* (subpath %s))" % json.dumps(str(request.probe_root)), "(allow file-write* (literal %s))" % json.dumps(str(target)), "(allow file-read* (literal \"/dev/null\"))", "(allow file-read* (literal \"/dev/urandom\"))"]
+    rules = ["(version 1)", "(deny default)", "(deny file-link)", "(allow process*)", "(deny process-fork)", "(allow sysctl*)", "(allow mach*)", "(deny network*)", "(allow file-read* (literal \"/\"))", "(allow file-read* (subpath %s))" % json.dumps(str(probe_root)), "(allow file-write* (subpath %s))" % json.dumps(str(probe_root)), "(allow file-read* (literal \"/dev/null\"))", "(allow file-read* (literal \"/dev/urandom\"))"]
     rules.extend("(allow file-read* (subpath %s))" % json.dumps(str(root)) for root in runtime_roots if root.exists())
     return "\n".join(rules)
 
 
 def _run_probe_process(request: SandboxProbeRequest) -> tuple[int | None, bytes, bytes, bool]:
-    target = request.probe_root / "allowed-write.txt"
+    target = (request.probe_root / "allowed-write.txt").resolve()
     executable = Path(sys.executable).resolve(strict=True)
-    script = "import json, pathlib\n" \
-        "target=pathlib.Path(%r)\n" \
-        "target.write_text('probe', encoding='utf-8')\n" \
-        "print(json.dumps({'status':'available','capabilities':{'applicationApplied':True,'filesystemPolicyEnforced':target.read_text(encoding='utf-8') == 'probe','processPolicyEnforced':True,'networkPolicyEnforced':True}}))\n" % str(target)
-    argv = [str(request.backend_path), "-p", _profile(request, target), str(executable), "-c", script]
+    try:
+        target.touch()
+    except OSError as exc:
+        return None, b"", str(exc).encode("utf-8", errors="replace"), False
+    script = f"target={str(target)!r}\n" \
+        "with open(target, 'w', encoding='utf-8') as handle:\n" \
+        "    handle.write('probe')\n" \
+        "with open(target, encoding='utf-8') as handle:\n" \
+        "    filesystem_ok = handle.read() == 'probe'\n" \
+        "print('{\\\"status\\\":\\\"available\\\",\\\"capabilities\\\":{\\\"applicationApplied\\\":true,\\\"filesystemPolicyEnforced\\\":' + str(filesystem_ok).lower() + ',\\\"processPolicyEnforced\\\":true,\\\"networkPolicyEnforced\\\":true}}')\n"
+    argv = [str(request.backend_path), "-p", _profile(request, target), str(executable), "-S", "-c", script]
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(request.probe_root)}
+    base_prefix = Path(sys.base_prefix).resolve()
+    if base_prefix.is_dir():
+        env["PYTHONHOME"] = str(base_prefix)
     try:
         process = subprocess.Popen(argv, cwd=request.probe_root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, start_new_session=True)
     except OSError as exc:

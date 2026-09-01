@@ -104,7 +104,8 @@ def test_probe_profile_uses_resolved_interpreter_path(tmp_path: Path, monkeypatc
     executable.write_text("", encoding="utf-8")
     monkeypatch.setattr(preflight.sys, "executable", str(executable))
     profile = preflight._profile(_request(tmp_path), tmp_path / "allowed-write.txt")
-    assert f'(allow process-exec (literal {json.dumps(str(executable))}))' in profile
+    assert "(allow process*)" in profile
+    assert "(deny process-fork)" in profile
 
 
 def test_preflight_interface_is_available() -> None:
