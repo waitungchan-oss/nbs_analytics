@@ -12,7 +12,7 @@ def test_full_pytest_gate_records_bounded_pass(monkeypatch, tmp_path):
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, "120 passed, 3 skipped in 2.50s\n", "")
+        return subprocess.CompletedProcess(argv, 0, "120 passed, 3 skipped in 2.50s (0:00:02)\n", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     evidence = run_full_pytest_gate(tmp_path, COMMIT, SOURCE)

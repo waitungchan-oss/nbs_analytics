@@ -18,7 +18,7 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 
 _TAIL = 4000
-_SUMMARY = re.compile(r"(?:(?P<failed>\d+) failed[, ]*)?(?:(?P<passed>\d+) passed)?(?:[, ]*(?P<skipped>\d+) skipped)?(?: in (?P<duration>[0-9.]+)s)?")
+_SUMMARY = re.compile(r"(?:(?P<failed>\d+) failed[, ]*)?(?:(?P<passed>\d+) passed)?(?:[, ]*(?P<skipped>\d+) skipped)?(?: in (?P<duration>[0-9.]+)s)?(?: \([^)]*\))?")
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 
