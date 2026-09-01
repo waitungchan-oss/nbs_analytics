@@ -382,6 +382,18 @@ cache／manifest／generation signature 是否仍 fresh？
 是否會影響 Forecast、WAPE、人數或票務數量？
 這是 read-only evidence，還是正式狀態寫入？
 本輪 Review、full pytest、Hermes、UI acceptance 各自狀態是什麼？
+
+## 2026-09 Release Gate Standardization
+
+本輪已建立 release gate implementation checkpoints；正式 release readiness 必須由同一 commit 的 fresh evidence 決定，不能沿用本 handoff 或歷史 CI 結果。
+
+- `Full pytest release gate`：包含 qualified runner 的 sandbox capability；sandbox blocked 不得降級成 skip 或 PASS。
+- `Hermes release gate`：只接受 fresh `overallStatus=pass`，並維持 Graph、Memory Hub、Memory Sidecar 與 Agent Operations 的 read-only／non-authoritative 邊界。
+- `UI acceptance release gate`：只接受 HTTP/HTTPS、temporary fixture、same commit/source fingerprint 的 bounded acceptance；禁止 `file://` 與正式資料路徑。
+- `Release gate aggregate`：只讀三份 evidence；任一 gate 為 `FAIL`、`BLOCKED`、`MISSING`、stale 或 identity mismatch 即 fail closed。
+- PR merge 與 release tag 必須分別重新執行三個 gate；aggregate PASS 不取代 Strict Review，也不改變正式 scope「不含掛賬核銷與 TT 退款轉團款」或 `2026-05` baseline `HKD 12,057,968`。
+
+目前 checkpoint 的 `Final-Acceptance: pending` 必須保留；full pytest、Hermes、UI acceptance 與 Strict Review 的 fresh 結果完成前，不宣稱 release-ready。
 ```
 
 只要這些邊界在 spec、implementation、review 與驗收中保持一致，就不容易把正式口徑、退款扣減、cache 或 Agent evidence 混在一起。

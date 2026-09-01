@@ -3,6 +3,12 @@
 版本：v1
 狀態：active
 
+## Release Gate Contract
+
+每個 Task checkpoint 後，Codex 必須分開取得 Strict Review、Full pytest、Hermes 與 UI acceptance 的 fresh source-bound evidence；四者互不取代。Full pytest、Hermes、UI acceptance 必須綁定同一 `commitSha` 與 source fingerprint，並由 read-only deterministic `scripts/release_gate.py` aggregate。
+
+Aggregate 只接受三份 exact gate evidence；`FAIL`、`BLOCKED`、`MISSING`、stale、malformed 或 identity mismatch 都 fail closed。PR 與 release tag 都必須重新執行三個 gate，不得沿用歷史 handoff／CI／Graph／Memory evidence。`Final-Acceptance: pending` 不是 PASS，也不能由 Review、Hermes、Governance Graph、Memory Hub、Memory Sidecar 或 Agent Operations 改寫。
+
 ## 文件目的
 
 本文件定義 Codex 何時收集 Context、何時要求 Review、何時分派 Implementation Agent，以及三者與 Hermes 的邊界。它是工作流程契約，不會在 NBS Analytics application runtime 內自動執行 Agent。
