@@ -1,0 +1,122 @@
+name: Release Gates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    tags: ["v*", "release-*"]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.10"
+
+jobs:
+  full-pytest:
+    name: Full pytest release gate
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install -r requirements.txt
+      - name: Run full pytest gate with required sandbox
+        run: |
+          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          python scripts/full_pytest_gate.py --sandbox-preflight required --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output full-pytest.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-full-pytest
+          path: full-pytest.json
+          if-no-files-found: error
+
+  hermes:
+    name: Hermes release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install -r requirements.txt
+      - name: Run Hermes read-only gate
+        run: |
+          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          python scripts/hermes_gate.py --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output hermes.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-hermes
+          path: hermes.json
+          if-no-files-found: error
+
+  ui-acceptance:
+    name: UI acceptance release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install -r requirements.txt
+      - name: Prepare isolated HTTP fixture
+        run: |
+          mkdir -p "$RUNNER_TEMP/nbs-ui-fixture"
+          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          python - "$GITHUB_SHA" "$SOURCE_FINGERPRINT" "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" <<'PY'
+          import json, sys
+          commit, source, output = sys.argv[1:]
+          json.dump({"route":"http://127.0.0.1:8765/","initialStatus":"CURRENT","mergeStatus":"READY","activeVersionId":"ci-fixture","manifestSha256":"c"*64,"downloadedArtifacts":{"total.detail":1,"paid.detail":1},"refreshedVersionId":"ci-fixture","commitSha":commit,"sourceFingerprint":source}, open(output,"w"))
+          PY
+          echo 'NBS release gate UI fixture' > "$RUNNER_TEMP/nbs-ui-fixture/index.html"
+      - name: Run isolated HTTP UI acceptance
+        run: |
+          python -m http.server 8765 --bind 127.0.0.1 --directory "$RUNNER_TEMP/nbs-ui-fixture" > "$RUNNER_TEMP/ui-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/ui-server.pid"
+          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          python scripts/ui_acceptance_gate.py --url http://127.0.0.1:8765/ --fixture-root "$RUNNER_TEMP/nbs-ui-fixture" --evidence "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output ui-acceptance.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-ui-acceptance
+          path: ui-acceptance.json
+          if-no-files-found: error
+
+  aggregate:
+    name: Release gate aggregate
+    runs-on: ubuntu-latest
+    needs: [full-pytest, hermes, ui-acceptance]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-gate-full-pytest
+          path: artifacts/full-pytest
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-gate-hermes
+          path: artifacts/hermes
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-gate-ui-acceptance
+          path: artifacts/ui-acceptance
+      - name: Aggregate fresh release evidence
+        run: |
+          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          python scripts/release_gate.py aggregate --full-pytest artifacts/full-pytest/full-pytest.json --hermes artifacts/hermes/hermes.json --ui-acceptance artifacts/ui-acceptance/ui-acceptance.json --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output release-gate-result.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-aggregate
+          path: release-gate-result.json
+          if-no-files-found: error

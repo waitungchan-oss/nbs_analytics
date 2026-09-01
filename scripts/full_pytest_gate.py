@@ -103,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--source-fingerprint", required=True)
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--sandbox-preflight", choices=("required",), default="required")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     evidence = run_full_pytest_gate(args.project_root, args.commit_sha, args.source_fingerprint, timeout_seconds=args.timeout)
