@@ -45,6 +45,10 @@ def _parse_summary(output: str) -> dict:
     raise ValueError("pytest summary is malformed")
 
 
+def _safe_argv(argv: list[str]) -> list[str]:
+    return [Path(value).name if Path(value).is_absolute() else value for value in argv]
+
+
 def run_full_pytest_gate(
     project_root: Path,
     commit_sha: str,
@@ -62,7 +66,7 @@ def run_full_pytest_gate(
     started = _timestamp()
     status = "FAIL"
     result = {"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0}
-    metadata = {"commandId": "full-pytest", "argv": argv, "exitCode": None}
+    metadata = {"commandId": "full-pytest", "argv": _safe_argv(argv), "exitCode": None}
     stdout = stderr = ""
     try:
         completed = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=timeout_seconds, check=False)
