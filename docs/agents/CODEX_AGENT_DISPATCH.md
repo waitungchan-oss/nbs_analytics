@@ -31,6 +31,12 @@ Phase 1 CLI 的 `run`（或 `start`）只執行 Context collection 並回傳 `aw
 
 Agent Operations 只讀 Phase 1 artifacts，不是第二個 source of truth。UI 僅支援「手動重新整理」session-scoped snapshot，且不清除 dashboard caches；不得批准、執行、停止、刪除或 prune workflow。Token usage 僅在 supplied 時顯示，否則顯示 `未提供`。
 
+### Task checkpoint commit boundary
+
+每個 approved Task 完成後，Codex 可在 fresh focused verification、findings-first Review 與 allowlist validation PASS 後建立一個 checkpoint commit；一個 approved Task 不得與另一 Task 共用 checkpoint。checkpoint metadata 使用 `task-checkpoint-evidence-v1` 與 `NBS-Checkpoint-Version: 1`，並綁定 Task contract、parent HEAD、changed-file allowlist、diff fingerprint、Review fingerprint 與 focused verification。Checkpoint subject 採 `checkpoint(task-<id>): <summary>`；`Final-Acceptance: pending` 必須保留，不能取代 full pytest、Hermes、UI acceptance 或正式完成。
+
+Implementation Agent 仍不得 commit、merge 或 push；validator 只 read-only 檢查，不自動 stage 或改寫 Git。既有 unrelated dirty changes 必須保留。push、PR、merge 與 rollback 仍由 Codex 依明確授權處理，rollback 預設建立可追蹤的 `git revert` commit。Governance Graph、Memory Hub、Memory Sidecar 與 Hermes 不得批准或建立 checkpoint。
+
 ## Machine-readable dispatch rules
 
 ```json
