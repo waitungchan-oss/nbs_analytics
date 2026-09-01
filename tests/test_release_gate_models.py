@@ -89,3 +89,17 @@ def test_aggregate_rejects_unknown_duplicate_or_non_pass_child():
     aggregate["evidenceFingerprint"] = canonical_fingerprint({k: v for k, v in aggregate.items() if k != "evidenceFingerprint"})
     with pytest.raises(ReleaseGateValidationError, match="gate"):
         validate_release_gate_aggregate(aggregate, COMMIT, NOW)
+
+
+def test_evidence_rejects_sensitive_field_names_and_total_payload_over_cap():
+    value = _evidence()
+    value["metadata"] = {"token": "value"}
+    value["evidenceFingerprint"] = canonical_fingerprint({k: v for k, v in value.items() if k != "evidenceFingerprint"})
+    with pytest.raises(ReleaseGateValidationError, match="secret"):
+        validate_release_gate_evidence(value, COMMIT, SOURCE, NOW)
+
+    value = _evidence()
+    value["metadata"] = {"first": "x" * 18000, "second": "y" * 18000}
+    value["evidenceFingerprint"] = canonical_fingerprint({k: v for k, v in value.items() if k != "evidenceFingerprint"})
+    with pytest.raises(ReleaseGateValidationError, match="size"):
+        validate_release_gate_evidence(value, COMMIT, SOURCE, NOW)

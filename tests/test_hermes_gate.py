@@ -70,3 +70,23 @@ def test_hermes_gate_rejects_write_or_approval_claim(monkeypatch, tmp_path):
     evidence = run_hermes_gate(tmp_path, COMMIT, SOURCE)
     assert evidence["status"] == "FAIL"
     assert evidence["metadata"]["failureCode"] == "read_only_boundary_violation"
+
+
+def test_hermes_gate_rejects_structured_nonzero_read_only_indicators(monkeypatch, tmp_path):
+    report = _report()
+    report["readOnlyIndicators"] = {"writes": 1, "approvals": 0, "dispatches": 0}
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, json.dumps(report), ""),
+    )
+    evidence = run_hermes_gate(tmp_path, COMMIT, SOURCE)
+    assert evidence["status"] == "FAIL"
+    assert evidence["metadata"]["failureCode"] == "read_only_boundary_violation"
+
+
+def test_hermes_gate_converts_runner_os_error_to_blocked(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("hermes missing")))
+    evidence = run_hermes_gate(tmp_path, COMMIT, SOURCE)
+    assert evidence["status"] == "BLOCKED"
+    assert evidence["metadata"]["failureCode"] == "runner_os_error"

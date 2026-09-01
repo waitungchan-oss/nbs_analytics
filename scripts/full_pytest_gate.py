@@ -53,6 +53,19 @@ def _safe_argv(argv: list[str]) -> list[str]:
     return [Path(value).name if Path(value).is_absolute() else value for value in argv]
 
 
+def _approved_argv(project_root: Path, command: list[str] | None) -> list[str]:
+    argv = list(command or [sys.executable, "-m", "pytest", "-q"])
+    if len(argv) not in {4, 6} or argv[1:4] != ["-m", "pytest", "-q"]:
+        raise ValueError("pytest command is not allowlisted")
+    if Path(argv[0]).name not in {"python", "python3", Path(sys.executable).name}:
+        raise ValueError("pytest command is not allowlisted")
+    if len(argv) == 6 and argv[4:] != ["--sandbox-preflight", "required"]:
+        raise ValueError("pytest command is not allowlisted")
+    if len(argv) == 4:
+        argv += ["--sandbox-preflight", "required"]
+    return argv
+
+
 def run_full_pytest_gate(
     project_root: Path,
     commit_sha: str,
@@ -64,9 +77,7 @@ def run_full_pytest_gate(
     if timeout_seconds <= 0:
         raise ValueError("timeout must be positive")
     root = Path(project_root).resolve()
-    argv = list(command or [sys.executable, "-m", "pytest", "-q"])
-    if "--sandbox-preflight" not in argv:
-        argv += ["--sandbox-preflight", "required"]
+    argv = _approved_argv(root, command)
     started = _timestamp()
     status = "FAIL"
     result = {"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0}
@@ -90,6 +101,10 @@ def run_full_pytest_gate(
         stdout = exc.output or ""
         stderr = exc.stderr or ""
         metadata.update({"failureCode": "timeout", "timeoutSeconds": timeout_seconds})
+        status = "BLOCKED"
+    except OSError as exc:
+        metadata.update({"failureCode": "runner_os_error", "errorType": type(exc).__name__})
+        stderr = str(exc)
         status = "BLOCKED"
     finished = _timestamp()
     unsigned = {

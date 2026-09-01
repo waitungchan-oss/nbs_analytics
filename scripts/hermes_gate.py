@@ -65,6 +65,8 @@ def run_hermes_gate(
             metadata["failureCode"] = "malformed_report"
         if not isinstance(report, dict):
             metadata["failureCode"] = "malformed_report"
+        elif not _read_only_indicators_are_zero(report):
+            metadata["failureCode"] = "read_only_boundary_violation"
         elif _FORBIDDEN.search(json.dumps(report, ensure_ascii=False)):
             metadata["failureCode"] = "read_only_boundary_violation"
         elif completed.returncode != 0 or report.get("overallStatus") != "pass":
@@ -74,6 +76,10 @@ def run_hermes_gate(
     except subprocess.TimeoutExpired as exc:
         stdout, stderr = exc.output or "", exc.stderr or ""
         metadata.update({"failureCode": "timeout", "timeoutSeconds": timeout_seconds})
+        status = "BLOCKED"
+    except OSError as exc:
+        metadata.update({"failureCode": "runner_os_error", "errorType": type(exc).__name__})
+        stderr = str(exc)
         status = "BLOCKED"
     result = {
         "overallStatus": report.get("overallStatus") if isinstance(report, dict) else None,
@@ -87,6 +93,20 @@ def run_hermes_gate(
         "metadata": {**metadata, "stdoutTail": stdout[-_TAIL:], "stderrTail": stderr[-_TAIL:]},
     }
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
+
+
+def _read_only_indicators_are_zero(report: dict) -> bool:
+    indicators = report.get("readOnlyIndicators")
+    if indicators is None:
+        return True
+    if not isinstance(indicators, dict):
+        return False
+    for key in ("writes", "approvals", "dispatches"):
+        value = indicators.get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+            return False
+    gateway = indicators.get("gateway")
+    return gateway in (None, "", "none", "not_started", False, 0)
 
 
 def main(argv: list[str] | None = None) -> int:

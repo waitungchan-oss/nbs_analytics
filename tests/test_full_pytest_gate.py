@@ -62,3 +62,23 @@ def test_full_pytest_gate_rejects_invalid_identity(tmp_path):
         assert "commit" in str(exc)
     else:
         raise AssertionError("invalid commit must be rejected")
+
+
+def test_full_pytest_gate_rejects_unapproved_command(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not execute")))
+    try:
+        run_full_pytest_gate(tmp_path, COMMIT, SOURCE, command=["echo", "fake-pass"])
+    except ValueError as exc:
+        assert "pytest command" in str(exc)
+    else:
+        raise AssertionError("unapproved command must be rejected")
+
+
+def test_full_pytest_gate_converts_runner_os_error_to_blocked(monkeypatch, tmp_path):
+    def missing_runner(argv, **kwargs):
+        raise FileNotFoundError("pytest missing")
+
+    monkeypatch.setattr(subprocess, "run", missing_runner)
+    evidence = run_full_pytest_gate(tmp_path, COMMIT, SOURCE)
+    assert evidence["status"] == "BLOCKED"
+    assert evidence["metadata"]["failureCode"] == "runner_os_error"

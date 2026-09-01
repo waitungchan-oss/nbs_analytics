@@ -16,6 +16,7 @@ _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_PAYLOAD_CHARS = 32_000
 _MAX_AGE_SECONDS = 1_800
 _SECRET = re.compile(r"(?i)(token|password|secret|authorization|api[_-]?key)\s*[:=]")
+_SENSITIVE_FIELDS = {"token", "password", "secret", "authorization", "apikey", "api_key", "api-key"}
 
 
 class ReleaseGateValidationError(ValueError):
@@ -46,6 +47,8 @@ def _scan(value: Any, field: str = "payload") -> None:
             raise ReleaseGateValidationError(f"{field} contains forbidden secret or path")
     elif isinstance(value, Mapping):
         for key, item in value.items():
+            if str(key).replace("-", "_").lower() in _SENSITIVE_FIELDS:
+                raise ReleaseGateValidationError(f"{field} contains forbidden secret field")
             _scan(str(key), field)
             _scan(item, f"{field}.{key}")
     elif isinstance(value, (list, tuple)):
@@ -143,6 +146,8 @@ def validate_release_gate_evidence(
     if finished < started or (current - finished).total_seconds() > _MAX_AGE_SECONDS or finished > current:
         raise ReleaseGateValidationError("evidence is stale")
     _scan(payload)
+    if len(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) > _MAX_PAYLOAD_CHARS:
+        raise ReleaseGateValidationError("payload exceeds total size cap")
     if not isinstance(payload["evidenceFingerprint"], str) or not _SHA64.fullmatch(payload["evidenceFingerprint"]):
         raise ReleaseGateValidationError("evidence fingerprint is invalid")
     if canonical_fingerprint(_unsigned(payload)) != payload["evidenceFingerprint"]:
