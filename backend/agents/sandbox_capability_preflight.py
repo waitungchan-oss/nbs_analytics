@@ -170,24 +170,52 @@ def _path_fingerprint(path: Path) -> str:
         return _fingerprint({"path": str(path.absolute()), "missing": True})
 
 
+def _resolve_symlink_chain(path: Path) -> Path:
+    """Resolve a bounded executable symlink chain without calling realpath."""
+    current = path.absolute()
+    for _ in range(32):
+        if not current.is_symlink():
+            return current
+        link = Path(os.readlink(current))
+        current = link if link.is_absolute() else current.parent / link
+    raise SandboxCapabilityError("sandbox probe executable symlink chain is too deep")
+
+
+def _canonical_probe_path(path: Path) -> Path:
+    """Use macOS's canonical /private/var spelling without realpath."""
+    absolute = path.absolute()
+    if absolute.parts[:2] == (os.sep, "var"):
+        return Path(os.sep, "private", "var", *absolute.parts[2:])
+    return absolute
+
+
 def _blocked(request: SandboxProbeRequest, code: str, message: str, *, status: SandboxCapabilityStatus = "blocked_environment") -> SandboxCapabilityEvidence:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return SandboxCapabilityEvidence._build(status, sys.platform, _path_fingerprint(request.backend_path), request.probe_profile_fingerprint, request.workspace_fingerprint, {key: False for key in _CAPABILITIES}, code, (message[:512],), now, now)
 
 
 def _profile(request: SandboxProbeRequest, target: Path) -> str:
-    executable = Path(sys.executable).resolve(strict=True)
-    probe_root = request.probe_root.resolve(strict=True)
-    target = target.resolve()
-    runtime_roots = {Path("/System/Library"), Path("/usr/lib"), Path("/usr/share"), Path("/private/var/db/dyld"), executable.parent.parent}
+    executable = _resolve_symlink_chain(Path(sys.executable))
+    probe_root = _canonical_probe_path(request.probe_root)
+    target = _canonical_probe_path(target)
+    runtime_roots = {
+        Path("/System/Library"),
+        Path("/usr/lib"),
+        Path("/usr/share"),
+        Path("/private/var/db/dyld"),
+        executable.parent.parent,
+        Path(sys.base_prefix).absolute(),
+        _resolve_symlink_chain(Path(sys.base_prefix)),
+    }
     rules = ["(version 1)", "(deny default)", "(deny file-link)", "(allow process*)", "(deny process-fork)", "(allow sysctl*)", "(allow mach*)", "(deny network*)", "(allow file-read* (literal \"/\"))", "(allow file-read* (subpath %s))" % json.dumps(str(probe_root)), "(allow file-write* (subpath %s))" % json.dumps(str(probe_root)), "(allow file-read* (literal \"/dev/null\"))", "(allow file-read* (literal \"/dev/urandom\"))"]
     rules.extend("(allow file-read* (subpath %s))" % json.dumps(str(root)) for root in runtime_roots if root.exists())
     return "\n".join(rules)
 
 
 def _run_probe_process(request: SandboxProbeRequest) -> tuple[int | None, bytes, bytes, bool]:
-    target = (request.probe_root / "allowed-write.txt").resolve()
-    executable = Path(sys.executable).resolve(strict=True)
+    probe_root = _canonical_probe_path(request.probe_root)
+    target = probe_root / "allowed-write.txt"
+    executable = _resolve_symlink_chain(Path(sys.executable))
     try:
         target.touch()
     except OSError as exc:
@@ -200,11 +228,11 @@ def _run_probe_process(request: SandboxProbeRequest) -> tuple[int | None, bytes,
         "print('{\\\"status\\\":\\\"available\\\",\\\"capabilities\\\":{\\\"applicationApplied\\\":true,\\\"filesystemPolicyEnforced\\\":' + str(filesystem_ok).lower() + ',\\\"processPolicyEnforced\\\":true,\\\"networkPolicyEnforced\\\":true}}')\n"
     argv = [str(request.backend_path), "-p", _profile(request, target), str(executable), "-S", "-c", script]
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(request.probe_root)}
-    base_prefix = Path(sys.base_prefix).resolve()
+    base_prefix = Path(sys.base_prefix).absolute()
     if base_prefix.is_dir():
         env["PYTHONHOME"] = str(base_prefix)
     try:
-        process = subprocess.Popen(argv, cwd=request.probe_root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, start_new_session=True)
+        process = subprocess.Popen(argv, cwd=probe_root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, start_new_session=True)
     except OSError as exc:
         return None, b"", str(exc).encode("utf-8", errors="replace"), False
     streams = {process.stdout: bytearray(), process.stderr: bytearray()}
