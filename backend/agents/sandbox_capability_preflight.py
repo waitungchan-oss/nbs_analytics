@@ -207,8 +207,10 @@ def _profile(request: SandboxProbeRequest, target: Path) -> str:
         Path(sys.base_prefix).absolute(),
         _resolve_symlink_chain(Path(sys.base_prefix)),
     }
+    runtime_ancestors = set(executable.parents) | set(Path(sys.base_prefix).absolute().parents)
     rules = ["(version 1)", "(deny default)", "(deny file-link)", "(allow process*)", "(deny process-fork)", "(allow sysctl*)", "(allow mach*)", "(deny network*)", "(allow file-read* (literal \"/\"))", "(allow file-read* (subpath %s))" % json.dumps(str(probe_root)), "(allow file-write* (subpath %s))" % json.dumps(str(probe_root)), "(allow file-read* (literal \"/dev/null\"))", "(allow file-read* (literal \"/dev/urandom\"))"]
     rules.extend("(allow file-read* (subpath %s))" % json.dumps(str(root)) for root in runtime_roots if root.exists())
+    rules.extend("(allow file-read* (literal %s))" % json.dumps(str(root)) for root in runtime_ancestors if root.exists())
     return "\n".join(rules)
 
 
