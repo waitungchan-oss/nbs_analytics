@@ -29,10 +29,15 @@ jobs:
           python scripts/sandbox_capability_preflight.py
           --output .nbs_agent_runtime/sandbox-capability/evidence.json
 
+      - name: Show sandbox capability evidence
+        if: always()
+        run: cat .nbs_agent_runtime/sandbox-capability/evidence.json
+
       - name: Run sandbox integration tests
         run: python -m pytest -m sandbox --sandbox-preflight required -q
 
       - name: Upload capability evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-capability-evidence
