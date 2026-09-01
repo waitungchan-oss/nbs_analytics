@@ -176,19 +176,21 @@ def _blocked(request: SandboxProbeRequest, code: str, message: str, *, status: S
 
 
 def _profile(request: SandboxProbeRequest, target: Path) -> str:
-    runtime_roots = {Path("/System/Library"), Path("/usr/lib"), Path("/usr/share"), Path("/private/var/db/dyld"), Path(sys.executable).parent.parent}
-    rules = ["(version 1)", "(deny default)", "(deny file-link)", "(allow process-exec (literal %s))" % json.dumps(sys.executable), "(allow sysctl*)", "(allow mach*)", "(deny network*)", "(allow file-read* (subpath %s))" % json.dumps(str(request.probe_root)), "(allow file-write* (literal %s))" % json.dumps(str(target)), "(allow file-read* (literal \"/dev/null\"))", "(allow file-read* (literal \"/dev/urandom\"))"]
+    executable = Path(sys.executable).resolve(strict=True)
+    runtime_roots = {Path("/System/Library"), Path("/usr/lib"), Path("/usr/share"), Path("/private/var/db/dyld"), executable.parent.parent}
+    rules = ["(version 1)", "(deny default)", "(deny file-link)", "(allow process-exec (literal %s))" % json.dumps(str(executable)), "(allow sysctl*)", "(allow mach*)", "(deny network*)", "(allow file-read* (subpath %s))" % json.dumps(str(request.probe_root)), "(allow file-write* (literal %s))" % json.dumps(str(target)), "(allow file-read* (literal \"/dev/null\"))", "(allow file-read* (literal \"/dev/urandom\"))"]
     rules.extend("(allow file-read* (subpath %s))" % json.dumps(str(root)) for root in runtime_roots if root.exists())
     return "\n".join(rules)
 
 
 def _run_probe_process(request: SandboxProbeRequest) -> tuple[int | None, bytes, bytes, bool]:
     target = request.probe_root / "allowed-write.txt"
+    executable = Path(sys.executable).resolve(strict=True)
     script = "import json, pathlib\n" \
         "target=pathlib.Path(%r)\n" \
         "target.write_text('probe', encoding='utf-8')\n" \
         "print(json.dumps({'status':'available','capabilities':{'applicationApplied':True,'filesystemPolicyEnforced':target.read_text(encoding='utf-8') == 'probe','processPolicyEnforced':True,'networkPolicyEnforced':True}}))\n" % str(target)
-    argv = [str(request.backend_path), "-p", _profile(request, target), sys.executable, "-c", script]
+    argv = [str(request.backend_path), "-p", _profile(request, target), str(executable), "-c", script]
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(request.probe_root)}
     try:
         process = subprocess.Popen(argv, cwd=request.probe_root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, start_new_session=True)
