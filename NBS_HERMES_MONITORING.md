@@ -227,6 +227,13 @@ Hermes 只檢查 bounded `governance-graph.json` projection、schema、cap、ide
 與 status counts；不 rebuild snapshot、不呼叫 runner、不 approve/dispatch/apply，
 也不把 Hermes PASS 當成 Review PASS。
 
+Hermes 可 read-only 讀取 Task checkpoint metadata；其 schema 為
+`task-checkpoint-evidence-v1`，Git trailer version 為 `NBS-Checkpoint-Version: 1`。
+Hermes 只報告 Task ID、parent/diff/Review fingerprint 是否可驗證，以及
+`Final-Acceptance: pending` 是否存在；不得 stage、commit、push、merge、revert 或
+修改 checkpoint evidence。Checkpoint commit 是 Task lineage，不是 Review、full
+pytest、Hermes、UI acceptance、baseline 或正式完成證據。
+
 ---
 
 ## 6. Change Detection

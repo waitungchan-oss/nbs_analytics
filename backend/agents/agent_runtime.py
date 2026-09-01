@@ -482,6 +482,7 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
         return tuple(sorted((path.resolve() for path in roots if path.exists()), key=os.fspath))
 
     def _build_profile(self, staging: Path, targets: tuple[Path, ...]) -> str:
+        executable = Path(self.argv[0])
         rules = [
             "(version 1)",
             "(deny default)",
@@ -492,13 +493,18 @@ class SandboxedSubprocessAgentRunner(SubprocessAgentRunner):
             "(allow mach*)",
             '(allow file-read* (literal "/"))',
             f"(allow file-read* (subpath {json.dumps(os.fspath(staging))}))",
-            f"(allow file-read* (literal {json.dumps(self.argv[0])}))",
+            f"(allow file-read* (literal {json.dumps(str(executable))}))",
             '(allow file-read* (literal "/dev/null"))',
             '(allow file-read* (literal "/dev/urandom"))',
         ]
         rules.extend(
             f"(allow file-read* (subpath {json.dumps(os.fspath(root))}))"
             for root in self._runtime_read_roots(Path(self.argv[0]))
+        )
+        rules.extend(
+            f"(allow file-read* (literal {json.dumps(os.fspath(parent))}))"
+            for parent in executable.parents
+            if parent.exists()
         )
         rules.extend(
             f"(allow file-write* (literal {json.dumps(os.fspath(target))}))"

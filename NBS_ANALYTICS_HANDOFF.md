@@ -255,6 +255,19 @@ Strict Review、full pytest、Hermes 與 UI acceptance 是四個獨立 gate；�
 
 ### 6.1 Repo 與測試
 
+### Task checkpoint commit contract
+
+每個 approved Task 使用一個 checkpoint commit，subject 格式為
+`checkpoint(task-<id>): <imperative summary>`，並以
+`task-checkpoint-evidence-v1`、parent HEAD、allowlist、diff fingerprint、Review
+fingerprint 與 focused verification 綁定。commit 必須保留
+`Final-Acceptance: pending`；這只是可回退的 Task lineage，不代表 final acceptance。
+
+Implementation Agent 不得 commit、push 或 merge；Codex 只在 Review/focused verification
+通過後執行明確授權的 Git integration。unrelated dirty changes 必須保留，rollback
+預設使用新的 `git revert` commit。Governance Graph、Memory Hub、Memory Sidecar 與
+Hermes 只提供 read-only projection/context，不得改變 Git 或 Task state。
+
 ```bash
 git status --short --branch
 git log -5 --oneline

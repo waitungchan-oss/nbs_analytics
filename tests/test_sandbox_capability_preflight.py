@@ -15,6 +15,7 @@ from backend.agents.sandbox_capability_preflight import (
     SandboxProbeRequest,
     run_sandbox_probe,
 )
+import backend.agents.sandbox_capability_preflight as preflight
 from backend.agents.sandbox_capability_receipt import read_capability_evidence, write_capability_evidence
 
 
@@ -96,6 +97,15 @@ def test_probe_request_rejects_unsafe_paths_and_limits(tmp_path: Path) -> None:
         _request(tmp_path, Path("relative/sandbox-exec"))
     with pytest.raises(SandboxCapabilityError):
         SandboxProbeRequest("darwin", "a" * 64, Path("/usr/bin/sandbox-exec"), tmp_path, 601, 4096, "b" * 64)
+
+
+def test_probe_profile_uses_resolved_interpreter_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    executable = tmp_path / "python3"
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setattr(preflight.sys, "executable", str(executable))
+    profile = preflight._profile(_request(tmp_path), tmp_path / "allowed-write.txt")
+    assert "(allow process*)" in profile
+    assert "(deny process-fork)" in profile
 
 
 def test_preflight_interface_is_available() -> None:
