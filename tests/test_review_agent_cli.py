@@ -1,8 +1,31 @@
 import json
+import uuid
+from pathlib import Path
 
 from scripts.review_agent import _parser
 from scripts.review_agent import _verification_freshness_diagnostics
 from scripts import review_agent
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _runtime_context_fixture() -> Path:
+    path = PROJECT_ROOT / ".nbs_agent_runtime" / "test-inputs" / f"review-context-{uuid.uuid4().hex}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schemaVersion": "context-summary-v1",
+        "status": "ready",
+        "taskUnderstanding": ["objective"],
+        "systemBoundaries": ["read-only"],
+        "relevantFiles": [],
+        "dependencies": [],
+        "recommendedTests": ["targeted"],
+        "risks": [],
+        "unknowns": [],
+        "contextFingerprint": "context-fingerprint",
+    }), encoding="utf-8")
+    return path
 
 
 def test_runner_diagnostics_keep_preflight_failure_when_provenance_is_present():
@@ -49,14 +72,18 @@ def test_review_cli_allows_model_inference_for_absolute_runner():
 
 def test_strict_cli_blocks_mismatched_approved_brief(capsys):
     brief = "docs/briefs/2026-08-28-strict-review-runner-runtime-recovery-brief.md"
+    context = _runtime_context_fixture()
 
-    result = review_agent.main([
-        "--brief", brief,
-        "--approved-brief", "docs/briefs/other-approved-brief.md",
-        "--agent-command", "codex",
-        "--context", ".nbs_agent_runtime/reports/current-context-summary.json",
-        "--strict", "--format", "json",
-    ])
+    try:
+        result = review_agent.main([
+            "--brief", brief,
+            "--approved-brief", "docs/briefs/other-approved-brief.md",
+            "--agent-command", "codex",
+            "--context", str(context),
+            "--strict", "--format", "json",
+        ])
+    finally:
+        context.unlink(missing_ok=True)
 
     assert result == 2
     report = json.loads(capsys.readouterr().out)
@@ -65,14 +92,18 @@ def test_strict_cli_blocks_mismatched_approved_brief(capsys):
 
 def test_strict_cli_blocks_without_verification_bundle(capsys):
     brief = "docs/briefs/2026-08-28-strict-review-runner-runtime-recovery-brief.md"
+    context = _runtime_context_fixture()
 
-    result = review_agent.main([
-        "--brief", brief,
-        "--approved-brief", brief,
-        "--agent-command", "codex",
-        "--context", ".nbs_agent_runtime/reports/current-context-summary.json",
-        "--strict", "--format", "json",
-    ])
+    try:
+        result = review_agent.main([
+            "--brief", brief,
+            "--approved-brief", brief,
+            "--agent-command", "codex",
+            "--context", str(context),
+            "--strict", "--format", "json",
+        ])
+    finally:
+        context.unlink(missing_ok=True)
 
     assert result == 2
     report = json.loads(capsys.readouterr().out)

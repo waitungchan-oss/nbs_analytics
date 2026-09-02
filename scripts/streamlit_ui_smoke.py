@@ -20,6 +20,7 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 
 _ACTIVE_VERSION_RE = re.compile(r"正式淨 GMV active version[：:]\s*([A-Za-z0-9._-]+)")
+_REFUND_UPLOAD_INPUT_SELECTOR = 'section[data-testid="stFileUploaderDropzone"][aria-label^="上傳退款明細數據"] input[type="file"]'
 
 
 def _download_record(item, media_manager) -> dict[str, object]:
@@ -109,6 +110,13 @@ def _served_active_version_id(page) -> str:
     return next(iter(candidates))
 
 
+def _served_refund_upload_input(page):
+    upload_input = page.locator(_REFUND_UPLOAD_INPUT_SELECTOR)
+    if upload_input.count() != 1:
+        raise ValueError("served Streamlit UI did not expose exactly one GMV refund uploader")
+    return upload_input
+
+
 def run_served_smoke(url: str, route: str, commit_sha: str, source_fingerprint: str, timeout: float) -> dict:
     try:
         from playwright.sync_api import sync_playwright
@@ -128,7 +136,7 @@ def run_served_smoke(url: str, route: str, commit_sha: str, source_fingerprint: 
             initial_version_id = _served_active_version_id(page)
             initial_body = page.locator("body").inner_text()
             initial_status = "CURRENT" if initial_version_id and "cache 尚未 ready" not in initial_body else "READY"
-            page.locator("input[type=file]").last.set_input_files({
+            _served_refund_upload_input(page).set_input_files({
                 "name": "release-gate-refund.csv",
                 "mimeType": "text/csv",
                 "buffer": "退款單號,來源單據號,退款原幣金額,退款狀態\nrelease-gate-refund,330000000,0,已退款\n".encode("utf-8-sig"),

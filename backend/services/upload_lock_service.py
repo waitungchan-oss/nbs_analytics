@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows uses the SQLite fallback.
+    fcntl = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -63,16 +69,53 @@ def _write_owner(path: Path, operation: UploadOperation) -> None:
     os.replace(temp, path)
 
 
+def _process_lock_path(coordination_db_path: Path) -> Path:
+    return coordination_db_path.with_name(f"{coordination_db_path.name}.lock")
+
+
+def _acquire_process_lock(coordination_db_path: Path, owner_path: Path):
+    if fcntl is None:
+        return None
+    lock_path = _process_lock_path(coordination_db_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            raise UploadBusyError(_public_owner(_read_owner(owner_path))) from exc
+        raise
+    return handle
+
+
+def _release_process_lock(handle) -> None:
+    if handle is None:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
 class UploadLease:
     def __init__(
         self,
         connection: sqlite3.Connection,
         operation: UploadOperation,
         owner_path: Path,
+        process_lock,
     ):
         self._connection = connection
         self.operation = operation
         self._owner_path = owner_path
+        self._process_lock = process_lock
         self._active = True
 
     @property
@@ -96,7 +139,10 @@ class UploadLease:
                 try:
                     self._connection.close()
                 finally:
-                    self._active = False
+                    try:
+                        _release_process_lock(self._process_lock)
+                    finally:
+                        self._active = False
 
     def __enter__(self):
         return self
@@ -117,12 +163,18 @@ def acquire_upload_lease(
     path = Path(coordination_db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     owner_path = _owner_path(path)
-    connection = sqlite3.connect(path, timeout=max(0.0, timeout_seconds), isolation_level=None)
+    process_lock = _acquire_process_lock(path, owner_path)
+    try:
+        connection = sqlite3.connect(path, timeout=max(0.0, timeout_seconds), isolation_level=None)
+    except Exception:
+        _release_process_lock(process_lock)
+        raise
     try:
         connection.execute(f"PRAGMA busy_timeout = {max(0, int(timeout_seconds * 1000))}")
         connection.execute("BEGIN EXCLUSIVE")
     except sqlite3.OperationalError as exc:
         connection.close()
+        _release_process_lock(process_lock)
         if "locked" in str(exc).lower():
             raise UploadBusyError(_public_owner(_read_owner(owner_path))) from exc
         raise
@@ -138,8 +190,9 @@ def acquire_upload_lease(
     except Exception:
         connection.rollback()
         connection.close()
+        _release_process_lock(process_lock)
         raise
-    return UploadLease(connection, operation, owner_path)
+    return UploadLease(connection, operation, owner_path, process_lock)
 
 
 def probe_upload_lease(

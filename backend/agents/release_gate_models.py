@@ -14,7 +14,7 @@ STATUSES = ("PASS", "FAIL", "BLOCKED")
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_PAYLOAD_CHARS = 32_000
-_MAX_AGE_SECONDS = 7_200
+_MAX_AGE_SECONDS = 1_800
 _SECRET = re.compile(r"(?i)(token|password|secret|authorization|api[_-]?key)\s*[:=]")
 _SENSITIVE_FIELDS = {"token", "password", "secret", "authorization", "apikey", "api_key", "api-key"}
 

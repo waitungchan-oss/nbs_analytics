@@ -18,7 +18,10 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 
 _TAIL = 4000
-_SUMMARY = re.compile(r"(?:(?P<failed>\d+) failed[, ]*)?(?:(?P<passed>\d+) passed)?(?:[, ]*(?P<skipped>\d+) skipped)?(?: in (?P<duration>[0-9.]+)s)?(?: \([^)]*\))?")
+_SUMMARY_SEGMENT = re.compile(
+    r"(?P<count>\d+)\s+(?P<kind>failed|errors?|passed|skipped|warnings?)\b"
+)
+_SUMMARY_DURATION = re.compile(r"\bin\s+(?P<duration>[0-9.]+)s\b")
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -37,14 +40,24 @@ def _identity(commit_sha: str, source_fingerprint: str) -> None:
 def _parse_summary(output: str) -> dict:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     for line in reversed(lines):
-        match = _SUMMARY.fullmatch(line)
-        if not match or not any(match.group(name) for name in ("failed", "passed", "skipped")):
+        segments = list(_SUMMARY_SEGMENT.finditer(line))
+        if not segments:
             continue
+        counts = {"failed": 0, "errors": 0, "passed": 0, "skipped": 0}
+        for segment in segments:
+            kind = segment.group("kind")
+            if kind.startswith("error"):
+                counts["errors"] += int(segment.group("count"))
+            elif kind in counts:
+                counts[kind] += int(segment.group("count"))
+        if not any(counts.values()):
+            continue
+        duration = _SUMMARY_DURATION.search(line)
         return {
-            "passed": int(match.group("passed") or 0),
-            "failed": int(match.group("failed") or 0),
-            "skipped": int(match.group("skipped") or 0),
-            "durationSeconds": float(match.group("duration") or 0),
+            "passed": counts["passed"],
+            "failed": counts["failed"] + counts["errors"],
+            "skipped": counts["skipped"],
+            "durationSeconds": float(duration.group("duration") if duration else 0),
         }
     raise ValueError("pytest summary is malformed")
 

@@ -35,6 +35,37 @@ def test_full_pytest_gate_nonzero_is_fail_and_output_is_bounded(monkeypatch, tmp
     assert len(evidence["metadata"]["stdoutTail"]) <= 4000
 
 
+def test_full_pytest_gate_parses_warnings_in_pytest_summary(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "4 failed, 2656 passed, 5 warnings in 126.08s (0:02:06)\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    evidence = run_full_pytest_gate(tmp_path, COMMIT, SOURCE)
+
+    assert evidence["metadata"].get("failureCode") != "malformed_summary"
+    assert evidence["result"] == {"passed": 2656, "failed": 4, "skipped": 0, "durationSeconds": 126.08}
+
+
+def test_full_pytest_gate_counts_errors_as_failures(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "1 error in 1.00s\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    evidence = run_full_pytest_gate(tmp_path, COMMIT, SOURCE)
+
+    assert evidence["result"] == {"passed": 0, "failed": 1, "skipped": 0, "durationSeconds": 1.0}
+
+
+def test_full_pytest_gate_parses_mixed_summary_segments_in_any_order(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "1 failed, 2 passed, 1 error, 5 warnings in 1.00s\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    evidence = run_full_pytest_gate(tmp_path, COMMIT, SOURCE)
+
+    assert evidence["result"] == {"passed": 2, "failed": 2, "skipped": 0, "durationSeconds": 1.0}
+
+
 def test_full_pytest_gate_sandbox_block_is_blocked(monkeypatch, tmp_path):
     def fake_run(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 1, "sandbox capability status: blocked_environment\n", "")
