@@ -34,12 +34,14 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     hermes_block = source.split("  hermes:\n", 1)[1].split("  ui-acceptance:\n", 1)[0]
     ui_block = source.split("  ui-acceptance:\n", 1)[1].split("  aggregate:\n", 1)[0]
     assert "fetch-depth: 0" in full_block
+    assert "git fetch --no-tags origin main:refs/heads/main" in full_block
     assert "prepare_release_gate_fixtures.py --output" in full_block
     assert "NBS_ANALYTICS_DB_FILE" in full_block
     assert "NBS_ANALYTICS_CACHE_DIR" in full_block
     assert "NBS_ANALYTICS_COORDINATION_DB" in full_block
     assert "runs-on: macos-14" in hermes_block
     assert "fetch-depth: 0" in hermes_block
+    assert "git fetch --no-tags origin main:refs/heads/main" in hermes_block
     assert ".venv/bin/python -m streamlit run app.py" in ui_block
     assert "streamlit_ui_smoke.py" in ui_block
     assert "prepare_release_gate_fixtures.py" in ui_block
@@ -48,6 +50,7 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "NBS_ANALYTICS_COORDINATION_DB" in ui_block
     assert "$RUNNER_TEMP/nbs-ui-fixture/upload_coordination.db" in ui_block
     assert "fetch-depth: 0" in ui_block
+    assert "git fetch --no-tags origin main:refs/heads/main" in ui_block
     assert ".venv/bin/python -m playwright install --with-deps chromium" in ui_block
     assert "--served-url http://127.0.0.1:8765/" in ui_block
     assert "curl --fail" in ui_block

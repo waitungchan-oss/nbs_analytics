@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Fetch base branch for immutable evidence
+        run: git fetch --no-tags origin main:refs/heads/main
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -53,6 +55,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Fetch base branch for immutable evidence
+        run: git fetch --no-tags origin main:refs/heads/main
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -85,6 +89,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Fetch base branch for immutable evidence
+        run: git fetch --no-tags origin main:refs/heads/main
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -112,8 +118,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-gate-ui-acceptance
-          path: ui-acceptance.json
-          if-no-files-found: error
+          path: |
+            ui-acceptance.json
+            ${{ runner.temp }}/ui-server.log
+            ${{ runner.temp }}/ui-page.html
+          if-no-files-found: warn
 
   aggregate:
     name: Release gate aggregate
@@ -123,6 +132,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Fetch base branch for immutable evidence
+        run: git fetch --no-tags origin main:refs/heads/main
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
