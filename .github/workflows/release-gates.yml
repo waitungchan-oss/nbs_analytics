@@ -73,7 +73,7 @@ jobs:
       - name: Run Hermes read-only gate
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
-          .venv/bin/python scripts/hermes_gate.py --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output hermes.json
+          .venv/bin/python scripts/hermes_gate.py --skip-system-acceptance --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output hermes.json
       - if: always()
         uses: actions/upload-artifact@v4
         with:

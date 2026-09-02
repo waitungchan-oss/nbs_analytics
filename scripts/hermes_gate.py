@@ -44,12 +44,15 @@ def run_hermes_gate(
     source_fingerprint: str,
     command: list[str] | None = None,
     timeout_seconds: int = 1800,
+    skip_system_acceptance: bool = False,
 ) -> dict:
     _identity(commit_sha, source_fingerprint)
     if timeout_seconds <= 0:
         raise ValueError("timeout must be positive")
     root = Path(project_root).resolve()
     argv = list(command or [sys.executable, str(root / "scripts" / "hermes_post_change_check.py"), "--skip-monitor", "--json"])
+    if command is None and skip_system_acceptance:
+        argv.insert(-1, "--skip-system-acceptance")
     started = _timestamp()
     status = "FAIL"
     report: dict = {}
@@ -115,9 +118,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--source-fingerprint", required=True)
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument(
+        "--skip-system-acceptance",
+        action="store_true",
+        help="Skip acceptance of externally managed local services.",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    evidence = run_hermes_gate(args.project_root, args.commit_sha, args.source_fingerprint, timeout_seconds=args.timeout)
+    evidence = run_hermes_gate(
+        args.project_root,
+        args.commit_sha,
+        args.source_fingerprint,
+        timeout_seconds=args.timeout,
+        skip_system_acceptance=args.skip_system_acceptance,
+    )
     rendered = json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.write_text(rendered, encoding="utf-8")

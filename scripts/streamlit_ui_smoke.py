@@ -119,6 +119,7 @@ def _served_refund_upload_input(page):
 
 def run_served_smoke(url: str, route: str, commit_sha: str, source_fingerprint: str, timeout: float) -> dict:
     try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise RuntimeError("playwright is required for served Streamlit UI acceptance") from exc
@@ -136,13 +137,28 @@ def run_served_smoke(url: str, route: str, commit_sha: str, source_fingerprint: 
             initial_version_id = _served_active_version_id(page)
             initial_body = page.locator("body").inner_text()
             initial_status = "CURRENT" if initial_version_id and "cache 尚未 ready" not in initial_body else "READY"
-            _served_refund_upload_input(page).set_input_files({
+            refund_upload = {
                 "name": "release-gate-refund.csv",
                 "mimeType": "text/csv",
                 "buffer": "退款單號,來源單據號,退款原幣金額,退款狀態\nrelease-gate-refund,330000000,0,已退款\n".encode("utf-8-sig"),
-            })
-            merge_button = page.get_by_role("button", name="上傳並合併退款資料庫", exact=True)
-            merge_button.wait_for(timeout=timeout_ms)
+            }
+            merge_button = None
+            for attempt in range(2):
+                _served_refund_upload_input(page).set_input_files(refund_upload)
+                merge_button = page.get_by_role("button", name="上傳並合併退款資料庫", exact=True)
+                try:
+                    merge_button.wait_for(timeout=min(timeout_ms, 30_000))
+                    break
+                except PlaywrightTimeoutError:
+                    if attempt == 1:
+                        raise
+                    page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+                    page.get_by_text("GMV 排除訂單看板", exact=True).first.wait_for(timeout=timeout_ms)
+                    page.locator('[data-test-connection-state="CONNECTED"]').wait_for(timeout=timeout_ms)
+                    page.get_by_role("tab", name="GMV 排除訂單看板", exact=True).click()
+                    page.get_by_role("button", name="下載總退款正式口徑", exact=True).wait_for(timeout=timeout_ms)
+            if merge_button is None:
+                raise RuntimeError("served Streamlit UI did not create a merge control after upload")
             merge_button.click()
             deadline = time.monotonic() + timeout
             refreshed_version_id = ""
@@ -224,9 +240,13 @@ def run_smoke(project_root: Path, route: str, commit_sha: str, source_fingerprin
         initial_status = "CURRENT" if not any("cache 尚未 ready" in text for text in initial_text) else "READY"
         uploader = app.file_uploader(key="GMV_EXCLUSION_UPLOAD")
         refund_upload = "退款單號,來源單據號,退款原幣金額,退款狀態\nrelease-gate-refund,330000000,0,已退款\n".encode("utf-8-sig")
-        uploader.set_value(("release-gate-refund.csv", refund_upload, "text/csv"))
-        app.run(timeout=timeout)
-        merge_buttons = [button for button in app.button if button.label == "上傳並合併退款資料庫"]
+        merge_buttons = []
+        for attempt in range(2):
+            app.file_uploader(key="GMV_EXCLUSION_UPLOAD").set_value(("release-gate-refund.csv", refund_upload, "text/csv"))
+            app.run(timeout=timeout)
+            merge_buttons = [button for button in app.button if button.label == "上傳並合併退款資料庫"]
+            if len(merge_buttons) == 1:
+                break
         if len(merge_buttons) != 1:
             raise RuntimeError("Streamlit UI did not render exactly one merge control after upload")
         merge_buttons[0].click()

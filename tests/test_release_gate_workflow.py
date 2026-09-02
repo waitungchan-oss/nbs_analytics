@@ -41,6 +41,7 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "NBS_ANALYTICS_COORDINATION_DB" in full_block
     assert "runs-on: macos-14" in hermes_block
     assert "fetch-depth: 0" in hermes_block
+    assert "--skip-system-acceptance" in hermes_block
     assert "git fetch --no-tags origin main:refs/heads/main" in hermes_block
     assert ".venv/bin/python -m streamlit run app.py" in ui_block
     assert "streamlit_ui_smoke.py" in ui_block

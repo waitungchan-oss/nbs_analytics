@@ -31,6 +31,20 @@ def test_hermes_gate_requires_pass_and_binds_identity(monkeypatch, tmp_path):
     assert "hermes_post_change_check.py" in " ".join(calls[0])
 
 
+def test_hermes_gate_can_skip_external_service_acceptance(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(_report()), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    evidence = run_hermes_gate(tmp_path, COMMIT, SOURCE, skip_system_acceptance=True)
+
+    assert evidence["status"] == "PASS"
+    assert "--skip-system-acceptance" in calls[0]
+
+
 def test_hermes_gate_nonpass_report_is_fail(monkeypatch, tmp_path):
     monkeypatch.setattr(
         subprocess,
