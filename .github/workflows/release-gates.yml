@@ -22,11 +22,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: python -m pip install -r requirements.txt
+      - name: Create approved repository virtualenv
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
       - name: Run full pytest gate with required sandbox
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
-          python scripts/full_pytest_gate.py --sandbox-preflight required --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output full-pytest.json
+          .venv/bin/python scripts/full_pytest_gate.py --sandbox-preflight required --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output full-pytest.json
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -43,15 +46,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: python -m pip install -r requirements.txt
+      - name: Create approved repository virtualenv
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
       - name: Prepare isolated Hermes baseline fixture
         run: |
-          python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-hermes-fixture"
+          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-hermes-fixture"
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-hermes-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
       - name: Run Hermes read-only gate
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
-          python scripts/hermes_gate.py --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output hermes.json
+          .venv/bin/python scripts/hermes_gate.py --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output hermes.json
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -68,23 +74,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: python -m pip install -r requirements.txt
-      - run: python -m playwright install --with-deps chromium
+      - name: Create approved repository virtualenv
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+      - run: .venv/bin/python -m playwright install --with-deps chromium
       - name: Prepare isolated HTTP fixture
         run: |
-          python scripts/prepare_release_gate_fixtures.py --profile ui --output "$RUNNER_TEMP/nbs-ui-fixture"
+          .venv/bin/python scripts/prepare_release_gate_fixtures.py --profile ui --output "$RUNNER_TEMP/nbs-ui-fixture"
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-ui-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-ui-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-ui-fixture/upload_coordination.db" >> "$GITHUB_ENV"
       - name: Run isolated HTTP UI acceptance
         run: |
-          python -m streamlit run app.py --server.headless true --server.address 127.0.0.1 --server.port 8765 > "$RUNNER_TEMP/ui-server.log" 2>&1 &
+          .venv/bin/python -m streamlit run app.py --server.headless true --server.address 127.0.0.1 --server.port 8765 > "$RUNNER_TEMP/ui-server.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ui-server.pid"
           trap 'kill "$(cat "$RUNNER_TEMP/ui-server.pid")" 2>/dev/null || true' EXIT
           curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 http://127.0.0.1:8765/ > "$RUNNER_TEMP/ui-page.html"
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
-          python scripts/streamlit_ui_smoke.py --project-root "$GITHUB_WORKSPACE" --route http://127.0.0.1:8765/ --served-url http://127.0.0.1:8765/ --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-ui-fixture/evidence.json"
-          python scripts/ui_acceptance_gate.py --url http://127.0.0.1:8765/ --fixture-root "$RUNNER_TEMP/nbs-ui-fixture" --evidence "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output ui-acceptance.json
+          .venv/bin/python scripts/streamlit_ui_smoke.py --project-root "$GITHUB_WORKSPACE" --route http://127.0.0.1:8765/ --served-url http://127.0.0.1:8765/ --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-ui-fixture/evidence.json"
+          .venv/bin/python scripts/ui_acceptance_gate.py --url http://127.0.0.1:8765/ --fixture-root "$RUNNER_TEMP/nbs-ui-fixture" --evidence "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output ui-acceptance.json
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -101,7 +110,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: python -m pip install -r requirements.txt
+      - name: Create approved repository virtualenv
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
       - uses: actions/download-artifact@v4
         with:
           name: release-gate-full-pytest
@@ -117,7 +129,7 @@ jobs:
       - name: Aggregate fresh release evidence
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
-          python scripts/release_gate.py aggregate --full-pytest artifacts/full-pytest/full-pytest.json --hermes artifacts/hermes/hermes.json --ui-acceptance artifacts/ui-acceptance/ui-acceptance.json --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output release-gate-result.json
+          .venv/bin/python scripts/release_gate.py aggregate --full-pytest artifacts/full-pytest/full-pytest.json --hermes artifacts/hermes/hermes.json --ui-acceptance artifacts/ui-acceptance/ui-acceptance.json --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output release-gate-result.json
       - if: always()
         uses: actions/upload-artifact@v4
         with:

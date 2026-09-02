@@ -10,6 +10,8 @@ def test_release_workflow_defines_independent_required_jobs_and_aggregate():
         assert name in source
     assert "needs: [full-pytest, hermes, ui-acceptance]" in source
     assert "requirements.txt" in source
+    assert "python -m venv .venv" in source
+    assert ".venv/bin/python -m pip install -r requirements.txt" in source
     assert "upload-artifact@v4" in source
     assert "download-artifact@v4" in source
 
@@ -31,14 +33,14 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     hermes_block = source.split("  hermes:\n", 1)[1].split("  ui-acceptance:\n", 1)[0]
     ui_block = source.split("  ui-acceptance:\n", 1)[1].split("  aggregate:\n", 1)[0]
     assert "runs-on: macos-14" in hermes_block
-    assert "python -m streamlit run app.py" in ui_block
+    assert ".venv/bin/python -m streamlit run app.py" in ui_block
     assert "streamlit_ui_smoke.py" in ui_block
     assert "prepare_release_gate_fixtures.py" in ui_block
     assert "NBS_ANALYTICS_DB_FILE" in ui_block
     assert "NBS_ANALYTICS_CACHE_DIR" in ui_block
     assert "NBS_ANALYTICS_COORDINATION_DB" in ui_block
     assert "$RUNNER_TEMP/nbs-ui-fixture/upload_coordination.db" in ui_block
-    assert "playwright install --with-deps chromium" in ui_block
+    assert ".venv/bin/python -m playwright install --with-deps chromium" in ui_block
     assert "--served-url http://127.0.0.1:8765/" in ui_block
     assert "curl --fail" in ui_block
     assert "--retry-connrefused" in ui_block
