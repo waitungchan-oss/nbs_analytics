@@ -7,6 +7,7 @@ from app_pages import _active_gmv_summary_rows
 
 
 PAGES_PATH = Path(__file__).resolve().parents[1] / "app_pages.py"
+SMOKE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "streamlit_ui_smoke.py"
 
 
 def _function_source(name: str) -> str:
@@ -69,3 +70,10 @@ def test_active_summary_contract_rejects_missing_before_gmv():
 
     with pytest.raises(ValueError, match="before_gmv"):
         _active_gmv_summary_rows(adjusted)
+
+
+def test_served_ui_smoke_targets_the_gmv_refund_uploader_semantically():
+    source = SMOKE_PATH.read_text(encoding="utf-8")
+
+    assert 'section[data-testid="stFileUploaderDropzone"][aria-label^="上傳退款明細數據"] input[type="file"]' in source
+    assert 'locator("input[type=file]").last' not in source

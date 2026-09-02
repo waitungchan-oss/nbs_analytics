@@ -4,6 +4,14 @@
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`
 契約版本：v1.1 read-only monitoring
 
+## Release Gate Boundary
+
+Hermes release gate 只讀取本次 commit 的 `hermes-gate-v1` evidence，要求 fresh `overallStatus=pass`。Hermes 不得以自身 PASS 取代 Full pytest、UI acceptance 或 Strict Review；三 gate 的 aggregate 由 deterministic validator 另行產生。
+
+所有 release evidence 必須同一 `commitSha`、source fingerprint、schema 與 freshness window。`FAIL`、`BLOCKED`、`MISSING` 或 stale evidence 一律阻擋 release，不得用歷史 handoff、Graph projection、Memory Hub／Memory Sidecar hints 或舊 workflow artifact 補推 PASS。
+
+Hermes、Governance Graph、Memory Hub、Memory Sidecar 與 Agent Operations 仍是 read-only／non-authoritative：不得批准、dispatch、write、prune、啟動 Gateway、改 SQLite、改 baseline 或改變 terminal state。每個 checkpoint 的 `Final-Acceptance: pending` 在 full pytest、Hermes、UI acceptance 與 Strict Review fresh evidence 完成前必須保留。
+
 ---
 
 ## 1. Purpose

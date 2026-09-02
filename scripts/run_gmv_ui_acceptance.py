@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import tempfile
 from typing import Any, Mapping
@@ -37,11 +38,12 @@ def _validate_target(url: str, fixture_root: str | Path) -> Path:
     normalized = str(root).lower()
     if any(marker in normalized for marker in _PRODUCTION_MARKERS):
         raise ValueError("production database/cache paths are not allowed")
-    temp_root = Path(tempfile.gettempdir()).resolve()
-    try:
-        root.relative_to(temp_root)
-    except ValueError as exc:
-        raise ValueError("fixture root must be under the system temporary directory") from exc
+    temporary_roots = {Path(tempfile.gettempdir()).resolve()}
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if runner_temp:
+        temporary_roots.add(Path(runner_temp).expanduser().resolve())
+    if not any(root == candidate or candidate in root.parents for candidate in temporary_roots):
+        raise ValueError("fixture root must be under the system temporary directory")
     return root
 
 

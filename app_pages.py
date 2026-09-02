@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import time
 import traceback
 from html import escape
@@ -3032,7 +3033,7 @@ def _render_gmv_exclusion_tab() -> None:
         return
     formal_tour, formal_others, _ = _build_revenue_scope_frames(db_tour, db_others)
     revenue_frames = RevenueFrames(db_tour, db_others, formal_tour, formal_others)
-    cache_dir = PROJECT_ROOT / ".nbs_runtime_cache"
+    cache_dir = Path(os.environ.get("NBS_ANALYTICS_CACHE_DIR", str(PROJECT_ROOT / ".nbs_runtime_cache")))
     active_scope = repository.load_active_scope()
 
     if upload is not None:
@@ -3137,7 +3138,7 @@ def _render_gmv_exclusion_tab() -> None:
         repository, revenue_frames, rule_version=REVENUE_SCOPE_LABEL,
         cache_manifest=cache_manifest, cache_dir=cache_dir,
     )
-    st.caption("正式淨 GMV active version")
+    st.caption(f"正式淨 GMV active version：{version_id}")
     st.dataframe(pd.DataFrame([active_scope]), hide_index=True, width="stretch")
     if not model.can_export or model.total_adjusted is None or model.paid_adjusted is None:
         st.warning("正式淨 GMV cache 尚未 ready，或主營收 token 已變更；請重新上傳退款明細並合併。")

@@ -97,6 +97,18 @@ def test_plan_can_skip_monitor_and_tests_for_fast_dry_run():
     assert "monthly-baseline-governance" in labels
 
 
+def test_plan_can_skip_external_service_acceptance_without_skipping_status_or_baseline():
+    plan = post_check.build_check_plan(
+        include_monitor=False, include_tests=False, include_system_acceptance=False,
+    )
+    labels = [step.label for step in plan]
+
+    assert "system-status" in labels
+    assert "system-acceptance" not in labels
+    assert "phase2-baseline" in labels
+    assert "monthly-baseline-governance" in labels
+
+
 def test_documentation_hermes_check_is_read_only_and_does_not_dispatch():
     plan = post_check.build_check_plan(include_monitor=False, include_tests=False)
     step = next(item for item in plan if item.label == "documentation-artifact-report")

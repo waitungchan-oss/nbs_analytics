@@ -133,7 +133,7 @@ AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
 EXPORT_CACHE_VERSION = 'export-lazy-v3'
 EXPORT_FAST_PATH_MODE = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", "shadow").strip().lower()
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v1'
-AI_CACHE_DIR = Path(__file__).resolve().parent / '.nbs_runtime_cache'
+AI_CACHE_DIR = Path(os.environ.get("NBS_ANALYTICS_CACHE_DIR", str(Path(__file__).resolve().parent / ".nbs_runtime_cache")))
 EXPORT_FAST_CACHE_DIR = AI_CACHE_DIR / "export_fast"
 PERSISTENT_REPAIR_STATE_PATH = Path(__file__).resolve().parent / '.nbs_runtime' / 'persistent_repair_state.json'
 

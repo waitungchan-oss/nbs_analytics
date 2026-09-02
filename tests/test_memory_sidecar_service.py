@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from time import monotonic, sleep
+from threading import Event
+from time import sleep
 
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.memory_sidecar_adapter import FakeMemorySidecarProvider, MemorySidecarProviderError
@@ -100,15 +101,17 @@ def test_recall_enforces_reduced_policy_byte_cap():
 
 
 def test_recall_returns_timeout_when_provider_blocks():
+    provider_finished = Event()
+
     class BlockingProvider:
         def recall(self, *, query, query_fingerprint, limits):
             sleep(0.2)
+            provider_finished.set()
             return _hints()
 
-    started = monotonic()
     result = MemorySidecarService(_policy_with(timeout_ms=20)).recall(query="review runtime", provider=BlockingProvider())
     assert result.status == "timeout"
-    assert monotonic() - started < 0.15
+    assert not provider_finished.is_set()
 
 
 def test_recall_caps_concurrent_blocked_provider_calls():

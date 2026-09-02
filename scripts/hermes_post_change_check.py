@@ -476,6 +476,7 @@ def build_check_plan(
     *,
     include_monitor: bool = True,
     include_tests: bool = True,
+    include_system_acceptance: bool = True,
     project_root: Path = PROJECT_ROOT,
     verification_profile: str | None = None,
 ) -> list[CheckStep]:
@@ -484,7 +485,8 @@ def build_check_plan(
         "from pathlib import Path; "
         "from scripts.phase2j_baseline_check import check_phase2_baseline; "
         "import json; "
-        "print(json.dumps(check_phase2_baseline(Path('nbs_marketing_data.db')), "
+        "import os; "
+        "print(json.dumps(check_phase2_baseline(Path(os.environ.get('NBS_ANALYTICS_DB_FILE', 'nbs_marketing_data.db'))), "
         "ensure_ascii=False, indent=2))"
     )
     implementation_agent_file_code = (
@@ -548,8 +550,9 @@ def build_check_plan(
         CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
         CheckStep("git-diff-name-only", ["git", "diff", "--name-only"], required=False),
         CheckStep("system-status", [py, "scripts/system_manager.py", "status", *profile_args]),
-        CheckStep("system-acceptance", [py, "scripts/system_manager.py", "acceptance", *profile_args]),
     ]
+    if include_system_acceptance:
+        plan.append(CheckStep("system-acceptance", [py, "scripts/system_manager.py", "acceptance", *profile_args]))
     if include_monitor and not verification_profile:
         plan.append(CheckStep("system-monitor", [py, "scripts/system_manager.py", "monitor"]))
     plan.append(
@@ -719,6 +722,7 @@ def run_checks(
     *,
     include_monitor: bool = True,
     include_tests: bool = True,
+    include_system_acceptance: bool = True,
     project_root: Path = PROJECT_ROOT,
     verification_profile: str | None = None,
     session_id: str | None = None,
@@ -760,6 +764,7 @@ def run_checks(
     plan = build_check_plan(
         include_monitor=include_monitor,
         include_tests=include_tests,
+        include_system_acceptance=include_system_acceptance,
         project_root=project_root,
         verification_profile=verification_profile,
     )
@@ -856,6 +861,11 @@ def format_markdown_report(report: dict) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Hermes post-change monitoring checks for nbs_analytics.")
     parser.add_argument("--skip-monitor", action="store_true", help="Skip system_manager.py monitor write.")
+    parser.add_argument(
+        "--skip-system-acceptance",
+        action="store_true",
+        help="Skip acceptance of externally managed local services.",
+    )
     parser.add_argument("--skip-tests", action="store_true", help="Skip targeted pytest monitoring pack.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
     parser.add_argument("--markdown", action="store_true", help="Print a concise Markdown report.")
@@ -881,6 +891,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run_checks(
         include_monitor=not args.skip_monitor,
         include_tests=not args.skip_tests,
+        include_system_acceptance=not args.skip_system_acceptance,
         verification_profile=args.verification_profile,
         session_id=args.session,
         hermes_profile=args.profile,
