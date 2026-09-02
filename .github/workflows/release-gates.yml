@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -26,6 +28,12 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements.txt
+      - name: Prepare isolated full pytest fixture
+        run: |
+          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-full-pytest-fixture"
+          echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-full-pytest-fixture/upload_coordination.db" >> "$GITHUB_ENV"
       - name: Run full pytest gate with required sandbox
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
@@ -43,6 +51,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -54,6 +64,8 @@ jobs:
         run: |
           .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-hermes-fixture"
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-hermes-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-hermes-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-hermes-fixture/upload_coordination.db" >> "$GITHUB_ENV"
       - name: Run Hermes read-only gate
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
@@ -71,6 +83,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -107,6 +121,8 @@ jobs:
     needs: [full-pytest, hermes, ui-acceptance]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
