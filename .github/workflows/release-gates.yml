@@ -118,10 +118,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-gate-ui-acceptance
-          path: |
-            ui-acceptance.json
-            ${{ runner.temp }}/ui-server.log
-            ${{ runner.temp }}/ui-page.html
+          path: ui-acceptance.json
           if-no-files-found: warn
 
   aggregate:
