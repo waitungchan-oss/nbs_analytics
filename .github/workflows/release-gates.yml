@@ -25,7 +25,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - name: Run full pytest gate with required sandbox
         run: |
-          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
           python scripts/full_pytest_gate.py --sandbox-preflight required --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output full-pytest.json
       - if: always()
         uses: actions/upload-artifact@v4
@@ -36,7 +36,7 @@ jobs:
 
   hermes:
     name: Hermes release gate
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +44,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: python -m pip install -r requirements.txt
+      - name: Prepare isolated Hermes baseline fixture
+        run: |
+          python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-hermes-fixture"
+          echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-hermes-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
       - name: Run Hermes read-only gate
         run: |
-          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
           python scripts/hermes_gate.py --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output hermes.json
       - if: always()
         uses: actions/upload-artifact@v4
@@ -65,21 +69,21 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: python -m pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
       - name: Prepare isolated HTTP fixture
         run: |
-          mkdir -p "$RUNNER_TEMP/nbs-ui-fixture"
-          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
-          python - "$GITHUB_SHA" "$SOURCE_FINGERPRINT" "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" <<'PY'
-          import json, sys
-          commit, source, output = sys.argv[1:]
-          json.dump({"route":"http://127.0.0.1:8765/","initialStatus":"CURRENT","mergeStatus":"READY","activeVersionId":"ci-fixture","manifestSha256":"c"*64,"downloadedArtifacts":{"total.detail":1,"paid.detail":1},"refreshedVersionId":"ci-fixture","commitSha":commit,"sourceFingerprint":source}, open(output,"w"))
-          PY
-          echo 'NBS release gate UI fixture' > "$RUNNER_TEMP/nbs-ui-fixture/index.html"
+          python scripts/prepare_release_gate_fixtures.py --profile ui --output "$RUNNER_TEMP/nbs-ui-fixture"
+          echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-ui-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-ui-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-ui-fixture/upload_coordination.db" >> "$GITHUB_ENV"
       - name: Run isolated HTTP UI acceptance
         run: |
-          python -m http.server 8765 --bind 127.0.0.1 --directory "$RUNNER_TEMP/nbs-ui-fixture" > "$RUNNER_TEMP/ui-server.log" 2>&1 &
+          python -m streamlit run app.py --server.headless true --server.address 127.0.0.1 --server.port 8765 > "$RUNNER_TEMP/ui-server.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ui-server.pid"
-          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          trap 'kill "$(cat "$RUNNER_TEMP/ui-server.pid")" 2>/dev/null || true' EXIT
+          curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 http://127.0.0.1:8765/ > "$RUNNER_TEMP/ui-page.html"
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          python scripts/streamlit_ui_smoke.py --project-root "$GITHUB_WORKSPACE" --route http://127.0.0.1:8765/ --served-url http://127.0.0.1:8765/ --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-ui-fixture/evidence.json"
           python scripts/ui_acceptance_gate.py --url http://127.0.0.1:8765/ --fixture-root "$RUNNER_TEMP/nbs-ui-fixture" --evidence "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output ui-acceptance.json
       - if: always()
         uses: actions/upload-artifact@v4
@@ -112,7 +116,7 @@ jobs:
           path: artifacts/ui-acceptance
       - name: Aggregate fresh release evidence
         run: |
-          SOURCE_FINGERPRINT=$(python -c 'import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(["git","ls-files","-z"])).hexdigest())')
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
           python scripts/release_gate.py aggregate --full-pytest artifacts/full-pytest/full-pytest.json --hermes artifacts/hermes/hermes.json --ui-acceptance artifacts/ui-acceptance/ui-acceptance.json --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output release-gate-result.json
       - if: always()
         uses: actions/upload-artifact@v4

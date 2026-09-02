@@ -10,7 +10,12 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_COORDINATION_DB = PROJECT_ROOT / ".nbs_runtime" / "upload_coordination.db"
+DEFAULT_COORDINATION_DB = Path(
+    os.environ.get(
+        "NBS_ANALYTICS_COORDINATION_DB",
+        str(PROJECT_ROOT / ".nbs_runtime" / "upload_coordination.db"),
+    )
+)
 
 
 @dataclass(frozen=True)

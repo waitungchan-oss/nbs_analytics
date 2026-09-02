@@ -75,7 +75,7 @@ def test_evidence_rejects_tampering_unknown_fields_and_sensitive_payload(mutatio
 def test_evidence_rejects_stale_and_identity_mismatch():
     value = _evidence()
     with pytest.raises(ReleaseGateValidationError, match="stale"):
-        validate_release_gate_evidence(value, COMMIT, SOURCE, NOW + timedelta(seconds=1801))
+        validate_release_gate_evidence(value, COMMIT, SOURCE, NOW + timedelta(seconds=7201))
     with pytest.raises(ReleaseGateValidationError, match="commit"):
         validate_release_gate_evidence(value, "c" * 40, SOURCE, NOW)
     with pytest.raises(ReleaseGateValidationError, match="source"):

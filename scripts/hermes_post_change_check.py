@@ -484,7 +484,8 @@ def build_check_plan(
         "from pathlib import Path; "
         "from scripts.phase2j_baseline_check import check_phase2_baseline; "
         "import json; "
-        "print(json.dumps(check_phase2_baseline(Path('nbs_marketing_data.db')), "
+        "import os; "
+        "print(json.dumps(check_phase2_baseline(Path(os.environ.get('NBS_ANALYTICS_DB_FILE', 'nbs_marketing_data.db'))), "
         "ensure_ascii=False, indent=2))"
     )
     implementation_agent_file_code = (
