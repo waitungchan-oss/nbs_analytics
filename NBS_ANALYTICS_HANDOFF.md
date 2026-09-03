@@ -397,3 +397,15 @@ cache／manifest／generation signature 是否仍 fresh？
 ```
 
 只要這些邊界在 spec、implementation、review 與驗收中保持一致，就不容易把正式口徑、退款扣減、cache 或 Agent evidence 混在一起。
+
+## 2026-09-03 GitHub main branch protection live snapshot
+
+本輪已依 approved release-gate branch protection policy 完成 live enforcement。此設定只治理 GitHub `main` merge gate，不改動正式 SQLite、baseline、GMV、退款或 Dashboard runtime。
+
+- Repository：`waitungchan-oss/nbs_analytics`；branch：`main`；visibility：`public`。
+- Before snapshot：HTTP 404 `Branch not protected`。
+- Required check：唯一 required status check 為 `Release gate aggregate`，provider 為 GitHub Actions，`app_id=15368`、`app_slug=github-actions`。
+- Branch policy：`strict=true`、`enforce_admins=true`、要求 Pull Request、`required_approving_review_count=0`、無 bypass actors；force push、deletion、branch lock、creation block、conversation requirement、linear history、fork syncing 均 disabled；restrictions 為 null 或 GitHub GET 省略該欄位。
+- Post-GET deterministic verification：`PASS`，`errors=[]`。GitHub GET 可能將 `contexts` materialize 為單一 canonical `Release gate aggregate`；validator 仍以 `checks` exact match 防止 child gate 混入。
+- Runtime evidence：`.nbs_agent_runtime/reports/main-protection-before.json`、`.nbs_agent_runtime/reports/main-protection-put.json`、`.nbs_agent_runtime/reports/main-protection-after.json`、`.nbs_agent_runtime/reports/main-protection-verification.json`。
+- 本 live snapshot 不代表 Strict Review、Full pytest、Hermes 或 UI acceptance PASS；四者仍是獨立 release gates。
