@@ -66,6 +66,12 @@ def _safe_argv(argv: list[str]) -> list[str]:
     return [Path(value).name if Path(value).is_absolute() else value for value in argv]
 
 
+def _as_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
 def _approved_argv(project_root: Path, command: list[str] | None) -> list[str]:
     argv = list(command or [sys.executable, "-m", "pytest", "-q"])
     if len(argv) not in {4, 6} or argv[1:4] != ["-m", "pytest", "-q"]:
@@ -98,7 +104,7 @@ def run_full_pytest_gate(
     stdout = stderr = ""
     try:
         completed = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=timeout_seconds, check=False)
-        stdout, stderr = completed.stdout or "", completed.stderr or ""
+        stdout, stderr = _as_text(completed.stdout), _as_text(completed.stderr)
         metadata["exitCode"] = completed.returncode
         combined = f"{stdout}\n{stderr}"
         if "blocked_environment" in combined or "sandbox capability" in combined.lower() and "blocked" in combined.lower():
@@ -111,8 +117,8 @@ def run_full_pytest_gate(
                 metadata["failureCode"] = "malformed_summary"
             status = "PASS" if completed.returncode == 0 and "failureCode" not in metadata and result["failed"] == 0 else "FAIL"
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.output or ""
-        stderr = exc.stderr or ""
+        stdout = _as_text(exc.output)
+        stderr = _as_text(exc.stderr)
         metadata.update({"failureCode": "timeout", "timeoutSeconds": timeout_seconds})
         status = "BLOCKED"
     except OSError as exc:
