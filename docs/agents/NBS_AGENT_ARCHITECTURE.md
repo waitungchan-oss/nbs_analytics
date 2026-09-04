@@ -108,6 +108,8 @@ flowchart TD
 
 Review Agent 的 `pass` 只代表可以進入完整驗證及 Hermes，不代表正式系統已完成驗收。
 
+Runner 的現有呼叫關係、transport 與 evidence 差異，見 [Runner Topology 與 Transport Matrix](RUNNER_TOPOLOGY_AND_TRANSPORT_MATRIX.md)；該文件為 source-backed reference，權限與執行規則仍以本契約為準。
+
 ### Memory Sidecar pilot boundary
 
 Memory Sidecar 是 provider-neutral、non-authoritative 的 bounded hint sidecar，不是 canonical artifacts、Governance Graph、Review、Hermes、approval、dispatch、SQLite、baseline、runtime 或 Git authority。NBS Hermes 不是 Tencent Hermes：它的 `memory-sidecar-hermes-report-v1` 只 read-only 檢查 bounded `memory-hints-v1` / telemetry evidence，固定 `policy=read-only`、`invocations=0`、`writes=0`，never starts Gateway 或呼叫 provider/network。詳細契約見 `MEMORY_SIDECAR_CONTRACT.md`。
