@@ -86,6 +86,8 @@ Implementation Agent 仍不得 commit、merge 或 push；validator 只 read-only
 
 ## 執行邊界
 
+選讀 runner source 前，可先查 [Runner Topology 與 Transport Matrix](RUNNER_TOPOLOGY_AND_TRANSPORT_MATRIX.md) 的 caller、transport 與 evidence 對照；該 reference 不提供 runner selection、approval 或 dispatch 能力。
+
 Governance Graph 的 scope、R0/R1/R2、Task ownership、CLI、freshness、retention
 與 `blocked_missing_runner` 邊界，統一見
 [NBS Governance Graph Contract](NBS_GOVERNANCE_GRAPH_CONTRACT.md)。Graph 是
