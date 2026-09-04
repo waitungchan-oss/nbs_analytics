@@ -24,6 +24,17 @@ def test_full_pytest_gate_records_bounded_pass(monkeypatch, tmp_path):
     assert calls[0][0][calls[0][0].index("--sandbox-preflight") + 1] == "required"
 
 
+def test_full_pytest_gate_normalizes_bytes_from_runner_boundary(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, b"3 passed in 0.10s\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    evidence = run_full_pytest_gate(tmp_path, COMMIT, SOURCE)
+
+    assert evidence["status"] == "PASS"
+    assert evidence["metadata"]["stdoutTail"] == "3 passed in 0.10s\n"
+
+
 def test_full_pytest_gate_nonzero_is_fail_and_output_is_bounded(monkeypatch, tmp_path):
     def fake_run(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 1, "2 failed, 8 passed in 1.00s\n" + "x" * 10000, "error")

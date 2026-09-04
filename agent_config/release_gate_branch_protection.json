@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "nbs-release-gate-branch-protection-v1",
+  "repository": "waitungchan-oss/nbs_analytics",
+  "branch": "main",
+  "requiredCheck": {
+    "context": "Release gate aggregate",
+    "appId": 15368,
+    "appSlug": "github-actions"
+  },
+  "strict": true,
+  "enforceAdmins": true,
+  "requirePullRequest": true,
+  "requiredApprovingReviewCount": 0,
+  "bypassActors": [],
+  "allowForcePushes": false,
+  "allowDeletions": false
+}

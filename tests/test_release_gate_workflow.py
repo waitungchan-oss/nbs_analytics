@@ -16,6 +16,12 @@ def test_release_workflow_defines_independent_required_jobs_and_aggregate():
     assert "download-artifact@v4" in source
 
 
+def test_release_aggregate_job_name_matches_branch_protection_contract():
+    source = WORKFLOW.read_text(encoding="utf-8")
+    assert "name: Release gate aggregate" in source
+    assert source.count("name: Release gate aggregate") == 1
+
+
 def test_release_workflow_is_fresh_for_pr_and_release_tags_and_fail_closed():
     source = WORKFLOW.read_text(encoding="utf-8")
     assert "pull_request:" in source
