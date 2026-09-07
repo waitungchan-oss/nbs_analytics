@@ -70,6 +70,7 @@ CONFIG_FILE = config_module.CONFIG_FILE
 DB_FILE = config_module.DB_FILE
 SESSION_RULE_KEYS = config_module.SESSION_RULE_KEYS
 TARGET_DEPT_FOR_REP = config_module.TARGET_DEPT_FOR_REP
+E_COMMERCE_SALES_POINT = "市場及電商部-電子商務組"
 init_session_state_config = config_module.init_session_state_config
 save_business_rules = config_module.save_business_rules
 
@@ -1099,7 +1100,7 @@ def _compute_beta_export_workbooks(
     rules: tuple[dict, list[str], list[str], list[str], list[str]] | None = None,
 ) -> dict:
     branch_mapping, target_branches, cruise_depts, sales_reps, _ = rules or _current_rules()
-    sales_point = "市場及電商部-電子商務組"
+    sales_point = E_COMMERCE_SALES_POINT
 
     def build_beta(excluded_receipt_types, excluded_payment_methods=None):
         return build_dashboard_data_excluding_receipt_types(

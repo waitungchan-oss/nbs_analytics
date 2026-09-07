@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+from pathlib import Path
 
 
 E_COMMERCE = "市場及電商部-電子商務組"
@@ -148,3 +149,11 @@ def test_beta_cache_identity_differs_from_formal_identity():
     assert app_workflows._build_export_variant_key(
         "source", "rules", "beta_ecommerce_sales_point_v1"
     ) != app_workflows._build_export_variant_key("source", "rules", "official")
+
+
+def test_export_ui_exposes_beta_ecommerce_comparison_without_replacing_official_action():
+    source = Path("app_pages.py").read_text(encoding="utf-8")
+
+    assert "Beta comparison export" in source
+    assert E_COMMERCE in source
+    assert "ex_no_writeoff_refund_transfer" in source
