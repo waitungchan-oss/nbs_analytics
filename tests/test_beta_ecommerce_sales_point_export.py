@@ -109,6 +109,7 @@ def test_beta_workbook_replaces_specialist_sheets_with_all_ecommerce_salespeople
 
     assert f"{E_COMMERCE}_經營統計" in facts
     assert set(facts[f"{E_COMMERCE}_經營統計"]["文本"]) >= {"Alice", "未指定"}
+    assert set(facts[f"{E_COMMERCE}_每天旅行團交易人數"]["文本"]) >= {"Alice", "未指定"}
     assert "Legacy Rep" not in set(facts[f"{E_COMMERCE}_每天旅行團交易人數"]["文本"])
 
 

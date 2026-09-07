@@ -975,6 +975,15 @@ def build_dashboard_data(
     df_tour_dedup["天數_num"] = pd.to_numeric(df_tour_dedup[COL_DAYS], errors="coerce").fillna(0)
     df_tour_dedup["交易人數"] = pd.to_numeric(df_tour_dedup[COL_QTY], errors="coerce").fillna(0)
     df_tour_dedup["月份"] = pd.to_datetime(df_tour_dedup["日期"], errors="coerce").dt.strftime("%Y-%m")
+    if beta_enabled:
+        beta_mask = df_tour_dedup[COL_BRANCH].astype(str).str.strip().eq(specialist_branch)
+        df_tour_dedup.loc[beta_mask, COL_SALESPERSON] = (
+            df_tour_dedup.loc[beta_mask, COL_SALESPERSON]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace({"": "未指定", "nan": "未指定", "None": "未指定"})
+        )
 
     def gen_t_stats(df_sub):
         if df_sub.empty:
@@ -1079,6 +1088,15 @@ def build_dashboard_data(
     df_tour_amount["文本"] = df_tour_amount.apply(lambda r: map_dest_category(r, cruise_depts), axis=1)
     df_tour_amount["月份"] = pd.to_datetime(df_tour_amount["日期"], errors="coerce").dt.strftime("%Y-%m")
     df_tour_amount[COL_MONEY] = pd.to_numeric(df_tour_amount[COL_MONEY], errors="coerce").fillna(0)
+    if beta_enabled:
+        beta_mask = df_tour_amount[COL_BRANCH].astype(str).str.strip().eq(specialist_branch)
+        df_tour_amount.loc[beta_mask, COL_SALESPERSON] = (
+            df_tour_amount.loc[beta_mask, COL_SALESPERSON]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace({"": "未指定", "nan": "未指定", "None": "未指定"})
+        )
 
     def gen_route_type_daily(
         count_df: pd.DataFrame,
