@@ -34,6 +34,7 @@ from config import (
     MONEY_COLS_1,
     MONEY_COLS_2,
     BRANCH_REASSIGNMENT_OVERRIDES,
+    BETA_ONLY_SALES_POINTS,
     TARGET_DEPT_FOR_REP,
 )
 
@@ -786,7 +787,11 @@ def build_dashboard_data(
         df_others_matched["統一日期"] = pd.to_datetime(df_others_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
 
     all_days = sorted(list(set(df_tour_matched["統一日期"].dropna()) | set(df_others_matched["統一日期"].dropna())))
-    branch_list = [f"{c}{n}" for c, n in branch_mapping.items() if n != TARGET_DEPT_FOR_REP]
+    branch_list = [
+        f"{c}{n}"
+        for c, n in branch_mapping.items()
+        if n != TARGET_DEPT_FOR_REP and n not in BETA_ONLY_SALES_POINTS
+    ]
     beta_enabled = bool(str(beta_sales_point or "").strip())
     if beta_enabled:
         specialist_tour, specialist_others = _select_sales_point_frames(
@@ -938,17 +943,25 @@ def build_dashboard_data(
         ]
         return res[columns].sort_values(["文本", "銷售員", "日期"]).reset_index(drop=True)
 
+    formal_branch_tour = df_tour_matched[
+        (df_tour_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP)
+        & (~df_tour_matched[COL_BRANCH].isin(BETA_ONLY_SALES_POINTS))
+    ]
+    formal_branch_others = df_others_matched[
+        (df_others_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP)
+        & (~df_others_matched[COL_BRANCH].isin(BETA_ONLY_SALES_POINTS))
+    ]
     result_s1 = build_summary(
-        df_tour_matched[df_tour_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
-        df_others_matched[df_others_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
+        formal_branch_tour,
+        formal_branch_others,
         branch_list,
         COL_BRANCH,
         True,
     )
     result_s1_salesperson = (
         build_branch_salesperson_summary(
-            df_tour_matched[df_tour_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
-            df_others_matched[df_others_matched[COL_BRANCH] != TARGET_DEPT_FOR_REP],
+            formal_branch_tour,
+            formal_branch_others,
         )
         if include_branch_salesperson_sheet
         else pd.DataFrame(columns=["文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"])

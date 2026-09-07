@@ -30,6 +30,7 @@ from rules import (
     MONEY_COLS_1,
     MONEY_COLS_2,
     BRANCH_REASSIGNMENT_OVERRIDES,
+    BETA_ONLY_SALES_POINTS,
     SESSION_RULE_KEYS,
     TARGET_DEPT_FOR_REP,
     _clean_list,
