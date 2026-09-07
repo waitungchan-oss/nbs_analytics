@@ -137,6 +137,8 @@ COL_TOUR_NAME = "團名稱"
 COL_SOURCE_TAG = "來源報表標籤"
 COL_RECEIPT_OPERATOR = "收款操作員"
 TARGET_DEPT_FOR_REP = "營銷運營中心-專職銷售組"
+# Sales points reserved for comparison exports; they must not enter formal branch KPIs.
+BETA_ONLY_SALES_POINTS = frozenset({"市場及電商部-電子商務組"})
 
 
 def _clean_text(value: Any) -> str:

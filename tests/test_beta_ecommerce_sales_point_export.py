@@ -133,6 +133,24 @@ def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
     assert list(facts[sheet].columns) == ["文本", "天數", "日期", "月份", "交易人數"]
 
 
+def test_formal_dashboard_excludes_beta_sales_point_from_branch_aggregation():
+    import pipeline
+
+    _, _, facts = pipeline.build_dashboard_data(
+        tour_frame(),
+        others_frame(),
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+    )
+
+    formal_branch_rows = facts["分社經營統計"]
+    assert not formal_branch_rows["文本"].astype(str).str.contains(E_COMMERCE, regex=False).any()
+
+
 def test_beta_export_has_distinct_variant_identity_and_artifacts():
     import app_workflows
 
