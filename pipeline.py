@@ -776,6 +776,8 @@ def build_dashboard_data(
     include_branch_salesperson_sheet: bool = False,
     return_facts: bool = False,
     _already_normalized: bool = False,
+    *,
+    beta_sales_point: str | None = None,
 ):
     if not _already_normalized:
         df_tour_matched = normalize_runtime_columns(df_tour_matched)
@@ -785,6 +787,28 @@ def build_dashboard_data(
 
     all_days = sorted(list(set(df_tour_matched["統一日期"].dropna()) | set(df_others_matched["統一日期"].dropna())))
     branch_list = [f"{c}{n}" for c, n in branch_mapping.items() if n != TARGET_DEPT_FOR_REP]
+    beta_enabled = bool(str(beta_sales_point or "").strip())
+    if beta_enabled:
+        specialist_tour, specialist_others = _select_sales_point_frames(
+            df_tour_matched,
+            df_others_matched,
+            sales_point=str(beta_sales_point),
+        )
+        specialist_salespeople = sorted(
+            {
+                str(value).strip() or "未指定"
+                for frame in (specialist_tour, specialist_others)
+                for value in frame.get(COL_SALESPERSON, pd.Series(dtype=object)).tolist()
+            }
+        )
+        specialist_branch = str(beta_sales_point).strip()
+        specialist_sheet_prefix = f"{specialist_branch}_"
+    else:
+        specialist_tour = df_tour_matched[df_tour_matched[COL_BRANCH] == TARGET_DEPT_FOR_REP]
+        specialist_others = df_others_matched[df_others_matched[COL_BRANCH] == TARGET_DEPT_FOR_REP]
+        specialist_salespeople = list(sales_rep_list)
+        specialist_branch = TARGET_DEPT_FOR_REP
+        specialist_sheet_prefix = ""
 
     def build_summary(df_t, df_o, text_list, text_col, is_branch=True):
         grid = pd.DataFrame(list(itertools.product(text_list, all_days)), columns=["文本", "日期"])
@@ -930,9 +954,9 @@ def build_dashboard_data(
         else pd.DataFrame(columns=["文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"])
     )
     result_s2 = build_summary(
-        df_tour_matched[df_tour_matched[COL_BRANCH] == TARGET_DEPT_FOR_REP],
-        df_others_matched[df_others_matched[COL_BRANCH] == TARGET_DEPT_FOR_REP],
-        sales_rep_list,
+        specialist_tour,
+        specialist_others,
+        specialist_salespeople,
         COL_SALESPERSON,
         False,
     )
@@ -961,7 +985,7 @@ def build_dashboard_data(
         return s[s["交易人數"] > 0].sort_values(["文本", "日期", "天數_num"])[["文本", "天數", "日期", "月份", "交易人數"]]
 
     result_s3 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)])
-    result_s4 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH] == TARGET_DEPT_FOR_REP])
+    result_s4 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH] == specialist_branch])
 
     df_ticket = df_others_matched.copy()
     df_ticket["日期"] = (
@@ -982,7 +1006,7 @@ def build_dashboard_data(
         return s[s["交易數量"] > 0].sort_values(["文本", "日期"])[["文本", "日期", "月份", "交易數量"]]
 
     result_s5 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)])
-    result_s6 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH] == TARGET_DEPT_FOR_REP])
+    result_s6 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH] == specialist_branch])
     result_s7 = gen_tk_stats(df_ticket)
 
     def gen_d_tour(df_sub, grp_col, t_name):
@@ -995,7 +1019,7 @@ def build_dashboard_data(
         return res[(res[t_name] > 0) | (res["郵輪交易人數"] > 0)].rename(columns={grp_col: "文本"}).sort_values(["文本", "日期"])
 
     result_s8 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH, "交易人數")
-    result_s9 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH] == TARGET_DEPT_FOR_REP], COL_SALESPERSON, "旅行團交易人數")
+    result_s9 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH] == specialist_branch], COL_SALESPERSON, "旅行團交易人數")
 
     def gen_d_tkt(df_sub, grp_col):
         if df_sub.empty:
@@ -1006,7 +1030,7 @@ def build_dashboard_data(
         return s.sort_values(["文本", "種類", "日期"])
 
     result_s10 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH)
-    result_s11 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH] == TARGET_DEPT_FOR_REP], COL_SALESPERSON)
+    result_s11 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH] == specialist_branch], COL_SALESPERSON)
 
     def gen_mny(df_sub, grp_col, type_col):
         if df_sub.empty:
@@ -1102,10 +1126,21 @@ def build_dashboard_data(
     )
     result_s16 = gen_route_type_daily(
         df_tour_count_daily[
-            (df_tour_count_daily[COL_BRANCH] == TARGET_DEPT_FOR_REP)
-            & df_tour_count_daily[COL_SALESPERSON].isin(sales_rep_list)
+            (df_tour_count_daily[COL_BRANCH] == specialist_branch)
+            & (
+                df_tour_count_daily[COL_SALESPERSON].isin(specialist_salespeople)
+                if not beta_enabled
+                else df_tour_count_daily[COL_SALESPERSON].notna()
+            )
         ],
-        df_tour_amount[(df_tour_amount[COL_BRANCH] == TARGET_DEPT_FOR_REP) & df_tour_amount[COL_SALESPERSON].isin(sales_rep_list)],
+        df_tour_amount[
+            (df_tour_amount[COL_BRANCH] == specialist_branch)
+            & (
+                df_tour_amount[COL_SALESPERSON].isin(specialist_salespeople)
+                if not beta_enabled
+                else df_tour_amount[COL_SALESPERSON].notna()
+            )
+        ],
         COL_SALESPERSON,
         "專職銷售員",
     )
@@ -1234,23 +1269,23 @@ def build_dashboard_data(
 
     sheets = [
         (result_s1, "分社經營統計"),
-        (result_s2, "專職經營統計"),
+        (result_s2, f"{specialist_sheet_prefix}經營統計" if beta_enabled else "專職經營統計"),
         (result_s3, "分社旅行團統計"),
-        (result_s4, "專職旅行團統計"),
+        (result_s4, f"{specialist_sheet_prefix}旅行團統計" if beta_enabled else "專職旅行團統計"),
         (result_s5, "分社票務總計"),
-        (result_s6, "專職票務總計"),
+        (result_s6, f"{specialist_sheet_prefix}票務總計" if beta_enabled else "專職票務總計"),
         (result_s7, "票務總計"),
         (result_s8, "分社每天旅行團交易人數"),
-        (result_s9, "專職每天旅行團交易人數"),
+        (result_s9, f"{specialist_sheet_prefix}每天旅行團交易人數" if beta_enabled else "專職每天旅行團交易人數"),
         (result_s10, "分社每天票務交易數量"),
-        (result_s11, "專職每天票務交易數量"),
+        (result_s11, f"{specialist_sheet_prefix}每天票務交易數量" if beta_enabled else "專職每天票務交易數量"),
         (result_s12, "NBS分社_旅行團金額統計"),
         (result_s13, "NBS分社_票務金額統計"),
         (result_total, "總表_多表匹配完成"),
         (result_tour_success, "旅行團_匹配成功"),
         (result_other_unmatched, "其它_未匹配_包含其它業務"),
         (result_s15, "分社線路種類每天統計"),
-        (result_s16, "專職線路種類每天統計"),
+        (result_s16, f"{specialist_sheet_prefix}線路種類每天統計" if beta_enabled else "專職線路種類每天統計"),
     ]
     if include_branch_salesperson_sheet:
         sheets.insert(1, (result_s1_salesperson, "分社經營統計_含銷售員"))

@@ -89,3 +89,43 @@ def test_beta_selection_does_not_mutate_sources():
 
     pd.testing.assert_frame_equal(tour, before_tour)
     pd.testing.assert_frame_equal(others, before_others)
+
+
+def test_beta_workbook_replaces_specialist_sheets_with_all_ecommerce_salespeople():
+    import pipeline
+
+    _, _, facts = pipeline.build_dashboard_data(
+        tour_frame(),
+        others_frame(),
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=E_COMMERCE,
+    )
+
+    assert f"{E_COMMERCE}_經營統計" in facts
+    assert set(facts[f"{E_COMMERCE}_經營統計"]["文本"]) >= {"Alice", "未指定"}
+    assert "Legacy Rep" not in set(facts[f"{E_COMMERCE}_每天旅行團交易人數"]["文本"])
+
+
+def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
+    import pipeline
+
+    _, _, facts = pipeline.build_dashboard_data(
+        empty_frame(),
+        empty_frame(),
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=E_COMMERCE,
+    )
+
+    sheet = f"{E_COMMERCE}_旅行團統計"
+    assert facts[sheet].empty
+    assert list(facts[sheet].columns) == ["文本", "天數", "日期", "月份", "交易人數"]
