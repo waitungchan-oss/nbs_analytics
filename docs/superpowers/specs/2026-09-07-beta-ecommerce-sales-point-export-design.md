@@ -16,8 +16,9 @@
 
 - Beta 只套用於 `Beta comparison export`，不改既有正式 export。
 - Beta 保留原 workbook 的總表、匹配結果、分社表與其他非專職表格。
-- Beta workbook 中原「專職」表格的位置改用電商組資料，並以明確的 Beta sheet identity 標示其內容為「市場及電商部-電子商務組」。
+- Beta workbook 中原「專職」表格的位置改用電商組資料，sheet name 使用「市場及電商部-電子商務組」前綴，明確標示這是 Beta 電商組版本；正式 workbook 的原「專職」sheet names 完全不變。
 - Beta 對應的專職表格至少包括：經營統計、旅行團統計、票務總計、每天旅行團交易人數、每天票務交易數量、線路種類每天統計。欄位結構沿用既有表格契約，避免下游讀取器破壞性變更。
+- Beta sheet names 固定為：`市場及電商部-電子商務組_經營統計`、`市場及電商部-電子商務組_旅行團統計`、`市場及電商部-電子商務組_票務總計`、`市場及電商部-電子商務組_每天旅行團交易人數`、`市場及電商部-電子商務組_每天票務交易數量`、`市場及電商部-電子商務組_線路種類每天統計`。
 
 ### 資料篩選與銷售員
 
@@ -66,4 +67,3 @@
 ## 最小改動原則
 
 優先在 export composition boundary 加入可明確傳遞的 Beta filter／variant，重用既有統計 builder 與欄位投影；不把 Beta 條件塞進 `TARGET_DEPT_FOR_REP`，不複製整套 pipeline，不做大型重構。
-
