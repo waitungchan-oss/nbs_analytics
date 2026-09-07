@@ -518,6 +518,29 @@ def normalize_runtime_columns(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _select_sales_point_frames(
+    tour: pd.DataFrame,
+    others: pd.DataFrame,
+    *,
+    sales_point: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Select one sales point and normalize its salesperson display values."""
+    target = str(sales_point).strip()
+    selected = []
+    for frame in (tour, others):
+        work = normalize_runtime_columns(frame.copy(deep=True))
+        work = work.loc[work[COL_BRANCH].astype(str).str.strip().eq(target)].copy()
+        work[COL_SALESPERSON] = (
+            work[COL_SALESPERSON]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace({"": "未指定", "nan": "未指定", "None": "未指定"})
+        )
+        selected.append(work)
+    return selected[0], selected[1]
+
+
 def _valid_entity_keys(series: pd.Series) -> pd.Series:
     return clean_invoice_number(series).replace({"": pd.NA, "NAN": pd.NA, "NONE": pd.NA}).dropna()
 
