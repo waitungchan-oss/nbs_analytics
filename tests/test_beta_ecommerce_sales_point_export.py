@@ -129,3 +129,22 @@ def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
     sheet = f"{E_COMMERCE}_旅行團統計"
     assert facts[sheet].empty
     assert list(facts[sheet].columns) == ["文本", "天數", "日期", "月份", "交易人數"]
+
+
+def test_beta_export_has_distinct_variant_identity_and_artifacts():
+    import app_workflows
+
+    payload = app_workflows._compute_beta_export_workbooks(tour_frame(), others_frame())
+
+    assert payload["export_variant"] == "beta_ecommerce_sales_point_v1"
+    assert payload["sales_point_filter"] == E_COMMERCE
+    assert {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} <= set(payload)
+    assert all(payload[key] for key in ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"))
+
+
+def test_beta_cache_identity_differs_from_formal_identity():
+    import app_workflows
+
+    assert app_workflows._build_export_variant_key(
+        "source", "rules", "beta_ecommerce_sales_point_v1"
+    ) != app_workflows._build_export_variant_key("source", "rules", "official")

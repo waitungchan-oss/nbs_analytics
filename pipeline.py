@@ -1315,6 +1315,8 @@ def build_dashboard_data_excluding_receipt_types(
     make_workbook: bool = True,
     include_branch_salesperson_sheet: bool = False,
     return_facts: bool = False,
+    *,
+    beta_sales_point: str | None = None,
 ):
     excluded_types = {str(v).strip() for v in excluded_receipt_types if str(v).strip()}
     excluded_methods = {str(v).strip() for v in (excluded_payment_methods or []) if str(v).strip()}
@@ -1329,6 +1331,7 @@ def build_dashboard_data_excluding_receipt_types(
             make_workbook=make_workbook,
             include_branch_salesperson_sheet=include_branch_salesperson_sheet,
             return_facts=return_facts,
+            beta_sales_point=beta_sales_point,
         )
 
     def collect_excluded_ids(df: pd.DataFrame) -> set[str]:
@@ -1359,4 +1362,5 @@ def build_dashboard_data_excluding_receipt_types(
         make_workbook=make_workbook,
         include_branch_salesperson_sheet=include_branch_salesperson_sheet,
         return_facts=return_facts,
+        beta_sales_point=beta_sales_point,
     )
