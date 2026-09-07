@@ -23,6 +23,7 @@ from app_workflows import (
     COL_QTY,
     COL_SALESPERSON,
     CONFIG_FILE,
+    E_COMMERCE_SALES_POINT,
     HAS_AI_LIBS,
     HAS_MATPLOTLIB,
     REVENUE_SCOPE_CAPTION,
@@ -50,6 +51,7 @@ from app_workflows import (
     _clean_editor_list,
     _combined_max_date,
     _compute_ai_cleaning_suggestions,
+    _compute_beta_export_workbooks,
     _compute_causal_driver_analytics,
     _compute_data_quality_scorecard,
     _compute_feature_store_lead_signals,
@@ -2394,6 +2396,30 @@ def _render_ai_and_exports(cache: dict) -> None:
                     )
             else:
                 st.info("目前沒有清洗異常日誌可下載。")
+
+        beta_keys = ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta")
+        beta_loaded = all(cache.get(key) for key in beta_keys)
+        st.markdown("#### Beta comparison export")
+        st.caption(
+            f"只將 workbook 內原專職表格替換為銷售點「{E_COMMERCE_SALES_POINT}」資料；正式 Dashboard、Forecast 與正式下載不變。"
+        )
+        if not beta_loaded and st.button("準備 Beta 電商組比較匯出", key="PREPARE_BETA_ECOMMERCE_EXPORT"):
+            with st.spinner("正在生成 Beta 電商組比較匯出..."):
+                beta_payload = _compute_beta_export_workbooks(cache.get("raw_t", pd.DataFrame()), cache.get("raw_o", pd.DataFrame()))
+            cache.update({key: beta_payload.get(key) for key in beta_keys})
+            cache["beta_export_variant"] = beta_payload.get("export_variant")
+            cache["beta_sales_point_filter"] = beta_payload.get("sales_point_filter")
+            st.session_state["PROCESSED_DATA_CACHE"] = cache
+            st.rerun()
+        if beta_loaded:
+            st.download_button(
+                "下載 Beta 電商組比較匯出（正式口徑）",
+                cache["ex_no_writeoff_refund_transfer_beta"] or b"",
+                "Beta_市場及電商部-電子商務組_不含掛賬核銷與TT退款轉團款.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="DOWNLOAD_BETA_ECOMMERCE_EXPORT",
+                width="stretch",
+            )
 
 def _render_dashboard_tab() -> None:
     _run_persistent_repairs_before_load()
