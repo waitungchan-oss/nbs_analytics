@@ -817,7 +817,11 @@ def build_dashboard_data(
 
     def build_summary(df_t, df_o, text_list, text_col, is_branch=True):
         grid = pd.DataFrame(list(itertools.product(text_list, all_days)), columns=["文本", "日期"])
-        grid["種類/單選"] = grid["文本"].apply(get_branch_type) if is_branch else "專職銷售"
+        grid["種類/單選"] = (
+            grid["文本"].apply(get_branch_type)
+            if is_branch
+            else ("市場電商" if beta_enabled else "專職銷售")
+        )
         grid["MapKey"] = grid["文本"].apply(lambda x: str(x)[2:]) if is_branch else grid["文本"]
 
         t_not_c = df_t[~df_t[COL_DEPT].isin(cruise_depts)]
