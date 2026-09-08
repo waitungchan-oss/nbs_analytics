@@ -2,9 +2,11 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.runtime_helpers import repository_python
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+PYTHON = repository_python(PROJECT_ROOT)
 
 
 def test_production_benchmark_cli_emits_isolated_matrix_json(tmp_path):

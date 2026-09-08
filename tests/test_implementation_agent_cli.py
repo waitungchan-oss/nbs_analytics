@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.runtime_helpers import repository_python
+
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent.parent if ROOT.parent.name == ".worktrees" else ROOT
-PYTHON = REPOSITORY_ROOT / ".venv/bin/python"
+PYTHON = repository_python(REPOSITORY_ROOT)
 PLAN_PATH = "docs/superpowers/plans/2026-07-14-implementation-agent.md"
 
 

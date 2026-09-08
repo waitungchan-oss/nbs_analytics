@@ -59,6 +59,18 @@ class SubprocessStageExecutor:
         if not self.python.is_file() and self.project_root.parent.name == ".worktrees":
             self.python = self.project_root.parent.parent / ".venv" / "bin" / "python"
         if not self.python.is_file():
+            git_file = self.project_root / ".git"
+            try:
+                git_pointer = git_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                git_pointer = ""
+            if git_file.is_file() and git_pointer.startswith("gitdir:"):
+                gitdir = Path(git_pointer.split(":", 1)[1].strip()).expanduser()
+                if gitdir.name and gitdir.parent.name == "worktrees":
+                    common_git = gitdir.parent.parent
+                    if common_git.name == ".git" and common_git.parent.is_dir():
+                        self.python = common_git.parent / ".venv" / "bin" / "python"
+        if not self.python.is_file():
             raise FileNotFoundError(f"Repository Python was not found: {self.python}")
 
     def run_json(self, argv: tuple[str, ...], *, timeout: int, require_json: bool = True) -> StageResult:
@@ -162,6 +174,10 @@ class WorkflowOrchestrator:
         self.policy = EvidencePolicy.from_project(self.project_root)
         self.store = store or WorkflowStore(self.project_root)
         self.stage_executor = stage_executor or SubprocessStageExecutor(self.project_root)
+        # Keep argv construction aligned with the executor's approved
+        # interpreter, including linked worktrees. Test doubles retain the
+        # historical project-local path because they never spawn a process.
+        self.python = getattr(self.stage_executor, "python", self.project_root / ".venv" / "bin" / "python")
         self.notifier = notifier or build_notifier()
         self.housekeeping = housekeeping
         self.warning_sink = warning_sink or (lambda warning: None)
@@ -260,7 +276,7 @@ class WorkflowOrchestrator:
 
     def _context_argv(self, brief_relative: str, command: str | None) -> tuple[str, ...]:
         argv = (
-            str(self.project_root / ".venv" / "bin" / "python"),
+            str(self.python),
             str(self.project_root / "scripts" / "context_agent.py"),
             "--brief", brief_relative,
         )
@@ -637,7 +653,7 @@ class WorkflowOrchestrator:
 
     def _implementation_argv(self, contract_file: Path, runner: tuple[str, ...]) -> tuple[str, ...]:
         return (
-            str(self.project_root / ".venv" / "bin" / "python"),
+            str(self.python),
             "scripts/implementation_agent.py", "--contract", str(contract_file),
             "--agent-command", *runner,
         )
@@ -651,7 +667,7 @@ class WorkflowOrchestrator:
     ) -> tuple[str, ...]:
         run_dir = self.store.runs_root / run_id
         return (
-            str(self.project_root / ".venv" / "bin" / "python"),
+            str(self.python),
             "scripts/review_agent.py", "--brief", manifest.brief_path,
             "--base", manifest.git_head, "--head", "WORKTREE",
             "--context", str(run_dir / "context.json"),
@@ -661,14 +677,14 @@ class WorkflowOrchestrator:
         )
 
     def _full_pytest_argv(self) -> tuple[str, ...]:
-        return (str(self.project_root / ".venv" / "bin" / "python"), "-m", "pytest", "-q")
+        return (str(self.python), "-m", "pytest", "-q")
 
     def _acceptance_argv(self) -> tuple[str, ...]:
-        return (str(self.project_root / ".venv" / "bin" / "python"), "scripts/system_manager.py", "acceptance")
+        return (str(self.python), "scripts/system_manager.py", "acceptance")
 
     def _hermes_argv(self) -> tuple[str, ...]:
         return (
-            str(self.project_root / ".venv" / "bin" / "python"),
+            str(self.python),
             "scripts/hermes_post_change_check.py", "--skip-monitor", "--json",
         )
 
