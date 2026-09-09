@@ -123,6 +123,20 @@ def test_duplicate_synthetic_call_invalidates_all_comparisons():
 def test_duplicate_observation_slot_invalidates_all_comparisons():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)
+    ledgers = [{"slot": slot, "terminalState": "completed", "expectedCallIds": ["a"] if i == 0 else []}
+               for i, slot in enumerate(slots)]
+    quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
+    observations = [{"identity": slots[0], "callId": call_id, "origin": "real",
+                     "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+                    for call_id in ("a", "a")]
+    report = build_report(manifest, observations, ledgers, quality, [])
+    assert report["status"] == "invalid"
+    assert not any(pair["eligible"] for pair in report["comparisons"])
+
+
+def test_distinct_expected_calls_in_one_slot_are_valid():
+    manifest = _manifest()
+    slots = planned_slots(manifest["caseIds"], 3)
     ledgers = [{"slot": slot, "terminalState": "completed", "expectedCallIds": ["a", "b"] if i == 0 else []}
                for i, slot in enumerate(slots)]
     quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
@@ -130,8 +144,32 @@ def test_duplicate_observation_slot_invalidates_all_comparisons():
                      "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
                     for call_id in ("a", "b")]
     report = build_report(manifest, observations, ledgers, quality, [])
+    assert report["status"] == "available"
+    assert report["slots"][0]["usage"]["status"] == "available"
+
+
+def test_observation_session_reuse_invalidates_comparisons():
+    manifest = _manifest()
+    slots = planned_slots(manifest["caseIds"], 3)
+    ledgers = [{"slot": slot, "terminalState": "completed", "expectedCallIds": []} for slot in slots]
+    quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
+    observations = [{"identity": slot, "callId": f"call-{i}", "origin": "real", "sessionId": "reused",
+                     "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+                    for i, slot in enumerate(slots[:2])]
+    report = build_report(manifest, observations, ledgers, quality, [])
     assert report["status"] == "invalid"
     assert not any(pair["eligible"] for pair in report["comparisons"])
+
+
+def test_mixed_observation_origins_invalidates_comparisons():
+    manifest = _manifest()
+    slots = planned_slots(manifest["caseIds"], 3)
+    observations = [{"identity": slots[0], "callId": "real", "origin": "real",
+                     "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}},
+                    {"identity": slots[1], "callId": "synthetic", "origin": "synthetic",
+                     "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}]
+    report = build_report(manifest, observations, [], [], [])
+    assert report["status"] == "invalid"
 
 
 def test_failed_or_unknown_quality_prevents_available_status():

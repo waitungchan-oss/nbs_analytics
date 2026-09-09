@@ -60,7 +60,28 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         key = _key(value)
         invalid_slot_input = invalid_slot_input or key not in slot_keys
         observation_map[key].append(copy.deepcopy(value))
-    duplicate_observation_slot = any(len(values) > 1 for values in observation_map.values())
+    observation_call_ids = set()
+    observation_sessions = set()
+    observation_duplicate = False
+    observation_mixed_provenance = False
+    origins = set()
+    for values in observation_map.values():
+        local_origins = set()
+        for value in values:
+            call_id = value.get("callId")
+            if call_id in observation_call_ids:
+                observation_duplicate = True
+            observation_call_ids.add(call_id)
+            session_id = value.get("sessionId") or (value.get("identity") or {}).get("sessionId")
+            if session_id is not None:
+                if session_id in observation_sessions:
+                    invalid_slot_input = True
+                observation_sessions.add(session_id)
+            origin = value.get("origin")
+            origins.add(origin)
+            local_origins.add(origin)
+        observation_mixed_provenance = observation_mixed_provenance or len(local_origins) > 1
+    observation_mixed_provenance = observation_mixed_provenance or len(origins) > 1
     ledger_map = {}
     quality_map = {}
     duplicate_slot = False
@@ -104,10 +125,9 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         row["ledgerPresent"] and row["qualityPresent"] and row["usage"]["status"] == "available"
         and row["terminalState"] == "completed" and row["quality"] == "success" for row in slot_rows
     ) else "partial"
-    if (duplicate_slot or invalid_slot_input or duplicate_observation_slot
+    if (duplicate_slot or invalid_slot_input or observation_duplicate or observation_mixed_provenance
             or any(row["usage"]["status"] == "invalid" for row in slot_rows)):
         report_status = "invalid"
-    origins = {item.get("origin") for item in observations if isinstance(item, dict)}
     if report_status != "invalid" and origins and origins == {"synthetic"}:
         report_status = "synthetic_only"
     by_pair = {(row["taskId"], row["repeatIndex"], row["cohort"]): row for row in slot_rows}
