@@ -47,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
         index = read_json(args.root, args.inputs, max_bytes=256 * 1024)
         if index.get("schemaVersion") != "agent-eval-input-index-v1":
             raise ValueError("invalid_input_index")
+        required_collections = {"observations", "ledgers", "quality", "diagnostics"}
+        if not required_collections <= set(index) or any(not isinstance(index[name], list) for name in required_collections):
+            raise ValueError("invalid_input_index")
         observation_artifact_refs = []
         def load_many(name: str) -> list[dict]:
             values = index.get(name, [])

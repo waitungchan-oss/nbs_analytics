@@ -63,9 +63,14 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         if not isinstance(value, dict):
             raise ValueError("invalid_observation")
         identity = value.get("identity")
+        canonical_observation = value.get("schemaVersion") == "agent-eval-observation-v1"
         if not isinstance(identity, dict):
             invalid_slot_input = True
             identity = {}
+        if canonical_observation:
+            required = {"projectId", "consumerId", "provider", "model", "settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "taskId", "repeatIndex", "cohort", "sessionId"}
+            if not required <= set(identity) or not {"producerId", "sourceSchema", "producerFingerprint", "artifactRef"} <= set(value):
+                invalid_slot_input = True
         for field in ("projectId", "consumerId", "provider", "model"):
             if field in identity and identity[field] != checked["identity"][field]:
                 invalid_slot_input = True
@@ -144,6 +149,12 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         status = ledger.get("terminalState") if isinstance(ledger, dict) else "missing"
         row = {**slot, "terminalState": status, "usage": usage, "quality": _slot_quality(status, quality_map.get(key)),
                "ledgerPresent": ledger is not None, "qualityPresent": key in quality_map}
+        if calls and isinstance(ledger, dict):
+            ledger_session = ledger.get("sessionId")
+            for call in calls:
+                call_session = call.get("sessionId") or (call.get("identity") or {}).get("sessionId")
+                if ledger_session is not None and call_session != ledger_session:
+                    invalid_slot_input = True
         slot_rows.append(row)
     terminal = [row["terminalState"] for row in slot_rows]
     q = [row["quality"] for row in slot_rows]

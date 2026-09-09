@@ -192,6 +192,25 @@ def test_direct_report_rejects_mismatched_observation_binding():
     assert report["status"] == "invalid"
 
 
+def test_report_rejects_canonical_observation_missing_provenance():
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    observation = {"schemaVersion": "agent-eval-observation-v1", "identity": slot,
+                   "callId": "call-1", "origin": "real", "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+    report = build_report(manifest, [observation], [], [], [])
+    assert report["status"] == "invalid"
+
+
+def test_report_rejects_observation_session_mismatch():
+    manifest = _manifest()
+    slots = planned_slots(manifest["caseIds"], 3)
+    ledgers = [{"slot": slots[0], "sessionId": "ledger-session", "terminalState": "completed", "expectedCallIds": ["call-1"]}]
+    observation = {"identity": slots[0], "callId": "call-1", "origin": "real", "sessionId": "other-session",
+                   "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+    report = build_report(manifest, [observation], ledgers, [], [])
+    assert report["status"] == "invalid"
+
+
 def test_failed_or_unknown_quality_prevents_available_status():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)

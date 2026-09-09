@@ -164,6 +164,9 @@ def verify_binding(payload: dict, *, manifest: dict, artifact_ref: dict, produce
         _fail("artifact_binding_mismatch")
     if identity.get("cohort") not in {"recall_off", "recall_on"}:
         _fail("invalid_cohort")
+    planned = {(slot["taskId"], slot["repeatIndex"], slot["cohort"]) for slot in planned_slots(checked["caseIds"], checked["repeatCount"])}
+    if (identity.get("taskId"), identity.get("repeatIndex"), identity.get("cohort")) not in planned:
+        _fail("invalid_slot")
     return {"manifestFingerprint": checked["manifestFingerprint"], "producerId": payload["producerId"], "artifactRef": copy.deepcopy(artifact_ref)}
 
 
