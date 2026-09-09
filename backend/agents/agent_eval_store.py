@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import stat
 from pathlib import Path
 from typing import Any
@@ -51,16 +52,32 @@ def _strict_object_pairs(pairs: list[tuple[str, Any]]) -> dict:
     return result
 
 
+def _open_relative_nofollow(root: Path, relative: str) -> int:
+    """Open a relative file through directory descriptors to avoid path races."""
+    rel = _relative(relative)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+    parent_fd = os.open(root, directory_flags)
+    try:
+        for part in rel.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        return os.open(rel.parts[-1], flags, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def read_json(root: Path, relative_path: str, *, max_bytes: int) -> dict:
     target = _safe_file(Path(root), relative_path, max_bytes)
     try:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(target, flags)
+        descriptor = _open_relative_nofollow(Path(root), relative_path)
         try:
             stat_result = os.fstat(descriptor)
-            if not os.path.isfile(target) or not stat.S_ISREG(stat_result.st_mode):
+            if not stat.S_ISREG(stat_result.st_mode):
                 raise ValueError("invalid_artifact")
             raw = os.read(descriptor, max_bytes + 1)
         finally:
@@ -81,7 +98,7 @@ def read_json_bytes(root: Path, relative_path: str, *, max_bytes: int) -> tuple[
     """Read and parse one file; return the exact bytes used for validation."""
     target = _safe_file(Path(root), relative_path, max_bytes)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(target, flags)
+    descriptor = _open_relative_nofollow(Path(root), relative_path)
     try:
         stat_result = os.fstat(descriptor)
         if not stat.S_ISREG(stat_result.st_mode):
@@ -180,7 +197,7 @@ def publish_bundle(root: Path, experiment_id: str, files: dict[str, bytes], *, q
                 os.chmod(metadata, 0o600)
                 os.rename(staging, bundle)
             except Exception:
-                # Preserve crash evidence; a later bounded inventory will count it.
+                shutil.rmtree(staging, ignore_errors=True)
                 raise
             return {"status": "published", "experimentId": experiment_id, "files": hashes}
         finally:
