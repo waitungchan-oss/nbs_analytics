@@ -172,12 +172,12 @@ _PROBE_ARGV_TEMPLATE = ("exec", "--ephemeral", "--json", "--model", "<model>", "
 _PROBE_PROMPT = (
     'Reply with only the JSON object {"status":"ok","model":"<your-model-name>"}.'
 )
-# Codex 0.150.x reports the selected gpt-5.4 slug as this stable display name
-# in a model-authored probe response.  Keep this allowlist narrow: an unknown
-# model name must still fail closed.
+# Codex may report a generic display name in a model-authored probe response.
+# Keep aliases scoped to the explicitly requested model: unknown names still
+# fail closed, and this does not alter the requested CLI model.
 _MODEL_DISPLAY_ALIASES = {
     "gpt-5.4": frozenset({"gpt-5.4", "gpt-5", "gpt-5 codex"}),
-    "gpt-5.6-luna": frozenset({"gpt-5.6-luna", "gpt-5.6 luna"}),
+    "gpt-5.6-luna": frozenset({"gpt-5.6-luna", "gpt-5.6 luna", "gpt-5"}),
     "gpt-6-astra": frozenset({"gpt-6-astra", "gpt-6 astra", "gpt-6"}),
 }
 _ENV_IDENTITY_KEYS = ("CODEX_HOME", "HOME")

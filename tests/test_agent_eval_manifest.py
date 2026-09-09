@@ -82,6 +82,16 @@ def test_verify_binding_requires_manifest_bound_producer_and_artifact():
         verify_binding(payload, manifest=manifest, artifact_ref=artifact, producer_registry=manifest["producerRegistry"])
 
 
+def test_verify_binding_rejects_consumer_identity_mismatch():
+    manifest = _manifest()
+    artifact = {"path": "observations/call.json", "sha256": "5" * 64}
+    payload = {"identity": {**manifest["identity"], "consumerId": "other-consumer", "cohort": "recall_off"},
+               "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
+               "producerFingerprint": "4" * 64, "artifactRef": artifact}
+    with pytest.raises(ValueError, match="binding_mismatch"):
+        verify_binding(payload, manifest=manifest, artifact_ref=artifact, producer_registry=manifest["producerRegistry"])
+
+
 def test_live_preflight_rejects_missing_budget_and_session_reuse():
     manifest = _manifest()
     evidence = {"runnerIdentity": None, "manifestFingerprint": manifest["manifestFingerprint"],
