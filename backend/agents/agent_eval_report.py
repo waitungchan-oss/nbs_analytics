@@ -64,13 +64,14 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             raise ValueError("invalid_observation")
         identity = value.get("identity")
         canonical_observation = value.get("schemaVersion") == "agent-eval-observation-v1"
+        if not canonical_observation:
+            invalid_slot_input = True
         if not isinstance(identity, dict):
             invalid_slot_input = True
             identity = {}
-        if canonical_observation:
-            required = {"projectId", "consumerId", "provider", "model", "settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "taskId", "repeatIndex", "cohort", "sessionId"}
-            if not required <= set(identity) or not {"producerId", "sourceSchema", "producerFingerprint", "artifactRef"} <= set(value):
-                invalid_slot_input = True
+        required = {"projectId", "consumerId", "provider", "model", "settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "taskId", "repeatIndex", "cohort", "sessionId"}
+        if not required <= set(identity) or not {"producerId", "sourceSchema", "producerFingerprint", "artifactRef"} <= set(value):
+            invalid_slot_input = True
         for field in ("projectId", "consumerId", "provider", "model"):
             if field in identity and identity[field] != checked["identity"][field]:
                 invalid_slot_input = True
@@ -90,7 +91,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         invalid_slot_input = invalid_slot_input or key not in slot_keys
         observation_map[key].append(copy.deepcopy(value))
     observation_call_ids = set()
-    observation_sessions = set()
+    observation_sessions = {}
     observation_duplicate = False
     observation_mixed_provenance = False
     origins = set()
@@ -103,9 +104,9 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             observation_call_ids.add(call_id)
             session_id = value.get("sessionId") or (value.get("identity") or {}).get("sessionId")
             if session_id is not None:
-                if session_id in observation_sessions:
+                if session_id in observation_sessions and observation_sessions[session_id] != key:
                     invalid_slot_input = True
-                observation_sessions.add(session_id)
+                observation_sessions[session_id] = key
             origin = value.get("origin")
             if origin not in _VALID_OBSERVATION_ORIGINS:
                 invalid_slot_input = True

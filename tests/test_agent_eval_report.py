@@ -140,10 +140,16 @@ def test_distinct_expected_calls_in_one_slot_are_valid():
     ledgers = [{"slot": slot, "terminalState": "completed", "expectedCallIds": ["a", "b"] if i == 0 else []}
                for i, slot in enumerate(slots)]
     quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
-    observations = [{"identity": slots[0], "callId": call_id, "origin": "real",
+    observations = [{"schemaVersion": "agent-eval-observation-v1",
+                     "identity": {**manifest["identity"], **slots[0], "sessionId": "session-1"},
+                     "callId": call_id, "origin": "real", "sessionId": "session-1",
+                     "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
+                     "producerFingerprint": "4" * 64,
+                     "artifactRef": {"path": f"obs-{call_id}.json", "sha256": "5" * 64},
                      "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
                     for call_id in ("a", "b")]
-    report = build_report(manifest, observations, ledgers, quality, [])
+    report = build_report(manifest, observations, ledgers, quality, [],
+                          observation_artifact_refs=[observation["artifactRef"] for observation in observations])
     assert report["status"] == "available"
     assert report["slots"][0]["usage"]["status"] == "available"
 
