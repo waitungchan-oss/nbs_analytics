@@ -7,11 +7,24 @@
   "approvedBaseSha": "bed4317086b8e8570451ef000ef151e00d1b52b5",
   "approvedWorktree": ".codex/worktrees/5160/nbs_analytics",
   "allowedWritePaths": [
+    "backend/agents/agent_eval_dataset.py",
+    "backend/agents/agent_eval_manifest.py",
     "backend/agents/agent_eval_report.py",
+    "backend/agents/agent_eval_statistics.py",
+    "backend/agents/agent_eval_store.py",
     "backend/agents/review_runner_profile.py",
+    "docs/agents/AGENT_EVAL_P1_RUNBOOK.md",
+    "scripts/agent_eval_report.py",
+    "tests/fixtures/agent_eval_cases_v1.json",
+    "tests/test_agent_eval_cli.py",
+    "tests/test_agent_eval_dataset.py",
+    "tests/test_agent_eval_manifest.py",
     "tests/test_agent_eval_report.py",
+    "tests/test_agent_eval_statistics.py",
+    "tests/test_agent_eval_store.py",
     "tests/test_review_runner_profile.py",
-    "docs/briefs/p1-contract-repair.md"
+    "docs/briefs/p1-contract-repair.md",
+    "docs/briefs/p1-repair-contract.json"
   ],
   "validationCommands": [
     "pytest -q tests/test_agent_eval_report.py tests/test_review_runner_profile.py",
@@ -19,8 +32,8 @@
     "git diff --check"
   ],
   "riskSurfaces": [],
-  "maxChangedFiles": 5,
-  "maxDiffLines": 300,
+  "maxChangedFiles": 18,
+  "maxDiffLines": 1800,
   "maxRepairLoops": 2,
   "taskType": "behavior",
   "redCommands": [],
