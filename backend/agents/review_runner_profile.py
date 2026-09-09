@@ -165,7 +165,7 @@ ALLOWED_RECEIPT_STATUSES = {
     "static_ready", "turn_ready", "blocked_runner_capability",
     "blocked_runner_transport",
 }
-_PROBE_TIMEOUT_SECONDS = 15
+_PROBE_TIMEOUT_SECONDS = 30
 _PROBE_MAX_OUTPUT_BYTES = 8 * 1024
 # Fixed, short, read-only probe command shape (model and prompt are filled in).
 _PROBE_ARGV_TEMPLATE = ("exec", "--ephemeral", "--json", "--model", "<model>", "<prompt>")
