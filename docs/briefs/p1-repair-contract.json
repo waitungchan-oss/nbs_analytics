@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "implementation-task-v1",
+  "taskId": "p1-report-integrity",
+  "planPath": "docs/superpowers/plans/2026-09-08-agent-memory-p1-measurement.md",
+  "planFingerprint": "3fc23eaaf9943b0fb72cbc550c7dfad68583d5b7dc34f0f3489c30e7d43c3480",
+  "objective": "Make canonical nested slots and contaminated observation records fail closed before paired comparison.",
+  "approvedBaseSha": "bed4317086b8e8570451ef000ef151e00d1b52b5",
+  "approvedWorktree": ".codex/worktrees/5160/nbs_analytics",
+  "allowedWritePaths": [
+    "backend/agents/agent_eval_report.py",
+    "backend/agents/review_runner_profile.py",
+    "tests/test_agent_eval_report.py",
+    "tests/test_review_runner_profile.py",
+    "docs/briefs/p1-contract-repair.md"
+  ],
+  "validationCommands": [
+    "pytest -q tests/test_agent_eval_report.py tests/test_review_runner_profile.py",
+    "python -m compileall -q backend/agents scripts",
+    "git diff --check"
+  ],
+  "riskSurfaces": [],
+  "maxChangedFiles": 5,
+  "maxDiffLines": 300,
+  "maxRepairLoops": 2,
+  "taskType": "behavior",
+  "redCommands": [],
+  "greenCommands": [
+    "pytest -q tests/test_agent_eval_report.py tests/test_review_runner_profile.py",
+    "python -m compileall -q backend/agents scripts",
+    "git diff --check"
+  ],
+  "approvedTestBehaviorChanges": [
+    "nested slot joins",
+    "contamination suppresses all comparison values",
+    "known Luna display alias"
+  ]
+}

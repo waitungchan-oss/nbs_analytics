@@ -320,6 +320,24 @@ def test_live_probe_accepts_known_codex_display_name_alias(tmp_path, monkeypatch
     assert receipt.status == "turn_ready"
 
 
+def test_live_probe_accepts_luna_display_name_alias(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import RunnerProfile, probe_runner
+
+    executable, cache = _profile(tmp_path, model="gpt-5.6-luna")
+    cache.write_text(json.dumps({"models": [{"slug": "gpt-5.6-luna", "model_messages": {"instructions_template": "base"}}]}), encoding="utf-8")
+    profile = RunnerProfile(str(executable), "gpt-5.6-luna", cache)
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.153.4\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "GPT-5.6-Luna"}), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert probe_runner(profile).status == "turn_ready"
+
+
 def test_live_probe_output_over_8kib_is_transport_blocked(tmp_path, monkeypatch):
     import subprocess
 
