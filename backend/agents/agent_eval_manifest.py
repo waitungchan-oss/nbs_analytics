@@ -180,6 +180,8 @@ def live_preflight(manifest: dict, *, authorization_evidence: dict | None) -> li
     missing = sorted(required - set(authorization_evidence))
     if missing:
         return [f"blocked_missing_{missing[0]}"]
+    if not isinstance(authorization_evidence["freshSession"], bool):
+        return ["blocked_invalid_authorization"]
     if not authorization_evidence["freshSession"]:
         return ["blocked_session_reuse"]
     auth = checked["authorization"]

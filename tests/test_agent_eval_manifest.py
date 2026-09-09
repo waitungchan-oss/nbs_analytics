@@ -110,3 +110,13 @@ def test_live_preflight_rejects_null_or_mismatched_authorization_values():
                 "timeoutMs": 1, "maxRetries": 1, "sourceFingerprint": "d" * 64,
                 "freshSession": True}
     assert "blocked_missing_budget" in live_preflight(manifest, authorization_evidence=evidence)
+
+
+def test_live_preflight_rejects_non_boolean_fresh_session():
+    manifest = _manifest()
+    evidence = {"runnerIdentity": "runner", "manifestFingerprint": manifest["manifestFingerprint"],
+                "maxTaskTokens": 1, "maxBatchTokens": 1, "maxBatchCost": 1,
+                "currency": "HKD", "priceTableFingerprint": "6" * 64,
+                "timeoutMs": 1, "maxRetries": 1, "sourceFingerprint": "d" * 64,
+                "freshSession": "true"}
+    assert "blocked_invalid_authorization" in live_preflight(manifest, authorization_evidence=evidence)

@@ -181,6 +181,17 @@ def test_unknown_observation_origin_invalidates_comparisons():
     assert report["status"] == "invalid"
 
 
+def test_direct_report_rejects_mismatched_observation_binding():
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    observation = {"identity": {**slot, "projectId": "other-project"}, "callId": "call-1",
+                   "origin": "real", "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
+                   "producerFingerprint": "4" * 64, "artifactRef": {"path": "obs.json", "sha256": "5" * 64},
+                   "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+    report = build_report(manifest, [observation], [], [], [], observation_artifact_refs=[observation["artifactRef"]])
+    assert report["status"] == "invalid"
+
+
 def test_failed_or_unknown_quality_prevents_available_status():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)

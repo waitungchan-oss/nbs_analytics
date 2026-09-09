@@ -49,15 +49,38 @@ def _slot_quality(terminal: str, record: dict | None) -> str:
     return _quality_status(record)
 
 
-def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], quality: list[dict], diagnostics: list[dict]) -> dict:
+def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], quality: list[dict], diagnostics: list[dict], *, observation_artifact_refs: list[dict] | None = None) -> dict:
     checked = validate_manifest(manifest)
     if not all(isinstance(value, list) for value in (observations, ledgers, quality, diagnostics)):
         raise ValueError("invalid_report_inputs")
+    if observation_artifact_refs is not None and (not isinstance(observation_artifact_refs, list) or len(observation_artifact_refs) != len(observations)):
+        raise ValueError("invalid_artifact_refs")
     slots = planned_slots(checked["caseIds"], checked["repeatCount"])
     slot_keys = {_key(slot) for slot in slots}
     observation_map = defaultdict(list)
     invalid_slot_input = False
-    for value in observations:
+    for index, value in enumerate(observations):
+        if not isinstance(value, dict):
+            raise ValueError("invalid_observation")
+        identity = value.get("identity")
+        if not isinstance(identity, dict):
+            invalid_slot_input = True
+            identity = {}
+        for field in ("projectId", "consumerId", "provider", "model"):
+            if field in identity and identity[field] != checked["identity"][field]:
+                invalid_slot_input = True
+        for field in ("settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint"):
+            if field in identity and identity[field] != checked["identity"][field]:
+                invalid_slot_input = True
+        producer_id = value.get("producerId")
+        if producer_id is not None:
+            producer = checked["producerRegistry"].get(producer_id)
+            if producer is None or value.get("sourceSchema") != producer["sourceSchema"] or value.get("producerFingerprint") != producer["producerFingerprint"]:
+                invalid_slot_input = True
+        if "artifactRef" in value:
+            expected_ref = observation_artifact_refs[index] if observation_artifact_refs is not None else None
+            if expected_ref is None or value["artifactRef"] != expected_ref:
+                invalid_slot_input = True
         key = _key(value)
         invalid_slot_input = invalid_slot_input or key not in slot_keys
         observation_map[key].append(copy.deepcopy(value))
