@@ -12,6 +12,7 @@ from .agent_eval_statistics import latency_summary, task_usage
 
 
 SCHEMA = "agent-eval-report-v1"
+_VALID_OBSERVATION_ORIGINS = {"real", "synthetic"}
 
 
 def _key(value: dict) -> tuple:
@@ -78,6 +79,8 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
                     invalid_slot_input = True
                 observation_sessions.add(session_id)
             origin = value.get("origin")
+            if origin not in _VALID_OBSERVATION_ORIGINS:
+                invalid_slot_input = True
             origins.add(origin)
             local_origins.add(origin)
         observation_mixed_provenance = observation_mixed_provenance or len(local_origins) > 1

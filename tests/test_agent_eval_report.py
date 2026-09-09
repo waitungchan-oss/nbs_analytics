@@ -172,6 +172,15 @@ def test_mixed_observation_origins_invalidates_comparisons():
     assert report["status"] == "invalid"
 
 
+def test_unknown_observation_origin_invalidates_comparisons():
+    manifest = _manifest()
+    slots = planned_slots(manifest["caseIds"], 3)
+    observations = [{"identity": slots[0], "callId": "tampered", "origin": "tampered",
+                     "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}]
+    report = build_report(manifest, observations, [], [], [])
+    assert report["status"] == "invalid"
+
+
 def test_failed_or_unknown_quality_prevents_available_status():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)

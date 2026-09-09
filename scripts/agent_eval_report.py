@@ -51,12 +51,13 @@ def main(argv: list[str] | None = None) -> int:
             values = index.get(name, [])
             if not isinstance(values, list) or len(values) > 4096:
                 raise ValueError("invalid_input_index")
-            loaded = [_load_input(args.root, item) for item in values]
-            if name == "observations":
-                for payload in loaded:
-                    artifact_ref = payload.get("artifactRef") if isinstance(payload, dict) else None
-                    verify_binding(payload, manifest=manifest, artifact_ref=artifact_ref,
+            loaded = []
+            for item in values:
+                payload = _load_input(args.root, item)
+                if name == "observations":
+                    verify_binding(payload, manifest=manifest, artifact_ref=item,
                                    producer_registry=manifest.get("producerRegistry"))
+                loaded.append(payload)
             return loaded
         report = build_report(manifest, load_many("observations"), load_many("ledgers"), load_many("quality"), load_many("diagnostics"))
         output = render_markdown(report) if args.format == "markdown" else json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
