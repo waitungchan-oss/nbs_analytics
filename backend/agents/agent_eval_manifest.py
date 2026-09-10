@@ -153,6 +153,8 @@ def verify_binding(payload: dict, *, manifest: dict, artifact_ref: dict, produce
     identity = payload.get("identity")
     if not isinstance(identity, dict):
         _fail("invalid_binding")
+    if not isinstance(identity.get("sessionId"), str) or not identity["sessionId"]:
+        _fail("invalid_session_id")
     for key in _FINGERPRINT_FIELDS | {"projectId", "consumerId", "provider", "model"}:
         expected = checked["identity"][key]
         if identity.get(key) != expected:

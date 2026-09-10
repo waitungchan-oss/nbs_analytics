@@ -72,7 +72,7 @@ def test_manifest_drift_and_overlong_ttl_are_rejected():
 def test_verify_binding_requires_manifest_bound_producer_and_artifact():
     manifest = _manifest()
     artifact = {"path": "observations/call.json", "sha256": "5" * 64}
-    payload = {"identity": {**manifest["identity"], "taskId": CASE_IDS[0], "repeatIndex": 0, "cohort": "recall_off"},
+    payload = {"identity": {**manifest["identity"], "taskId": CASE_IDS[0], "repeatIndex": 0, "cohort": "recall_off", "sessionId": "session-1"},
                "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
                "producerFingerprint": "4" * 64, "artifactRef": artifact}
     result = verify_binding(payload, manifest=manifest, artifact_ref=artifact, producer_registry=manifest["producerRegistry"])
@@ -85,7 +85,7 @@ def test_verify_binding_requires_manifest_bound_producer_and_artifact():
 def test_verify_binding_rejects_consumer_identity_mismatch():
     manifest = _manifest()
     artifact = {"path": "observations/call.json", "sha256": "5" * 64}
-    payload = {"identity": {**manifest["identity"], "consumerId": "other-consumer", "cohort": "recall_off"},
+    payload = {"identity": {**manifest["identity"], "consumerId": "other-consumer", "cohort": "recall_off", "sessionId": "session-1"},
                "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
                "producerFingerprint": "4" * 64, "artifactRef": artifact}
     with pytest.raises(ValueError, match="binding_mismatch"):
@@ -125,7 +125,7 @@ def test_live_preflight_rejects_non_boolean_fresh_session():
 def test_verify_binding_rejects_unplanned_slot():
     manifest = _manifest()
     artifact = {"path": "observations/call.json", "sha256": "5" * 64}
-    payload = {"identity": {**manifest["identity"], "taskId": "not-planned", "cohort": "recall_off"},
+    payload = {"identity": {**manifest["identity"], "taskId": "not-planned", "cohort": "recall_off", "sessionId": "session-1"},
                "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
                "producerFingerprint": "4" * 64, "artifactRef": artifact}
     with pytest.raises(ValueError, match="invalid_slot"):
