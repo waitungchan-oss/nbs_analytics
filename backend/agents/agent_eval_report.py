@@ -95,7 +95,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
     observation_duplicate = False
     observation_mixed_provenance = False
     origins = set()
-    for values in observation_map.values():
+    for key, values in observation_map.items():
         local_origins = set()
         for value in values:
             call_id = value.get("callId")
