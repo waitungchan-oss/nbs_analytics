@@ -27,12 +27,18 @@ def _key(value: dict) -> tuple:
         repeat_index = slot.get("repeatIndex")
         if isinstance(repeat_index, bool) or not isinstance(repeat_index, int):
             raise ValueError("invalid_slot_record")
-        return slot.get("taskId"), repeat_index, slot.get("cohort")
+        task_id, cohort = slot.get("taskId"), slot.get("cohort")
+        if not isinstance(task_id, str) or not task_id or not isinstance(cohort, str) or not cohort:
+            raise ValueError("invalid_slot_record")
+        return task_id, repeat_index, cohort
     identity = value.get("identity") if isinstance(value.get("identity"), dict) else value
     repeat_index = identity.get("repeatIndex")
     if isinstance(repeat_index, bool) or not isinstance(repeat_index, int):
         raise ValueError("invalid_slot_record")
-    return identity.get("taskId"), repeat_index, identity.get("cohort")
+    task_id, cohort = identity.get("taskId"), identity.get("cohort")
+    if not isinstance(task_id, str) or not task_id or not isinstance(cohort, str) or not cohort:
+        raise ValueError("invalid_slot_record")
+    return task_id, repeat_index, cohort
 
 
 def _quality_status(record: dict | None) -> str:
@@ -193,6 +199,14 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             key = _key(value)
             invalid_slot_input = invalid_slot_input or key not in slot_keys
             duplicate_slot = duplicate_slot or key in quality_map
+            session = value.get("sessionId")
+            if session is not None:
+                if not isinstance(session, str) or not session:
+                    raise ValueError("invalid_session_id")
+                owner = session_registry.get(session)
+                if owner is not None and owner[0] != key:
+                    invalid_slot_input = True
+                session_registry[session] = (key, "quality")
             quality_map[key] = value
         else:
             raise ValueError("invalid_quality")
