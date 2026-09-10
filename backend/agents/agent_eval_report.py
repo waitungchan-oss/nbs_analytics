@@ -22,9 +22,15 @@ def _key(value: dict) -> tuple:
         slot = value["slot"]
         if not isinstance(slot, dict):
             raise ValueError("invalid_slot_record")
-        return slot.get("taskId"), slot.get("repeatIndex"), slot.get("cohort")
+        repeat_index = slot.get("repeatIndex")
+        if isinstance(repeat_index, bool) or not isinstance(repeat_index, int):
+            raise ValueError("invalid_slot_record")
+        return slot.get("taskId"), repeat_index, slot.get("cohort")
     identity = value.get("identity") if isinstance(value.get("identity"), dict) else value
-    return identity.get("taskId"), identity.get("repeatIndex"), identity.get("cohort")
+    repeat_index = identity.get("repeatIndex")
+    if isinstance(repeat_index, bool) or not isinstance(repeat_index, int):
+        raise ValueError("invalid_slot_record")
+    return identity.get("taskId"), repeat_index, identity.get("cohort")
 
 
 def _quality_status(record: dict | None) -> str:

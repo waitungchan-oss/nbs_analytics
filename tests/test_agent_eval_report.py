@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.agents.agent_eval_manifest import planned_slots
 from backend.agents.agent_eval_report import build_report, render_markdown
 from tests.test_agent_eval_manifest import _manifest
@@ -234,6 +236,15 @@ def test_report_rejects_ledger_or_quality_artifact_mismatch():
     quality = {"slot": slot, "checks": {"rubric": "pass"}, "artifactRef": {"path": "quality.json", "sha256": "1" * 64}}
     report = build_report(manifest, [], [ledger], [quality], [], ledger_artifact_refs=[{"path": "other.json", "sha256": "2" * 64}], quality_artifact_refs=[quality["artifactRef"]])
     assert report["status"] == "invalid"
+
+
+def test_report_rejects_boolean_repeat_index():
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    observation = {"identity": {**slot, "repeatIndex": True}, "callId": "call-1",
+                   "origin": "real", "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+    with pytest.raises(ValueError, match="invalid_slot_record"):
+        build_report(manifest, [observation], [], [], [])
 
 
 def test_failed_or_unknown_quality_prevents_available_status():
