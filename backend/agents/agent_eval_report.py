@@ -104,7 +104,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             observation_call_ids.add(call_id)
             session_id = value.get("sessionId") or (value.get("identity") or {}).get("sessionId")
             if session_id is not None:
-                if session_id in observation_sessions and observation_sessions[session_id] != key:
+                if session_id in observation_sessions:
                     invalid_slot_input = True
                 observation_sessions[session_id] = key
             origin = value.get("origin")

@@ -141,8 +141,8 @@ def test_distinct_expected_calls_in_one_slot_are_valid():
                for i, slot in enumerate(slots)]
     quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
     observations = [{"schemaVersion": "agent-eval-observation-v1",
-                     "identity": {**manifest["identity"], **slots[0], "sessionId": "session-1"},
-                     "callId": call_id, "origin": "real", "sessionId": "session-1",
+                     "identity": {**manifest["identity"], **slots[0], "sessionId": f"session-{call_id}"},
+                     "callId": call_id, "origin": "real", "sessionId": f"session-{call_id}",
                      "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
                      "producerFingerprint": "4" * 64,
                      "artifactRef": {"path": f"obs-{call_id}.json", "sha256": "5" * 64},
