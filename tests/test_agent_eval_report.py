@@ -227,6 +227,15 @@ def test_strata_excludes_noncompleted_slots():
     assert report["strata"][0]["eligible"] == 35
 
 
+def test_report_rejects_ledger_or_quality_artifact_mismatch():
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    ledger = {"slot": slot, "terminalState": "completed", "expectedCallIds": [], "artifactRef": {"path": "ledger.json", "sha256": "0" * 64}}
+    quality = {"slot": slot, "checks": {"rubric": "pass"}, "artifactRef": {"path": "quality.json", "sha256": "1" * 64}}
+    report = build_report(manifest, [], [ledger], [quality], [], ledger_artifact_refs=[{"path": "other.json", "sha256": "2" * 64}], quality_artifact_refs=[quality["artifactRef"]])
+    assert report["status"] == "invalid"
+
+
 def test_failed_or_unknown_quality_prevents_available_status():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)

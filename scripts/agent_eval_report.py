@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
         if not required_collections <= set(index) or any(not isinstance(index[name], list) for name in required_collections):
             raise ValueError("invalid_input_index")
         observation_artifact_refs = []
+        ledger_artifact_refs = []
+        quality_artifact_refs = []
         def load_many(name: str) -> list[dict]:
             values = index.get(name, [])
             if not isinstance(values, list) or len(values) > 4096:
@@ -64,10 +66,16 @@ def main(argv: list[str] | None = None) -> int:
                     verify_binding(payload, manifest=manifest, artifact_ref=item,
                                    producer_registry=manifest.get("producerRegistry"))
                     observation_artifact_refs.append(item)
+                elif name == "ledgers":
+                    ledger_artifact_refs.append(item)
+                elif name == "quality":
+                    quality_artifact_refs.append(item)
                 loaded.append(payload)
             return loaded
         observations = load_many("observations")
-        report = build_report(manifest, observations, load_many("ledgers"), load_many("quality"), load_many("diagnostics"), observation_artifact_refs=observation_artifact_refs)
+        ledgers = load_many("ledgers")
+        quality = load_many("quality")
+        report = build_report(manifest, observations, ledgers, quality, load_many("diagnostics"), observation_artifact_refs=observation_artifact_refs, ledger_artifact_refs=ledger_artifact_refs, quality_artifact_refs=quality_artifact_refs)
         output = render_markdown(report) if args.format == "markdown" else json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if args.save_id:
             publish_bundle(args.root, args.save_id, {"report.md" if args.format == "markdown" else "report.json": output.encode("utf-8")})

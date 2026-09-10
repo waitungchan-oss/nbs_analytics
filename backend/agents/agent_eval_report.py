@@ -49,12 +49,15 @@ def _slot_quality(terminal: str, record: dict | None) -> str:
     return _quality_status(record)
 
 
-def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], quality: list[dict], diagnostics: list[dict], *, observation_artifact_refs: list[dict] | None = None) -> dict:
+def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], quality: list[dict], diagnostics: list[dict], *, observation_artifact_refs: list[dict] | None = None, ledger_artifact_refs: list[dict] | None = None, quality_artifact_refs: list[dict] | None = None) -> dict:
     checked = validate_manifest(manifest)
     if not all(isinstance(value, list) for value in (observations, ledgers, quality, diagnostics)):
         raise ValueError("invalid_report_inputs")
     if observation_artifact_refs is not None and (not isinstance(observation_artifact_refs, list) or len(observation_artifact_refs) != len(observations)):
         raise ValueError("invalid_artifact_refs")
+    for refs, records in ((ledger_artifact_refs, ledgers), (quality_artifact_refs, quality)):
+        if refs is not None and (not isinstance(refs, list) or len(refs) != len(records)):
+            raise ValueError("invalid_artifact_refs")
     slots = planned_slots(checked["caseIds"], checked["repeatCount"])
     slot_keys = {_key(slot) for slot in slots}
     observation_map = defaultdict(list)
@@ -118,8 +121,10 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
     ledger_map = {}
     quality_map = {}
     duplicate_slot = False
-    for value in ledgers:
+    for index, value in enumerate(ledgers):
         if isinstance(value, dict):
+            if ledger_artifact_refs is not None and value.get("artifactRef") != ledger_artifact_refs[index]:
+                invalid_slot_input = True
             key = _key(value)
             invalid_slot_input = invalid_slot_input or key not in slot_keys
             duplicate_slot = duplicate_slot or key in ledger_map
@@ -134,8 +139,10 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             ledger_map[key] = value
         else:
             raise ValueError("invalid_ledger")
-    for value in quality:
+    for index, value in enumerate(quality):
         if isinstance(value, dict):
+            if quality_artifact_refs is not None and value.get("artifactRef") != quality_artifact_refs[index]:
+                invalid_slot_input = True
             key = _key(value)
             invalid_slot_input = invalid_slot_input or key not in slot_keys
             duplicate_slot = duplicate_slot or key in quality_map
