@@ -217,6 +217,16 @@ def test_report_rejects_observation_session_mismatch():
     assert report["status"] == "invalid"
 
 
+def test_strata_excludes_noncompleted_slots():
+    manifest = _manifest()
+    slots = planned_slots(manifest["caseIds"], 3)
+    ledgers = [{"slot": slot, "terminalState": "completed", "expectedCallIds": []} for slot in slots]
+    ledgers[0]["terminalState"] = "timeout"
+    quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
+    report = build_report(manifest, [], ledgers, quality, [])
+    assert report["strata"][0]["eligible"] == 35
+
+
 def test_failed_or_unknown_quality_prevents_available_status():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)

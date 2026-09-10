@@ -91,7 +91,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         invalid_slot_input = invalid_slot_input or key not in slot_keys
         observation_map[key].append(copy.deepcopy(value))
     observation_call_ids = set()
-    observation_sessions = {}
+    session_registry = {}
     observation_duplicate = False
     observation_mixed_provenance = False
     origins = set()
@@ -104,9 +104,10 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             observation_call_ids.add(call_id)
             session_id = value.get("sessionId") or (value.get("identity") or {}).get("sessionId")
             if session_id is not None:
-                if session_id in observation_sessions:
+                owner = session_registry.get(session_id)
+                if owner is not None and owner[0] != key:
                     invalid_slot_input = True
-                observation_sessions[session_id] = key
+                session_registry[session_id] = (key, "observation")
             origin = value.get("origin")
             if origin not in _VALID_OBSERVATION_ORIGINS:
                 invalid_slot_input = True
@@ -117,7 +118,6 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
     ledger_map = {}
     quality_map = {}
     duplicate_slot = False
-    sessions = set()
     for value in ledgers:
         if isinstance(value, dict):
             key = _key(value)
@@ -127,8 +127,10 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             if session is not None:
                 if not isinstance(session, str) or not session:
                     raise ValueError("invalid_session_id")
-                invalid_slot_input = invalid_slot_input or session in sessions
-                sessions.add(session)
+                owner = session_registry.get(session)
+                if owner is not None and owner[0] != key:
+                    invalid_slot_input = True
+                session_registry[session] = (key, "ledger")
             ledger_map[key] = value
         else:
             raise ValueError("invalid_ledger")
@@ -185,7 +187,8 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
                 "qualityOff": off["quality"], "qualityOn": on["quality"],
             })
     strata = [{"cohort": cohort, "planned": sum(row["cohort"] == cohort for row in slot_rows),
-               "eligible": sum(row["cohort"] == cohort and row["quality"] == "success"
+               "eligible": sum(row["cohort"] == cohort and row["terminalState"] == "completed"
+                               and row["quality"] == "success"
                                and row["usage"]["status"] == "available" and report_status != "invalid"
                                for row in slot_rows)}
               for cohort in ("recall_off", "recall_on")]
