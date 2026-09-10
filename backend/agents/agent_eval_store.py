@@ -69,11 +69,9 @@ def _open_relative_nofollow(root: Path, relative: str) -> int:
 
 
 def read_json(root: Path, relative_path: str, *, max_bytes: int) -> dict:
-    target = _safe_file(Path(root), relative_path, max_bytes)
+    if Path(root).is_symlink():
+        raise ValueError("unsafe_path")
     try:
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
         descriptor = _open_relative_nofollow(Path(root), relative_path)
         try:
             stat_result = os.fstat(descriptor)
@@ -87,6 +85,8 @@ def read_json(root: Path, relative_path: str, *, max_bytes: int) -> dict:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_strict_object_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non_finite")))
     except UnicodeDecodeError:
         raise ValueError("invalid_utf8")
+    except OSError as exc:
+        raise ValueError("invalid_artifact") from exc
     except json.JSONDecodeError:
         raise ValueError("invalid_json")
     if not isinstance(value, dict):
@@ -96,8 +96,8 @@ def read_json(root: Path, relative_path: str, *, max_bytes: int) -> dict:
 
 def read_json_bytes(root: Path, relative_path: str, *, max_bytes: int) -> tuple[dict, bytes]:
     """Read and parse one file; return the exact bytes used for validation."""
-    target = _safe_file(Path(root), relative_path, max_bytes)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    if Path(root).is_symlink():
+        raise ValueError("unsafe_path")
     descriptor = _open_relative_nofollow(Path(root), relative_path)
     try:
         stat_result = os.fstat(descriptor)
@@ -113,6 +113,8 @@ def read_json_bytes(root: Path, relative_path: str, *, max_bytes: int) -> tuple[
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non_finite")))
     except UnicodeDecodeError:
         raise ValueError("invalid_utf8")
+    except OSError as exc:
+        raise ValueError("invalid_artifact") from exc
     except json.JSONDecodeError:
         raise ValueError("invalid_json")
     if not isinstance(value, dict):
