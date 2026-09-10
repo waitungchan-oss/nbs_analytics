@@ -18,3 +18,9 @@ def test_load_input_uses_index_reference_as_independent_artifact(tmp_path):
     payload = _load_input(tmp_path, item)
     assert payload["artifactRef"]["path"] == "other.json"
     assert item["path"] == "observation.json"
+
+
+def test_load_input_rejects_non_object_index_item(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="invalid_input_index"):
+        _load_input(tmp_path, "not-an-object")

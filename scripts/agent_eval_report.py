@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
             return _error("missing_inputs")
         manifest = read_json(args.root, args.manifest, max_bytes=256 * 1024)
         index = read_json(args.root, args.inputs, max_bytes=256 * 1024)
+        if not isinstance(index, dict):
+            raise ValueError("invalid_input_index")
         if index.get("schemaVersion") != "agent-eval-input-index-v1":
             raise ValueError("invalid_input_index")
         required_collections = {"observations", "ledgers", "quality", "diagnostics"}
