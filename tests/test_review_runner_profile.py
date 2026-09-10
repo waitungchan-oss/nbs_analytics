@@ -294,7 +294,7 @@ def test_live_probe_model_mismatch_is_transport_blocked(tmp_path, monkeypatch):
     assert any("model" in diagnostic for diagnostic in receipt.diagnostics)
 
 
-def test_live_probe_rejects_ambiguous_codex_display_name_alias(tmp_path, monkeypatch):
+def test_live_probe_accepts_profile_bound_codex_display_name_alias(tmp_path, monkeypatch):
     import subprocess
 
     from backend.agents.review_runner_profile import probe_runner
@@ -317,7 +317,7 @@ def test_live_probe_rejects_ambiguous_codex_display_name_alias(tmp_path, monkeyp
     monkeypatch.setattr(subprocess, "run", fake_run)
     receipt = probe_runner(profile)
 
-    assert receipt.status == "blocked_runner_transport"
+    assert receipt.status == "turn_ready"
 
 
 def test_live_probe_accepts_luna_display_name_alias(tmp_path, monkeypatch):

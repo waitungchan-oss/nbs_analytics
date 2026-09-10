@@ -392,14 +392,12 @@ def _run_live_probe(
 
     reported_model = response.get("model")
     selected_model = argv[argv.index("--model") + 1] if "--model" in argv else None
-    exact_match = isinstance(reported_model, str) and reported_model.casefold() == profile.model.casefold()
-    generic_cli_display = {
-        "gpt-5.6-luna": "gpt-5",
-        "gpt-6-astra": "gpt-6",
-    }.get(profile.model)
-    generic_match = (reported_model == generic_cli_display and selected_model == profile.model
-                     and profile.model in _MODEL_DISPLAY_ALIASES)
-    if not exact_match and not generic_match:
+    aliases = _MODEL_DISPLAY_ALIASES.get(profile.model, frozenset({profile.model.casefold()}))
+    alias_match = isinstance(reported_model, str) and reported_model.casefold() in {
+        alias.casefold() for alias in aliases
+    }
+    generic_display = reported_model in {"gpt-5", "gpt-6"}
+    if not alias_match or (generic_display and selected_model != profile.model):
         return _build_receipt(
             profile, status="blocked_runner_transport", cli_version=cli_version,
             cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,

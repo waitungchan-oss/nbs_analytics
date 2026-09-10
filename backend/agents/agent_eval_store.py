@@ -98,14 +98,17 @@ def read_json_bytes(root: Path, relative_path: str, *, max_bytes: int) -> tuple[
     """Read and parse one file; return the exact bytes used for validation."""
     if Path(root).is_symlink():
         raise ValueError("unsafe_path")
-    descriptor = _open_relative_nofollow(Path(root), relative_path)
     try:
-        stat_result = os.fstat(descriptor)
-        if not stat.S_ISREG(stat_result.st_mode):
-            raise ValueError("invalid_artifact")
-        raw = os.read(descriptor, max_bytes + 1)
-    finally:
-        os.close(descriptor)
+        descriptor = _open_relative_nofollow(Path(root), relative_path)
+        try:
+            stat_result = os.fstat(descriptor)
+            if not stat.S_ISREG(stat_result.st_mode):
+                raise ValueError("invalid_artifact")
+            raw = os.read(descriptor, max_bytes + 1)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ValueError("invalid_artifact") from exc
     if len(raw) > max_bytes:
         raise ValueError("size_exceeded")
     try:
@@ -113,8 +116,6 @@ def read_json_bytes(root: Path, relative_path: str, *, max_bytes: int) -> tuple[
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non_finite")))
     except UnicodeDecodeError:
         raise ValueError("invalid_utf8")
-    except OSError as exc:
-        raise ValueError("invalid_artifact") from exc
     except json.JSONDecodeError:
         raise ValueError("invalid_json")
     if not isinstance(value, dict):
