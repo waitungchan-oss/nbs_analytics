@@ -70,6 +70,7 @@ CONFIG_FILE = config_module.CONFIG_FILE
 DB_FILE = config_module.DB_FILE
 SESSION_RULE_KEYS = config_module.SESSION_RULE_KEYS
 TARGET_DEPT_FOR_REP = config_module.TARGET_DEPT_FOR_REP
+E_COMMERCE_SALES_POINT = "市場及電商部-電子商務組"
 init_session_state_config = config_module.init_session_state_config
 save_business_rules = config_module.save_business_rules
 
@@ -1087,6 +1088,59 @@ def _compute_export_workbooks(
     }
 
 
+def _build_export_variant_key(source_fingerprint: str, rules_fingerprint: str, variant: str) -> str:
+    payload = "|".join((str(source_fingerprint), str(rules_fingerprint), str(variant)))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _compute_beta_export_workbooks(
+    db_tour: pd.DataFrame,
+    db_others: pd.DataFrame,
+    *,
+    rules: tuple[dict, list[str], list[str], list[str], list[str]] | None = None,
+) -> dict:
+    branch_mapping, target_branches, cruise_depts, sales_reps, _ = rules or _current_rules()
+    sales_point = E_COMMERCE_SALES_POINT
+
+    def build_beta(excluded_receipt_types, excluded_payment_methods=None):
+        return build_dashboard_data_excluding_receipt_types(
+            db_tour,
+            db_others,
+            branch_mapping,
+            target_branches,
+            cruise_depts,
+            sales_reps,
+            excluded_receipt_types,
+            excluded_payment_methods=excluded_payment_methods,
+            beta_sales_point=sales_point,
+        )
+
+    buffers = {
+        "ex_beta": build_beta([]),
+        "ex_no_writeoff_beta": build_beta(["掛賬核銷"]),
+        "ex_no_writeoff_refund_transfer_beta": build_beta(
+            ["掛賬核銷"], excluded_payment_methods=["TT 退款轉團款"]
+        ),
+    }
+    source_payload = pd.util.hash_pandas_object(db_tour, index=True).values.tobytes()
+    source_payload += pd.util.hash_pandas_object(db_others, index=True).values.tobytes()
+    source_fingerprint = hashlib.sha256(source_payload).hexdigest()
+    rules_fingerprint = _file_content_hash(CONFIG_FILE)
+    variant = "beta_ecommerce_sales_point_v1"
+    return {
+        **{
+            key: _buffer_to_bytes(value[0] if isinstance(value, tuple) else value)
+            for key, value in buffers.items()
+        },
+        "export_variant": variant,
+        "sales_point_filter": sales_point,
+        "source_fingerprint": source_fingerprint,
+        "rules_fingerprint": rules_fingerprint,
+        "export_variant_key": _build_export_variant_key(source_fingerprint, rules_fingerprint, variant),
+        "beta_export_schema": f"{OFFICIAL_EXPORT_SCHEMA_CONTRACT}:{variant}",
+    }
+
+
 def _build_export_fast_candidate(scope_id: str, intermediate) -> bytes:
     inputs = build_scope_report_inputs(intermediate, ExportScope(scope_id))
     branch_mapping, target_branches, cruise_depts, sales_reps, _ = _current_rules()
@@ -1982,6 +2036,9 @@ def _load_and_compute_cache(include_ai: bool = True) -> None:
         "ex": None,
         "ex_no_writeoff": None,
         "ex_no_writeoff_refund_transfer": None,
+        "ex_beta": None,
+        "ex_no_writeoff_beta": None,
+        "ex_no_writeoff_refund_transfer_beta": None,
         "anm": pd.DataFrame(),
         "t": analysis_tour,
         "o": analysis_others,
