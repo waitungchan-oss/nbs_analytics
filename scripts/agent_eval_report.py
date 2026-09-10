@@ -11,18 +11,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.agents.agent_eval_report import build_report, render_markdown
-from backend.agents.agent_eval_manifest import verify_binding
+from backend.agents.agent_eval_manifest import validate_manifest, verify_binding
 from backend.agents.agent_eval_store import publish_bundle, read_json, read_json_bytes
 
 
-def _load_input(root: Path, item: dict) -> dict:
+def _load_input(root: Path, item: dict, *, include_size: bool = False) -> dict | tuple[dict, int]:
     if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
         raise ValueError("invalid_input_index")
     path = item["path"]
     payload, raw = read_json_bytes(root, path, max_bytes=2 * 1024 * 1024)
     if hashlib.sha256(raw).hexdigest() != item["sha256"]:
         raise ValueError("input_hash_mismatch")
-    return payload
+    return (payload, len(raw)) if include_size else payload
 
 
 def _error(code: str) -> int:
@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         if not (args.root / args.inputs).is_file():
             return _error("missing_inputs")
         manifest = read_json(args.root, args.manifest, max_bytes=256 * 1024)
+        checked_manifest = validate_manifest(manifest)
         index = read_json(args.root, args.inputs, max_bytes=256 * 1024)
         if not isinstance(index, dict):
             raise ValueError("invalid_input_index")
@@ -55,13 +56,18 @@ def main(argv: list[str] | None = None) -> int:
         observation_artifact_refs = []
         ledger_artifact_refs = []
         quality_artifact_refs = []
+        cumulative_input_bytes = 0
         def load_many(name: str) -> list[dict]:
+            nonlocal cumulative_input_bytes
             values = index.get(name, [])
             if not isinstance(values, list) or len(values) > 4096:
                 raise ValueError("invalid_input_index")
             loaded = []
             for item in values:
-                payload = _load_input(args.root, item)
+                payload, raw_size = _load_input(args.root, item, include_size=True)
+                cumulative_input_bytes += raw_size
+                if cumulative_input_bytes > checked_manifest["artifactBudgetBytes"]:
+                    raise ValueError("quota_exceeded")
                 if name == "observations":
                     verify_binding(payload, manifest=manifest, artifact_ref=item,
                                    producer_registry=manifest.get("producerRegistry"))

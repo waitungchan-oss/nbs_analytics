@@ -63,3 +63,12 @@ def test_root_and_nested_symlinks_are_rejected(tmp_path):
     (tmp_path / "nested-link").symlink_to(real, target_is_directory=True)
     with pytest.raises(ValueError, match="invalid_artifact"):
         read_json(tmp_path, "nested-link/input.json", max_bytes=64)
+
+
+def test_publish_rejects_preexisting_symlink_root(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    root = tmp_path / "root-link"
+    root.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match="unsafe_path"):
+        publish_bundle(root, "exp-1", {"report.json": b"{}"})

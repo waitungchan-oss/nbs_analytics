@@ -57,6 +57,28 @@ def _slot_quality(terminal: str, record: dict | None) -> str:
     return _quality_status(record)
 
 
+def _valid_auxiliary_binding(value: dict, checked: dict, expected_ref: dict) -> bool:
+    if value.get("artifactRef") != expected_ref:
+        return False
+    identity = value.get("identity")
+    if not isinstance(identity, dict):
+        return False
+    for field in ("projectId", "consumerId", "provider", "model", "settingsFingerprint",
+                  "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint",
+                  "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint"):
+        if identity.get(field) != checked["identity"][field]:
+            return False
+    if not isinstance(identity.get("sessionId"), str) or not identity["sessionId"]:
+        return False
+    if value.get("sessionId") != identity["sessionId"]:
+        return False
+    producer_id = value.get("producerId")
+    producer = checked["producerRegistry"].get(producer_id)
+    return (isinstance(producer_id, str) and bool(producer_id) and producer is not None
+            and value.get("sourceSchema") == producer["sourceSchema"]
+            and value.get("producerFingerprint") == producer["producerFingerprint"])
+
+
 def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], quality: list[dict], diagnostics: list[dict], *, observation_artifact_refs: list[dict] | None = None, ledger_artifact_refs: list[dict] | None = None, quality_artifact_refs: list[dict] | None = None) -> dict:
     checked = validate_manifest(manifest)
     if not all(isinstance(value, list) for value in (observations, ledgers, quality, diagnostics)):
@@ -142,7 +164,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
     duplicate_slot = False
     for index, value in enumerate(ledgers):
         if isinstance(value, dict):
-            if ledger_artifact_refs is not None and value.get("artifactRef") != ledger_artifact_refs[index]:
+            if ledger_artifact_refs is not None and not _valid_auxiliary_binding(value, checked, ledger_artifact_refs[index]):
                 invalid_slot_input = True
             key = _key(value)
             invalid_slot_input = invalid_slot_input or key not in slot_keys
@@ -160,7 +182,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             raise ValueError("invalid_ledger")
     for index, value in enumerate(quality):
         if isinstance(value, dict):
-            if quality_artifact_refs is not None and value.get("artifactRef") != quality_artifact_refs[index]:
+            if quality_artifact_refs is not None and not _valid_auxiliary_binding(value, checked, quality_artifact_refs[index]):
                 invalid_slot_input = True
             key = _key(value)
             invalid_slot_input = invalid_slot_input or key not in slot_keys

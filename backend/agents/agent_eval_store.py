@@ -150,7 +150,15 @@ def publish_bundle(root: Path, experiment_id: str, files: dict[str, bytes], *, q
         if len(content) > 2 * 1024 * 1024:
             raise ValueError("size_exceeded")
         normalized[path] = content
+    if root.exists() and root.is_symlink():
+        raise ValueError("unsafe_path")
     root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("unsafe_path")
+    try:
+        root.resolve().relative_to(root.parent.resolve())
+    except ValueError as exc:
+        raise ValueError("unsafe_path") from exc
     lock_path = root / ".agent-eval.lock"
     with lock_path.open("a+b") as lock:
         try:
