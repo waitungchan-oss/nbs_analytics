@@ -258,6 +258,16 @@ def test_report_rejects_missing_producer_binding():
     assert report["status"] == "invalid"
 
 
+def test_report_fail_closes_malformed_call_id_without_raising():
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    observation = {"identity": slot, "callId": None, "origin": "real",
+                   "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+    report = build_report(manifest, [observation], [], [], [])
+    assert report["status"] == "invalid"
+    assert all(pair["tokenDelta"] is None for pair in report["comparisons"])
+
+
 def test_failed_or_unknown_quality_prevents_available_status():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -13,6 +14,7 @@ from .agent_eval_statistics import latency_summary, task_usage
 
 SCHEMA = "agent-eval-report-v1"
 _VALID_OBSERVATION_ORIGINS = {"real", "synthetic"}
+_ARTIFACT_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _key(value: dict) -> tuple:
@@ -95,6 +97,12 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             if producer is None or value.get("sourceSchema") != producer["sourceSchema"] or value.get("producerFingerprint") != producer["producerFingerprint"]:
                 invalid_slot_input = True
         if "artifactRef" in value:
+            artifact_ref = value["artifactRef"]
+            if (not isinstance(artifact_ref, dict) or set(artifact_ref) != {"path", "sha256"}
+                    or not isinstance(artifact_ref["path"], str)
+                    or not isinstance(artifact_ref["sha256"], str)
+                    or not _ARTIFACT_SHA_RE.fullmatch(artifact_ref["sha256"])):
+                invalid_slot_input = True
             expected_ref = observation_artifact_refs[index] if observation_artifact_refs is not None else None
             if expected_ref is not None and value["artifactRef"] != expected_ref:
                 invalid_slot_input = True
@@ -110,6 +118,9 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         local_origins = set()
         for value in values:
             call_id = value.get("callId")
+            if not isinstance(call_id, str) or not call_id:
+                invalid_slot_input = True
+                continue
             if call_id in observation_call_ids:
                 observation_duplicate = True
             observation_call_ids.add(call_id)
@@ -162,8 +173,9 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         key = _key(slot)
         ledger = ledger_map.get(key)
         calls = observation_map.get(key, [])
+        valid_calls = [call for call in calls if isinstance(call.get("callId"), str) and call.get("callId")]
         expected = ledger.get("expectedCallIds") if isinstance(ledger, dict) else None
-        usage = task_usage(calls, expected_call_ids=expected if isinstance(expected, list) else None)
+        usage = task_usage(valid_calls, expected_call_ids=expected if isinstance(expected, list) else None)
         status = ledger.get("terminalState") if isinstance(ledger, dict) else "missing"
         row = {**slot, "terminalState": status, "usage": usage, "quality": _slot_quality(status, quality_map.get(key)),
                "ledgerPresent": ledger is not None, "qualityPresent": key in quality_map}
