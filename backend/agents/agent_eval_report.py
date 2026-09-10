@@ -92,13 +92,17 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         raise ValueError("invalid_report_inputs")
     if observation_artifact_refs is not None and (not isinstance(observation_artifact_refs, list) or len(observation_artifact_refs) != len(observations)):
         raise ValueError("invalid_artifact_refs")
+    if observations and observation_artifact_refs is None:
+        observation_refs_missing = True
+    else:
+        observation_refs_missing = False
     for refs, records in ((ledger_artifact_refs, ledgers), (quality_artifact_refs, quality)):
         if refs is not None and (not isinstance(refs, list) or len(refs) != len(records)):
             raise ValueError("invalid_artifact_refs")
     slots = planned_slots(checked["caseIds"], checked["repeatCount"])
     slot_keys = {_key(slot) for slot in slots}
     observation_map = defaultdict(list)
-    invalid_slot_input = False
+    invalid_slot_input = observation_refs_missing
     for index, value in enumerate(observations):
         if not isinstance(value, dict):
             raise ValueError("invalid_observation")
