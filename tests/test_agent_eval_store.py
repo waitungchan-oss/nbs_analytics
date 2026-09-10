@@ -41,6 +41,11 @@ def test_quota_includes_bundle_metadata(tmp_path):
         publish_bundle(tmp_path, "exp-1", {"report.json": b"{}"}, quota_bytes=2)
 
 
+def test_generated_manifest_name_is_reserved(tmp_path):
+    with pytest.raises(ValueError, match="reserved_artifact_name"):
+        publish_bundle(tmp_path, "exp-1", {"bundle-manifest.json": b"{}"})
+
+
 def test_existing_bundle_detects_tampered_file(tmp_path):
     publish_bundle(tmp_path, "exp-1", {"report.json": b"{}"})
     (tmp_path / "exp-1" / "report.json").write_bytes(b"tampered")

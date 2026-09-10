@@ -143,6 +143,8 @@ def publish_bundle(root: Path, experiment_id: str, files: dict[str, bytes], *, q
     normalized: dict[Path, bytes] = {}
     for name, content in files.items():
         path = _relative(name)
+        if path == Path("bundle-manifest.json"):
+            raise ValueError("reserved_artifact_name")
         if not isinstance(content, bytes):
             raise ValueError("invalid_bundle")
         if len(content) > 2 * 1024 * 1024:
