@@ -338,7 +338,7 @@ def test_live_probe_accepts_luna_display_name_alias(tmp_path, monkeypatch):
     assert probe_runner(profile).status == "turn_ready"
 
 
-def test_live_probe_accepts_cli_generic_display_name_for_luna_when_selection_is_exact(tmp_path, monkeypatch):
+def test_live_probe_accepts_exact_cli_model_selection_for_luna(tmp_path, monkeypatch):
     import subprocess
     from backend.agents.review_runner_profile import RunnerProfile, probe_runner
 
@@ -349,7 +349,7 @@ def test_live_probe_accepts_cli_generic_display_name_for_luna_when_selection_is_
     def fake_run(argv, **kwargs):
         if "--version" in argv:
             return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.153.4\n", stderr="")
-        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "gpt-5"}), stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "gpt-5.6-luna"}), stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert probe_runner(profile).status == "turn_ready"
