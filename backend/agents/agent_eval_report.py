@@ -77,7 +77,7 @@ def _valid_auxiliary_binding(value: dict, checked: dict, expected_ref: dict) -> 
             return False
     if not isinstance(identity.get("sessionId"), str) or not identity["sessionId"]:
         return False
-    if value.get("sessionId") != identity["sessionId"]:
+    if "sessionId" in value and value.get("sessionId") != identity["sessionId"]:
         return False
     producer_id = value.get("producerId")
     producer = checked["producerRegistry"].get(producer_id)
