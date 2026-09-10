@@ -86,6 +86,17 @@ def _valid_auxiliary_binding(value: dict, checked: dict, expected_ref: dict) -> 
             and value.get("producerFingerprint") == producer["producerFingerprint"])
 
 
+def _register_session(registry: dict, session: str, key: tuple, role: str) -> bool:
+    owner = registry.get(session)
+    if owner is None:
+        registry[session] = [key, {role}]
+        return True
+    if owner[0] != key or role in owner[1]:
+        return False
+    owner[1].add(role)
+    return True
+
+
 def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], quality: list[dict], diagnostics: list[dict], *, observation_artifact_refs: list[dict] | None = None, ledger_artifact_refs: list[dict] | None = None, quality_artifact_refs: list[dict] | None = None) -> dict:
     checked = validate_manifest(manifest)
     if not all(isinstance(value, list) for value in (observations, ledgers, quality, diagnostics)):
@@ -161,10 +172,8 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             observation_call_ids.add(call_id)
             session_id = value.get("sessionId") or (value.get("identity") or {}).get("sessionId")
             if session_id is not None:
-                owner = session_registry.get(session_id)
-                if owner is not None and (owner[0] != key or owner[1] == "observation"):
+                if not _register_session(session_registry, session_id, key, "observation"):
                     invalid_slot_input = True
-                session_registry[session_id] = (key, "observation")
             origin = value.get("origin")
             if origin not in _VALID_OBSERVATION_ORIGINS:
                 invalid_slot_input = True
@@ -190,10 +199,8 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             if session is not None:
                 if not isinstance(session, str) or not session:
                     raise ValueError("invalid_session_id")
-                owner = session_registry.get(session)
-                if owner is not None and (owner[0] != key or owner[1] == "ledger"):
+                if not _register_session(session_registry, session, key, "ledger"):
                     invalid_slot_input = True
-                session_registry[session] = (key, "ledger")
             ledger_map[key] = value
         else:
             raise ValueError("invalid_ledger")
@@ -208,10 +215,8 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             if session is not None:
                 if not isinstance(session, str) or not session:
                     raise ValueError("invalid_session_id")
-                owner = session_registry.get(session)
-                if owner is not None and (owner[0] != key or owner[1] == "quality"):
+                if not _register_session(session_registry, session, key, "quality"):
                     invalid_slot_input = True
-                session_registry[session] = (key, "quality")
             quality_map[key] = value
         else:
             raise ValueError("invalid_quality")
