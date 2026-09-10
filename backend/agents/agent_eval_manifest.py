@@ -179,6 +179,8 @@ def live_preflight(manifest: dict, *, authorization_evidence: dict | None) -> li
         checked = validate_manifest(manifest)
     except ValueError as exc:
         return [str(exc)]
+    if _timestamp(checked["expiresAt"], "invalid_expires_at") <= datetime.now(timezone.utc):
+        return ["blocked_manifest_expired"]
     if not isinstance(authorization_evidence, dict):
         return ["blocked_invalid_authorization"]
     required = {"runnerIdentity", "manifestFingerprint", "maxTaskTokens", "maxBatchTokens", "maxBatchCost", "currency", "priceTableFingerprint", "timeoutMs", "maxRetries", "sourceFingerprint", "freshSession"}

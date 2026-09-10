@@ -122,6 +122,15 @@ def test_live_preflight_rejects_non_boolean_fresh_session():
     assert "blocked_invalid_authorization" in live_preflight(manifest, authorization_evidence=evidence)
 
 
+def test_live_preflight_rejects_expired_manifest():
+    manifest = _manifest()
+    manifest["expiresAt"] = "2026-09-09T00:00:00+00:00"
+    manifest["manifestFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in manifest.items() if key != "manifestFingerprint"}
+    )
+    assert live_preflight(manifest, authorization_evidence={}) == ["blocked_manifest_expired"]
+
+
 def test_verify_binding_rejects_unplanned_slot():
     manifest = _manifest()
     artifact = {"path": "observations/call.json", "sha256": "5" * 64}
