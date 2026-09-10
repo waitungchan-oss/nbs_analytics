@@ -102,6 +102,8 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         if not isinstance(identity, dict):
             invalid_slot_input = True
             identity = {}
+        if "sessionId" in value and value.get("sessionId") != identity.get("sessionId"):
+            invalid_slot_input = True
         required = {"projectId", "consumerId", "provider", "model", "settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "taskId", "repeatIndex", "cohort", "sessionId"}
         if not required <= set(identity) or not {"producerId", "sourceSchema", "producerFingerprint", "artifactRef"} <= set(value):
             invalid_slot_input = True
@@ -162,6 +164,10 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
     ledger_map = {}
     quality_map = {}
     duplicate_slot = False
+    if ledgers and ledger_artifact_refs is None:
+        invalid_slot_input = True
+    if quality and quality_artifact_refs is None:
+        invalid_slot_input = True
     for index, value in enumerate(ledgers):
         if isinstance(value, dict):
             if ledger_artifact_refs is not None and not _valid_auxiliary_binding(value, checked, ledger_artifact_refs[index]):

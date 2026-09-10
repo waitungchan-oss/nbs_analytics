@@ -3,8 +3,49 @@ from __future__ import annotations
 import pytest
 
 from backend.agents.agent_eval_manifest import planned_slots
-from backend.agents.agent_eval_report import build_report, render_markdown
+from backend.agents.agent_eval_report import build_report as _build_report, render_markdown
 from tests.test_agent_eval_manifest import _manifest
+
+
+def build_report(manifest, observations, ledgers, quality, diagnostics, **kwargs):
+    """Give legacy unit fixtures the same explicit bindings as the CLI."""
+    def bind(records, kind):
+        bound = []
+        refs = []
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                bound.append(record)
+                refs.append({"path": f"{kind}-{index}.json", "sha256": "0" * 64})
+                continue
+            value = dict(record)
+            slot = value.get("slot") if isinstance(value.get("slot"), dict) else value
+            identity = {**manifest["identity"], **slot}
+            identity["sessionId"] = value.get("sessionId") or f"{kind}-session-{index}"
+            value["identity"] = identity
+            value["sessionId"] = identity["sessionId"]
+            value.update({"producerId": "fixture-v1", "sourceSchema": "fixture-v1",
+                          "producerFingerprint": "4" * 64})
+            ref = {"path": f"{kind}-{index}.json", "sha256": "0" * 64}
+            value["artifactRef"] = ref
+            bound.append(value)
+            refs.append(ref)
+        return bound, refs
+    if ledgers and "ledger_artifact_refs" not in kwargs:
+        ledgers, kwargs["ledger_artifact_refs"] = bind(ledgers, "ledger")
+        observation_sessions = {}
+        for observation in observations:
+            identity = observation.get("identity") if isinstance(observation, dict) else None
+            if isinstance(identity, dict):
+                observation_sessions[(identity.get("taskId"), identity.get("repeatIndex"), identity.get("cohort"))] = observation.get("sessionId") or identity.get("sessionId")
+        for ledger in ledgers:
+            slot = ledger.get("slot") if isinstance(ledger.get("slot"), dict) else ledger
+            session_id = observation_sessions.get((slot.get("taskId"), slot.get("repeatIndex"), slot.get("cohort")))
+            if session_id:
+                ledger["sessionId"] = session_id
+                ledger["identity"]["sessionId"] = session_id
+    if quality and "quality_artifact_refs" not in kwargs:
+        quality, kwargs["quality_artifact_refs"] = bind(quality, "quality")
+    return _build_report(manifest, observations, ledgers, quality, diagnostics, **kwargs)
 
 
 def test_invalid_manifest_rejected():
@@ -143,8 +184,8 @@ def test_distinct_expected_calls_in_one_slot_are_valid():
                for i, slot in enumerate(slots)]
     quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
     observations = [{"schemaVersion": "agent-eval-observation-v1",
-                     "identity": {**manifest["identity"], **slots[0], "sessionId": f"session-{call_id}"},
-                     "callId": call_id, "origin": "real", "sessionId": f"session-{call_id}",
+                     "identity": {**manifest["identity"], **slots[0], "sessionId": "session-slot-0"},
+                     "callId": call_id, "origin": "real", "sessionId": "session-slot-0",
                      "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
                      "producerFingerprint": "4" * 64,
                      "artifactRef": {"path": f"obs-{call_id}.json", "sha256": "5" * 64},
