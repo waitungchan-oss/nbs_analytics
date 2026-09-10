@@ -194,6 +194,8 @@ def live_preflight(manifest: dict, *, authorization_evidence: dict | None) -> li
                      "priceTableFingerprint", "timeoutMs", "maxRetries")
     if any(auth[field] is None for field in budget_fields):
         return ["blocked_missing_budget"]
+    if auth["manifestFingerprint"] != checked["manifestFingerprint"]:
+        return ["blocked_authorization_mismatch"]
     if authorization_evidence["manifestFingerprint"] != checked["manifestFingerprint"]:
         return ["blocked_manifest_drift"]
     if authorization_evidence["runnerIdentity"] != checked["authorization"]["runnerIdentity"]:

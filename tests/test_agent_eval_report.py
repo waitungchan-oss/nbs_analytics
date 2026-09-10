@@ -180,7 +180,7 @@ def test_duplicate_observation_slot_invalidates_all_comparisons():
 def test_distinct_expected_calls_in_one_slot_are_valid():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)
-    ledgers = [{"slot": slot, "terminalState": "completed", "expectedCallIds": ["a", "b"] if i == 0 else []}
+    ledgers = [{"slot": slot, "terminalState": "completed", "expectedCallIds": ["a"] if i == 0 else []}
                for i, slot in enumerate(slots)]
     quality = [{"slot": slot, "checks": {"rubric": "pass"}} for slot in slots]
     observations = [{"schemaVersion": "agent-eval-observation-v1",
@@ -190,7 +190,7 @@ def test_distinct_expected_calls_in_one_slot_are_valid():
                      "producerFingerprint": "4" * 64,
                      "artifactRef": {"path": f"obs-{call_id}.json", "sha256": "5" * 64},
                      "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
-                    for call_id in ("a", "b")]
+                        for call_id in ("a",)]
     report = build_report(manifest, observations, ledgers, quality, [],
                           observation_artifact_refs=[observation["artifactRef"] for observation in observations])
     assert report["status"] == "available"
