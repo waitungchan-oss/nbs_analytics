@@ -152,7 +152,11 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             expected_ref = observation_artifact_refs[index] if observation_artifact_refs is not None else None
             if expected_ref is not None and value["artifactRef"] != expected_ref:
                 invalid_slot_input = True
-        key = _key(value)
+        try:
+            key = _key(value)
+        except ValueError:
+            invalid_slot_input = True
+            continue
         invalid_slot_input = invalid_slot_input or key not in slot_keys
         observation_map[key].append(copy.deepcopy(value))
     observation_call_ids = set()

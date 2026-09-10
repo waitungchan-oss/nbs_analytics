@@ -284,8 +284,9 @@ def test_report_rejects_boolean_repeat_index():
     slot = planned_slots(manifest["caseIds"], 3)[0]
     observation = {"identity": {**slot, "repeatIndex": True}, "callId": "call-1",
                    "origin": "real", "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
-    with pytest.raises(ValueError, match="invalid_slot_record"):
-        build_report(manifest, [observation], [], [], [])
+    report = build_report(manifest, [observation], [], [], [])
+    assert report["status"] == "invalid"
+    assert all(pair["tokenDelta"] is None for pair in report["comparisons"])
 
 
 def test_report_rejects_missing_producer_binding():
