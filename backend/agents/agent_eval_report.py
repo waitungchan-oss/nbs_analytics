@@ -88,7 +88,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
                 invalid_slot_input = True
         if "artifactRef" in value:
             expected_ref = observation_artifact_refs[index] if observation_artifact_refs is not None else None
-            if expected_ref is None or value["artifactRef"] != expected_ref:
+            if expected_ref is not None and value["artifactRef"] != expected_ref:
                 invalid_slot_input = True
         key = _key(value)
         invalid_slot_input = invalid_slot_input or key not in slot_keys
@@ -108,7 +108,7 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             session_id = value.get("sessionId") or (value.get("identity") or {}).get("sessionId")
             if session_id is not None:
                 owner = session_registry.get(session_id)
-                if owner is not None:
+                if owner is not None and (owner[0] != key or owner[1] != "observation"):
                     invalid_slot_input = True
                 session_registry[session_id] = (key, "observation")
             origin = value.get("origin")
