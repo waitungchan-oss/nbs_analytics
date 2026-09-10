@@ -177,7 +177,8 @@ def publish_bundle(root: Path, experiment_id: str, files: dict[str, bytes], *, q
                 metadata = bundle / "bundle-manifest.json"
                 existing_hashes = {}
                 if metadata.is_file():
-                    existing_hashes = json.loads(metadata.read_text(encoding="utf-8")).get("files", {})
+                    manifest = read_json(root, f"{experiment_id}/bundle-manifest.json", max_bytes=256 * 1024)
+                    existing_hashes = manifest.get("files", {})
                 if existing_hashes != hashes:
                     raise ValueError("experiment_collision")
                 for relative, expected_hash in hashes.items():

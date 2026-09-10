@@ -177,8 +177,8 @@ _PROBE_PROMPT = (
 # fail closed, and this does not alter the requested CLI model.
 _MODEL_DISPLAY_ALIASES = {
     "gpt-5.4": frozenset({"gpt-5.4", "gpt-5", "gpt-5 codex"}),
-    "gpt-5.6-luna": frozenset({"gpt-5.6-luna", "gpt-5.6 luna", "gpt-5"}),
-    "gpt-6-astra": frozenset({"gpt-6-astra", "gpt-6 astra", "gpt-6"}),
+    "gpt-5.6-luna": frozenset({"gpt-5.6-luna", "gpt-5.6 luna"}),
+    "gpt-6-astra": frozenset({"gpt-6-astra", "gpt-6 astra"}),
 }
 _ENV_IDENTITY_KEYS = ("CODEX_HOME", "HOME")
 
