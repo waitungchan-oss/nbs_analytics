@@ -88,7 +88,9 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             if field in identity and identity[field] != checked["identity"][field]:
                 invalid_slot_input = True
         producer_id = value.get("producerId")
-        if producer_id is not None:
+        if not isinstance(producer_id, str) or not producer_id:
+            invalid_slot_input = True
+        else:
             producer = checked["producerRegistry"].get(producer_id)
             if producer is None or value.get("sourceSchema") != producer["sourceSchema"] or value.get("producerFingerprint") != producer["producerFingerprint"]:
                 invalid_slot_input = True

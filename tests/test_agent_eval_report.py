@@ -247,6 +247,17 @@ def test_report_rejects_boolean_repeat_index():
         build_report(manifest, [observation], [], [], [])
 
 
+def test_report_rejects_missing_producer_binding():
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    observation = {"schemaVersion": "agent-eval-observation-v1", "identity": {**manifest["identity"], **slot, "sessionId": "session-1"},
+                   "callId": "call-1", "origin": "real", "producerId": None, "sourceSchema": "fixture-v1",
+                   "producerFingerprint": "4" * 64, "artifactRef": {"path": "obs.json", "sha256": "5" * 64},
+                   "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1}}
+    report = build_report(manifest, [observation], [], [], [], observation_artifact_refs=[observation["artifactRef"]])
+    assert report["status"] == "invalid"
+
+
 def test_failed_or_unknown_quality_prevents_available_status():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)
