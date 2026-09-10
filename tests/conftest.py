@@ -26,15 +26,41 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _source_db(project_root: Path) -> Path | None:
+def _git_common_root(project_root: Path) -> Path | None:
+    """Resolve the main checkout for a linked Git worktree."""
+    git_marker = project_root / ".git"
+    if git_marker.is_dir():
+        return project_root
+    if not git_marker.is_file():
+        return None
+    try:
+        marker = git_marker.read_text(encoding="utf-8").strip()
+        prefix, value = marker.split(":", 1)
+        if prefix.strip().lower() != "gitdir":
+            return None
+        worktree_git_dir = Path(value.strip())
+        if not worktree_git_dir.is_absolute():
+            worktree_git_dir = (project_root / worktree_git_dir).resolve()
+        # <common-root>/.git/worktrees/<worktree-name>
+        if worktree_git_dir.parent.name != "worktrees" or worktree_git_dir.parent.parent.name != ".git":
+            return None
+        return worktree_git_dir.parent.parent.parent
+    except (OSError, ValueError):
+        return None
+
+
+def _source_db(project_root: Path, *, minimum_bytes: int = _MIN_CANONICAL_DB_BYTES) -> Path | None:
     configured = os.environ.get("NBS_ANALYTICS_SOURCE_DB")
     candidates = [Path(configured).expanduser()] if configured else []
     candidates.append(project_root / "nbs_marketing_data.db")
     # An isolated worktree may not contain the ignored production snapshot;
     # the main checkout is a read-only source for a disposable test snapshot.
+    common_root = _git_common_root(project_root)
+    if common_root is not None and common_root != project_root:
+        candidates.append(common_root / "nbs_marketing_data.db")
     candidates.append(project_root.parent.parent / "nbs_marketing_data.db")
     for candidate in candidates:
-        if candidate.is_file() and not candidate.is_symlink() and candidate.stat().st_size >= _MIN_CANONICAL_DB_BYTES:
+        if candidate.is_file() and not candidate.is_symlink() and candidate.stat().st_size >= minimum_bytes:
             return candidate
     return None
 

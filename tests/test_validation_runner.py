@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.runtime_helpers import repository_python
+
 from backend.agents.implementation_models import ValidationResult
 from backend.agents.validation_runner import CommandRejected, ValidationRunner
 
@@ -14,7 +16,7 @@ REPOSITORY_ROOT = (
     if PROJECT_ROOT.parent.name == ".worktrees"
     else PROJECT_ROOT
 )
-REPOSITORY_PYTHON = (REPOSITORY_ROOT / ".venv/bin/python").resolve()
+REPOSITORY_PYTHON = repository_python(REPOSITORY_ROOT).resolve()
 
 
 def completed(stdout="", stderr="", returncode=0):
@@ -56,6 +58,20 @@ def test_runner_resolves_project_local_interpreter_first(tmp_path):
     runner.project_root = tmp_path.resolve()
 
     assert runner._resolve_interpreter(".venv/bin/python") == interpreter.resolve()
+
+
+def test_runner_resolves_git_common_root_for_codex_worktree(tmp_path):
+    common_root = tmp_path / "repository"
+    worktree = tmp_path / ".codex" / "worktrees" / "5160" / "repository"
+    worktree.mkdir(parents=True)
+    gitdir = common_root / ".git" / "worktrees" / "5160"
+    gitdir.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+
+    runner = object.__new__(ValidationRunner)
+    runner.project_root = worktree.resolve()
+
+    assert runner._approved_repository_root() == common_root.resolve()
 
 
 def test_runner_rejects_worktree_interpreter_symlink_outside_approved_root(tmp_path):

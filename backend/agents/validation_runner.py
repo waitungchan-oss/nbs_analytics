@@ -156,6 +156,17 @@ class ValidationRunner:
     def _approved_repository_root(self) -> Path:
         if self.project_root.parent.name == ".worktrees":
             return self.project_root.parent.parent.resolve()
+        git_file = self.project_root / ".git"
+        try:
+            git_pointer = git_file.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            git_pointer = ""
+        if git_file.is_file() and git_pointer.startswith("gitdir:"):
+            gitdir = Path(git_pointer.split(":", 1)[1].strip()).expanduser()
+            if gitdir.name and gitdir.parent.name == "worktrees":
+                common_git = gitdir.parent.parent
+                if common_git.name == ".git" and common_git.parent.is_dir():
+                    return common_git.parent.resolve()
         return self.project_root
 
     def _validate_pytest_arguments(self, arguments: tuple[str, ...]) -> None:

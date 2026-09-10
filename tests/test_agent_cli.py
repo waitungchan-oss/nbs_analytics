@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.runtime_helpers import repository_python
+
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / ".venv/bin/python"
-if not PYTHON.exists():
-    PYTHON = ROOT.parent.parent / ".venv/bin/python"
+PYTHON = repository_python(ROOT)
 
 
 def valid_context_summary():

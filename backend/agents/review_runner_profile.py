@@ -165,18 +165,20 @@ ALLOWED_RECEIPT_STATUSES = {
     "static_ready", "turn_ready", "blocked_runner_capability",
     "blocked_runner_transport",
 }
-_PROBE_TIMEOUT_SECONDS = 15
+_PROBE_TIMEOUT_SECONDS = 30
 _PROBE_MAX_OUTPUT_BYTES = 8 * 1024
 # Fixed, short, read-only probe command shape (model and prompt are filled in).
 _PROBE_ARGV_TEMPLATE = ("exec", "--ephemeral", "--json", "--model", "<model>", "<prompt>")
 _PROBE_PROMPT = (
     'Reply with only the JSON object {"status":"ok","model":"<your-model-name>"}.'
 )
-# Codex 0.150.x reports the selected gpt-5.4 slug as this stable display name
-# in a model-authored probe response.  Keep this allowlist narrow: an unknown
-# model name must still fail closed.
+# Codex may report a generic display name in a model-authored probe response.
+# Keep aliases scoped to the explicitly requested model: unknown names still
+# fail closed, and this does not alter the requested CLI model.
 _MODEL_DISPLAY_ALIASES = {
     "gpt-5.4": frozenset({"gpt-5.4", "gpt-5", "gpt-5 codex"}),
+    "gpt-5.6-luna": frozenset({"gpt-5.6-luna", "gpt-5.6 luna", "gpt-5"}),
+    "gpt-6-astra": frozenset({"gpt-6-astra", "gpt-6 astra", "gpt-6"}),
 }
 _ENV_IDENTITY_KEYS = ("CODEX_HOME", "HOME")
 
@@ -389,10 +391,13 @@ def _run_live_probe(
         )
 
     reported_model = response.get("model")
-    accepted_models = _MODEL_DISPLAY_ALIASES.get(
-        profile.model, frozenset({profile.model.casefold()})
-    )
-    if not isinstance(reported_model, str) or reported_model.casefold() not in accepted_models:
+    selected_model = argv[argv.index("--model") + 1] if "--model" in argv else None
+    aliases = _MODEL_DISPLAY_ALIASES.get(profile.model, frozenset({profile.model.casefold()}))
+    alias_match = isinstance(reported_model, str) and reported_model.casefold() in {
+        alias.casefold() for alias in aliases
+    }
+    generic_display = reported_model in {"gpt-5", "gpt-6"}
+    if not alias_match or (generic_display and selected_model != profile.model):
         return _build_receipt(
             profile, status="blocked_runner_transport", cli_version=cli_version,
             cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
