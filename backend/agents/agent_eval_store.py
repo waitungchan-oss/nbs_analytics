@@ -181,6 +181,11 @@ def publish_bundle(root: Path, experiment_id: str, files: dict[str, bytes], *, q
                 existing_hashes = {}
                 if metadata.is_file():
                     manifest = read_json(root, f"{experiment_id}/bundle-manifest.json", max_bytes=256 * 1024)
+                    if (set(manifest) != {"schemaVersion", "experimentId", "files"}
+                            or manifest.get("schemaVersion") != "agent-eval-bundle-v1"
+                            or manifest.get("experimentId") != experiment_id
+                            or not isinstance(manifest.get("files"), dict)):
+                        raise ValueError("experiment_collision")
                     existing_hashes = manifest.get("files", {})
                 if existing_hashes != hashes:
                     raise ValueError("experiment_collision")

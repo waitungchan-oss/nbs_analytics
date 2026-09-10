@@ -20,6 +20,8 @@ def _load_input(root: Path, item: dict, *, include_size: bool = False) -> dict |
         raise ValueError("invalid_input_index")
     path = item["path"]
     payload, raw = read_json_bytes(root, path, max_bytes=2 * 1024 * 1024)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid_input")
     if hashlib.sha256(raw).hexdigest() != item["sha256"]:
         raise ValueError("input_hash_mismatch")
     return (payload, len(raw)) if include_size else payload
