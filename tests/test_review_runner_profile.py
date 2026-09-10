@@ -294,7 +294,7 @@ def test_live_probe_model_mismatch_is_transport_blocked(tmp_path, monkeypatch):
     assert any("model" in diagnostic for diagnostic in receipt.diagnostics)
 
 
-def test_live_probe_accepts_known_codex_display_name_alias(tmp_path, monkeypatch):
+def test_live_probe_rejects_ambiguous_codex_display_name_alias(tmp_path, monkeypatch):
     import subprocess
 
     from backend.agents.review_runner_profile import probe_runner
@@ -317,7 +317,7 @@ def test_live_probe_accepts_known_codex_display_name_alias(tmp_path, monkeypatch
     monkeypatch.setattr(subprocess, "run", fake_run)
     receipt = probe_runner(profile)
 
-    assert receipt.status == "turn_ready"
+    assert receipt.status == "blocked_runner_transport"
 
 
 def test_live_probe_accepts_luna_display_name_alias(tmp_path, monkeypatch):
@@ -338,7 +338,7 @@ def test_live_probe_accepts_luna_display_name_alias(tmp_path, monkeypatch):
     assert probe_runner(profile).status == "turn_ready"
 
 
-def test_live_probe_rejects_cli_generic_display_name_for_luna(tmp_path, monkeypatch):
+def test_live_probe_accepts_cli_generic_display_name_for_luna_when_selection_is_exact(tmp_path, monkeypatch):
     import subprocess
     from backend.agents.review_runner_profile import RunnerProfile, probe_runner
 
@@ -352,7 +352,7 @@ def test_live_probe_rejects_cli_generic_display_name_for_luna(tmp_path, monkeypa
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "gpt-5"}), stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert probe_runner(profile).status == "blocked_runner_transport"
+    assert probe_runner(profile).status == "turn_ready"
 
 
 def test_live_probe_rejects_generic_luna_alias(tmp_path, monkeypatch):
