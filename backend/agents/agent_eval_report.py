@@ -71,7 +71,8 @@ def _valid_auxiliary_binding(value: dict, checked: dict, expected_ref: dict) -> 
         return False
     for field in ("projectId", "consumerId", "provider", "model", "settingsFingerprint",
                   "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint",
-                  "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint"):
+                  "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint",
+                  "datasetFingerprint", "rubricFingerprint"):
         if identity.get(field) != checked["identity"][field]:
             return False
     if not isinstance(identity.get("sessionId"), str) or not identity["sessionId"]:
@@ -110,13 +111,13 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             identity = {}
         if "sessionId" in value and value.get("sessionId") != identity.get("sessionId"):
             invalid_slot_input = True
-        required = {"projectId", "consumerId", "provider", "model", "settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "taskId", "repeatIndex", "cohort", "sessionId"}
+        required = {"projectId", "consumerId", "provider", "model", "settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "datasetFingerprint", "rubricFingerprint", "taskId", "repeatIndex", "cohort", "sessionId"}
         if not required <= set(identity) or not {"producerId", "sourceSchema", "producerFingerprint", "artifactRef"} <= set(value):
             invalid_slot_input = True
         for field in ("projectId", "consumerId", "provider", "model"):
             if field in identity and identity[field] != checked["identity"][field]:
                 invalid_slot_input = True
-        for field in ("settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint"):
+        for field in ("settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "datasetFingerprint", "rubricFingerprint"):
             if field in identity and identity[field] != checked["identity"][field]:
                 invalid_slot_input = True
         producer_id = value.get("producerId")
