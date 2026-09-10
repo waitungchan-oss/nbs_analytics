@@ -90,10 +90,12 @@ def validate_manifest(value: dict) -> dict:
         _id(identity[key], f"invalid_{key}")
     for key in _FINGERPRINT_FIELDS:
         _fp(identity[key], f"invalid_{key}", 40 if key == "sourceCommit" else 64)
-    if not isinstance(value["caseIds"], list) or len(value["caseIds"]) != 12 or len(set(value["caseIds"])) != 12:
+    if not isinstance(value["caseIds"], list) or len(value["caseIds"]) != 12:
         _fail("invalid_case_ids")
     for case_id in value["caseIds"]:
         _id(case_id, "invalid_case_id")
+    if len(set(value["caseIds"])) != 12:
+        _fail("invalid_case_ids")
     splits = value["splits"]
     if not isinstance(splits, dict) or set(splits) != {"dev", "holdout"}:
         _fail("invalid_splits")

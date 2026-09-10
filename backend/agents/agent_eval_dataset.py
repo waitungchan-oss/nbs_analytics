@@ -72,9 +72,11 @@ def validate_dataset(dataset: dict) -> dict:
         _fail("invalid_dataset_schema")
     _id(dataset["datasetId"], "invalid_dataset_id")
     cases = dataset["cases"]
-    if not isinstance(cases, list) or len(cases) != 12 or len({case.get("id") for case in cases if isinstance(case, dict)}) != 12:
+    if not isinstance(cases, list) or len(cases) != 12:
         _fail("invalid_case_count")
     validated = [_validate_case(case) for case in cases]
+    if len({case["id"] for case in validated}) != 12:
+        _fail("invalid_case_count")
     if sum(case["split"] == "dev" for case in validated) != 4 or sum(case["split"] == "holdout" for case in validated) != 8:
         _fail("invalid_split_counts")
     _hash(dataset["datasetFingerprint"])
