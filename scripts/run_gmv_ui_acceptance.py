@@ -30,6 +30,24 @@ _PRODUCTION_MARKERS = (
 )
 
 
+def _temporary_roots() -> set[Path]:
+    candidates = [tempfile.gettempdir(), os.environ.get("TMPDIR")]
+    if os.name != "nt":
+        candidates.extend(("/tmp", "/private/tmp"))
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if runner_temp:
+        candidates.append(runner_temp)
+    roots: set[Path] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            roots.add(Path(candidate).expanduser().resolve())
+        except OSError:
+            continue
+    return roots
+
+
 def _validate_target(url: str, fixture_root: str | Path) -> Path:
     """Validate an HTTP target and a temporary fixture root."""
     if not url.startswith(("http://", "https://")):
@@ -38,11 +56,7 @@ def _validate_target(url: str, fixture_root: str | Path) -> Path:
     normalized = str(root).lower()
     if any(marker in normalized for marker in _PRODUCTION_MARKERS):
         raise ValueError("production database/cache paths are not allowed")
-    temporary_roots = {Path(tempfile.gettempdir()).resolve()}
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    if runner_temp:
-        temporary_roots.add(Path(runner_temp).expanduser().resolve())
-    if not any(root == candidate or candidate in root.parents for candidate in temporary_roots):
+    if not any(root == candidate or candidate in root.parents for candidate in _temporary_roots()):
         raise ValueError("fixture root must be under the system temporary directory")
     return root
 
