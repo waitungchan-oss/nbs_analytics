@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from backend.agents.evidence_models import EvidenceBundle, EvidenceItem
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,17 +94,46 @@ def _sessions_root(tmp_path):
 def _write_session(tmp_path, *, session_id, status, gates=None):
     """Create one session manifest below <tmp>/.nbs_agent_runtime/verification_sessions/."""
     from backend.agents.verification_session import VerificationSession, write_session
+    from backend.agents.verification_chain import git_source_probe
+
+    brief = tmp_path / "docs" / "briefs" / "task.md"
+    contract = tmp_path / "docs" / "agents" / "REVIEW_AGENT_CONTRACT.md"
+    policy = tmp_path / "agent_config" / "token_budgets.json"
+    if not (tmp_path / ".git").exists():
+        brief.parent.mkdir(parents=True, exist_ok=True)
+        brief.write_text("test brief\n", encoding="utf-8")
+        contract.parent.mkdir(parents=True, exist_ok=True)
+        contract.write_text("test review contract\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.email", "tests@example.com"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Acceptance Tests"], cwd=tmp_path, check=True)
+        (tmp_path / ".git" / "info" / "exclude").write_text("*\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-f", "docs/briefs/task.md"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-qm", "test source"], cwd=tmp_path, check=True)
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text("{}\n", encoding="utf-8")
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    source = git_source_probe(
+        tmp_path,
+        brief_path="docs/briefs/task.md",
+        base_sha=base_sha,
+        contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+        policy_path="agent_config/token_budgets.json",
+    )
 
     session = VerificationSession.create(
         project_id="nbs_analytics",
-        base_sha="a" * 40,
-        head_sha="b" * 40,
+        base_sha=base_sha,
+        head_sha=source["head_sha"],
         brief_path="docs/briefs/task.md",
-        brief_fingerprint="c" * 64,
-        worktree_fingerprint="d" * 64,
-        diff_fingerprint="e" * 64,
-        contract_fingerprint="f" * 64,
-        policy_fingerprint="0" * 64,
+        brief_fingerprint=source["brief_fingerprint"],
+        worktree_fingerprint=source["worktree_fingerprint"],
+        diff_fingerprint=source["diff_fingerprint"],
+        contract_fingerprint=source["contract_fingerprint"],
+        policy_fingerprint=source["policy_fingerprint"],
         session_id=session_id,
         status=status,
         gates=gates,
@@ -121,13 +152,50 @@ def _run_cli(tmp_path, *args):
 
     stdout = io.StringIO()
     with contextlib.redirect_stdout(stdout):
-        exit_code = vc.main([*args, "--runtime-root", str(_sessions_root(tmp_path))])
+        exit_code = vc.main(
+            [args[0], "--project-root", str(tmp_path), *args[1:], "--runtime-root", str(_sessions_root(tmp_path))]
+        )
     text = stdout.getvalue()
     try:
         payload = json.loads(text) if text.strip() else None
     except json.JSONDecodeError:
         payload = text
     return exit_code, payload
+
+
+def test_review_inputs_are_bound_to_the_sealed_session(tmp_path):
+    from scripts import verification_chain as verification_chain_cli
+
+    session = _write_session(tmp_path, session_id="s1", status="sealed")
+    args = type("Args", (), {
+        "brief": "docs/briefs/other-task.md",
+        "base": session.base_sha,
+        "head": "WORKTREE",
+    })()
+
+    with pytest.raises(ValueError, match="brief path"):
+        verification_chain_cli._sealed_review_inputs(session, args, tmp_path)
+
+
+def test_review_payload_session_metadata_contains_canonical_source_fingerprint(tmp_path):
+    from backend.agents.review_agent_service import build_review_evidence_payload
+    from backend.agents.verification_session import VerificationSession
+
+    session = _write_session(tmp_path, session_id="s1", status="sealed")
+    payload = build_review_evidence_payload(
+        EvidenceBundle(
+            schema_version="review-evidence-v1",
+            task={"id": "task", "objective": "approved", "scope": [], "forbidden": []},
+            repository={"baseSha": session.base_sha, "headRef": "WORKTREE", "dirtyFiles": []},
+            guardrails={},
+            evidence=(EvidenceItem(kind="diff", source="task.py", content="+change"),),
+        ),
+        context_summary={},
+        verification=[],
+        verification_session={**session.to_dict(), "sourceFingerprint": session.source_fingerprint},
+    )
+
+    assert payload["verificationSession"]["sourceFingerprint"] == session.source_fingerprint
 
 
 def _marker_script(tmp_path, marker):
@@ -173,7 +241,8 @@ def test_cli_status_does_not_select_old_report(tmp_path):
     assert code == 0
     assert result["sessionId"] == "new"
     assert result["status"] == "blocked_runner_transport"
-    assert result["gates"] == {}
+    assert set(result["gates"]) == {"sourceProbeVersion"}
+    assert result["gates"]["sourceProbeVersion"] == "verification-source-probe-v1"
 
 
 def test_cli_status_is_scoped_to_the_requested_session(tmp_path):
@@ -201,12 +270,27 @@ def test_cli_status_missing_session_is_invalid_runtime(tmp_path):
     assert result["status"] == "not_found"
 
 
+def test_cli_review_requires_a_new_session_after_capability_block(tmp_path):
+    session = _write_session(tmp_path, session_id="s1", status="blocked_runner_capability")
+
+    code, result = _run_cli(
+        tmp_path,
+        "run-review",
+        "--session", session.session_id,
+        "--brief", "docs/briefs/task.md",
+    )
+
+    assert code == 5
+    assert "new source-bound session" in str(result)
+
+
 def test_cli_seal_uses_session_subdirectory_under_runtime_root(tmp_path):
+    _write_session(tmp_path, session_id="seed", status="sealed")
     code, result = _run_cli(
         tmp_path,
         "seal",
         "--brief",
-        "docs/briefs/2026-08-28-strict-review-runner-runtime-recovery-brief.md",
+        "docs/briefs/task.md",
         "--base",
         "HEAD",
     )

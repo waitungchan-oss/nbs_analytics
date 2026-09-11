@@ -19,6 +19,7 @@ import pytest
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.verification_session import (
     ALLOWED_SESSION_STATUSES,
+    SOURCE_PROBE_VERSION,
     StaleVerificationSession,
     VerificationSession,
     read_session,
@@ -63,6 +64,7 @@ def test_session_round_trip_has_exact_schema():
     assert restored.source_fingerprint == session.source_fingerprint
     assert restored == session
     assert set(session.to_dict()) == _EXPECTED_KEYS
+    assert session.to_dict()["gates"]["sourceProbeVersion"] == SOURCE_PROBE_VERSION
 
 
 def test_session_from_dict_rejects_non_object():
@@ -123,6 +125,7 @@ def test_allowed_statuses_cover_gate_state_machine():
         "created", "sealed", "review_running", "review_passed",
         "full_verification_passed", "hermes_passed", "complete",
         "blocked_runner_capability", "blocked_runner_transport",
+        "blocked_source_probe",
         "review_changes_required", "context_overflow", "verification_failed",
         "hermes_failed", "stale_source", "invalid_evidence",
     }
@@ -180,7 +183,24 @@ def test_session_assert_fresh_passes_when_source_unchanged():
         brief_fingerprint=session.brief_fingerprint,
         worktree_fingerprint=session.worktree_fingerprint,
         diff_fingerprint=session.diff_fingerprint,
+        contract_fingerprint=session.contract_fingerprint,
+        policy_fingerprint=session.policy_fingerprint,
+        source_probe_version=SOURCE_PROBE_VERSION,
     )
+
+
+def test_session_assert_fresh_rejects_changed_source_probe_version():
+    session = _session()
+    with pytest.raises(StaleVerificationSession, match="sourceProbeVersion"):
+        session.assert_fresh(
+            head_sha=session.head_sha,
+            brief_fingerprint=session.brief_fingerprint,
+            worktree_fingerprint=session.worktree_fingerprint,
+            diff_fingerprint=session.diff_fingerprint,
+            contract_fingerprint=session.contract_fingerprint,
+            policy_fingerprint=session.policy_fingerprint,
+            source_probe_version="verification-source-probe-v2",
+        )
 
 
 def test_session_rejects_changed_worktree():
@@ -191,7 +211,26 @@ def test_session_rejects_changed_worktree():
             brief_fingerprint=session.brief_fingerprint,
             worktree_fingerprint="f" * 64,
             diff_fingerprint=session.diff_fingerprint,
+            contract_fingerprint=session.contract_fingerprint,
+            policy_fingerprint=session.policy_fingerprint,
         )
+
+
+@pytest.mark.parametrize("field", ["contract_fingerprint", "policy_fingerprint"])
+def test_assert_fresh_rejects_changed_policy_identity(field):
+    session = _session()
+    current = {
+        "head_sha": session.head_sha,
+        "brief_fingerprint": session.brief_fingerprint,
+        "worktree_fingerprint": session.worktree_fingerprint,
+        "diff_fingerprint": session.diff_fingerprint,
+        "contract_fingerprint": session.contract_fingerprint,
+        "policy_fingerprint": session.policy_fingerprint,
+    }
+    current[field] = "1" * 64
+
+    with pytest.raises(StaleVerificationSession, match="stale"):
+        session.assert_fresh(**current)
 
 
 def test_assert_fresh_rejects_each_drifted_field():
@@ -203,7 +242,10 @@ def test_assert_fresh_rejects_each_drifted_field():
     ):
         current = {
             key: getattr(session, key)
-            for key in ("head_sha", "brief_fingerprint", "worktree_fingerprint", "diff_fingerprint")
+            for key in (
+                "head_sha", "brief_fingerprint", "worktree_fingerprint", "diff_fingerprint",
+                "contract_fingerprint", "policy_fingerprint",
+            )
         }
         current.update(drifted)
         with pytest.raises(StaleVerificationSession, match="stale"):
@@ -218,6 +260,8 @@ def test_assert_fresh_rejects_invalid_argument_format():
             brief_fingerprint=session.brief_fingerprint,
             worktree_fingerprint=session.worktree_fingerprint,
             diff_fingerprint=session.diff_fingerprint,
+            contract_fingerprint=session.contract_fingerprint,
+            policy_fingerprint=session.policy_fingerprint,
         )
 
 

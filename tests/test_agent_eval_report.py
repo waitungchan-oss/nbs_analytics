@@ -45,6 +45,16 @@ def build_report(manifest, observations, ledgers, quality, diagnostics, **kwargs
                 ledger["identity"]["sessionId"] = session_id
     if quality and "quality_artifact_refs" not in kwargs:
         quality, kwargs["quality_artifact_refs"] = bind(quality, "quality")
+        ledger_sessions = {}
+        for ledger in ledgers:
+            slot = ledger.get("slot") if isinstance(ledger.get("slot"), dict) else ledger
+            ledger_sessions[(slot.get("taskId"), slot.get("repeatIndex"), slot.get("cohort"))] = ledger.get("sessionId")
+        for item in quality:
+            slot = item.get("slot") if isinstance(item.get("slot"), dict) else item
+            session_id = ledger_sessions.get((slot.get("taskId"), slot.get("repeatIndex"), slot.get("cohort")))
+            if session_id:
+                item["sessionId"] = session_id
+                item["identity"]["sessionId"] = session_id
     return _build_report(manifest, observations, ledgers, quality, diagnostics, **kwargs)
 
 
@@ -92,6 +102,45 @@ def test_nested_identity_is_used_for_slot_join():
     assert report["slots"][0]["usage"]["taskTotalTokens"] == 3
 
 
+def test_session_id_falls_back_to_nested_identity_when_top_level_is_null():
+    from backend.agents.agent_eval_report import _session_id, _session_ids_consistent
+
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    observations = [{
+        "identity": {**manifest["identity"], **slot, "sessionId": "nested-session"},
+        "sessionId": None,
+        "callId": "call-1",
+        "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1},
+    }]
+
+    assert _session_id(observations[0]) == "nested-session"
+
+
+def test_session_id_mismatch_is_not_canonical():
+    from backend.agents.agent_eval_report import _session_ids_consistent
+
+    assert not _session_ids_consistent({
+        "sessionId": "top-level-session",
+        "identity": {"sessionId": "nested-session"},
+    })
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"sessionId": 123, "identity": {"sessionId": "nested-session"}},
+        {"sessionId": "top-level-session", "identity": {"sessionId": 123}},
+        {"sessionId": "", "identity": {"sessionId": "nested-session"}},
+        {"sessionId": "top-level-session", "identity": {"sessionId": ""}},
+    ],
+)
+def test_malformed_session_identity_is_not_canonical(value):
+    from backend.agents.agent_eval_report import _session_ids_consistent
+
+    assert not _session_ids_consistent(value)
+
+
 def test_report_builds_paired_off_on_comparisons():
     manifest = _manifest()
     slots = planned_slots(manifest["caseIds"], 3)
@@ -101,6 +150,53 @@ def test_report_builds_paired_off_on_comparisons():
     assert len(report["comparisons"]) == 36
     assert report["comparisons"][0]["eligible"] is True
     assert report["comparisons"][0]["tokenDelta"] == 0
+
+
+def test_same_slot_shared_session_remains_eligible():
+    manifest = _manifest()
+    slot = planned_slots(manifest["caseIds"], 3)[0]
+    session_id = "shared-slot-session"
+    observation = {
+        "schemaVersion": "agent-eval-observation-v1",
+        "identity": {**manifest["identity"], **slot, "sessionId": session_id},
+        "callId": "call-1", "origin": "real", "sessionId": session_id,
+        "producerId": "fixture-v1", "sourceSchema": "fixture-v1",
+        "producerFingerprint": "4" * 64,
+        "artifactRef": {"path": "obs.json", "sha256": "5" * 64},
+        "usage": {"measuredInputTokens": 1, "measuredOutputTokens": 1},
+    }
+    ledger = {**slot, "sessionId": session_id, "terminalState": "completed", "expectedCallIds": ["call-1"]}
+    quality = {**slot, "sessionId": session_id, "checks": {"rubric": "pass"}}
+
+    report = build_report(
+        manifest, [observation], [ledger], [quality], [],
+        observation_artifact_refs=[observation["artifactRef"]],
+    )
+
+    assert report["status"] == "partial"
+    assert report["slots"][0]["usage"]["status"] == "available"
+
+
+def test_cross_slot_session_contamination_invalidates_all_token_comparisons():
+    manifest = _manifest()
+    slots = planned_slots(manifest["caseIds"], 3)
+    ledgers = [
+        {**slot, "sessionId": f"slot-session-{index}", "terminalState": "completed", "expectedCallIds": []}
+        for index, slot in enumerate(slots)
+    ]
+    quality = [
+        {**slot, "sessionId": f"slot-session-{index}", "checks": {"rubric": "pass"}}
+        for index, slot in enumerate(slots)
+    ]
+    clean = build_report(manifest, [], ledgers, quality, [])
+    assert clean["status"] == "available"
+
+    ledgers[1]["sessionId"] = ledgers[0]["sessionId"]
+    contaminated = build_report(manifest, [], ledgers, quality, [])
+
+    assert contaminated["status"] == "invalid"
+    assert not any(item["eligible"] for item in contaminated["comparisons"])
+    assert all(item["tokenDelta"] is None for item in contaminated["comparisons"])
 
 
 def test_duplicate_ledger_slot_invalidates_report():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.agents.verification_session import VerificationSession
+from backend.agents.verification_session import SOURCE_PROBE_VERSION, VerificationSession
 from scripts.verification_chain_benchmark import benchmark_session
 
 
@@ -46,12 +46,26 @@ def _report() -> dict:
     }
 
 
+def _fresh_probe(session: VerificationSession):
+    def probe() -> dict:
+        return {
+            "head_sha": session.head_sha,
+            "brief_fingerprint": session.brief_fingerprint,
+            "worktree_fingerprint": session.worktree_fingerprint,
+            "diff_fingerprint": session.diff_fingerprint,
+            "contract_fingerprint": session.contract_fingerprint,
+            "policy_fingerprint": session.policy_fingerprint,
+            "source_probe_version": SOURCE_PROBE_VERSION,
+        }
+    return probe
+
+
 def _completed_chain(tmp_path: Path):
     from backend.agents.verification_chain import VerificationChain
 
     session = _session()
     directory = tmp_path / ".nbs_agent_runtime" / "verification_sessions" / session.session_id
-    chain = VerificationChain.seal(session, runtime_root=directory)
+    chain = VerificationChain.seal(session, runtime_root=directory, source_probe=_fresh_probe(session))
     chain.run_pre_review([_command()])
     chain.run_strict_review(runner=lambda _: _report())
     chain.run_full_verification([_command()])
@@ -88,7 +102,7 @@ def test_benchmark_preserves_blocked_status_without_mutating_session(tmp_path):
 
     session = _session()
     directory = tmp_path / ".nbs_agent_runtime" / "verification_sessions" / session.session_id
-    chain = VerificationChain.seal(session, runtime_root=directory)
+    chain = VerificationChain.seal(session, runtime_root=directory, source_probe=_fresh_probe(session))
     chain.run_pre_review([_command()])
     chain.run_strict_review(capability="blocked_runner_capability", runner=lambda _: _report())
 

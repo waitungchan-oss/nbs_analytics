@@ -10,6 +10,7 @@ from typing import Any
 
 from .agent_eval_manifest import planned_slots, validate_manifest
 from .agent_eval_statistics import latency_summary, task_usage
+from .session_binding import binding_record_fingerprint, validate_session_bindings
 
 
 SCHEMA = "agent-eval-report-v1"
@@ -77,7 +78,11 @@ def _valid_auxiliary_binding(value: dict, checked: dict, expected_ref: dict) -> 
             return False
     if not isinstance(identity.get("sessionId"), str) or not identity["sessionId"]:
         return False
-    if "sessionId" in value and value.get("sessionId") != identity["sessionId"]:
+    if (
+        isinstance(value.get("sessionId"), str)
+        and value.get("sessionId")
+        and value.get("sessionId") != identity["sessionId"]
+    ):
         return False
     producer_id = value.get("producerId")
     producer = checked["producerRegistry"].get(producer_id)
@@ -86,15 +91,42 @@ def _valid_auxiliary_binding(value: dict, checked: dict, expected_ref: dict) -> 
             and value.get("producerFingerprint") == producer["producerFingerprint"])
 
 
-def _register_session(registry: dict, session: str, key: tuple, role: str) -> bool:
-    owner = registry.get(session)
-    if owner is None:
-        registry[session] = [key, {role}]
-        return True
-    if owner[0] != key or role in owner[1]:
+def _session_id(value: dict) -> object:
+    identity = value.get("identity") if isinstance(value.get("identity"), dict) else {}
+    top_level = value.get("sessionId")
+    return top_level if isinstance(top_level, str) and top_level else identity.get("sessionId")
+
+
+def _session_ids_consistent(value: dict) -> bool:
+    identity = value.get("identity") if isinstance(value.get("identity"), dict) else {}
+    top_level = value.get("sessionId")
+    nested = identity.get("sessionId")
+    if top_level is not None and (not isinstance(top_level, str) or not top_level):
         return False
-    owner[1].add(role)
-    return True
+    if nested is not None and (not isinstance(nested, str) or not nested):
+        return False
+    return not (
+        isinstance(top_level, str) and top_level
+        and isinstance(nested, str) and nested
+        and top_level != nested
+    )
+
+
+def _slot_id(key: tuple) -> str:
+    return f"{key[0]}/{key[1]}/{key[2]}"
+
+
+def _append_binding(bindings: list[dict], key: tuple, session_id: object, role: str, record: dict) -> None:
+    try:
+        record_fingerprint = binding_record_fingerprint(record, role=role)
+    except (TypeError, ValueError):
+        record_fingerprint = ""
+    bindings.append({
+        "slotId": _slot_id(key),
+        "sessionId": session_id,
+        "role": role,
+        "recordFingerprint": record_fingerprint,
+    })
 
 
 def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], quality: list[dict], diagnostics: list[dict], *, observation_artifact_refs: list[dict] | None = None, ledger_artifact_refs: list[dict] | None = None, quality_artifact_refs: list[dict] | None = None) -> dict:
@@ -113,19 +145,21 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
     slots = planned_slots(checked["caseIds"], checked["repeatCount"])
     slot_keys = {_key(slot) for slot in slots}
     observation_map = defaultdict(list)
+    bindings: list[dict] = []
+    observation_binding_groups = defaultdict(list)
     invalid_slot_input = observation_refs_missing
     for index, value in enumerate(observations):
         if not isinstance(value, dict):
             raise ValueError("invalid_observation")
         identity = value.get("identity")
+        if not _session_ids_consistent(value):
+            invalid_slot_input = True
         canonical_observation = value.get("schemaVersion") == "agent-eval-observation-v1"
         if not canonical_observation:
             invalid_slot_input = True
         if not isinstance(identity, dict):
             invalid_slot_input = True
             identity = {}
-        if "sessionId" in value and value.get("sessionId") != identity.get("sessionId"):
-            invalid_slot_input = True
         required = {"projectId", "consumerId", "provider", "model", "settingsFingerprint", "sourceCommit", "dirtyFingerprint", "workloadFingerprint", "catalogFingerprint", "policyFingerprint", "allowedFilesFingerprint", "commandsFingerprint", "datasetFingerprint", "rubricFingerprint", "taskId", "repeatIndex", "cohort", "sessionId"}
         if not required <= set(identity) or not {"producerId", "sourceSchema", "producerFingerprint", "artifactRef"} <= set(value):
             invalid_slot_input = True
@@ -160,7 +194,6 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         invalid_slot_input = invalid_slot_input or key not in slot_keys
         observation_map[key].append(copy.deepcopy(value))
     observation_call_ids = set()
-    session_registry = {}
     observation_duplicate = False
     observation_mixed_provenance = False
     origins = set()
@@ -174,10 +207,11 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             if call_id in observation_call_ids:
                 observation_duplicate = True
             observation_call_ids.add(call_id)
-            session_id = value.get("sessionId") or (value.get("identity") or {}).get("sessionId")
-            if session_id is not None:
-                if not _register_session(session_registry, session_id, key, "observation"):
-                    invalid_slot_input = True
+            session_id = _session_id(value)
+            if isinstance(session_id, str) and session_id:
+                observation_binding_groups[(key, session_id)].append(value)
+            else:
+                _append_binding(bindings, key, session_id, "observation", value)
             origin = value.get("origin")
             if origin not in _VALID_OBSERVATION_ORIGINS:
                 invalid_slot_input = True
@@ -185,6 +219,12 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
             local_origins.add(origin)
         observation_mixed_provenance = observation_mixed_provenance or len(local_origins) > 1
     observation_mixed_provenance = observation_mixed_provenance or len(origins) > 1
+    for (key, session_id), records in observation_binding_groups.items():
+        ordered_records = sorted(
+            records,
+            key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
+        )
+        _append_binding(bindings, key, session_id, "observation", {"records": ordered_records})
     ledger_map = {}
     quality_map = {}
     duplicate_slot = False
@@ -194,33 +234,29 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         invalid_slot_input = True
     for index, value in enumerate(ledgers):
         if isinstance(value, dict):
+            if not _session_ids_consistent(value):
+                invalid_slot_input = True
             if ledger_artifact_refs is not None and not _valid_auxiliary_binding(value, checked, ledger_artifact_refs[index]):
                 invalid_slot_input = True
             key = _key(value)
             invalid_slot_input = invalid_slot_input or key not in slot_keys
             duplicate_slot = duplicate_slot or key in ledger_map
-            session = value.get("sessionId")
-            if session is not None:
-                if not isinstance(session, str) or not session:
-                    raise ValueError("invalid_session_id")
-                if not _register_session(session_registry, session, key, "ledger"):
-                    invalid_slot_input = True
+            session = _session_id(value)
+            _append_binding(bindings, key, session, "ledger", value)
             ledger_map[key] = value
         else:
             raise ValueError("invalid_ledger")
     for index, value in enumerate(quality):
         if isinstance(value, dict):
+            if not _session_ids_consistent(value):
+                invalid_slot_input = True
             if quality_artifact_refs is not None and not _valid_auxiliary_binding(value, checked, quality_artifact_refs[index]):
                 invalid_slot_input = True
             key = _key(value)
             invalid_slot_input = invalid_slot_input or key not in slot_keys
             duplicate_slot = duplicate_slot or key in quality_map
-            session = value.get("sessionId")
-            if session is not None:
-                if not isinstance(session, str) or not session:
-                    raise ValueError("invalid_session_id")
-                if not _register_session(session_registry, session, key, "quality"):
-                    invalid_slot_input = True
+            session = _session_id(value)
+            _append_binding(bindings, key, session, "quality", value)
             quality_map[key] = value
         else:
             raise ValueError("invalid_quality")
@@ -236,12 +272,14 @@ def build_report(manifest: dict, observations: list[dict], ledgers: list[dict], 
         row = {**slot, "terminalState": status, "usage": usage, "quality": _slot_quality(status, quality_map.get(key)),
                "ledgerPresent": ledger is not None, "qualityPresent": key in quality_map}
         if calls and isinstance(ledger, dict):
-            ledger_session = ledger.get("sessionId")
+            ledger_session = _session_id(ledger)
             for call in calls:
-                call_session = call.get("sessionId") or (call.get("identity") or {}).get("sessionId")
+                call_session = _session_id(call)
                 if ledger_session is not None and call_session != ledger_session:
                     invalid_slot_input = True
         slot_rows.append(row)
+    if validate_session_bindings(bindings):
+        invalid_slot_input = True
     terminal = [row["terminalState"] for row in slot_rows]
     q = [row["quality"] for row in slot_rows]
     report_status = "available" if not duplicate_slot and all(

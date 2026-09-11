@@ -42,6 +42,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.agents.agent_runtime import SubprocessAgentRunner
 from backend.agents.context_agent_service import context_summary_from_evidence_payload
 from backend.agents.evidence_collector import EvidenceCollector, EvidencePolicy
+from backend.agents.evidence_collector import normalize_review_head_ref
 from backend.agents.implementation_models import ImplementationTaskContract
 from backend.agents.review_agent_service import (
     merge_review_batches,
@@ -53,6 +54,7 @@ from backend.agents.review_runner_profile import (
     load_runner_profile,
     probe_runner,
 )
+from backend.agents.release_readiness import classify_acceptance_stage
 from backend.agents.verification_chain import (
     InvalidGateTransition,
     VerificationChain,
@@ -63,6 +65,7 @@ from backend.agents.strict_review_preflight_models import validate_preflight_res
 from backend.agents.verification_session import (
     StaleVerificationSession,
     VerificationSession,
+    read_session,
 )
 
 DEFAULT_SESSIONS_ROOT = PROJECT_ROOT / ".nbs_agent_runtime" / "verification_sessions"
@@ -173,11 +176,57 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_chain(session_id: str, runtime_root: str):
+def _load_chain(session_id: str, runtime_root: str, project_root: Path):
     try:
-        return VerificationChain.load(session_id, runtime_root=runtime_root)
+        project_root = project_root.resolve()
+        sessions_root = Path(runtime_root).resolve()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", session_id):
+            raise ValueError("session id is not a safe path component")
+        session_path = (sessions_root / session_id / "session.json").resolve()
+        try:
+            session_path.relative_to(sessions_root)
+        except ValueError as exc:
+            raise ValueError("session path escapes the configured runtime root") from exc
+        session = read_session(session_path)
+        brief = (project_root / session.brief_path).resolve()
+        brief.relative_to(project_root)
+
+        def probe() -> dict:
+            return git_source_probe(
+                project_root,
+                brief_path=session.brief_path,
+                base_sha=session.base_sha,
+                head_ref="WORKTREE",
+                contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+                policy_path="agent_config/token_budgets.json",
+            )
+
+        return VerificationChain.load(
+            session_id, runtime_root=runtime_root, source_probe=probe
+        )
     except (FileNotFoundError, ValueError, PermissionError, OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"session {session_id!r} is unavailable: {exc}") from exc
+
+
+def _sealed_review_inputs(session: VerificationSession, args, project_root: Path) -> tuple[str, str, str]:
+    """Return review inputs derived from, and bound to, the sealed session."""
+    if args.brief != session.brief_path:
+        raise ValueError("review brief path does not match the sealed session")
+    base_sha = _resolve_sha(project_root, args.base)
+    if base_sha != session.base_sha:
+        raise ValueError("review base does not match the sealed session")
+    head_ref = normalize_review_head_ref(args.head)
+    if head_ref != "WORKTREE":
+        raise ValueError("review head must be WORKTREE for a sealed session")
+    return session.brief_path, session.base_sha, "WORKTREE"
+
+
+def _assert_review_bundle_bound(session: VerificationSession, bundle) -> None:
+    repository = bundle.repository
+    if repository.get("baseSha") != session.base_sha:
+        raise ValueError("review evidence base does not match the sealed session")
+    if normalize_review_head_ref(repository.get("headRef")) != "WORKTREE":
+        raise ValueError("review evidence head does not match the sealed session")
 
 
 def _resolve_sha(project_root: Path, ref: str) -> str:
@@ -313,7 +362,12 @@ def cmd_seal(args) -> int:
 
     def probe() -> dict:
         return git_source_probe(
-            project_root, brief_path=args.brief, base_sha=base_sha, head_ref=args.head
+            project_root,
+            brief_path=args.brief,
+            base_sha=base_sha,
+            head_ref=args.head,
+            contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+            policy_path="agent_config/token_budgets.json",
         )
 
     current = probe()
@@ -355,12 +409,14 @@ def cmd_seal(args) -> int:
 def cmd_run_review(args) -> int:
     project_root = Path(args.project_root)
     try:
-        chain = _load_chain(args.session, args.runtime_root)
+        chain = _load_chain(args.session, args.runtime_root, project_root)
     except ValueError as exc:
         return _emit_error(str(exc), session_id=args.session)
-    if chain.session.status not in {"sealed", "blocked_runner_capability", "blocked_runner_transport"}:
+    if chain.session.status not in {"sealed", "blocked_runner_transport"}:
         return _emit_error(
-            f"run-review requires a sealed session; current status is {chain.session.status}",
+            "run-review requires a sealed or transport-blocked session; "
+            f"current status is {chain.session.status}; create a new source-bound session "
+            "after capability repair",
             session_id=args.session,
         )
     try:
@@ -370,16 +426,23 @@ def cmd_run_review(args) -> int:
                 validate_preflight_for_session(args.preflight, source_fingerprint=chain.session.source_fingerprint)
             except ValueError as exc:
                 return _emit_error(str(exc), status="invalid_evidence", session_id=args.session)
-        brief = (project_root / args.brief).resolve()
+        try:
+            brief_path, base_ref, head_ref = _sealed_review_inputs(
+                chain.session, args, project_root
+            )
+        except (ValueError, OSError) as exc:
+            return _emit_error(str(exc), status="invalid_evidence", session_id=args.session)
+        brief = (project_root / brief_path).resolve()
         if not brief.is_file():
-            return _emit_error(f"brief not found: {args.brief}", status="invalid_evidence", session_id=args.session)
+            return _emit_error(f"brief not found: {brief_path}", status="invalid_evidence", session_id=args.session)
         policy.resolve_read_path(brief)
         bundle = EvidenceCollector(project_root, policy=policy).collect_review(
             brief,
-            base_ref=args.base,
-            head_ref=args.head,
+            base_ref=base_ref,
+            head_ref=head_ref,
             preserve_dirty_paths=tuple(args.preserve_dirty_path),
         )
+        _assert_review_bundle_bound(chain.session, bundle)
         if args.task_contract:
             bundle = replace(
                 bundle,
@@ -411,10 +474,12 @@ def cmd_run_review(args) -> int:
         if runner_identity is not None:
             chain.bind_runner_identity(runner_identity)
 
-        pre = chain.run_pre_review(verification)
-        if pre.status != "sealed":
-            _emit(pre.to_dict())
-            return exit_code_for_status(pre.status)
+        pre = chain.session.gates.get("preReview")
+        if not isinstance(pre, dict) or pre.get("gateStatus") != "pass":
+            pre_result = chain.run_pre_review(verification)
+            if pre_result.status != "sealed":
+                _emit(pre_result.to_dict())
+                return exit_code_for_status(pre_result.status)
 
         instructions = (project_root / "docs/agents/REVIEW_AGENT_CONTRACT.md").read_text(
             encoding="utf-8"
@@ -435,6 +500,21 @@ def cmd_run_review(args) -> int:
                     output_token_limit=policy.review_output_tokens,
                     memory_hub_evidence=memory_evidence,
                     runner_diagnostics=diagnostics,
+                    verification_session={
+                        **session.to_dict(),
+                        "sourceFingerprint": session.source_fingerprint,
+                    },
+                    runner_capability=(
+                        capability.to_dict() if capability is not None else None
+                    ),
+                    source_probe=lambda: git_source_probe(
+                        project_root,
+                        brief_path=session.brief_path,
+                        base_sha=session.base_sha,
+                        head_ref="WORKTREE",
+                        contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+                        policy_path="agent_config/token_budgets.json",
+                    ),
                 )
                 for batch in batches
             ]
@@ -455,9 +535,24 @@ def cmd_run_review(args) -> int:
 
 def cmd_run_preflight(args) -> int:
     from scripts.strict_review_evidence_preflight import main as preflight_main
+    project_root = Path(args.project_root)
+    try:
+        chain = _load_chain(args.session, args.runtime_root, project_root)
+    except ValueError as exc:
+        return _emit_error(str(exc), session_id=args.session)
+    freshness_result = chain.check_source_freshness(gate="pre_review")
+    if freshness_result is not None:
+        _emit(freshness_result.to_dict())
+        return exit_code_for_status(freshness_result.status)
+    source_fingerprint = chain.session.source_fingerprint
+    if args.source_fingerprint and args.source_fingerprint != source_fingerprint:
+        return _emit_error(
+            "preflight source fingerprint does not match the sealed session",
+            status="stale_source",
+            session_id=args.session,
+        )
     forwarded = ["--project-root", args.project_root, "--session", args.session]
-    if args.source_fingerprint:
-        forwarded += ["--source-fingerprint", args.source_fingerprint]
+    forwarded += ["--source-fingerprint", source_fingerprint]
     if args.output:
         forwarded += ["--output", args.output]
     if args.strict:
@@ -468,7 +563,7 @@ def cmd_run_preflight(args) -> int:
 def cmd_run_full(args) -> int:
     project_root = Path(args.project_root)
     try:
-        chain = _load_chain(args.session, args.runtime_root)
+        chain = _load_chain(args.session, args.runtime_root, project_root)
     except ValueError as exc:
         return _emit_error(str(exc), session_id=args.session)
     if chain.session.status != "review_passed":
@@ -490,7 +585,7 @@ def cmd_run_full(args) -> int:
 def cmd_run_hermes(args) -> int:
     project_root = Path(args.project_root)
     try:
-        chain = _load_chain(args.session, args.runtime_root)
+        chain = _load_chain(args.session, args.runtime_root, project_root)
     except ValueError as exc:
         return _emit_error(str(exc), session_id=args.session)
     if chain.session.status not in {"full_verification_passed", "hermes_failed"}:
@@ -572,7 +667,7 @@ def cmd_run_hermes(args) -> int:
 
 def cmd_attest(args) -> int:
     try:
-        chain = _load_chain(args.session, args.runtime_root)
+        chain = _load_chain(args.session, args.runtime_root, Path(args.project_root))
     except ValueError as exc:
         return _emit_error(str(exc), session_id=args.session)
     attestation = chain.attest()
@@ -582,7 +677,7 @@ def cmd_attest(args) -> int:
 
 def cmd_status(args) -> int:
     try:
-        chain = _load_chain(args.session, args.runtime_root)
+        chain = _load_chain(args.session, args.runtime_root, Path(args.project_root))
     except ValueError as exc:
         return _emit_error(str(exc), session_id=args.session, status="not_found")
     terminal = None
@@ -592,13 +687,32 @@ def cmd_status(args) -> int:
             terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             terminal = None
+    session_payload = chain.session.to_dict()
+    session_payload["sourceFingerprint"] = chain.session.source_fingerprint
+    completion_path = chain.session_dir / "completion.json"
+    if completion_path.is_file() and not completion_path.is_symlink():
+        try:
+            completion = json.loads(completion_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            completion = None
+        if isinstance(completion, dict):
+            session_payload["completion"] = completion
+    release = None
+    release_path = chain.session_dir / "release-gate-result.json"
+    if release_path.is_file() and not release_path.is_symlink():
+        try:
+            release = json.loads(release_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            release = None
     _emit({
         "schemaVersion": "verification-status-v1",
         "sessionId": chain.session_id,
         "status": chain.session.status,
+        "acceptanceStage": classify_acceptance_stage(session_payload, release),
         "sourceFingerprint": chain.session.source_fingerprint,
         "gates": chain.session.gates,
         "terminal": terminal,
+        "session": session_payload,
     })
     return 0
 
