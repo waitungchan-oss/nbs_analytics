@@ -376,7 +376,7 @@ def start_services(project_root: Path = PROJECT_ROOT, open_browser: bool = True,
         record = services[name]
         if not wait_for_ready(spec, record["pid"]):
             print(f"[ERROR] {name} did not become ready. Log: {record['logPath']}")
-            stop_services(project_root)
+            stop_services(project_root, profile=profile)
             return 1
         print(f"[READY] {name}: {spec['ready_url']}")
 
@@ -414,12 +414,32 @@ def _terminate_pid(pid: int) -> None:
             pass
 
 
-def stop_services(project_root: Path = PROJECT_ROOT) -> int:
-    runtime_dir = project_root / ".nbs_runtime"
+def stop_services(project_root: Path = PROJECT_ROOT, *, profile=None) -> int:
+    python_bin, npm_bin = _resolve_runtime(project_root)
+    profile_ports = dict(profile.services.ports) if profile is not None else None
+    profile_id = profile.profile_id if profile is not None else None
+    specs = build_service_specs(project_root, python_bin, npm_bin, ports=profile_ports, profile_id=profile_id)
+    runtime_dir = (
+        project_root / ".nbs_agent_runtime" / "verification" / profile.profile_id
+        if profile is not None else project_root / ".nbs_runtime"
+    )
     state = read_state(runtime_dir)
     for name, record in (state.get("services") or {}).items():
         pid = record.get("pid")
-        if process_is_alive(pid):
+        managed = process_is_alive(pid)
+        if profile is not None:
+            managed = managed and record.get("profileId") == profile.profile_id
+            spec = specs.get(name)
+            managed = managed and spec is not None
+            if managed:
+                managed = _command_matches_service(
+                    name,
+                    _process_command(pid),
+                    spec,
+                    project_root,
+                    process_cwd=_process_cwd(pid),
+                )
+        if managed:
             print(f"[STOP] {name} pid={pid}")
             _terminate_pid(int(pid))
     write_state({"status": "stopped", "services": {}}, runtime_dir)
@@ -597,7 +617,7 @@ def main() -> int:
     if args.action == "start":
         return start_services(open_browser=not args.no_browser, profile=profile)
     if args.action == "stop":
-        return stop_services()
+        return stop_services(profile=profile)
     if args.action == "status":
         result = service_status(profile=profile)
     elif args.action == "monitor":

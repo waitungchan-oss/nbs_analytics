@@ -23,6 +23,17 @@ def test_ui_runner_accepts_explicit_ci_runner_temp(monkeypatch, tmp_path):
     assert _validate_target("http://127.0.0.1:8502/", fixture) == fixture.resolve()
 
 
+def test_ui_runner_accepts_posix_tmp_alias_after_canonicalization(monkeypatch, tmp_path):
+    from pathlib import Path
+    from scripts.run_gmv_ui_acceptance import _validate_target
+
+    monkeypatch.delenv("RUNNER_TEMP", raising=False)
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path / "python-temp"))
+    fixture = Path("/tmp") / "nbs-ui-fixture-canonical"
+
+    assert _validate_target("http://127.0.0.1:8502/", fixture) == fixture.resolve()
+
+
 def test_ui_runner_loads_only_bounded_evidence(tmp_path):
     from scripts.run_gmv_ui_acceptance import load_bounded_evidence
 

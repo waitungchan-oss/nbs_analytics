@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 from scripts import system_manager
 
@@ -85,6 +86,35 @@ def test_start_services_accepts_verification_profile_without_using_default_ports
     assert captured["runtime"] == tmp_path / ".nbs_agent_runtime/verification/profile-test"
 
 
+def test_start_services_profile_failure_stops_same_profile(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        profile_id="profile-test",
+        services=SimpleNamespace(ports={"api": 18601, "streamlit": 18502, "vue": 15173}),
+    )
+    captured = {}
+    monkeypatch.setattr(system_manager, "_resolve_runtime", lambda root: ("python", "npm"))
+    monkeypatch.setattr(system_manager, "preflight", lambda *args: {"ok": True, "issues": []})
+    monkeypatch.setattr(system_manager, "read_state", lambda runtime: {"services": {}})
+    monkeypatch.setattr(system_manager, "write_state", lambda *args: None)
+    monkeypatch.setattr(system_manager, "find_reusable_service_pid", lambda *args: None)
+    monkeypatch.setattr(
+        system_manager,
+        "_spawn_service",
+        lambda *args: {"pid": 1, "logPath": str(tmp_path / "service.log")},
+    )
+    monkeypatch.setattr(system_manager, "wait_for_ready", lambda *args: False)
+    monkeypatch.setattr(
+        system_manager,
+        "stop_services",
+        lambda *args, **kwargs: captured.update(args=args, kwargs=kwargs) or 0,
+    )
+
+    assert system_manager.start_services(tmp_path, open_browser=False, profile=profile) == 1
+    assert captured == {"args": (tmp_path,), "kwargs": {"profile": profile}}
+
+
 def test_service_status_profile_rejects_missing_managed_pid(monkeypatch, tmp_path):
     from types import SimpleNamespace
     profile = SimpleNamespace(profile_id="profile-test", git_head="a" * 40, project_id="nbs_analytics", services=SimpleNamespace(profile_namespace="profile-test", ports={"api": 18601, "streamlit": 18502, "vue": 15173}))
@@ -163,3 +193,61 @@ def test_vue_command_matching_uses_frontend_working_directory(tmp_path):
 def test_parser_accepts_verification_profile_option():
     args = system_manager.build_parser().parse_args(["acceptance", "--verification-profile", "profile.json"])
     assert args.verification_profile == "profile.json"
+
+
+def test_stop_services_profile_stops_only_matching_profile_processes(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        profile_id="profile-test",
+        services=SimpleNamespace(ports={"api": 18601, "streamlit": 18502, "vue": 15173}),
+    )
+    specs = system_manager.build_service_specs(
+        tmp_path, "python", "npm", ports=dict(profile.services.ports), profile_id=profile.profile_id
+    )
+    state = {
+        "status": "ready",
+        "services": {
+            "streamlit": {"pid": 101, "profileId": "profile-test"},
+            "api": {"pid": 102, "profileId": "other-profile"},
+            "vue": {"pid": 103, "profileId": "profile-test"},
+        },
+    }
+    captured = {}
+    commands = {
+        101: "python -m streamlit run app.py --server.port 18502",
+        102: "python -m uvicorn backend.main:app --port 18601",
+        103: "npm run dev --host 127.0.0.1 --port 15173",
+    }
+    monkeypatch.setattr(system_manager, "read_state", lambda runtime: state)
+    monkeypatch.setattr(system_manager, "process_is_alive", lambda pid: True)
+    monkeypatch.setattr(system_manager, "_process_command", lambda pid: commands[pid])
+    monkeypatch.setattr(
+        system_manager,
+        "_process_cwd",
+        lambda pid: tmp_path / "frontend" if pid == 103 else tmp_path,
+    )
+    monkeypatch.setattr(system_manager, "_terminate_pid", lambda pid: captured.setdefault("terminated", []).append(pid))
+    monkeypatch.setattr(system_manager, "write_state", lambda value, runtime: captured.update(state=value, runtime=runtime))
+
+    assert system_manager.stop_services(tmp_path, profile=profile) == 0
+    assert captured["terminated"] == [101, 103]
+    assert captured["runtime"] == tmp_path / ".nbs_agent_runtime" / "verification" / "profile-test"
+    assert captured["state"] == {"status": "stopped", "services": {}}
+
+
+def test_cli_stop_passes_verification_profile_to_stop_services(monkeypatch):
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(profile_id="profile-test")
+    captured = {}
+    monkeypatch.setattr(sys, "argv", ["system_manager.py", "stop", "--verification-profile", "profile.json"])
+    monkeypatch.setattr(system_manager, "_load_verification_profile", lambda value: profile)
+    monkeypatch.setattr(
+        system_manager,
+        "stop_services",
+        lambda **kwargs: captured.update(kwargs) or 0,
+    )
+
+    assert system_manager.main() == 0
+    assert captured == {"profile": profile}
