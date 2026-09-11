@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.acceptance_telemetry import build_gate_telemetry
 
 
 _TAIL = 4000
@@ -54,6 +56,7 @@ def run_hermes_gate(
     if command is None and skip_system_acceptance:
         argv.insert(-1, "--skip-system-acceptance")
     started = _timestamp()
+    monotonic_started = time.perf_counter()
     status = "FAIL"
     report: dict = {}
     metadata: dict = {"commandId": "hermes-post-change", "argv": _safe_argv(argv), "readOnly": True, "exitCode": None}
@@ -93,7 +96,16 @@ def run_hermes_gate(
         "schemaVersion": "hermes-gate-v1", "gate": "hermes", "status": status,
         "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,
         "startedAt": started, "finishedAt": _timestamp(), "result": result,
-        "metadata": {**metadata, "stdoutTail": stdout[-_TAIL:], "stderrTail": stderr[-_TAIL:]},
+        "metadata": {
+            **metadata,
+            "stdoutTail": stdout[-_TAIL:],
+            "stderrTail": stderr[-_TAIL:],
+            "telemetry": build_gate_telemetry(
+                duration_seconds=time.perf_counter() - monotonic_started,
+                failure_code=metadata.get("failureCode"),
+                blocked_reason=metadata.get("failureCode") if status == "BLOCKED" else None,
+            ),
+        },
     }
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 

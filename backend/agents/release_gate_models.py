@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from backend.agents.acceptance_telemetry import validate_gate_telemetry
 from backend.agents.evidence_models import canonical_fingerprint
 
 
@@ -58,6 +59,15 @@ def _scan(value: Any, field: str = "payload") -> None:
 
 def _unsigned(value: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value[key] for key in value if key != "evidenceFingerprint"}
+
+
+def _validate_optional_gate_telemetry(metadata: Mapping[str, Any]) -> None:
+    if "telemetry" not in metadata:
+        return
+    try:
+        validate_gate_telemetry(metadata["telemetry"])
+    except (TypeError, ValueError) as exc:
+        raise ReleaseGateValidationError(f"telemetry is invalid: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -140,6 +150,7 @@ def validate_release_gate_evidence(
         raise ReleaseGateValidationError("source mismatch")
     if not isinstance(payload["result"], dict) or not isinstance(payload["metadata"], dict):
         raise ReleaseGateValidationError("result or metadata schema is invalid")
+    _validate_optional_gate_telemetry(payload["metadata"])
     started = _parse_time(payload["startedAt"], "startedAt")
     finished = _parse_time(payload["finishedAt"], "finishedAt")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -182,6 +193,19 @@ def aggregate_release_gates(
         "gates": {gate: {"status": item.status, "evidenceFingerprint": item.fingerprint} for gate, item in children.items()},
         "freshness": {"status": "fresh", "maxAgeSeconds": _MAX_AGE_SECONDS, "agesSeconds": ages},
     }
+    durations = {
+        gate: float(child.metadata["telemetry"]["durationSeconds"])
+        for gate, child in children.items()
+        if "telemetry" in child.metadata
+    }
+    if durations:
+        earliest = min(_parse_time(child.started_at, "startedAt") for child in children.values())
+        latest = max(_parse_time(child.finished_at, "finishedAt") for child in children.values())
+        unsigned["freshness"]["telemetry"] = {
+            "childDurationsSeconds": durations,
+            "totalWallDurationSeconds": max(0.0, round((latest - earliest).total_seconds(), 6)),
+            "slowestGate": max(durations, key=durations.get),
+        }
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
 
@@ -200,6 +224,25 @@ def validate_release_gate_aggregate(payload: Mapping[str, Any], expected_commit_
             raise ReleaseGateValidationError(f"aggregate gate {gate} is invalid")
     if not isinstance(payload["freshness"], dict) or payload["freshness"].get("status") != "fresh":
         raise ReleaseGateValidationError("aggregate freshness is invalid")
+    aggregate_telemetry = payload["freshness"].get("telemetry")
+    if aggregate_telemetry is not None:
+        if not isinstance(aggregate_telemetry, dict) or set(aggregate_telemetry) != {
+            "childDurationsSeconds", "totalWallDurationSeconds", "slowestGate",
+        }:
+            raise ReleaseGateValidationError("aggregate telemetry is invalid")
+        durations = aggregate_telemetry["childDurationsSeconds"]
+        if not isinstance(durations, dict) or not durations or set(durations) - set(GATES):
+            raise ReleaseGateValidationError("aggregate telemetry durations are invalid")
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+            for value in durations.values()
+        ):
+            raise ReleaseGateValidationError("aggregate telemetry durations are invalid")
+        total = aggregate_telemetry["totalWallDurationSeconds"]
+        if isinstance(total, bool) or not isinstance(total, (int, float)) or total < 0:
+            raise ReleaseGateValidationError("aggregate telemetry duration is invalid")
+        if aggregate_telemetry["slowestGate"] not in durations:
+            raise ReleaseGateValidationError("aggregate telemetry slowest gate is invalid")
     _scan(payload)
     if canonical_fingerprint(_unsigned(payload)) != payload["evidenceFingerprint"]:
         raise ReleaseGateValidationError("aggregate fingerprint mismatch")

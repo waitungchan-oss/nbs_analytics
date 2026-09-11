@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.acceptance_telemetry import build_gate_telemetry
 from scripts.run_gmv_ui_acceptance import _validate_target, load_bounded_evidence, run_ui_acceptance
 
 
@@ -37,6 +39,8 @@ def run_ui_acceptance_gate(
         raise ValueError("commit must be a 40-character SHA")
     if not _SHA64.fullmatch(source_fingerprint):
         raise ValueError("source fingerprint must be a 64-character SHA-256")
+    started = _timestamp()
+    monotonic_started = time.perf_counter()
     root = _validate_target(url, fixture_root)
     evidence_file = Path(evidence_path).expanduser().resolve()
     evidence_file.relative_to(root)
@@ -47,12 +51,21 @@ def run_ui_acceptance_gate(
         raise ValueError("UI evidence source mismatch")
     load_bounded_evidence(evidence_file)
     result = run_ui_acceptance(url=url, fixture_root=root, evidence_path=evidence_file)
+    finished = _timestamp()
     unsigned = {
         "schemaVersion": "ui-acceptance-gate-v1", "gate": "ui_acceptance", "status": result["status"],
         "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,
-        "startedAt": _timestamp(), "finishedAt": _timestamp(),
+        "startedAt": started, "finishedAt": finished,
         "result": {"route": result.get("route"), "httpStatus": result.get("httpStatus"), "evidenceStatus": result.get("evidenceStatus"), "failureReasons": result.get("failureReasons", [])},
-        "metadata": {"commandId": "gmv-ui-acceptance", "httpOnly": True, "temporaryFixture": True},
+        "metadata": {
+            "commandId": "gmv-ui-acceptance",
+            "httpOnly": True,
+            "temporaryFixture": True,
+            "telemetry": build_gate_telemetry(
+                duration_seconds=time.perf_counter() - monotonic_started,
+                failure_code="ui_acceptance_failed" if result["status"] != "PASS" else None,
+            ),
+        },
     }
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 

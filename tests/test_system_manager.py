@@ -236,18 +236,83 @@ def test_stop_services_profile_stops_only_matching_profile_processes(monkeypatch
     assert captured["state"] == {"status": "stopped", "services": {}}
 
 
-def test_cli_stop_passes_verification_profile_to_stop_services(monkeypatch):
+def test_stop_services_report_separates_stopped_and_identity_mismatch(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        profile_id="profile-test",
+        services=SimpleNamespace(ports={"api": 18601, "streamlit": 18502, "vue": 15173}),
+    )
+    state = {
+        "status": "ready",
+        "services": {
+            "streamlit": {"pid": 101, "profileId": "profile-test"},
+            "api": {"pid": 102, "profileId": "other-profile"},
+        },
+    }
+    commands = {
+        101: "python -m streamlit run app.py --server.port 18502",
+        102: "python -m uvicorn backend.main:app --port 18601",
+    }
+    captured = {}
+    monkeypatch.setattr(system_manager, "read_state", lambda runtime: state)
+    monkeypatch.setattr(system_manager, "process_is_alive", lambda pid: True)
+    monkeypatch.setattr(system_manager, "_process_command", lambda pid: commands[pid])
+    monkeypatch.setattr(system_manager, "_process_cwd", lambda pid: tmp_path)
+    monkeypatch.setattr(system_manager, "_terminate_pid", lambda pid: captured.setdefault("terminated", []).append(pid))
+    monkeypatch.setattr(system_manager, "write_state", lambda value, runtime: captured.update(state=value, runtime=runtime))
+
+    report = system_manager.stop_services_report(tmp_path, profile=profile)
+
+    assert report["schemaVersion"] == "service-stop-result-v1"
+    assert report["status"] == "partial"
+    assert report["stopped"] == ["streamlit"]
+    assert report["identityMismatches"] == ["api"]
+    assert captured["terminated"] == [101]
+    assert report["durationSeconds"] >= 0
+
+
+def test_stop_services_int_wrapper_remains_zero(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        profile_id="profile-test",
+        services=SimpleNamespace(ports={"api": 18601, "streamlit": 18502, "vue": 15173}),
+    )
+    monkeypatch.setattr(
+        system_manager,
+        "stop_services_report",
+        lambda *args, **kwargs: {
+            "schemaVersion": "service-stop-result-v1",
+            "status": "clean",
+            "errors": [],
+        },
+    )
+
+    assert system_manager.stop_services(tmp_path, profile=profile) == 0
+
+
+def test_cli_stop_prints_structured_report_and_passes_verification_profile(monkeypatch, capsys):
     from types import SimpleNamespace
 
     profile = SimpleNamespace(profile_id="profile-test")
-    captured = {}
     monkeypatch.setattr(sys, "argv", ["system_manager.py", "stop", "--verification-profile", "profile.json"])
     monkeypatch.setattr(system_manager, "_load_verification_profile", lambda value: profile)
     monkeypatch.setattr(
         system_manager,
-        "stop_services",
-        lambda **kwargs: captured.update(kwargs) or 0,
+        "stop_services_report",
+        lambda **kwargs: {
+            "schemaVersion": "service-stop-result-v1",
+            "profileId": kwargs["profile"].profile_id,
+            "status": "clean",
+            "stopped": [],
+            "alreadyAbsent": [],
+            "skipped": [],
+            "identityMismatches": [],
+            "errors": [],
+            "durationSeconds": 0,
+        },
     )
 
     assert system_manager.main() == 0
-    assert captured == {"profile": profile}
+    assert '"schemaVersion": "service-stop-result-v1"' in capsys.readouterr().out

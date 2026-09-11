@@ -69,6 +69,18 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "python -m http.server" not in ui_block
 
 
+def test_full_pytest_job_uploads_diagnostic_manifest_without_replacing_serial_gate():
+    source = _workflow_text()
+    full_block = source.split("  full-pytest:\n", 1)[1].split("  hermes:\n", 1)[0]
+
+    assert "scripts/pytest_manifest.py" in full_block
+    assert "pytest-manifest.json" in full_block
+    assert "release-gate-pytest-manifest-${{ github.sha }}" in full_block
+    assert "scripts/full_pytest_gate.py" in full_block
+    assert "full-pytest.json" in full_block
+    assert "strategy:" not in full_block
+
+
 def test_release_workflow_cancels_superseded_pr_runs_but_not_release_tags():
     text = _workflow_text()
     assert "concurrency:" in text

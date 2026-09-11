@@ -47,4 +47,41 @@
 - child jobs 使用 setup-python dependency cache；aggregate 只用最小 Python runtime 讀取三份 bounded JSON，不重裝完整 `requirements.txt`。
 - aggregate 以 `if: always()` 收集 child 結果；缺少 artifact 或 identity 不一致時保持 fail closed。
 
+## 本地 Fast Lane（只作開發回饋）
+
+變更後可先用 advisory precheck 縮短回饋時間：
+
+```bash
+python scripts/fast_acceptance_precheck.py \
+  --project-root . \
+  --base-ref origin/main \
+  --output .nbs_agent_runtime/fast-precheck.json
+```
+
+輸出 schema 是 `acceptance-fast-precheck-v1`，固定帶有 `authority=advisory` 與
+`fullGateRequired=true`。它只選取受影響的 deterministic tests；即使回傳 `PASS`，也不能取代
+Full pytest、Hermes、UI acceptance 或 release aggregate。
+
+## Manifest 與 shard prototype 邊界
+
+要觀察 Full pytest 的 collection 成本，可先產生 source-bound manifest：
+
+```bash
+python scripts/pytest_manifest.py \
+  --project-root . \
+  --commit-sha "$(git rev-parse HEAD)" \
+  --source-fingerprint <source-seal-sha256> \
+  --output .nbs_agent_runtime/pytest-manifest.json
+```
+
+`pytest-test-manifest-v1` 只是 nodeid selection evidence，不代表測試通過。`full-pytest-shard-v1`
+與 `full-pytest-shard-aggregate-v1` 目前是 opt-in、diagnostic-only prototype，必須使用每個 shard
+獨立且尚未存在的 temporary fixture root；aggregate 會檢查同一 source／manifest identity、完整
+shard index，以及每個 nodeid exactly once。任何 FAIL、BLOCKED、duplicate、missing 或 unknown
+nodeid 都必須 fail closed。
+
+在 fixture isolation audit、controlled benchmark 與 branch-protection rollout review 完成前，正式
+Full pytest 維持 serial；prototype 不可輸出 `full-pytest-gate-v1`，也不可被
+`release_gate.py` 消費成正式 PASS。
+
 Memory Hub、Memory Sidecar、Governance Graph 和 Agent Operations 只能提供 bounded、read-only、non-authoritative context；它們不能批准、dispatch、改寫 session、改寫正式資料或把 blocked 狀態升格為 release-ready。

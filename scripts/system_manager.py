@@ -414,7 +414,8 @@ def _terminate_pid(pid: int) -> None:
             pass
 
 
-def stop_services(project_root: Path = PROJECT_ROOT, *, profile=None) -> int:
+def stop_services_report(project_root: Path = PROJECT_ROOT, *, profile=None) -> dict:
+    started = time.perf_counter()
     python_bin, npm_bin = _resolve_runtime(project_root)
     profile_ports = dict(profile.services.ports) if profile is not None else None
     profile_id = profile.profile_id if profile is not None else None
@@ -424,26 +425,57 @@ def stop_services(project_root: Path = PROJECT_ROOT, *, profile=None) -> int:
         if profile is not None else project_root / ".nbs_runtime"
     )
     state = read_state(runtime_dir)
+    stopped = []
+    already_absent = []
+    skipped = []
+    identity_mismatches = []
+    errors = []
     for name, record in (state.get("services") or {}).items():
         pid = record.get("pid")
         managed = process_is_alive(pid)
+        if not managed:
+            already_absent.append(name)
+            continue
         if profile is not None:
-            managed = managed and record.get("profileId") == profile.profile_id
+            if record.get("profileId") != profile.profile_id:
+                identity_mismatches.append(name)
+                continue
             spec = specs.get(name)
-            managed = managed and spec is not None
-            if managed:
-                managed = _command_matches_service(
-                    name,
-                    _process_command(pid),
-                    spec,
-                    project_root,
-                    process_cwd=_process_cwd(pid),
-                )
+            if spec is None or not _command_matches_service(
+                name,
+                _process_command(pid),
+                spec,
+                project_root,
+                process_cwd=_process_cwd(pid),
+            ):
+                identity_mismatches.append(name)
+                continue
         if managed:
             print(f"[STOP] {name} pid={pid}")
-            _terminate_pid(int(pid))
+            try:
+                _terminate_pid(int(pid))
+            except (OSError, TypeError, ValueError) as exc:
+                errors.append({"service": name, "reason": type(exc).__name__})
+            else:
+                stopped.append(name)
     write_state({"status": "stopped", "services": {}}, runtime_dir)
-    return 0
+    status = "error" if errors else "partial" if identity_mismatches or skipped else "clean"
+    return {
+        "schemaVersion": "service-stop-result-v1",
+        "profileId": profile_id or "default",
+        "status": status,
+        "stopped": stopped,
+        "alreadyAbsent": already_absent,
+        "skipped": skipped,
+        "identityMismatches": identity_mismatches,
+        "errors": errors,
+        "durationSeconds": round(time.perf_counter() - started, 6),
+    }
+
+
+def stop_services(project_root: Path = PROJECT_ROOT, *, profile=None) -> int:
+    report = stop_services_report(project_root, profile=profile)
+    return 0 if not report["errors"] else 1
 
 
 def service_status(project_root: Path = PROJECT_ROOT, *, profile=None) -> dict:
@@ -617,8 +649,8 @@ def main() -> int:
     if args.action == "start":
         return start_services(open_browser=not args.no_browser, profile=profile)
     if args.action == "stop":
-        return stop_services(profile=profile)
-    if args.action == "status":
+        result = stop_services_report(profile=profile)
+    elif args.action == "status":
         result = service_status(profile=profile)
     elif args.action == "monitor":
         result = monitor_services()

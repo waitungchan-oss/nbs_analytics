@@ -42,10 +42,24 @@ jobs:
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-full-pytest-fixture/upload_coordination.db" >> "$GITHUB_ENV"
+      - name: Collect diagnostic pytest manifest
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          set +e
+          .venv/bin/python scripts/pytest_manifest.py --project-root "$GITHUB_WORKSPACE" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output pytest-manifest.json
+          MANIFEST_EXIT=$?
+          echo "pytest_manifest_exit=$MANIFEST_EXIT"
+          exit 0
       - name: Run full pytest gate with required sandbox
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
           .venv/bin/python scripts/full_pytest_gate.py --sandbox-preflight required --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output full-pytest.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-pytest-manifest-${{ github.sha }}
+          path: pytest-manifest.json
+          if-no-files-found: warn
       - if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
-import tempfile
 from typing import Any, Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -21,6 +19,7 @@ from backend.services.gmv_ui_acceptance_service import (
     _from_mapping,
     validate_ui_acceptance_evidence,
 )
+from backend.agents.acceptance_paths import is_temporary_path, temporary_roots
 
 
 _PRODUCTION_MARKERS = (
@@ -31,21 +30,7 @@ _PRODUCTION_MARKERS = (
 
 
 def _temporary_roots() -> set[Path]:
-    candidates = [tempfile.gettempdir(), os.environ.get("TMPDIR")]
-    if os.name != "nt":
-        candidates.extend(("/tmp", "/private/tmp"))
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    if runner_temp:
-        candidates.append(runner_temp)
-    roots: set[Path] = set()
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            roots.add(Path(candidate).expanduser().resolve())
-        except OSError:
-            continue
-    return roots
+    return set(temporary_roots())
 
 
 def _validate_target(url: str, fixture_root: str | Path) -> Path:
@@ -56,7 +41,7 @@ def _validate_target(url: str, fixture_root: str | Path) -> Path:
     normalized = str(root).lower()
     if any(marker in normalized for marker in _PRODUCTION_MARKERS):
         raise ValueError("production database/cache paths are not allowed")
-    if not any(root == candidate or candidate in root.parents for candidate in _temporary_roots()):
+    if not is_temporary_path(root, _temporary_roots()):
         raise ValueError("fixture root must be under the system temporary directory")
     return root
 

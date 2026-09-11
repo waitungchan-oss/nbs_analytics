@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.acceptance_telemetry import build_gate_telemetry
 from backend.agents.release_gate_models import (
     ReleaseGateValidationError,
     aggregate_release_gates,
@@ -52,6 +53,24 @@ def test_aggregate_is_deterministic_and_requires_all_three_passes():
     assert aggregate_release_gates(blocked, COMMIT, SOURCE, NOW)["status"] == "BLOCKED"
 
 
+def test_aggregate_preserves_legacy_shape_and_adds_optional_telemetry():
+    children = {gate: _evidence(gate) for gate in ("full_pytest", "hermes", "ui_acceptance")}
+    for index, gate in enumerate(children):
+        children[gate]["metadata"]["telemetry"] = build_gate_telemetry(duration_seconds=index + 1)
+        children[gate]["evidenceFingerprint"] = canonical_fingerprint(
+            {key: value for key, value in children[gate].items() if key != "evidenceFingerprint"}
+        )
+
+    aggregate = aggregate_release_gates(children, COMMIT, SOURCE, NOW)
+
+    assert set(aggregate) == {
+        "schemaVersion", "status", "commitSha", "sourceFingerprint",
+        "gates", "freshness", "evidenceFingerprint",
+    }
+    assert aggregate["freshness"]["telemetry"]["slowestGate"] == "ui_acceptance"
+    assert validate_release_gate_aggregate(aggregate, COMMIT, NOW).to_dict() == aggregate
+
+
 @pytest.mark.parametrize(
     "mutation, message",
     [
@@ -96,6 +115,17 @@ def test_evidence_rejects_sensitive_field_names_and_total_payload_over_cap():
     value["metadata"] = {"token": "value"}
     value["evidenceFingerprint"] = canonical_fingerprint({k: v for k, v in value.items() if k != "evidenceFingerprint"})
     with pytest.raises(ReleaseGateValidationError, match="secret"):
+        validate_release_gate_evidence(value, COMMIT, SOURCE, NOW)
+
+
+def test_evidence_rejects_malformed_telemetry():
+    value = _evidence()
+    value["metadata"]["telemetry"] = {"durationSeconds": -1}
+    value["evidenceFingerprint"] = canonical_fingerprint(
+        {key: item for key, item in value.items() if key != "evidenceFingerprint"}
+    )
+
+    with pytest.raises(ReleaseGateValidationError, match="telemetry"):
         validate_release_gate_evidence(value, COMMIT, SOURCE, NOW)
 
     value = _evidence()
