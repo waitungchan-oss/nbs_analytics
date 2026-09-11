@@ -10,6 +10,7 @@ from backend.agents.review_agent_service import (
     build_review_report,
     compact_review_evidence_payload,
     merge_review_batches,
+    plan_review_batches,
     split_review_bundle_by_file,
     validate_context_summary,
 )
@@ -150,6 +151,25 @@ def test_review_payload_has_exact_public_contract():
     assert set(payload["gitDiff"]) == {
         "base", "head", "files", "patches", "truncated", "diffFingerprint",
     }
+
+
+def test_review_payload_can_bind_partial_batch_to_session_and_runner():
+    payload = build_review_evidence_payload(
+        review_bundle(), context_summary=context_summary(), verification=verification(),
+        review_batch={"batchId": "batch-001", "batchCount": 2, "files": ["backend/app.py"]},
+        verification_session={
+            "schemaVersion": "verification-session-v1", "sessionId": "s1",
+            "sourceFingerprint": "a" * 64, "diffFingerprint": "b" * 64,
+        },
+        runner_capability={"schemaVersion": "runner-capability-v1", "status": "turn_ready", "model": "gpt-5.6-luna"},
+    )
+
+    assert payload["reviewBatch"]["batchId"] == "batch-001"
+    assert payload["reviewBatch"]["batchCount"] == 2
+    assert payload["verificationSession"]["sessionId"] == "s1"
+    assert payload["runnerCapability"]["model"] == "gpt-5.6-luna"
+    assert payload["gitDiff"]["sourceFingerprint"] == "a" * 64
+    assert payload["gitDiff"]["sourceDiffFingerprint"] == "b" * 64
 
 
 def test_review_payload_git_diff_fingerprint_is_deterministic_and_content_bound():
@@ -344,6 +364,42 @@ def test_large_review_bundle_splits_only_between_files():
     batches = split_review_bundle_by_file(bundle, patch_token_budget=10)
     assert len(batches) == 3
     assert [batch.evidence[0].source for batch in batches] == ["file-0.py", "file-1.py", "file-2.py"]
+
+
+def test_session_bound_batch_keeps_a_large_single_file_patch_complete():
+    from backend.agents.verification_session import VerificationSession
+
+    session = VerificationSession.create(
+        project_id="nbs_analytics",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        brief_path="docs/task.md",
+        brief_fingerprint="c" * 64,
+        worktree_fingerprint="d" * 64,
+        diff_fingerprint="e" * 64,
+        contract_fingerprint="f" * 64,
+        policy_fingerprint="0" * 64,
+    )
+    content = "+" + ("x" * 17000)
+    bundle = EvidenceBundle(
+        schema_version="review-evidence-v1",
+        task={"id": "x", "objective": "approved", "scope": [], "forbidden": []},
+        repository={"baseSha": "a" * 40, "headRef": "WORKTREE", "dirtyFiles": []},
+        guardrails={"mayBaseline": "HKD 12,057,968"},
+        evidence=(EvidenceItem(kind="diff", source="large.py", content=content),),
+    )
+
+    batch = plan_review_batches(session, bundle)[0]
+    payload = build_review_evidence_payload(
+        batch.bundle,
+        context_summary=context_summary(),
+        verification=verification(),
+        review_batch=batch.to_dict(),
+        verification_session=session.to_dict(),
+    )
+
+    assert payload["gitDiff"]["patches"][0]["content"] == content
+    assert payload["gitDiff"]["truncated"] is False
 
 
 def test_strict_review_batches_scope_known_dirty_files_and_keep_unattributed_dirty_blocked(tmp_path):
@@ -754,6 +810,147 @@ def test_same_batch_fingerprint_reuses_completed_report(tmp_path):
     second = run_review_batch(batches[0], runner, runtime_root=tmp_path)
 
     assert first == second
+    assert runner.calls == 1
+
+
+def test_review_batch_cache_telemetry_distinguishes_miss_and_hit(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    runner = BatchRunner()
+
+    run_review_batch(batch, runner, runtime_root=tmp_path)
+    run_review_batch(batch, runner, runtime_root=tmp_path)
+
+    attempts = json.loads(
+        (tmp_path / "review" / "batches" / session.session_id / "attempts.json").read_text()
+    )["attempts"]
+    assert [item["cacheHit"] for item in attempts] == [False, True]
+    assert [item["outcome"] for item in attempts] == ["pass", "pass"]
+    assert runner.calls == 1
+
+
+def test_review_batch_transport_retry_is_bounded_and_recorded(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    class AlwaysTimeout:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload):
+            self.calls += 1
+            raise subprocess.TimeoutExpired(cmd=["local-agent"], timeout=1)
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    runner = AlwaysTimeout()
+    report = run_review_batch(batch, runner, runtime_root=tmp_path)
+
+    attempts = json.loads(
+        (tmp_path / "review" / "batches" / session.session_id / "attempts.json").read_text()
+    )["attempts"]
+    assert report["verdict"] == "blocked"
+    assert runner.calls == 2
+    assert len(attempts) == 2
+    assert all(item["outcome"] == "blocked_runner_transport" for item in attempts)
+    assert all(item["cacheHit"] is False for item in attempts)
+    assert [item["attemptNumber"] for item in attempts] == [1, 2]
+    assert len({item["retryGroup"] for item in attempts}) == 1
+
+
+def test_review_batch_stops_retry_when_source_probe_drifts(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    class TimeoutOnce:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload):
+            self.calls += 1
+            raise subprocess.TimeoutExpired(cmd=["local-agent"], timeout=1)
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    state = {"worktreeFingerprint": session.worktree_fingerprint}
+
+    def probe():
+        return {
+            "head_sha": session.head_sha,
+            "brief_fingerprint": session.brief_fingerprint,
+            "worktree_fingerprint": state["worktreeFingerprint"],
+            "diff_fingerprint": session.diff_fingerprint,
+            "contract_fingerprint": session.contract_fingerprint,
+            "policy_fingerprint": session.policy_fingerprint,
+        }
+
+    def drift_after_first_attempt(payload):
+        state["worktreeFingerprint"] = "f" * 64
+        raise subprocess.TimeoutExpired(cmd=["local-agent"], timeout=1)
+
+    class Runner:
+        def run(self, payload):
+            return drift_after_first_attempt(payload)
+
+    runner = Runner()
+    report = run_review_batch(
+        batch,
+        runner,
+        runtime_root=tmp_path,
+        verification_session={**session.to_dict(), "sourceFingerprint": session.source_fingerprint},
+        source_probe=probe,
+    )
+
+    assert report["verdict"] == "blocked"
+    assert "stale" in report["residualRisk"][0].lower()
+
+
+def test_strict_review_batch_requires_source_probe(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    report = run_review_batch(
+        batch,
+        BatchRunner(),
+        runtime_root=tmp_path,
+        strict=True,
+        verification_session={**session.to_dict(), "sourceFingerprint": session.source_fingerprint},
+    )
+
+    assert report["verdict"] == "blocked"
+    assert "source probe" in report["residualRisk"][0].lower()
+
+
+def test_strict_review_batch_blocks_malformed_source_probe(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    report = run_review_batch(
+        batch,
+        BatchRunner(),
+        runtime_root=tmp_path,
+        strict=True,
+        verification_session={**session.to_dict(), "sourceFingerprint": session.source_fingerprint},
+        source_probe=lambda: [],
+    )
+
+    assert report["verdict"] == "blocked"
+    assert "mapping" in report["residualRisk"][0].lower()
+
+
+def test_blocked_batch_is_not_reused_after_runner_capability_is_repaired(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    blocked = run_review_batch(batch, None, runtime_root=tmp_path)
+    runner = BatchRunner()
+    recovered = run_review_batch(batch, runner, runtime_root=tmp_path)
+
+    assert blocked["verdict"] == "blocked"
+    assert recovered["verdict"] == "pass"
     assert runner.calls == 1
 
 

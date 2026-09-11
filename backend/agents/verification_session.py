@@ -32,6 +32,7 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 
 SESSION_SCHEMA_VERSION = "verification-session-v1"
+SOURCE_PROBE_VERSION = "verification-source-probe-v1"
 
 SESSION_KEYS = {
     "schemaVersion", "sessionId", "status", "projectId", "baseSha", "headSha",
@@ -43,6 +44,7 @@ ALLOWED_SESSION_STATUSES = {
     "created", "sealed", "review_running", "review_passed",
     "full_verification_passed", "hermes_passed", "complete",
     "blocked_runner_capability", "blocked_runner_transport",
+    "blocked_source_probe",
     "review_changes_required", "context_overflow", "verification_failed",
     "hermes_failed", "stale_source", "invalid_evidence",
 }
@@ -145,6 +147,10 @@ class VerificationSession:
         _require_rfc3339(self.created_at, "createdAt")
         if not isinstance(self.gates, dict):
             raise ValueError("gates must be an object")
+        if self.gates.get("sourceProbeVersion") != SOURCE_PROBE_VERSION:
+            raise ValueError(
+                "gates.sourceProbeVersion must be the supported source probe version"
+            )
 
     @classmethod
     def create(
@@ -165,6 +171,10 @@ class VerificationSession:
         gates: dict[str, Any] | None = None,
     ) -> "VerificationSession":
         """Build a sealed session from the approved source seal inputs."""
+        session_gates = dict(gates or {})
+        session_gates.setdefault("sourceProbeVersion", SOURCE_PROBE_VERSION)
+        if session_gates["sourceProbeVersion"] != SOURCE_PROBE_VERSION:
+            raise ValueError("gates.sourceProbeVersion is unsupported")
         return cls(
             schema_version=SESSION_SCHEMA_VERSION,
             session_id=session_id or str(uuid4()),
@@ -179,7 +189,7 @@ class VerificationSession:
             contract_fingerprint=contract_fingerprint,
             policy_fingerprint=policy_fingerprint,
             created_at=created_at if created_at is not None else _now_rfc3339(),
-            gates=dict(gates or {}),
+            gates=session_gates,
         )
 
     @classmethod
@@ -226,8 +236,12 @@ class VerificationSession:
     @property
     def source_fingerprint(self) -> str:
         """Canonical fingerprint of the source seal and policy identity only."""
+        source_seal = {
+            key: self.to_dict()[key] for key in _SOURCE_SEAL_KEYS
+        }
+        source_seal["sourceProbeVersion"] = self.gates["sourceProbeVersion"]
         return canonical_fingerprint(
-            {key: self.to_dict()[key] for key in _SOURCE_SEAL_KEYS}
+            source_seal
         )
 
     def assert_fresh(
@@ -237,19 +251,31 @@ class VerificationSession:
         brief_fingerprint: str,
         worktree_fingerprint: str,
         diff_fingerprint: str,
+        contract_fingerprint: str,
+        policy_fingerprint: str,
+        source_probe_version: str = SOURCE_PROBE_VERSION,
     ) -> None:
-        """Raise ``StaleVerificationSession`` if the current source drifted."""
+        """Raise ``StaleVerificationSession`` if source or policy identity drifted."""
+        source_probe_version = _require_non_empty(
+            source_probe_version, "sourceProbeVersion"
+        )
         current = {
             "headSha": _require_sha(head_sha, "headSha"),
             "briefFingerprint": _require_sha256(brief_fingerprint, "briefFingerprint"),
             "worktreeFingerprint": _require_sha256(worktree_fingerprint, "worktreeFingerprint"),
             "diffFingerprint": _require_sha256(diff_fingerprint, "diffFingerprint"),
+            "contractFingerprint": _require_sha256(contract_fingerprint, "contractFingerprint"),
+            "policyFingerprint": _require_sha256(policy_fingerprint, "policyFingerprint"),
+            "sourceProbeVersion": source_probe_version,
         }
         sealed = {
             "headSha": self.head_sha,
             "briefFingerprint": self.brief_fingerprint,
             "worktreeFingerprint": self.worktree_fingerprint,
             "diffFingerprint": self.diff_fingerprint,
+            "contractFingerprint": self.contract_fingerprint,
+            "policyFingerprint": self.policy_fingerprint,
+            "sourceProbeVersion": self.gates["sourceProbeVersion"],
         }
         for label in current:
             if current[label] != sealed[label]:

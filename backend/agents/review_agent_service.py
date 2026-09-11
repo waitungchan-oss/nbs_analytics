@@ -5,9 +5,11 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend.agents.agent_runtime import AgentRunner, AgentRuntime, agent_request_fingerprint
 from backend.agents.context_agent_service import _validate_memory_hints_payload
@@ -21,6 +23,7 @@ from backend.agents.evidence_models import (
 )
 from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
 from backend.agents.verification_session import VerificationSession
+from backend.agents.acceptance_attempts import record_attempt
 
 
 REVIEW_EVIDENCE_SCHEMA = "review-evidence-v1"
@@ -62,11 +65,19 @@ _BATCH_SCHEMA = "review-batch-v1"
 _BATCH_REPORT_KEYS = _REPORT_KEYS | {
     "sessionId", "batchId", "batchFingerprint", "sessionFingerprint", "resultFingerprint",
 }
-_MAX_PATCH_CHARS = 16000
+# Keep one changed source file intact when it is only slightly larger than the
+# old bound.  Batch planning still controls total prompt size; this bound only
+# prevents a syntactically valid patch from being cut mid-statement.
+_MAX_PATCH_CHARS = 30000
 _DEFAULT_BATCH_PATCH_BUDGET = 12000
 
 
-def compact_review_evidence_payload(payload: dict, *, max_patch_chars: int = 16000, max_tail_chars: int = 4000) -> dict:
+def compact_review_evidence_payload(
+    payload: dict,
+    *,
+    max_patch_chars: int = _MAX_PATCH_CHARS,
+    max_tail_chars: int = 4000,
+) -> dict:
     """Return bounded Review data while preserving source and payload identity semantics.
 
     ``bundleFingerprint`` remains the immutable identity of the collected source
@@ -179,7 +190,17 @@ def _runtime_instructions(instructions: str, *, strict: bool) -> str:
         "copy that value verbatim and do not recompute, replace, or omit it. "
         "The nested evidence.bundleFingerprint is the source-evidence identity and "
         "is intentionally distinct from the outer request fingerprint; do not report "
-        "that expected distinction as an integrity mismatch."
+        "that expected distinction as an integrity mismatch. "
+        "If reviewBatch is present, this is an intentional partial batch: use its "
+        "batchId, batchCount, files, sessionId, and sessionFingerprint to bind the "
+        "batch, and do not report files omitted from this batch as missing evidence; "
+        "the deterministic final aggregator validates complete batch coverage. "
+        "verificationSession is the sealed source manifest and runnerCapability is "
+        "the capability receipt; use them as the authoritative session boundary. "
+        "gitDiff.sourceFingerprint is the complete canonical session identity; "
+        "gitDiff.sourceDiffFingerprint is only the sealed diff component and must "
+        "match verificationSession.diffFingerprint. Do not compare those two "
+        "different-scope fingerprints directly."
     )
 
 
@@ -234,6 +255,9 @@ def build_review_evidence_payload(
     context_summary: dict,
     verification: list[dict],
     memory_hub_context: dict | None = None,
+    review_batch: dict | None = None,
+    verification_session: dict | None = None,
+    runner_capability: dict | None = None,
 ) -> dict:
     if bundle.schema_version != REVIEW_EVIDENCE_SCHEMA:
         raise ValueError("Unexpected Review evidence schema")
@@ -251,6 +275,13 @@ def build_review_evidence_payload(
         "truncated": bool(bundle.repository.get("diffFileLimitExceeded"))
         or any(bool(item.metadata.get("truncated")) for item in patches),
     }
+    if verification_session is not None:
+        source_fingerprint = verification_session.get("sourceFingerprint")
+        if isinstance(source_fingerprint, str):
+            git_diff["sourceFingerprint"] = source_fingerprint
+        source_diff = verification_session.get("diffFingerprint")
+        if isinstance(source_diff, str):
+            git_diff["sourceDiffFingerprint"] = source_diff
     git_diff["diffFingerprint"] = canonical_fingerprint(git_diff)
     unsigned = {
         "schemaVersion": REVIEW_EVIDENCE_SCHEMA,
@@ -261,6 +292,15 @@ def build_review_evidence_payload(
     }
     if memory_hub_context is not None:
         unsigned["memoryHubContext"] = memory_hub_context
+    for key, value in (
+        ("reviewBatch", review_batch),
+        ("verificationSession", verification_session),
+        ("runnerCapability", runner_capability),
+    ):
+        if value is not None:
+            if not isinstance(value, dict):
+                raise ValueError(f"{key} must be an object")
+            unsigned[key] = json.loads(json.dumps(value, ensure_ascii=False))
     return compact_review_evidence_payload({**unsigned, "bundleFingerprint": canonical_fingerprint(unsigned)})
 
 
@@ -666,7 +706,12 @@ def _load_batch_result(path: Path) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _batch_result_is_reusable(stored: dict, batch: ReviewBatch) -> bool:
+def _batch_result_is_reusable(
+    stored: dict,
+    batch: ReviewBatch,
+    *,
+    expected_review_fingerprint: str | None = None,
+) -> bool:
     if stored.get("schemaVersion") != REVIEW_REPORT_SCHEMA:
         return False
     if stored.get("sessionId") != batch.session_id:
@@ -674,6 +719,10 @@ def _batch_result_is_reusable(stored: dict, batch: ReviewBatch) -> bool:
     if stored.get("batchId") != batch.batch_id:
         return False
     if stored.get("batchFingerprint") != batch.batch_fingerprint:
+        return False
+    if expected_review_fingerprint is not None and stored.get("reviewFingerprint") != expected_review_fingerprint:
+        return False
+    if stored.get("verdict") not in {"pass", "changes_required"}:
         return False
     content = {key: stored[key] for key in _REPORT_KEYS if key in stored}
     return stored.get("resultFingerprint") == canonical_fingerprint(content)
@@ -723,6 +772,10 @@ def run_review_batch(
     output_token_limit: int = 3000,
     memory_hub_evidence: dict | None = None,
     runner_diagnostics: list[str] | None = None,
+    runner_fingerprint: str | None = None,
+    verification_session: dict | None = None,
+    runner_capability: dict | None = None,
+    source_probe: Callable[[], dict] | None = None,
 ) -> dict:
     """Run one batch exactly once and store a bounded, session-bound result.
 
@@ -733,16 +786,16 @@ def run_review_batch(
     """
     if not isinstance(batch, ReviewBatch):
         raise ValueError("run_review_batch requires a ReviewBatch")
-    result_path = _batch_result_path(runtime_root, batch)
-    cached = _load_batch_result(result_path)
-    if cached is not None and _batch_result_is_reusable(cached, batch):
-        return cached
     if input_token_limit <= 0 or output_token_limit <= 0:
         raise ValueError("Review batch token budgets must be positive")
+    result_path = _batch_result_path(runtime_root, batch)
     context_summary = context_summary or {}
     verification = verification or []
     evidence_payload = build_review_evidence_payload(
         batch.bundle, context_summary=context_summary, verification=verification,
+        review_batch=batch.to_dict(),
+        verification_session=verification_session,
+        runner_capability=runner_capability,
         memory_hub_context=(
             _memory_hub_observation(memory_hub_evidence)
             if memory_hub_evidence is not None else None
@@ -759,40 +812,209 @@ def run_review_batch(
         output_schema=REVIEW_REPORT_SCHEMA,
         evidence_payload=evidence_payload,
     )
+
+    attempt_root = runtime_root / "review" / "batches" / batch.session_id
+
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def _outcome(report: dict) -> str:
+        return "pass" if report.get("verdict") == "pass" else (
+            "failed" if report.get("verdict") == "changes_required" else (
+                "blocked_runner_transport" if report.get("verdict") == "blocked"
+                else "invalid_evidence"
+            )
+        )
+
+    def _safe_attempt(
+        *, outcome: str, cache_hit: bool, started_at: str,
+        blocked_reason: str | None = None, attempt_number: int | None = None,
+    ) -> None:
+        try:
+            record_attempt(
+                attempt_root,
+                gate="review_batch",
+                source_fingerprint=batch.session_fingerprint,
+                runner_fingerprint=runner_fingerprint,
+                outcome=outcome,
+                blocked_reason=blocked_reason,
+                cache_hit=cache_hit,
+                started_at=started_at,
+                finished_at=_now(),
+                retry_group=batch.batch_fingerprint,
+                attempt_number=attempt_number,
+            )
+        except (OSError, TypeError, ValueError):
+            # Telemetry is supplementary; it must never alter the Review verdict.
+            return
+
+    def _finish(
+        report: dict,
+        *,
+        outcome: str | None = None,
+        cache_hit: bool = False,
+        started_at: str | None = None,
+        record_telemetry: bool = True,
+        attempt_number: int | None = None,
+    ) -> dict:
+        bound = _bind_batch_report(batch, finish(report))
+        if not cache_hit:
+            _write_batch_result(result_path, bound)
+        if record_telemetry:
+            _safe_attempt(
+                outcome=outcome or _outcome(bound),
+                cache_hit=cache_hit,
+                started_at=started_at or _now(),
+                blocked_reason=(bound.get("residualRisk") or [None])[0],
+                attempt_number=attempt_number,
+            )
+        return bound
+
     request_text = json.dumps(
         {"instructions": instructions, "evidence": evidence_payload},
         ensure_ascii=False,
         sort_keys=True,
     )
     if estimate_tokens(request_text) > input_token_limit:
-        return _bind_batch_report(batch, finish(_report(
-            "context_overflow",
-            review_fingerprint,
-            residual_risk=["Review batch payload exceeds the input token budget."],
-        )))
+            return _finish(
+                _report(
+                "context_overflow",
+                review_fingerprint,
+                residual_risk=["Review batch payload exceeds the input token budget."],
+                ),
+                attempt_number=1,
+            )
     if runner_diagnostics:
-        return _bind_batch_report(batch, finish(_report(
-            "blocked",
-            review_fingerprint,
-            residual_risk=runner_diagnostics[:4],
-        )))
+            return _finish(
+                _report(
+                "blocked",
+                review_fingerprint,
+                residual_risk=runner_diagnostics[:4],
+            ),
+            outcome="blocked_runner_capability",
+            attempt_number=1,
+        )
     if runner is None:
-        return _bind_batch_report(batch, finish(_report(
-            "blocked",
-            review_fingerprint,
-            residual_risk=["No AgentRunner was configured for this batch."],
-        )))
-    result = runner.run({
-        "instructions": instructions,
-        "evidence": evidence_payload,
-        "bundleFingerprint": review_fingerprint,
-    })
+        return _finish(
+            _report(
+                "blocked",
+                review_fingerprint,
+                residual_risk=["No AgentRunner was configured for this batch."],
+            ),
+            outcome="blocked_runner_capability",
+            attempt_number=1,
+        )
+    transport_attempts = 0
+
+    def _source_status() -> tuple[str, str] | None:
+        if source_probe is None or not isinstance(verification_session, dict):
+            if strict:
+                return "blocked_source_probe", "Strict Review requires a sealed source probe"
+            return None
+        try:
+            current = source_probe()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return "blocked_source_probe", f"Review source probe unavailable before retry: {exc}"
+        if not isinstance(current, Mapping):
+            return "blocked_source_probe", "Review source probe result must be a mapping"
+        expected = {
+            "headSha": verification_session.get("headSha"),
+            "briefFingerprint": verification_session.get("briefFingerprint"),
+            "worktreeFingerprint": verification_session.get("worktreeFingerprint"),
+            "diffFingerprint": verification_session.get("diffFingerprint"),
+            "contractFingerprint": verification_session.get("contractFingerprint"),
+            "policyFingerprint": verification_session.get("policyFingerprint"),
+        }
+        actual = {
+            "headSha": current.get("head_sha"),
+            "briefFingerprint": current.get("brief_fingerprint"),
+            "worktreeFingerprint": current.get("worktree_fingerprint"),
+            "diffFingerprint": current.get("diff_fingerprint"),
+            "contractFingerprint": current.get("contract_fingerprint"),
+            "policyFingerprint": current.get("policy_fingerprint"),
+        }
+        if actual != expected:
+            return "stale_source", "Review source became stale before transport retry"
+        return None
+
+    source_status = _source_status()
+    if source_status is not None:
+        outcome, reason = source_status
+        return _finish(
+            _report("blocked", review_fingerprint, residual_risk=[reason]),
+            outcome=outcome,
+            attempt_number=1,
+        )
+
+    cached = _load_batch_result(result_path)
+    if cached is not None and _batch_result_is_reusable(
+        cached, batch, expected_review_fingerprint=review_fingerprint,
+    ):
+        _safe_attempt(
+            outcome=_outcome(cached),
+            cache_hit=True,
+            started_at=_now(),
+            blocked_reason=(cached.get("residualRisk") or [None])[0],
+            attempt_number=1,
+        )
+        return cached
+
+    while True:
+        source_status = _source_status()
+        if source_status is not None:
+            outcome, reason = source_status
+            return _finish(
+                _report("blocked", review_fingerprint, residual_risk=[reason]),
+                outcome=outcome,
+                attempt_number=transport_attempts + 1,
+            )
+        started_at = _now()
+        try:
+            result = runner.run({
+                "instructions": instructions,
+                "evidence": evidence_payload,
+                "bundleFingerprint": review_fingerprint,
+            })
+            break
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            transport_attempts += 1
+            reason = "Review batch runner transport failed; retry budget exhausted." if transport_attempts >= 2 else "Review batch runner transport failed; retrying once."
+            _safe_attempt(
+                outcome="blocked_runner_transport",
+                cache_hit=False,
+                started_at=started_at,
+                blocked_reason=reason,
+                attempt_number=transport_attempts,
+            )
+            if transport_attempts >= 2:
+                return _finish(_report(
+                    "blocked",
+                    review_fingerprint,
+                    residual_risk=[reason],
+                ), outcome="blocked_runner_transport", started_at=started_at,
+                    record_telemetry=False, attempt_number=transport_attempts)
+            retry_status = _source_status()
+            if retry_status is not None:
+                outcome, reason = retry_status
+                return _finish(
+                    _report("blocked", review_fingerprint, residual_risk=[reason]),
+                    outcome=outcome,
+                    started_at=started_at,
+                    attempt_number=transport_attempts,
+                )
+        source_status = _source_status()
+        if source_status is not None:
+            outcome, reason = source_status
+            return _finish(
+                _report("blocked", review_fingerprint, residual_risk=[reason]),
+                outcome=outcome,
+                started_at=started_at,
+                attempt_number=transport_attempts + 1,
+            )
     validated = _validate_report(result, review_fingerprint, strict=strict)
     if estimate_tokens(json.dumps(validated, ensure_ascii=False)) > output_token_limit:
         raise ValueError("Review batch output token budget exceeded")
-    bound = _bind_batch_report(batch, finish(validated))
-    _write_batch_result(result_path, bound)
-    return bound
+    return _finish(validated, started_at=started_at, attempt_number=transport_attempts + 1)
 
 
 def _validate_session_coverage(

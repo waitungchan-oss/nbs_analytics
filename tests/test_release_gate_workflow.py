@@ -4,8 +4,12 @@ from pathlib import Path
 WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "release-gates.yml"
 
 
+def _workflow_text() -> str:
+    return WORKFLOW.read_text(encoding="utf-8")
+
+
 def test_release_workflow_defines_independent_required_jobs_and_aggregate():
-    source = WORKFLOW.read_text(encoding="utf-8")
+    source = _workflow_text()
     for name in ("Full pytest release gate", "Hermes release gate", "UI acceptance release gate", "Release gate aggregate"):
         assert name in source
     assert "needs: [full-pytest, hermes, ui-acceptance]" in source
@@ -17,13 +21,13 @@ def test_release_workflow_defines_independent_required_jobs_and_aggregate():
 
 
 def test_release_aggregate_job_name_matches_branch_protection_contract():
-    source = WORKFLOW.read_text(encoding="utf-8")
+    source = _workflow_text()
     assert "name: Release gate aggregate" in source
     assert source.count("name: Release gate aggregate") == 1
 
 
 def test_release_workflow_is_fresh_for_pr_and_release_tags_and_fail_closed():
-    source = WORKFLOW.read_text(encoding="utf-8")
+    source = _workflow_text()
     assert "pull_request:" in source
     assert "tags:" in source
     assert "--sandbox-preflight required" in source
@@ -35,7 +39,7 @@ def test_release_workflow_is_fresh_for_pr_and_release_tags_and_fail_closed():
 
 
 def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
-    source = WORKFLOW.read_text(encoding="utf-8")
+    source = _workflow_text()
     full_block = source.split("  full-pytest:\n", 1)[1].split("  hermes:\n", 1)[0]
     hermes_block = source.split("  hermes:\n", 1)[1].split("  ui-acceptance:\n", 1)[0]
     ui_block = source.split("  ui-acceptance:\n", 1)[1].split("  aggregate:\n", 1)[0]
@@ -63,3 +67,27 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "curl --fail" in ui_block
     assert "--retry-connrefused" in ui_block
     assert "python -m http.server" not in ui_block
+
+
+def test_release_workflow_cancels_superseded_pr_runs_but_not_release_tags():
+    text = _workflow_text()
+    assert "concurrency:" in text
+    assert "github.event.pull_request.number || github.ref" in text
+    assert "startsWith(github.ref, 'refs/tags/') == false" in text
+
+
+def test_release_child_artifacts_are_isolated_by_commit_and_use_dependency_cache():
+    text = _workflow_text()
+    for name in ("full-pytest", "hermes", "ui-acceptance"):
+        assert f"name: release-gate-{name}-${{{{ github.sha }}}}" in text
+    assert text.count("cache: pip") == 3
+    assert text.count("cache-dependency-path: requirements.txt") == 3
+
+
+def test_release_aggregate_uses_minimal_runtime_and_runs_after_failed_children():
+    text = _workflow_text()
+    aggregate = text[text.index("  aggregate:"):]
+    assert "if: always()" in aggregate
+    assert "pip install -r requirements.txt" not in aggregate
+    assert "python scripts/release_gate.py aggregate" in aggregate
+    assert "if-no-files-found: error" in aggregate

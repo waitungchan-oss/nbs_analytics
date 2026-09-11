@@ -48,12 +48,16 @@ from backend.agents.verification_evidence_writer import (
     write_gate_evidence,
 )
 from backend.agents.verification_session import (
+    SOURCE_PROBE_VERSION,
     StaleVerificationSession,
     VerificationSession,
     read_session,
     write_session,
 )
 from backend.agents.runner_identity import RunnerIdentity
+from backend.agents.acceptance_attempts import (
+    MAX_TRANSPORT_ATTEMPTS, count_transport_attempts, record_attempt,
+)
 
 GATE_RESULT_SCHEMA = "verification-gate-result-v1"
 TERMINAL_SCHEMA = "verification-terminal-v1"
@@ -197,14 +201,16 @@ def git_source_probe(
     brief_path: str,
     base_sha: str,
     head_ref: str = "WORKTREE",
+    contract_path: str | None = None,
+    policy_path: str | None = None,
 ) -> dict:
     """Compute the four source-seal fingerprints from the live repository.
 
-    Uses the same approved command shapes as the strict review provenance
-    checks: ``git rev-parse HEAD``, the brief bytes SHA-256, the filtered
-    porcelain worktree fingerprint and the base/head diff fingerprint.
+    Uses ``git rev-parse HEAD``, the brief bytes SHA-256, a filtered porcelain
+    worktree fingerprint that includes dirty-file content, and the base/head
+    diff fingerprint.
     """
-    project_root = Path(project_root)
+    project_root = Path(project_root).resolve()
 
     def _run(argv: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -212,24 +218,92 @@ def git_source_probe(
         )
 
     head_sha = _run(["git", "rev-parse", "HEAD"]).stdout.strip()
-    brief = (project_root / brief_path).resolve()
+    brief_candidate = project_root / brief_path
+    if brief_candidate.is_symlink():
+        raise ValueError("brief path cannot be a symlink")
+    brief = brief_candidate.resolve()
+    try:
+        brief.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError("brief path is outside project root") from exc
+    if not brief.is_file():
+        raise ValueError(f"brief path is unavailable: {brief_path}")
     brief_fingerprint = sha256(brief.read_bytes()).hexdigest()
-    worktree = _run([
-        "sh", "-c",
-        "git status --porcelain --untracked-files=all -- . "
-        "':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256",
-    ]).stdout.strip().split(maxsplit=1)[0].lower()
+    status = subprocess.run(
+        [
+            "git", "status", "--porcelain=v1", "--untracked-files=all", "-z",
+        ], cwd=project_root, capture_output=True, check=True,
+    ).stdout
+    dirty_entries: list[dict[str, str]] = []
+    raw_entries = [entry for entry in status.split(b"\0") if entry]
+    index = 0
+    while index < len(raw_entries):
+        raw_entry = raw_entries[index]
+        if len(raw_entry) < 4:
+            raise ValueError("git status returned a malformed entry")
+        status_code = raw_entry[:2].decode("utf-8", errors="strict")
+        relative = raw_entry[3:].decode("utf-8", errors="surrogateescape")
+        paths = [relative]
+        if "R" in status_code or "C" in status_code:
+            index += 1
+            if index >= len(raw_entries):
+                raise ValueError("git status returned an incomplete rename entry")
+            paths.append(raw_entries[index].decode("utf-8", errors="surrogateescape"))
+        def _content_fingerprint(relative_path: str) -> str:
+            path = (project_root / relative_path).resolve()
+            try:
+                path.relative_to(project_root.resolve())
+            except ValueError as exc:
+                raise ValueError("git status returned a path outside project root") from exc
+            if not path.is_file() or path.is_symlink():
+                return "missing"
+            return sha256(path.read_bytes()).hexdigest()
+
+        if len(paths) == 2:
+            dirty_entries.append({
+                "status": status_code,
+                "path": paths[0],
+                "pairedPath": paths[1],
+                "contentFingerprint": _content_fingerprint(paths[0]),
+                "pairedContentFingerprint": _content_fingerprint(paths[1]),
+            })
+        else:
+            dirty_entries.append({
+                "status": status_code,
+                "path": paths[0],
+                "contentFingerprint": _content_fingerprint(paths[0]),
+            })
+        index += 1
+    worktree = sha256(
+        json.dumps(sorted(dirty_entries, key=lambda item: (item["path"], item["status"])),
+                   ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     if head_ref == "WORKTREE":
         diff_stdout = _run(["git", "diff", "--no-ext-diff", base_sha]).stdout
     else:
         diff_stdout = _run(["git", "diff", "--no-ext-diff", f"{base_sha}...{head_ref}"]).stdout
     diff_fingerprint = sha256(diff_stdout.encode("utf-8")).hexdigest()
-    return {
+    result = {
         "head_sha": head_sha,
         "brief_fingerprint": brief_fingerprint,
         "worktree_fingerprint": worktree,
         "diff_fingerprint": diff_fingerprint,
+        "source_probe_version": SOURCE_PROBE_VERSION,
     }
+    for key, relative_path in (
+        ("contract_fingerprint", contract_path),
+        ("policy_fingerprint", policy_path),
+    ):
+        if relative_path is not None:
+            candidate = (project_root / relative_path).resolve()
+            try:
+                candidate.relative_to(project_root.resolve())
+            except ValueError as exc:
+                raise ValueError("source identity path is outside project root") from exc
+            if not candidate.is_file() or candidate.is_symlink():
+                raise ValueError(f"source identity file is unavailable: {relative_path}")
+            result[key] = sha256(candidate.read_bytes()).hexdigest()
+    return result
 
 
 class VerificationChain:
@@ -279,17 +353,52 @@ class VerificationChain:
         )
         if source_probe is not None:
             try:
-                session.assert_fresh(**source_probe())
+                current = source_probe()
+                required = {
+                    "contract_fingerprint", "policy_fingerprint", "source_probe_version",
+                }
+                if not required <= set(current):
+                    raise ValueError(
+                        "source probe is missing contract/policy identity or version"
+                    )
+                session.assert_fresh(**current)
             except StaleVerificationSession as exc:
                 raise StaleVerificationSession(f"cannot seal stale source: {exc}") from exc
+            except (TypeError, KeyError, ValueError) as exc:
+                raise ValueError(f"cannot seal: source probe is incomplete: {exc}") from exc
         chain._persist()
         return chain
 
     def bind_runner_identity(self, runner_identity: RunnerIdentity) -> None:
-        """Bind an explicitly resolved runner identity before the first gate."""
+        """Bind a runner before the first gate or a transport-blocked resume."""
         if not isinstance(runner_identity, RunnerIdentity):
             raise ValueError("runner_identity must be a RunnerIdentity")
-        if self._session.status != "sealed":
+        if self._session.status == "blocked_runner_transport":
+            blocked = [
+                (name, value)
+                for name, value in self._session.gates.items()
+                if isinstance(value, dict) and value.get("gateStatus") == "blocked"
+                and name in {"preReview", "strictReview", "fullPytest", "hermes"}
+            ]
+            if len(blocked) != 1:
+                raise InvalidGateTransition(
+                    "transport resume must identify exactly one blocked gate"
+                )
+            _, gate = blocked[0]
+            expected = gate.get("runnerFingerprint")
+            if (
+                not isinstance(expected, str)
+                or len(expected) != 64
+                or any(character not in "0123456789abcdef" for character in expected)
+            ):
+                raise InvalidGateTransition(
+                    "blocked transport is missing valid runner identity"
+                )
+            if expected != runner_identity.identity_fingerprint:
+                raise InvalidGateTransition(
+                    "runner identity does not match the blocked transport attempt"
+                )
+        elif self._session.status != "sealed":
             raise InvalidGateTransition("runner identity must be bound before gates start")
         self._runner_identity = runner_identity
 
@@ -338,6 +447,38 @@ class VerificationChain:
             return False
         return payload.get("sessionId") != self._session.session_id
 
+    def check_source_freshness(self, *, gate: str) -> GateResult | None:
+        """Check the live source seal without invoking the gate runner."""
+        if gate not in _GATE_NAMES:
+            raise ValueError(f"unknown freshness gate: {gate}")
+        self._check_fresh(gate=gate)
+        return self._last_result
+
+    def _check_transport_retry_budget(self, gate: str) -> bool:
+        if self._session.status != "blocked_runner_transport":
+            return True
+        try:
+            attempts = count_transport_attempts(self._session_dir, gate=gate)
+        except (OSError, ValueError, TypeError) as exc:
+            self._enter_terminal(
+                "blocked_source_probe",
+                gate=gate,
+                gate_status="blocked",
+                diagnostics=(f"transport retry history unavailable: {exc}",),
+                recovery=("Repair the session attempt artifact, then create a fresh session.",),
+            )
+            return False
+        if attempts >= MAX_TRANSPORT_ATTEMPTS:
+            self._enter_terminal(
+                "blocked_runner_transport",
+                gate=gate,
+                gate_status="blocked",
+                diagnostics=("transport retry budget exhausted for this gate",),
+                recovery=("Create a fresh source-bound session after repairing runner transport.",),
+            )
+            return False
+        return True
+
     # ------------------------------------------------------------ internals
 
     def _gate_dir(self, gate: str) -> Path:
@@ -361,6 +502,8 @@ class VerificationChain:
         }
         if extra:
             entry.update(extra)
+        if self._runner_identity is not None:
+            entry.setdefault("runnerFingerprint", self._runner_identity.identity_fingerprint)
         self._session = replace(
             self._session, gates={**self._session.gates, name: entry}
         )
@@ -379,9 +522,18 @@ class VerificationChain:
         so the caller never runs the next gate.
         """
         if self._source_probe is None:
-            return True
+            self._enter_terminal(
+                "blocked_source_probe",
+                gate=gate,
+                gate_status="blocked",
+                diagnostics=("source freshness probe is unavailable",),
+                recovery=("Reload the session through the project-bound verification CLI.",),
+            )
+            return False
         try:
             current = self._source_probe()
+            if "source_probe_version" not in current:
+                raise ValueError("source probe is missing source schema/collector version")
             self._session.assert_fresh(**current)
             return True
         except StaleVerificationSession as exc:
@@ -393,6 +545,56 @@ class VerificationChain:
                 recovery=("Re-seal a fresh session from the current source state.",),
             )
             return False
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+            self._enter_terminal(
+                "blocked_source_probe",
+                gate=gate,
+                gate_status="blocked",
+                diagnostics=(f"source freshness probe unavailable: {exc}",),
+                recovery=(
+                    "Repair the probe inputs or reload through the project-bound verification CLI.",
+                ),
+            )
+            return False
+
+    def _record_attempt(
+        self,
+        *,
+        gate: str,
+        status: str,
+        gate_status: str,
+        started_at: str,
+        finished_at: str,
+        diagnostics: tuple[str, ...],
+    ) -> None:
+        if gate_status == "pass":
+            outcome = "pass"
+        elif status in {
+            "blocked_runner_transport", "blocked_runner_capability",
+            "blocked_source_probe", "invalid_evidence", "stale_source",
+        }:
+            outcome = status
+        else:
+            outcome = "failed"
+        try:
+            record_attempt(
+                self._session_dir,
+                gate=gate,
+                source_fingerprint=self._session.source_fingerprint,
+                runner_fingerprint=(
+                    self._runner_identity.identity_fingerprint
+                    if self._runner_identity is not None else None
+                ),
+                outcome=outcome,
+                blocked_reason=diagnostics[0][:512] if diagnostics else None,
+                cache_hit=False,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        except (OSError, ValueError, TypeError):
+            # Attempt telemetry is supplementary; an unavailable artifact must
+            # never change the already-persisted gate verdict.
+            return
 
     def _build_result(
         self,
@@ -444,6 +646,11 @@ class VerificationChain:
             diagnostics=diagnostics, recovery=recovery, started_at=started_at,
         )
         self._last_result = result
+        self._record_attempt(
+            gate=gate, status=status, gate_status=gate_status,
+            started_at=started_at, finished_at=result.finished_at,
+            diagnostics=diagnostics,
+        )
         return result
 
     def _enter_terminal(
@@ -476,6 +683,11 @@ class VerificationChain:
             started_at=started_at or _now_rfc3339(),
         )
         self._last_result = result
+        self._record_attempt(
+            gate=gate, status=status, gate_status=gate_status,
+            started_at=started_at or result.started_at, finished_at=result.finished_at,
+            diagnostics=diagnostics,
+        )
         return result
 
     def _write_terminal(
@@ -559,13 +771,39 @@ class VerificationChain:
         on pass until Strict Review starts.
         """
         started_at = _now_rfc3339()
-        self._require_status({"sealed"}, gate="pre_review")
+        self._require_status({"sealed", "blocked_runner_transport"}, gate="pre_review")
+        if not self._check_transport_retry_budget("pre_review"):
+            return self._last_result
+        if self._session.status == "blocked_runner_transport":
+            previous = self._session.gates.get("preReview")
+            if not isinstance(previous, dict) or previous.get("gateStatus") != "blocked":
+                raise InvalidGateTransition(
+                    "pre_review transport resume requires a blocked preReview gate"
+                )
+        # Freshness must hold before invoking any potentially expensive runner.
         if not self._check_fresh(gate="pre_review"):
             return self._last_result
         if commands is None:
             if runner is None:
                 raise ValueError("pre_review requires commands or a runner callable")
-            commands = runner()
+            try:
+                commands = runner()
+            except subprocess.TimeoutExpired:
+                return self._enter_terminal(
+                    "blocked_runner_transport", gate="pre_review", gate_status="blocked",
+                    diagnostics=("pre-review runner timed out",),
+                    recovery=("Check runner transport/session/config, then rerun pre-review on this session.",),
+                    started_at=started_at,
+                )
+            except OSError as exc:
+                return self._enter_terminal(
+                    "blocked_runner_transport", gate="pre_review", gate_status="blocked",
+                    diagnostics=(f"pre-review runner could not start: {exc}",),
+                    recovery=("Check runner transport/session/config, then rerun pre-review on this session.",),
+                    started_at=started_at,
+                )
+        if not self._check_fresh(gate="pre_review"):
+            return self._last_result
         evidence = write_gate_evidence(
             self._session, "pre_review", list(commands), self._gate_dir("pre_review"),
             runner_identity=self._runner_identity,
@@ -608,15 +846,21 @@ class VerificationChain:
         maps to ``blocked_runner_transport`` and may be resumed on this session.
         """
         started_at = _now_rfc3339()
-        self._require_status(
-            {"sealed", "blocked_runner_capability", "blocked_runner_transport"},
-            gate="strict_review",
-        )
+        self._require_status({"sealed", "blocked_runner_transport"}, gate="strict_review")
+        if not self._check_transport_retry_budget("strict_review"):
+            return self._last_result
         pre = self._session.gates.get("preReview")
         if not isinstance(pre, dict) or pre.get("gateStatus") != "pass":
             raise InvalidGateTransition(
                 "strict_review requires a passing pre_review gate"
             )
+        if self._session.status == "blocked_runner_transport":
+            previous = self._session.gates.get("strictReview")
+            if not isinstance(previous, dict) or previous.get("gateStatus") != "blocked":
+                raise InvalidGateTransition(
+                    "strict_review transport resume requires a blocked strictReview gate"
+                )
+        # Freshness must hold before invoking the independent Review runner.
         if not self._check_fresh(gate="strict_review"):
             return self._last_result
         cap_status, cap_diagnostics = self._normalize_capability(capability)
@@ -668,6 +912,8 @@ class VerificationChain:
                 ),
                 started_at=started_at,
             )
+        if not self._check_fresh(gate="strict_review"):
+            return self._last_result
         try:
             report = self._validate_review_report(report)
         except ValueError as exc:
@@ -737,13 +983,47 @@ class VerificationChain:
         is preserved in ``session.gates``.
         """
         started_at = _now_rfc3339()
-        self._require_status({"review_passed"}, gate="full_pytest")
+        self._require_status({"review_passed", "blocked_runner_transport"}, gate="full_pytest")
+        if not self._check_transport_retry_budget("full_pytest"):
+            return self._last_result
+        if self._session.status == "blocked_runner_transport":
+            previous = self._session.gates.get("fullPytest")
+            if not isinstance(previous, dict) or previous.get("gateStatus") != "blocked":
+                raise InvalidGateTransition(
+                    "full_pytest transport resume requires a blocked full_pytest gate"
+                )
+        # Freshness must hold before invoking the full verification runner.
         if not self._check_fresh(gate="full_pytest"):
             return self._last_result
         if commands is None:
             if runner is None:
                 raise ValueError("full verification requires commands or a runner callable")
-            commands = runner()
+            try:
+                commands = runner()
+            except subprocess.TimeoutExpired:
+                return self._enter_terminal(
+                    "blocked_runner_transport",
+                    gate="full_pytest",
+                    gate_status="blocked",
+                    diagnostics=("full verification runner timed out",),
+                    recovery=(
+                        "Check verification transport, then resume full verification on this session.",
+                    ),
+                    started_at=started_at,
+                )
+            except OSError as exc:
+                return self._enter_terminal(
+                    "blocked_runner_transport",
+                    gate="full_pytest",
+                    gate_status="blocked",
+                    diagnostics=(f"full verification runner could not start: {exc}",),
+                    recovery=(
+                        "Check verification transport, then resume full verification on this session.",
+                    ),
+                    started_at=started_at,
+                )
+        if not self._check_fresh(gate="full_pytest"):
+            return self._last_result
         evidence = write_gate_evidence(
             self._session, "full_pytest", list(commands), self._gate_dir("full_pytest"),
             runner_identity=self._runner_identity,
@@ -788,19 +1068,56 @@ class VerificationChain:
         failure.
         """
         started_at = _now_rfc3339()
-        self._require_status({"full_verification_passed", "hermes_failed"}, gate="hermes")
+        self._require_status(
+            {"full_verification_passed", "hermes_failed", "blocked_runner_transport"},
+            gate="hermes",
+        )
+        if not self._check_transport_retry_budget("hermes"):
+            return self._last_result
+        if self._session.status == "blocked_runner_transport":
+            previous = self._session.gates.get("hermes")
+            if not isinstance(previous, dict) or previous.get("gateStatus") != "blocked":
+                raise InvalidGateTransition(
+                    "hermes transport resume requires a blocked hermes gate"
+                )
         if self._session.status == "hermes_failed" and profile is None:
             raise InvalidGateTransition(
                 "resuming hermes from hermes_failed requires an explicit profile"
             )
         if profile is not None and profile not in HERMES_PROFILES:
             raise ValueError("hermes profile must be primary-runtime or isolated-profile")
+        # Freshness must hold before invoking the read-only Hermes runner.
         if not self._check_fresh(gate="hermes"):
             return self._last_result
         if result is None:
             if runner is None:
                 raise ValueError("hermes requires a runner callable or a result dict")
-            result = runner(self._session)
+            try:
+                result = runner(self._session)
+            except subprocess.TimeoutExpired:
+                return self._enter_terminal(
+                    "blocked_runner_transport",
+                    gate="hermes",
+                    gate_status="blocked",
+                    diagnostics=("hermes runner timed out",),
+                    recovery=(
+                        "Check Hermes transport, then resume Hermes on this session with an explicit profile.",
+                    ),
+                    started_at=started_at,
+                )
+            except OSError as exc:
+                return self._enter_terminal(
+                    "blocked_runner_transport",
+                    gate="hermes",
+                    gate_status="blocked",
+                    diagnostics=(f"hermes runner could not start: {exc}",),
+                    recovery=(
+                        "Check Hermes transport, then resume Hermes on this session with an explicit profile.",
+                    ),
+                    started_at=started_at,
+                )
+        if not self._check_fresh(gate="hermes"):
+            return self._last_result
         if not isinstance(result, dict):
             return self._enter_terminal(
                 "hermes_failed",
