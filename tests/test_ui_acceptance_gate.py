@@ -21,14 +21,19 @@ def _evidence(tmp_path):
 
 def test_ui_acceptance_gate_binds_http_and_identity(monkeypatch, tmp_path):
     evidence_path = _evidence(tmp_path)
-    monkeypatch.setattr("scripts.ui_acceptance_gate.run_ui_acceptance", lambda **kwargs: {
-        "status": "PASS", "route": kwargs["url"], "httpStatus": 200,
-        "evidenceStatus": "PASS", "failureReasons": [],
-    })
+    captured = {}
+    def runner(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "PASS", "route": kwargs["url"], "httpStatus": 200,
+            "evidenceStatus": "PASS", "failureReasons": [],
+        }
+    monkeypatch.setattr("scripts.ui_acceptance_gate.run_ui_acceptance", runner)
     result = run_ui_acceptance_gate(tmp_path, "http://127.0.0.1:8501/", tmp_path, evidence_path, COMMIT, SOURCE)
     assert result["schemaVersion"] == "ui-acceptance-gate-v1"
     assert result["status"] == "PASS"
     assert result["result"]["route"] == "http://127.0.0.1:8501/"
+    assert captured["source_fingerprint"] == SOURCE
     assert result["metadata"]["telemetry"]["attemptNumber"] == 1
     assert result["metadata"]["telemetry"]["durationSeconds"] >= 0
 

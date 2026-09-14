@@ -50,7 +50,12 @@ def run_ui_acceptance_gate(
     if payload.get("sourceFingerprint") != source_fingerprint:
         raise ValueError("UI evidence source mismatch")
     load_bounded_evidence(evidence_file)
-    result = run_ui_acceptance(url=url, fixture_root=root, evidence_path=evidence_file)
+    result = run_ui_acceptance(
+        url=url,
+        fixture_root=root,
+        evidence_path=evidence_file,
+        source_fingerprint=source_fingerprint,
+    )
     finished = _timestamp()
     unsigned = {
         "schemaVersion": "ui-acceptance-gate-v1", "gate": "ui_acceptance", "status": result["status"],

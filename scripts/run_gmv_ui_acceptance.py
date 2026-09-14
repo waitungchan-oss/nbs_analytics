@@ -75,6 +75,7 @@ def _probe_http(url: str) -> tuple[int | None, str | None]:
 def run_ui_acceptance(
     *, url: str, fixture_root: str | Path, evidence_path: str | Path,
     db_path: str | Path | None = None, cache_dir: str | Path | None = None,
+    source_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     root = _validate_target(url, fixture_root)
     fixture_db = db_path or os.environ.get("NBS_ANALYTICS_DB_FILE")
@@ -90,7 +91,7 @@ def run_ui_acceptance(
             "activeVersionId": "",
             "downloadedArtifacts": {},
         }
-    source_fingerprint = os.environ.get("NBS_ACCEPTANCE_SOURCE_FINGERPRINT")
+    source_fingerprint = source_fingerprint or os.environ.get("NBS_ACCEPTANCE_SOURCE_FINGERPRINT")
     if not source_fingerprint:
         return {
             "schemaVersion": "gmv-ui-acceptance-result-v1",
