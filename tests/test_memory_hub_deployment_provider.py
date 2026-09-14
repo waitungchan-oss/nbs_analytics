@@ -23,7 +23,7 @@ def _fixture(root: Path) -> tuple[Path, dict]:
     manifest_root.mkdir(parents=True)
     content = "deployment-owned governance source"
     artifact.write_text(content, encoding="utf-8")
-    now = datetime(2026, 8, 14, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
     source = MemorySource.from_parts(
         source_kind="governance_document", artifact_ref="guide.md",
         artifact_sha256=hashlib.sha256(content.encode()).hexdigest(), run_id=None,

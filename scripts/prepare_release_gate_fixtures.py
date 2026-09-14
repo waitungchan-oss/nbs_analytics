@@ -148,13 +148,15 @@ def _summary_rows(dimension: str, total: float) -> list[dict[str, object]]:
     ]
 
 
-def build_release_gate_fixtures(root: Path, *, profile: str = "full") -> ReleaseGateFixtures:
+def build_release_gate_fixtures(
+    root: Path, *, profile: str = "full", source_fingerprint: str | None = None,
+) -> ReleaseGateFixtures:
     if profile not in {"full", "ui"}:
         raise ValueError(f"unsupported release gate fixture profile: {profile}")
     target = Path(root).resolve()
     target.mkdir(parents=True, exist_ok=True)
     db_path = target / "release_gate_fixture.db"
-    cache_dir = target / ".nbs_runtime_cache"
+    cache_dir = target / "release_gate_cache"
     rows = _revenue_rows(
         rows_per_month=ANALYSIS_ROWS // len(EXPECTED_MONTHLY_TOTALS) if profile == "full" else 1,
         excluded_rows=EXCLUDED_ROWS if profile == "full" else UI_EXCLUDED_ROWS,
@@ -202,6 +204,7 @@ def build_release_gate_fixtures(root: Path, *, profile: str = "full") -> Release
         validation_mode="release_gate_fixture",
         shadow_status="NOT_RUN",
         refund_state_sha256="d" * 64,
+        source_fingerprint=source_fingerprint,
     )
     return ReleaseGateFixtures(db_path, cache_dir, VERSION_ID)
 
