@@ -28,6 +28,8 @@ def test_hermes_gate_requires_pass_and_binds_identity(monkeypatch, tmp_path):
     assert evidence["status"] == "PASS"
     assert evidence["result"]["overallStatus"] == "pass"
     assert evidence["metadata"]["readOnly"] is True
+    assert evidence["metadata"]["telemetry"]["attemptNumber"] == 1
+    assert evidence["metadata"]["telemetry"]["durationSeconds"] >= 0
     assert "hermes_post_change_check.py" in " ".join(calls[0])
 
 

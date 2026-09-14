@@ -51,7 +51,10 @@ def test_release_fixture_covers_hermes_phase2_baseline_dimensions(tmp_path, monk
 
 
 def test_release_fixture_drives_real_gmv_ui_smoke(tmp_path, monkeypatch):
-    fixture = build_release_gate_fixtures(tmp_path, profile="ui")
+    source_fingerprint = "b" * 64
+    fixture = build_release_gate_fixtures(
+        tmp_path, profile="ui", source_fingerprint=source_fingerprint,
+    )
     output = tmp_path / "ui-evidence.json"
     env = {
         **os.environ,
@@ -60,7 +63,7 @@ def test_release_fixture_drives_real_gmv_ui_smoke(tmp_path, monkeypatch):
         "NBS_ANALYTICS_COORDINATION_DB": str(tmp_path / "upload_coordination.db"),
     }
     completed = subprocess.run(
-        [sys.executable, "scripts/streamlit_ui_smoke.py", "--project-root", str(Path.cwd()), "--route", "http://127.0.0.1:8765/", "--commit-sha", "a" * 40, "--source-fingerprint", "b" * 64, "--output", str(output), "--timeout", "60"],
+        [sys.executable, "scripts/streamlit_ui_smoke.py", "--project-root", str(Path.cwd()), "--route", "http://127.0.0.1:8765/", "--commit-sha", "a" * 40, "--source-fingerprint", source_fingerprint, "--output", str(output), "--timeout", "60"],
         env=env, capture_output=True, text=True, check=False,
     )
     assert completed.returncode == 0, completed.stderr

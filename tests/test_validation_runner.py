@@ -74,6 +74,24 @@ def test_runner_resolves_git_common_root_for_codex_worktree(tmp_path):
     assert runner._approved_repository_root() == common_root.resolve()
 
 
+def test_runner_allows_real_interpreter_inside_linked_worktree(tmp_path):
+    common_root = tmp_path / "repository"
+    worktree = tmp_path / ".codex" / "worktrees" / "5160" / "repository"
+    worktree.mkdir(parents=True)
+    gitdir = common_root / ".git" / "worktrees" / "5160"
+    gitdir.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    interpreter = worktree / ".venv/bin/python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"python")
+    interpreter.chmod(0o755)
+
+    runner = object.__new__(ValidationRunner)
+    runner.project_root = worktree.resolve()
+
+    assert runner._resolve_interpreter(".venv/bin/python") == interpreter.resolve()
+
+
 def test_runner_rejects_worktree_interpreter_symlink_outside_approved_root(tmp_path):
     repository = tmp_path / "repository"
     worktree = repository / ".worktrees/implementation-agent"

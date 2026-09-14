@@ -21,14 +21,21 @@ def _evidence(tmp_path):
 
 def test_ui_acceptance_gate_binds_http_and_identity(monkeypatch, tmp_path):
     evidence_path = _evidence(tmp_path)
-    monkeypatch.setattr("scripts.ui_acceptance_gate.run_ui_acceptance", lambda **kwargs: {
-        "status": "PASS", "route": kwargs["url"], "httpStatus": 200,
-        "evidenceStatus": "PASS", "failureReasons": [],
-    })
+    captured = {}
+    def runner(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "PASS", "route": kwargs["url"], "httpStatus": 200,
+            "evidenceStatus": "PASS", "failureReasons": [],
+        }
+    monkeypatch.setattr("scripts.ui_acceptance_gate.run_ui_acceptance", runner)
     result = run_ui_acceptance_gate(tmp_path, "http://127.0.0.1:8501/", tmp_path, evidence_path, COMMIT, SOURCE)
     assert result["schemaVersion"] == "ui-acceptance-gate-v1"
     assert result["status"] == "PASS"
     assert result["result"]["route"] == "http://127.0.0.1:8501/"
+    assert captured["source_fingerprint"] == SOURCE
+    assert result["metadata"]["telemetry"]["attemptNumber"] == 1
+    assert result["metadata"]["telemetry"]["durationSeconds"] >= 0
 
 
 def test_ui_acceptance_gate_rejects_file_url_and_identity_mismatch(tmp_path):
@@ -57,3 +64,18 @@ def test_ui_acceptance_gate_maps_runner_failure_to_fail(monkeypatch, tmp_path):
     result = run_ui_acceptance_gate(tmp_path, "http://127.0.0.1:8501/", tmp_path, evidence_path, COMMIT, SOURCE)
     assert result["status"] == "FAIL"
     assert result["result"]["failureReasons"] == ["HTTP_PROBE_FAILED"]
+
+
+def test_ui_acceptance_gate_timestamps_wrap_the_run(monkeypatch, tmp_path):
+    evidence_path = _evidence(tmp_path)
+    monkeypatch.setattr("scripts.ui_acceptance_gate.run_ui_acceptance", lambda **kwargs: {
+        "status": "PASS", "route": kwargs["url"], "httpStatus": 200,
+        "evidenceStatus": "PASS", "failureReasons": [],
+    })
+    timestamps = iter(["2026-09-11T00:00:00Z", "2026-09-11T00:00:01Z"])
+    monkeypatch.setattr("scripts.ui_acceptance_gate._timestamp", lambda: next(timestamps))
+
+    result = run_ui_acceptance_gate(tmp_path, "http://127.0.0.1:8501/", tmp_path, evidence_path, COMMIT, SOURCE)
+
+    assert result["startedAt"] == "2026-09-11T00:00:00Z"
+    assert result["finishedAt"] == "2026-09-11T00:00:01Z"

@@ -20,6 +20,8 @@ def test_full_pytest_gate_records_bounded_pass(monkeypatch, tmp_path):
     assert evidence["status"] == "PASS"
     assert evidence["result"] == {"passed": 120, "failed": 0, "skipped": 3, "durationSeconds": 2.5}
     assert evidence["metadata"]["exitCode"] == 0
+    assert evidence["metadata"]["telemetry"]["attemptNumber"] == 1
+    assert evidence["metadata"]["telemetry"]["durationSeconds"] >= 0
     assert "--sandbox-preflight" in calls[0][0]
     assert calls[0][0][calls[0][0].index("--sandbox-preflight") + 1] == "required"
 

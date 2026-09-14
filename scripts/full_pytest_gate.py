@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.acceptance_telemetry import build_gate_telemetry
 
 
 _TAIL = 4000
@@ -98,6 +100,7 @@ def run_full_pytest_gate(
     root = Path(project_root).resolve()
     argv = _approved_argv(root, command)
     started = _timestamp()
+    monotonic_started = time.perf_counter()
     status = "FAIL"
     result = {"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0}
     metadata = {"commandId": "full-pytest", "argv": _safe_argv(argv), "exitCode": None}
@@ -126,6 +129,11 @@ def run_full_pytest_gate(
         stderr = str(exc)
         status = "BLOCKED"
     finished = _timestamp()
+    metadata["telemetry"] = build_gate_telemetry(
+        duration_seconds=time.perf_counter() - monotonic_started,
+        failure_code=metadata.get("failureCode"),
+        blocked_reason=metadata.get("failureCode") if status == "BLOCKED" else None,
+    )
     unsigned = {
         "schemaVersion": "full-pytest-gate-v1", "gate": "full_pytest", "status": status,
         "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,

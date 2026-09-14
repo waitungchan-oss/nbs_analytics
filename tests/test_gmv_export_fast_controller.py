@@ -174,6 +174,62 @@ def test_fast_controller_warm_reference_does_not_call_legacy(monkeypatch, tmp_pa
     assert calls == ["fast"]
 
 
+def test_fast_controller_propagates_source_fingerprint_to_published_cache(monkeypatch, tmp_path):
+    import backend.services.gmv_export_cache_service as cache_service
+    import backend.services.gmv_refund_service as service
+    import backend.services.gmv_trusted_reference_service as reference_service
+
+    class Repository:
+        db_path = tmp_path / "nbs.sqlite"
+
+        def load_active_scope(self):
+            return {
+                "version_id": "v1",
+                "revenue_generation_token": "revenue-v1",
+                "refund_state_sha256": "a" * 64,
+            }
+
+    class Reference:
+        status = "TRUSTED"
+        content_fingerprint = "a" * 64
+        reference_id = "gmv-trusted-reference-v1:" + "a" * 64
+
+        def to_dict(self):
+            return {"referenceId": self.reference_id, "contentFingerprint": self.content_fingerprint}
+
+    class Manifest:
+        status = "ready"
+
+    candidate = service.GmvFastCandidate(
+        artifacts={},
+        total_adjusted={"adjusted_detail": pd.DataFrame()},
+        paid_adjusted={"adjusted_detail": pd.DataFrame()},
+        total_summary_rows=[],
+        paid_summary_rows=[],
+        shadow_status="PASS",
+        reference_status="HIT",
+    )
+    captured = {}
+    monkeypatch.setattr(reference_service, "load_trusted_reference", lambda **kwargs: Reference())
+    monkeypatch.setattr(cache_service, "load_gmv_export_cache", lambda **kwargs: None)
+
+    def capture_cache_build(**kwargs):
+        captured["source_fingerprint"] = kwargs["source_fingerprint"]
+        return Manifest()
+
+    monkeypatch.setattr(cache_service, "build_gmv_export_cache", capture_cache_build)
+    monkeypatch.setattr(service, "_run_fast_export_gate", lambda **kwargs: candidate)
+    monkeypatch.setattr(service, "_gmv_baseline_status", lambda **kwargs: "PASS")
+
+    result = service.build_gmv_formal_artifacts_fast_or_legacy(
+        repository=Repository(), version_id="v1", revenue_frames=_frames(),
+        rule_version="rules", cache_dir=tmp_path, source_fingerprint="b" * 64,
+    )
+
+    assert result.cache_manifest.status == "ready"
+    assert captured["source_fingerprint"] == "b" * 64
+
+
 def test_fast_controller_passes_affected_receipts_to_candidate(monkeypatch, tmp_path):
     import backend.services.gmv_export_cache_service as cache_service
     import backend.services.gmv_refund_service as service

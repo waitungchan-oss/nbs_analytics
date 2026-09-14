@@ -142,7 +142,7 @@ class ValidationRunner:
                 continue
             if not resolved.is_file() or not resolved.stat().st_mode & 0o111:
                 continue
-            if not allow_external_symlink and not self._is_under(resolved, approved_root):
+            if not allow_external_symlink and not self._is_under(resolved, self.project_root):
                 continue
             return resolved
 

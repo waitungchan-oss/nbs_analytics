@@ -3131,6 +3131,7 @@ def _render_gmv_exclusion_tab() -> None:
                         revenue_frames=revenue_frames, rule_version=REVENUE_SCOPE_LABEL,
                         cache_dir=cache_dir, worker_count=3,
                         affected_source_receipt_nos=receipt.affected_source_receipt_nos,
+                        source_fingerprint=os.environ.get("NBS_ACCEPTANCE_SOURCE_FINGERPRINT"),
                     )
                     if artifacts.cache_manifest.status != "ready":
                         raise RuntimeError(artifacts.cache_manifest.error or "GMV export cache failed")
