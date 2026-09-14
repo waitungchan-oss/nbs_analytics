@@ -2,7 +2,11 @@ import pytest
 
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.release_gate_models import ReleaseGateValidationError
-from scripts.full_pytest_shard_aggregate import aggregate_pytest_shards
+from scripts.full_pytest_shard_aggregate import (
+    aggregate_pytest_shards,
+    compare_serial_and_shard,
+    validate_shard_set,
+)
 
 
 COMMIT = "a" * 40
@@ -60,6 +64,40 @@ def test_aggregate_requires_exactly_once_manifest_coverage():
     assert result["status"] == "PASS"
     assert result["authority"] == "prototype"
     assert result["formalReleaseEnabled"] is False
+
+
+def test_validate_shard_set_returns_bounded_identity_and_coverage_result():
+    manifest = _manifest(["tests/test_a.py::test_one", "tests/test_b.py::test_two"])
+    shards = [_shard(manifest, 0, [manifest["nodeids"][0]]), _shard(manifest, 1, [manifest["nodeids"][1]])]
+
+    result = validate_shard_set(manifest, shards, COMMIT, SOURCE)
+
+    assert result["status"] == "PASS"
+    assert result["coveredNodeids"] == 2
+    assert result["duplicateNodeids"] == []
+    assert result["missingNodeids"] == []
+    assert result["unknownNodeids"] == []
+
+
+def test_parity_mismatch_blocks_rollout_candidate():
+    result = compare_serial_and_shard(
+        {"status": "PASS", "passed": 10, "failed": 0, "skipped": 1},
+        {"status": "PASS", "passed": 9, "failed": 0, "skipped": 1},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "serial_parity_mismatch"
+
+
+@pytest.mark.parametrize("status", ["FAIL", "BLOCKED"])
+def test_parity_rejects_non_passing_inputs_even_when_counts_match(status):
+    result = compare_serial_and_shard(
+        {"status": "PASS", "passed": 10, "failed": 0, "skipped": 1},
+        {"status": status, "passed": 10, "failed": 0, "skipped": 1},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "serial_or_shard_status_invalid"
 
 
 @pytest.mark.parametrize(
