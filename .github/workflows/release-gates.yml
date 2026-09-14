@@ -146,6 +146,7 @@ jobs:
           trap 'kill "$(cat "$RUNNER_TEMP/ui-server.pid")" 2>/dev/null || true' EXIT
           curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 http://127.0.0.1:8765/ > "$RUNNER_TEMP/ui-page.html"
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          export NBS_ACCEPTANCE_SOURCE_FINGERPRINT="$SOURCE_FINGERPRINT"
           .venv/bin/python scripts/streamlit_ui_smoke.py --project-root "$GITHUB_WORKSPACE" --route http://127.0.0.1:8765/ --served-url http://127.0.0.1:8765/ --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-ui-fixture/evidence.json"
           .venv/bin/python scripts/ui_acceptance_gate.py --url http://127.0.0.1:8765/ --fixture-root "$RUNNER_TEMP/nbs-ui-fixture" --evidence "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output ui-acceptance.json
       - if: always()

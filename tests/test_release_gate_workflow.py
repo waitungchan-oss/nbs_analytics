@@ -70,6 +70,7 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "git fetch --no-tags origin main:refs/heads/main" in ui_block
     assert ".venv/bin/python -m playwright install --with-deps chromium" in ui_block
     assert "--served-url http://127.0.0.1:8765/" in ui_block
+    assert "export NBS_ACCEPTANCE_SOURCE_FINGERPRINT=\"$SOURCE_FINGERPRINT\"" in ui_block
     assert "curl --fail" in ui_block
     assert "--retry-connrefused" in ui_block
     assert "python -m http.server" not in ui_block
