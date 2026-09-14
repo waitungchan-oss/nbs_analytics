@@ -40,10 +40,24 @@ def _result(status: str, failure_code: str | None, **fields: Any) -> dict[str, A
     unsigned = {
         "schemaVersion": "acceptance-shard-canary-v1",
         "status": status,
+        "authority": "prototype",
+        "formalReleaseEnabled": False,
         "rolloutCandidate": "eligible" if status == "PASS" else "ineligible",
         "failureCode": failure_code,
         **fields,
     }
+    return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
+
+
+def _bind_source_identity(
+    result: Mapping[str, Any], *, commit_sha: str, source_fingerprint: str,
+    manifest_fingerprint: str | None,
+) -> dict[str, Any]:
+    unsigned = dict(result)
+    unsigned.pop("evidenceFingerprint", None)
+    unsigned.update({"commitSha": commit_sha, "sourceFingerprint": source_fingerprint})
+    if manifest_fingerprint is not None:
+        unsigned["manifestFingerprint"] = manifest_fingerprint
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
 
@@ -202,11 +216,13 @@ def run_canary(*, project_root: Path, config: RolloutConfig, repeats: int = 3) -
     if commit_sha != expected_commit_sha:
         return _result("BLOCKED", "commit_identity_mismatch", runCount=0, runs=[])
     runs: list[dict[str, Any]] = []
+    manifest_fingerprint: str | None = None
     for repeat in range(3):
         manifest = collect_pytest_manifest(root, commit_sha=commit_sha, source_fingerprint=source_fingerprint)
         if manifest.get("status") != "PASS":
             runs.append({"status": "BLOCKED", "failureCode": "manifest_invalid"})
             break
+        manifest_fingerprint = manifest.get("manifestFingerprint")
         serial = _serial_control(root)
         if serial["status"] != "PASS":
             runs.append({"status": serial["status"], "failureCode": serial.get("failureCode", "serial_control_failed"), "serialSeconds": serial["serialSeconds"], "shardSeconds": 0.0})
@@ -230,7 +246,11 @@ def run_canary(*, project_root: Path, config: RolloutConfig, repeats: int = 3) -
         runs.append({"status": "PASS" if parity["status"] == "PASS" else "BLOCKED", "failureCode": parity.get("failureCode"), "serialSeconds": serial["serialSeconds"], "shardSeconds": shard_seconds, "parity": parity})
         if parity["status"] != "PASS":
             break
-    return summarize_canary_runs(runs) if len(runs) == 3 else _result("BLOCKED", (runs[-1].get("failureCode") if runs else "canary_run_failed"), runCount=len(runs), runs=list(runs))
+    summary = summarize_canary_runs(runs) if len(runs) == 3 else _result("BLOCKED", (runs[-1].get("failureCode") if runs else "canary_run_failed"), runCount=len(runs), runs=list(runs))
+    return _bind_source_identity(
+        summary, commit_sha=commit_sha, source_fingerprint=source_fingerprint,
+        manifest_fingerprint=manifest_fingerprint,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

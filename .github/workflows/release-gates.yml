@@ -1,6 +1,13 @@
 name: Release Gates
 
 on:
+  workflow_dispatch:
+    inputs:
+      enable_acceptance_shards:
+        description: "Run the diagnostic acceptance shard canary"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -144,6 +151,112 @@ jobs:
           name: release-gate-ui-acceptance-${{ github.sha }}
           path: ui-acceptance.json
           if-no-files-found: error
+
+  acceptance-shard-preflight:
+    name: acceptance-shard-preflight
+    if: github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_shards == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Create isolated shard preflight environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+      - name: Collect source-bound shard manifest
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          mkdir -p "$RUNNER_TEMP/nbs-shard-preflight"
+          .venv/bin/python scripts/pytest_manifest.py --project-root "$GITHUB_WORKSPACE" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-shard-preflight/pytest-manifest.json"
+          test -s "$RUNNER_TEMP/nbs-shard-preflight/pytest-manifest.json"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-shard-preflight-${{ github.sha }}
+          path: ${{ runner.temp }}/nbs-shard-preflight/pytest-manifest.json
+          if-no-files-found: warn
+
+  acceptance-shard-canary:
+    name: acceptance-shard-canary
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_shards == true && needs.acceptance-shard-preflight.result == 'success'
+    needs: [acceptance-shard-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Create isolated shard canary environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: acceptance-shard-preflight-${{ github.sha }}
+          path: artifacts/shard-preflight
+      - name: Run repeated diagnostic shard canary
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          NBS_ACCEPTANCE_COMMIT_SHA="$GITHUB_SHA" NBS_ACCEPTANCE_SOURCE_FINGERPRINT="$SOURCE_FINGERPRINT" ACCEPTANCE_SHARDS_ENABLED=true .venv/bin/python scripts/acceptance_shard_canary.py --project-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/shard-canary.json"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-shard-canary-${{ github.sha }}
+          path: ${{ runner.temp }}/shard-canary.json
+          if-no-files-found: warn
+
+  acceptance-shard-aggregate:
+    name: acceptance-shard-aggregate
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_shards == true
+    needs: [acceptance-shard-preflight, acceptance-shard-canary]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: acceptance-shard-preflight-${{ github.sha }}
+          path: artifacts/shard-preflight
+      - uses: actions/download-artifact@v4
+        with:
+          name: acceptance-shard-canary-${{ github.sha }}
+          path: artifacts/shard-canary
+      - name: Require successful advisory upstream jobs
+        if: always()
+        run: |
+          test "${{ needs.acceptance-shard-preflight.result }}" = "success"
+          test "${{ needs.acceptance-shard-canary.result }}" = "success"
+      - name: Validate advisory canary artifact
+        if: always()
+        run: |
+          test -s artifacts/shard-preflight/pytest-manifest.json
+          test -s artifacts/shard-canary/shard-canary.json
+          python - <<'PY'
+          import json
+          manifest = json.load(open("artifacts/shard-preflight/pytest-manifest.json", encoding="utf-8"))
+          canary = json.load(open("artifacts/shard-canary/shard-canary.json", encoding="utf-8"))
+          assert manifest["commitSha"] == "${{ github.sha }}"
+          assert canary["commitSha"] == manifest["commitSha"]
+          assert canary["sourceFingerprint"] == manifest["sourceFingerprint"]
+          assert canary["manifestFingerprint"] == manifest["manifestFingerprint"]
+          assert canary["schemaVersion"] == "acceptance-shard-canary-v1"
+          assert canary["rolloutCandidate"] in {"eligible", "ineligible"}
+          assert canary["status"] in {"PASS", "BLOCKED"}
+          assert canary["formalReleaseEnabled"] is False
+          PY
 
   aggregate:
     name: Release gate aggregate

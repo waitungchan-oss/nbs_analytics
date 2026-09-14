@@ -85,3 +85,26 @@ Full pytest 維持 serial；prototype 不可輸出 `full-pytest-gate-v1`，也�
 `release_gate.py` 消費成正式 PASS。
 
 Memory Hub、Memory Sidecar、Governance Graph 和 Agent Operations 只能提供 bounded、read-only、non-authoritative context；它們不能批准、dispatch、改寫 session、改寫正式資料或把 blocked 狀態升格為 release-ready。
+
+## Manual shard rollout（serial authority 保留）
+
+`acceptance-shard-preflight`、`acceptance-shard-canary` 和
+`acceptance-shard-aggregate` 只在 `workflow_dispatch` 且明確設定
+`enable_acceptance_shards=true` 時執行。Repository 預設保持：
+
+```text
+ACCEPTANCE_SHARDS_ENABLED=false
+formalReleaseEnabled=false
+```
+
+既有 `full-pytest`、`hermes`、`ui-acceptance` 與正式 `aggregate` job 不依賴
+shard jobs；缺少或失敗的 advisory shard artifact 不會改變 serial release path。
+在任何 rollout 問題下，回退方式是重新 dispatch：
+
+```bash
+gh workflow run release-gates.yml -f enable_acceptance_shards=false
+```
+
+shard aggregate 只能驗證同一 source／manifest 的 diagnostic evidence，不能輸出
+`full-pytest-gate-v1`，也不能被 `release_gate.py` 消費成正式 PASS。只有另行批准的
+L3 promotion 才能改變這個邊界。

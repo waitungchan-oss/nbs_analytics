@@ -103,3 +103,35 @@ def test_release_aggregate_uses_minimal_runtime_and_runs_after_failed_children()
     assert "pip install -r requirements.txt" not in aggregate
     assert "python scripts/release_gate.py aggregate" in aggregate
     assert "if-no-files-found: error" in aggregate
+
+
+def test_serial_full_pytest_remains_default_and_required():
+    source = _workflow_text()
+    full_block = source.split("  full-pytest:\n", 1)[1].split("  hermes:\n", 1)[0]
+
+    assert "name: Full pytest release gate" in full_block
+    assert "strategy:" not in full_block
+
+
+def test_shard_matrix_is_manual_and_default_off():
+    source = _workflow_text()
+
+    assert "workflow_dispatch:" in source
+    assert "enable_acceptance_shards" in source
+    assert "default: false" in source
+    for name in ("acceptance-shard-preflight", "acceptance-shard-canary", "acceptance-shard-aggregate"):
+        assert name in source
+
+
+def test_shard_jobs_are_advisory_and_do_not_replace_serial_authority():
+    source = _workflow_text()
+    full_block = source.split("  full-pytest:\n", 1)[1].split("  hermes:\n", 1)[0]
+    shard_block = source.split("  acceptance-shard-preflight:\n", 1)[1].split("  aggregate:\n", 1)[0]
+    formal_aggregate = source.split("  aggregate:\n", 1)[1]
+
+    assert "name: Full pytest release gate" in full_block
+    assert "strategy:" not in full_block
+    assert "formalReleaseEnabled" in shard_block
+    assert "acceptance-shard-aggregate" in shard_block
+    assert "needs: [full-pytest, hermes, ui-acceptance]" in formal_aggregate
+    assert "acceptance-shard" not in formal_aggregate
