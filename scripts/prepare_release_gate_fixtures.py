@@ -215,8 +215,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", choices=("full", "ui"), default="full")
+    parser.add_argument("--source-fingerprint")
     args = parser.parse_args(argv)
-    fixture = build_release_gate_fixtures(args.output, profile=args.profile)
+    fixture = build_release_gate_fixtures(
+        args.output, profile=args.profile, source_fingerprint=args.source_fingerprint,
+    )
     print(f"db={fixture.db_path}")
     print(f"cache={fixture.cache_dir}")
     return 0

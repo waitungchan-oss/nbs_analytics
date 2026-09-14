@@ -46,16 +46,22 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "fetch-depth: 0" in full_block
     assert "git fetch --no-tags origin main:refs/heads/main" in full_block
     assert "prepare_release_gate_fixtures.py --output" in full_block
+    assert "prepare_release_gate_fixtures.py --output \"$RUNNER_TEMP/nbs-full-pytest-fixture\" --source-fingerprint \"$SOURCE_FINGERPRINT\"" in full_block
+    assert "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_cache" in full_block
     assert "NBS_ANALYTICS_DB_FILE" in full_block
     assert "NBS_ANALYTICS_CACHE_DIR" in full_block
     assert "NBS_ANALYTICS_COORDINATION_DB" in full_block
     assert "runs-on: macos-14" in hermes_block
     assert "fetch-depth: 0" in hermes_block
     assert "--skip-system-acceptance" in hermes_block
+    assert "prepare_release_gate_fixtures.py --output \"$RUNNER_TEMP/nbs-hermes-fixture\" --source-fingerprint \"$SOURCE_FINGERPRINT\"" in hermes_block
+    assert "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-hermes-fixture/release_gate_cache" in hermes_block
     assert "git fetch --no-tags origin main:refs/heads/main" in hermes_block
     assert ".venv/bin/python -m streamlit run app.py" in ui_block
     assert "streamlit_ui_smoke.py" in ui_block
     assert "prepare_release_gate_fixtures.py" in ui_block
+    assert "prepare_release_gate_fixtures.py --profile ui --output \"$RUNNER_TEMP/nbs-ui-fixture\" --source-fingerprint \"$SOURCE_FINGERPRINT\"" in ui_block
+    assert "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-ui-fixture/release_gate_cache" in ui_block
     assert "NBS_ANALYTICS_DB_FILE" in ui_block
     assert "NBS_ANALYTICS_CACHE_DIR" in ui_block
     assert "NBS_ANALYTICS_COORDINATION_DB" in ui_block

@@ -45,9 +45,10 @@ jobs:
           .venv/bin/python -m pip install -r requirements.txt
       - name: Prepare isolated full pytest fixture
         run: |
-          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-full-pytest-fixture"
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-full-pytest-fixture" --source-fingerprint "$SOURCE_FINGERPRINT"
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
-          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_cache" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-full-pytest-fixture/upload_coordination.db" >> "$GITHUB_ENV"
       - name: Collect diagnostic pytest manifest
         run: |
@@ -95,9 +96,10 @@ jobs:
           .venv/bin/python -m pip install -r requirements.txt
       - name: Prepare isolated Hermes baseline fixture
         run: |
-          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-hermes-fixture"
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-hermes-fixture" --source-fingerprint "$SOURCE_FINGERPRINT"
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-hermes-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
-          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-hermes-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-hermes-fixture/release_gate_cache" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-hermes-fixture/upload_coordination.db" >> "$GITHUB_ENV"
       - name: Run Hermes read-only gate
         run: |
@@ -132,9 +134,10 @@ jobs:
       - run: .venv/bin/python -m playwright install --with-deps chromium
       - name: Prepare isolated HTTP fixture
         run: |
-          .venv/bin/python scripts/prepare_release_gate_fixtures.py --profile ui --output "$RUNNER_TEMP/nbs-ui-fixture"
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          .venv/bin/python scripts/prepare_release_gate_fixtures.py --profile ui --output "$RUNNER_TEMP/nbs-ui-fixture" --source-fingerprint "$SOURCE_FINGERPRINT"
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-ui-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
-          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-ui-fixture/.nbs_runtime_cache" >> "$GITHUB_ENV"
+          echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-ui-fixture/release_gate_cache" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-ui-fixture/upload_coordination.db" >> "$GITHUB_ENV"
       - name: Run isolated HTTP UI acceptance
         run: |
