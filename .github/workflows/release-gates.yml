@@ -139,13 +139,14 @@ jobs:
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-ui-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-ui-fixture/release_gate_cache" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-ui-fixture/upload_coordination.db" >> "$GITHUB_ENV"
+          echo "NBS_ACCEPTANCE_SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT" >> "$GITHUB_ENV"
       - name: Run isolated HTTP UI acceptance
         run: |
           .venv/bin/python -m streamlit run app.py --server.headless true --server.address 127.0.0.1 --server.port 8765 > "$RUNNER_TEMP/ui-server.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ui-server.pid"
           trap 'kill "$(cat "$RUNNER_TEMP/ui-server.pid")" 2>/dev/null || true' EXIT
           curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 http://127.0.0.1:8765/ > "$RUNNER_TEMP/ui-page.html"
-          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          SOURCE_FINGERPRINT="$NBS_ACCEPTANCE_SOURCE_FINGERPRINT"
           export NBS_ACCEPTANCE_SOURCE_FINGERPRINT="$SOURCE_FINGERPRINT"
           .venv/bin/python scripts/streamlit_ui_smoke.py --project-root "$GITHUB_WORKSPACE" --route http://127.0.0.1:8765/ --served-url http://127.0.0.1:8765/ --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-ui-fixture/evidence.json"
           .venv/bin/python scripts/ui_acceptance_gate.py --url http://127.0.0.1:8765/ --fixture-root "$RUNNER_TEMP/nbs-ui-fixture" --evidence "$RUNNER_TEMP/nbs-ui-fixture/evidence.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output ui-acceptance.json

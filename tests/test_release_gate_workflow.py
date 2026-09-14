@@ -62,6 +62,7 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "prepare_release_gate_fixtures.py" in ui_block
     assert "prepare_release_gate_fixtures.py --profile ui --output \"$RUNNER_TEMP/nbs-ui-fixture\" --source-fingerprint \"$SOURCE_FINGERPRINT\"" in ui_block
     assert "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-ui-fixture/release_gate_cache" in ui_block
+    assert "echo \"NBS_ACCEPTANCE_SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT\" >> \"$GITHUB_ENV\"" in ui_block
     assert "NBS_ANALYTICS_DB_FILE" in ui_block
     assert "NBS_ANALYTICS_CACHE_DIR" in ui_block
     assert "NBS_ANALYTICS_COORDINATION_DB" in ui_block
@@ -70,6 +71,7 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "git fetch --no-tags origin main:refs/heads/main" in ui_block
     assert ".venv/bin/python -m playwright install --with-deps chromium" in ui_block
     assert "--served-url http://127.0.0.1:8765/" in ui_block
+    assert "SOURCE_FINGERPRINT=\"$NBS_ACCEPTANCE_SOURCE_FINGERPRINT\"" in ui_block
     assert "export NBS_ACCEPTANCE_SOURCE_FINGERPRINT=\"$SOURCE_FINGERPRINT\"" in ui_block
     assert "curl --fail" in ui_block
     assert "--retry-connrefused" in ui_block
