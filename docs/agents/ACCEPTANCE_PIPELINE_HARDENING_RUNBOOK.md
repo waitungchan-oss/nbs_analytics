@@ -108,3 +108,24 @@ gh workflow run release-gates.yml -f enable_acceptance_shards=false
 shard aggregate 只能驗證同一 source／manifest 的 diagnostic evidence，不能輸出
 `full-pytest-gate-v1`，也不能被 `release_gate.py` 消費成正式 PASS。只有另行批准的
 L3 promotion 才能改變這個邊界。
+
+## Rollout handoff gate（Task 6）
+
+每次 handoff 必須綁定同一份 fresh source seal、`HEAD` commit SHA、manifest
+fingerprint、runner fingerprint 和 canary artifact；同時保存 serial/shard
+parity、三次 timing ratio、UI fixture preflight 狀態，以及 rollback command。
+`ui_fixture_cache_mismatch`、缺少或過期的 source/preflight/serial/canary/aggregate/
+Hermes/UI evidence，任何 contaminated artifact，均固定產生
+`rolloutCandidate=ineligible`。
+
+這個 checkpoint 仍是 diagnostic-only：即使 canary/history parity PASS，也不能
+把 shard artifact 送進 formal release aggregate，不能改寫 `full-pytest-gate-v1`
+或 `release-gate-result-v1`，也不能推進 L3。當前 checkpoint 尚未具備 rollout
+eligible 條件時，必須回到 serial control path，重新建立 source-matched UI
+fixture evidence，再重新走 handoff。
+
+發現問題時使用明確 rollback：
+
+```bash
+gh workflow run release-gates.yml -f enable_acceptance_shards=false
+```
