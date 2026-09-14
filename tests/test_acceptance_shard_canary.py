@@ -89,6 +89,19 @@ def test_run_canary_preserves_manifest_blocker(monkeypatch, tmp_path):
     assert result["runs"][0]["failureCode"] == "manifest_invalid"
 
 
+def test_source_identity_binding_recomputes_evidence_fingerprint():
+    result = acceptance_shard_canary._bind_source_identity(
+        {"schemaVersion": "acceptance-shard-canary-v1", "status": "BLOCKED"},
+        commit_sha="a" * 40, source_fingerprint="b" * 64,
+        manifest_fingerprint="c" * 64,
+    )
+
+    assert result["commitSha"] == "a" * 40
+    assert result["sourceFingerprint"] == "b" * 64
+    assert result["manifestFingerprint"] == "c" * 64
+    assert result["evidenceFingerprint"] == canonical_fingerprint({key: value for key, value in result.items() if key != "evidenceFingerprint"})
+
+
 def test_run_canary_converts_shard_runtime_error_to_bounded_blocker(monkeypatch, tmp_path):
     monkeypatch.setenv("NBS_ACCEPTANCE_SOURCE_FINGERPRINT", "b" * 64)
     monkeypatch.setenv("NBS_ACCEPTANCE_COMMIT_SHA", "a" * 40)
