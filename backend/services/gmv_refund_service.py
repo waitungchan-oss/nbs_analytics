@@ -830,6 +830,7 @@ def build_gmv_formal_artifacts(
     revenue_frames: RevenueFrames, rule_version: str, cache_dir=None,
     builder_mode: str = "legacy", equivalence_status: str = "NOT_RUN",
     publish_active: bool = True, fallback_reason: str | None = None,
+    source_fingerprint: str | None = None,
 ) -> GmvFormalArtifacts:
     """Calculate both formal dimensions once and persist their derived cache."""
     from app_workflows import (
@@ -896,6 +897,7 @@ def build_gmv_formal_artifacts(
         equivalence_status=equivalence_status,
         publish_active=publish_active,
         ready_error=fallback_reason,
+        source_fingerprint=source_fingerprint,
     )
     return GmvFormalArtifacts(total_adjusted, paid_adjusted, total_summary_rows, paid_summary_rows, manifest)
 
@@ -1058,6 +1060,7 @@ def build_gmv_formal_artifacts_fast_or_legacy(
     worker_count: int = 3, validation_mode: str = "trusted_warm",
     affected_source_receipt_nos: tuple[str, ...] | list[str] = (),
     baseline_status_override: str | None = None,
+    source_fingerprint: str | None = None,
 ) -> GmvFormalArtifacts:
     """Use trusted warm validation and a private legacy seed on cold miss."""
     cache_root = cache_dir or ".nbs_runtime_cache"
@@ -1106,6 +1109,7 @@ def build_gmv_formal_artifacts_fast_or_legacy(
                 repository=repository, version_id=version_id, revenue_frames=revenue_frames,
                 rule_version=rule_version, cache_dir=cache_root,
                 builder_mode="legacy_seed", equivalence_status="NOT_RUN", publish_active=False,
+                source_fingerprint=source_fingerprint,
             )
             seed_manifest = seed_result.cache_manifest
             if seed_manifest.status != "ready":
@@ -1168,6 +1172,7 @@ def build_gmv_formal_artifacts_fast_or_legacy(
             performance=candidate.performance or {},
             fallback={"used": False, "reason": None},
             refund_state_sha256=str(active.get("refund_state_sha256") or "") or None,
+            source_fingerprint=source_fingerprint,
         )
         if candidate_manifest.status != "ready":
             raise RuntimeError(candidate_manifest.error or "fast cache publication failed")
@@ -1192,6 +1197,7 @@ def build_gmv_formal_artifacts_fast_or_legacy(
             rule_version=rule_version, cache_dir=cache_root,
             builder_mode="legacy_fallback", equivalence_status="FALLBACK",
             fallback_reason=fallback_reason,
+            source_fingerprint=source_fingerprint,
         )
 
 
