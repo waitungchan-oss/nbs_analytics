@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.error import URLError
@@ -20,6 +21,7 @@ from backend.services.gmv_ui_acceptance_service import (
     validate_ui_acceptance_evidence,
 )
 from backend.agents.acceptance_paths import is_temporary_path, temporary_roots
+from scripts.ui_acceptance_fixture_preflight import inspect_ui_fixture_cache
 
 
 _PRODUCTION_MARKERS = (
@@ -72,8 +74,49 @@ def _probe_http(url: str) -> tuple[int | None, str | None]:
 
 def run_ui_acceptance(
     *, url: str, fixture_root: str | Path, evidence_path: str | Path,
+    db_path: str | Path | None = None, cache_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     root = _validate_target(url, fixture_root)
+    fixture_db = db_path or os.environ.get("NBS_ANALYTICS_DB_FILE")
+    fixture_cache = cache_dir or os.environ.get("NBS_ANALYTICS_CACHE_DIR")
+    if fixture_db is None or fixture_cache is None:
+        return {
+            "schemaVersion": "gmv-ui-acceptance-result-v1",
+            "status": "BLOCKED",
+            "route": url,
+            "httpStatus": None,
+            "evidenceStatus": "BLOCKED",
+            "failureReasons": ["UI_FIXTURE_PREFLIGHT:fixture_paths_required"],
+            "activeVersionId": "",
+            "downloadedArtifacts": {},
+        }
+    source_fingerprint = os.environ.get("NBS_ACCEPTANCE_SOURCE_FINGERPRINT")
+    if not source_fingerprint:
+        return {
+            "schemaVersion": "gmv-ui-acceptance-result-v1",
+            "status": "BLOCKED",
+            "route": url,
+            "httpStatus": None,
+            "evidenceStatus": "BLOCKED",
+            "failureReasons": ["UI_FIXTURE_PREFLIGHT:source_fingerprint_required"],
+            "activeVersionId": "",
+            "downloadedArtifacts": {},
+        }
+    preflight = inspect_ui_fixture_cache(
+        db_path=Path(fixture_db), cache_dir=Path(fixture_cache), project_root=root,
+        source_fingerprint=source_fingerprint,
+    )
+    if preflight["status"] != "PASS":
+        return {
+            "schemaVersion": "gmv-ui-acceptance-result-v1",
+            "status": "BLOCKED",
+            "route": url,
+            "httpStatus": None,
+            "evidenceStatus": "BLOCKED",
+            "failureReasons": [f"UI_FIXTURE_PREFLIGHT:{preflight['reason']}"],
+            "activeVersionId": preflight.get("activeVersionId", ""),
+            "downloadedArtifacts": {},
+        }
     evidence_file = Path(evidence_path).expanduser().resolve()
     try:
         evidence_file.relative_to(root)
@@ -108,10 +151,14 @@ def main() -> int:
     parser.add_argument("--url", required=True)
     parser.add_argument("--fixture-root", required=True)
     parser.add_argument("--evidence", required=True)
+    parser.add_argument("--db-path")
+    parser.add_argument("--cache-dir")
     parser.add_argument("--output")
     args = parser.parse_args()
     result = run_ui_acceptance(
         url=args.url, fixture_root=args.fixture_root, evidence_path=args.evidence,
+        db_path=args.db_path or os.environ.get("NBS_ANALYTICS_DB_FILE"),
+        cache_dir=args.cache_dir or os.environ.get("NBS_ANALYTICS_CACHE_DIR"),
     )
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2)
     if args.output:

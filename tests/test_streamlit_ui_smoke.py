@@ -1,5 +1,6 @@
 import pytest
 
+from scripts import streamlit_ui_smoke
 from scripts.streamlit_ui_smoke import build_evidence
 
 
@@ -34,3 +35,17 @@ def test_streamlit_smoke_requires_active_version_and_downloads():
 def test_streamlit_smoke_requires_stable_version_and_validated_downloads():
     with pytest.raises(ValueError, match="changed across rerun"):
         build_evidence("http://127.0.0.1:8765/", "a" * 40, "b" * 64, [], ["GMV 排除訂單看板"], ["GMV 排除訂單看板", "正式淨 GMV active version"], "CURRENT", "READY", "v1", "v2", DOWNLOADS, MERGE_FLOW, "streamlit.testing.v1.AppTest")
+
+
+def test_streamlit_main_preserves_runtime_value_error_classification(monkeypatch, tmp_path):
+    def fail(*args, **kwargs):
+        raise ValueError("browser flow failed")
+
+    monkeypatch.setattr(streamlit_ui_smoke, "run_smoke", fail)
+    with pytest.raises(ValueError, match="browser flow failed"):
+        streamlit_ui_smoke.main([
+            "--route", "http://127.0.0.1:8765/",
+            "--commit-sha", "a" * 40,
+            "--source-fingerprint", "b" * 64,
+            "--output", str(tmp_path / "evidence.json"),
+        ])

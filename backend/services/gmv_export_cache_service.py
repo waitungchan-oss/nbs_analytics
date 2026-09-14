@@ -52,6 +52,7 @@ class GmvExportCacheManifest:
     performance: dict[str, object] = field(default_factory=dict)
     fallback: dict[str, object] = field(default_factory=dict)
     refund_state_sha256: str | None = None
+    source_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -77,6 +78,7 @@ class GmvExportCacheManifest:
             "performance": self.performance,
             "fallback": self.fallback,
             "refundStateSha256": self.refund_state_sha256,
+            "sourceFingerprint": self.source_fingerprint,
         }
 
     @classmethod
@@ -104,6 +106,7 @@ class GmvExportCacheManifest:
             performance=dict(payload.get("performance") or {}),
             fallback=dict(payload.get("fallback") or {}),
             refund_state_sha256=(str(payload["refundStateSha256"]) if payload.get("refundStateSha256") else None),
+            source_fingerprint=(str(payload["sourceFingerprint"]) if payload.get("sourceFingerprint") else None),
         )
 
 
@@ -229,6 +232,7 @@ def build_gmv_export_cache(
     performance: dict[str, object] | None = None,
     fallback: dict[str, object] | None = None,
     refund_state_sha256: str | None = None,
+    source_fingerprint: str | None = None,
 ) -> GmvExportCacheManifest:
     cache_key = gmv_export_cache_key(
         version_id=version_id,
@@ -275,7 +279,7 @@ def build_gmv_export_cache(
             CACHE_SCHEMA_VERSION, "ready", artifacts, round((time.perf_counter() - started) * 1000), ready_error,
             builder_mode, equivalence_status, len(artifacts), str(generation_path),
             content_fingerprint, reference_id, validation_mode, shadow_status, reference_manifest_sha256,
-            reference_status, performance or {}, fallback or {}, refund_state_sha256,
+            reference_status, performance or {}, fallback or {}, refund_state_sha256, source_fingerprint,
         )
         _write_manifest(target / "manifest.json", manifest)
         if publish_active:
@@ -287,7 +291,7 @@ def build_gmv_export_cache(
             CACHE_SCHEMA_VERSION, "failed", {}, round((time.perf_counter() - started) * 1000),
             f"serialize_artifacts: {type(exc).__name__}: {exc}", builder_mode, equivalence_status, 0,
             content_fingerprint, reference_id, validation_mode, shadow_status, reference_manifest_sha256,
-            reference_status, performance or {}, fallback or {}, refund_state_sha256,
+            reference_status, performance or {}, fallback or {}, refund_state_sha256, source_fingerprint,
         )
         _write_manifest(target / "manifest.json", manifest)
         return manifest

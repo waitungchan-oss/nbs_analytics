@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -17,6 +18,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.evidence_models import canonical_fingerprint
+from scripts.ui_acceptance_fixture_preflight import (
+    UiFixturePreflightError,
+    build_ui_fixture_blocker,
+    inspect_ui_fixture_cache,
+)
 
 
 _ACTIVE_VERSION_RE = re.compile(r"正式淨 GMV active version[：:]\s*([A-Za-z0-9._-]+)")
@@ -214,7 +220,26 @@ def build_evidence(route: str, commit_sha: str, source_fingerprint: str, titles:
     }
 
 
-def run_smoke(project_root: Path, route: str, commit_sha: str, source_fingerprint: str, timeout: float, served_url: str | None = None) -> dict:
+def run_smoke(
+    project_root: Path,
+    route: str,
+    commit_sha: str,
+    source_fingerprint: str,
+    timeout: float,
+    served_url: str | None = None,
+    db_path: Path | None = None,
+    cache_dir: Path | None = None,
+) -> dict:
+    fixture_db = db_path or (Path(os.environ["NBS_ANALYTICS_DB_FILE"]) if os.environ.get("NBS_ANALYTICS_DB_FILE") else None)
+    fixture_cache = cache_dir or (Path(os.environ["NBS_ANALYTICS_CACHE_DIR"]) if os.environ.get("NBS_ANALYTICS_CACHE_DIR") else None)
+    if fixture_db is None or fixture_cache is None:
+        raise UiFixturePreflightError("UI fixture requires NBS_ANALYTICS_DB_FILE and NBS_ANALYTICS_CACHE_DIR")
+    preflight = inspect_ui_fixture_cache(
+        db_path=fixture_db, cache_dir=fixture_cache, project_root=project_root,
+        source_fingerprint=source_fingerprint,
+    )
+    if preflight["status"] != "PASS":
+        raise UiFixturePreflightError(f"UI fixture preflight blocked: {preflight['reason']}")
     if served_url:
         return run_served_smoke(served_url, route, commit_sha, source_fingerprint, timeout)
     try:
@@ -279,7 +304,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--served-url")
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args(argv)
-    evidence = run_smoke(args.project_root.resolve(), args.route, args.commit_sha, args.source_fingerprint, args.timeout, args.served_url)
+    try:
+        evidence = run_smoke(args.project_root.resolve(), args.route, args.commit_sha, args.source_fingerprint, args.timeout, args.served_url)
+    except UiFixturePreflightError as exc:
+        reason = str(exc).rsplit(": ", 1)[-1]
+        evidence = build_ui_fixture_blocker(reason)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(evidence, ensure_ascii=False))
+        return 2
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"status": "PASS", "evidenceFingerprint": canonical_fingerprint(evidence)}, ensure_ascii=False))

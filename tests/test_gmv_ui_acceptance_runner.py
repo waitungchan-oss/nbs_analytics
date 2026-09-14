@@ -56,3 +56,23 @@ def test_ui_runner_loads_only_bounded_evidence(tmp_path):
     path.write_text(json.dumps({"rawRows": [{"來源單據號": "S-1"}]}), encoding="utf-8")
     with pytest.raises(ValueError, match="raw business data"):
         load_bounded_evidence(path)
+
+
+def test_ui_runner_blocks_without_source_matched_fixture_paths(monkeypatch, tmp_path):
+    from scripts.run_gmv_ui_acceptance import run_ui_acceptance
+
+    monkeypatch.delenv("NBS_ANALYTICS_DB_FILE", raising=False)
+    monkeypatch.delenv("NBS_ANALYTICS_CACHE_DIR", raising=False)
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text("{}", encoding="utf-8")
+
+    result = run_ui_acceptance(
+        url="http://127.0.0.1:8502/",
+        fixture_root=tmp_path,
+        evidence_path=evidence_path,
+        db_path=None,
+        cache_dir=None,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureReasons"] == ["UI_FIXTURE_PREFLIGHT:fixture_paths_required"]
