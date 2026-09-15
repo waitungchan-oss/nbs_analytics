@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import os
 import re
 import signal
@@ -37,6 +38,14 @@ _PRODUCTION_PATH_NAMES = {
     "production.db",
     "baseline.db",
 }
+
+
+class _PortReadinessView(dict[str, int]):
+    """Mapping-compatible port view carrying the reserved socket handles."""
+
+    def __init__(self, ports: dict[str, int], reservations: dict[str, socket.socket]) -> None:
+        super().__init__(ports)
+        self.reserved_sockets = dict(reservations)
 
 
 def _safe_run_id(run_id: str) -> str:
@@ -130,6 +139,100 @@ class ShardRuntime:
 
     def profile_ports(self) -> dict[str, int]:
         return dict(self._ports)
+
+    def validate_reserved_ports(self, probe: Callable[[dict[str, int]], bool]) -> None:
+        """Validate the already-held port namespace without releasing it."""
+        if not callable(probe):
+            raise ValueError("probe must be callable")
+        if set(self._port_reservations) != set(self._ports):
+            raise RuntimeError("reserved port ownership is incomplete")
+        for name, expected_port in self._ports.items():
+            reservation = self._port_reservations[name]
+            try:
+                address = reservation.getsockname()
+                accepting = reservation.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            except OSError as exc:
+                if exc.errno in {errno.ENOPROTOOPT, errno.EINVAL, errno.ENOTSUP}:
+                    accepting = None
+                else:
+                    raise RuntimeError("reserved port ownership is unavailable") from exc
+            if reservation.fileno() < 0 or address[:2] != ("127.0.0.1", expected_port) or accepting not in {None, 1}:
+                raise RuntimeError("reserved port endpoint is not ready")
+        if not probe(_PortReadinessView(self._ports, self._port_reservations)):
+            raise RuntimeError("reserved port readiness probe failed")
+
+    def launch_process_with_port_handoff(
+        self, argv: list[str], *, cwd: Path, env: dict[str, str]
+    ) -> subprocess.Popen:
+        """Launch a child that inherits the reserved sockets before release.
+
+        The parent keeps the namespace lock while Popen and process-group
+        registration complete.  The child receives the listening descriptors
+        through ``pass_fds``; the parent then closes its copies, so ownership
+        does not pass through an unbound interval.
+        """
+        if self._is_windows:
+            raise RuntimeError("windows shard launcher is not qualified")
+        namespace_descriptor = _open_namespace_lock()
+        process = None
+        reservations = tuple(self._port_reservations.values())
+        readiness_reader, readiness_writer = os.pipe()
+        start_reader, start_writer = os.pipe()
+        try:
+            pass_fds = tuple(reservation.fileno() for reservation in reservations) + (
+                readiness_writer, start_reader,
+            )
+            child_env = dict(env)
+            child_env["NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL"] = "reserved-fd-v1"
+            child_env["NBS_ACCEPTANCE_RESERVED_PORT_FDS"] = ",".join(
+                f"{name}={self._port_reservations[name].fileno()}:{self._ports[name]}"
+                for name in sorted(self._ports)
+            )
+            child_env["NBS_ACCEPTANCE_CHILD_READY_FD"] = str(readiness_writer)
+            child_env["NBS_ACCEPTANCE_CHILD_START_FD"] = str(start_reader)
+            process = subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                pass_fds=pass_fds,
+            )
+            process._nbs_readiness_reader = readiness_reader
+            process._nbs_start_writer = start_writer
+            readiness_reader = None
+            start_writer = None
+            self.register_process_group(process.pid)
+            return process
+        except BaseException:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+            raise
+        finally:
+            for reservation in reservations:
+                try:
+                    reservation.close()
+                except OSError:
+                    pass
+            self._port_reservations.clear()
+            for descriptor in (readiness_reader, readiness_writer, start_reader, start_writer):
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+            try:
+                os.close(namespace_descriptor)
+            except OSError:
+                pass
 
     def handoff_ports(self) -> None:
         """Release probes only through an explicit child bind/readiness protocol."""
@@ -350,6 +453,7 @@ class ShardRuntime:
 
     def cleanup_report(self) -> dict[str, Any]:
         self._cleanup = self._leak_report()
+        self._cleanup["allProcessGroupsTerminated"] = not self._cleanup["leakedProcesses"]
         return {
             **self._cleanup,
             "leakedFiles": list(self._cleanup["leakedFiles"]),
@@ -449,6 +553,7 @@ class ShardRuntime:
             final["failureCode"] = "isolation_violation"
             if "cleanup_failed" not in final["leakedFiles"]:
                 final["leakedFiles"].append("cleanup_failed")
+        final["allProcessGroupsTerminated"] = not final["leakedProcesses"]
         self._cleanup = final
         return {
             **final,
@@ -510,9 +615,7 @@ def allocate_shard_runtime(
             raise ValueError("shard fixture root must be unique and not already exist")
         if not is_temporary_path(candidate):
             raise ValueError("shard fixture root must be inside a temporary root")
-        if (
-            project == canonical_path(candidate).parent or project in canonical_path(candidate).parents
-        ) and not is_temporary_path(project):
+        if project == canonical_path(candidate).parent or project in canonical_path(candidate).parents:
             raise ValueError("shard fixture root must not be inside the project root")
         candidate.parent.mkdir(parents=True, exist_ok=True)
         candidate.mkdir()

@@ -88,6 +88,62 @@ def test_handoff_allows_child_to_bind_port_and_cleanup_allows_reallocation(tmp_p
     second.cleanup()
 
 
+def test_process_handoff_transfers_reserved_socket_fds_to_child(monkeypatch, tmp_path):
+    runtime = allocate_shard_runtime(
+        project_root=_project_root(tmp_path), run_id=f"run-process-handoff-{uuid.uuid4().hex}", shard_index=0
+    )
+    reserved_fds = {reservation.fileno() for reservation in runtime._port_reservations.values()}
+    captured = {}
+
+    class FakeProcess:
+        pid = 456
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(acceptance_shard_runtime.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(runtime, "register_process_group", lambda process_id: None)
+
+    process = runtime.launch_process_with_port_handoff(
+        ["pytest"], cwd=tmp_path, env={"NBS_ACCEPTANCE_PROFILE_PORTS": ""}
+    )
+
+    assert process.pid == 456
+    assert captured["env"]["NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL"] == "reserved-fd-v1"
+    readiness_fd = int(captured["env"]["NBS_ACCEPTANCE_CHILD_READY_FD"])
+    start_fd = int(captured["env"]["NBS_ACCEPTANCE_CHILD_START_FD"])
+    assert set(captured["pass_fds"]) == reserved_fds | {readiness_fd, start_fd}
+    metadata = {}
+    for item in captured["env"]["NBS_ACCEPTANCE_RESERVED_PORT_FDS"].split(","):
+        name, descriptor_spec = item.split("=", 1)
+        descriptor, port = descriptor_spec.split(":", 1)
+        metadata[name] = (int(descriptor), int(port))
+    assert set(metadata) == set(runtime.profile_ports())
+    assert {descriptor for descriptor, _ in metadata.values()} == reserved_fds
+    assert {name: port for name, (_, port) in metadata.items()} == runtime.profile_ports()
+    assert runtime._port_reservations == {}
+    assert runtime.cleanup()["status"] == "PASS"
+
+
+def test_reserved_port_validation_proves_socket_ownership_and_listening(tmp_path):
+    runtime = allocate_shard_runtime(
+        project_root=_project_root(tmp_path), run_id="run-readiness-contract", shard_index=0
+    )
+    observed = {}
+
+    def probe(ports):
+        observed["ports"] = dict(ports)
+        observed["has_reservations"] = hasattr(ports, "reserved_sockets")
+        return True
+
+    runtime.validate_reserved_ports(probe)
+
+    assert observed["ports"] == runtime.profile_ports()
+    assert observed["has_reservations"] is True
+    assert runtime.cleanup()["status"] == "PASS"
+
+
 def test_port_handoff_requires_explicit_bind_readiness_protocol(tmp_path):
     runtime = allocate_shard_runtime(
         project_root=_project_root(tmp_path), run_id="run-handoff-contract", shard_index=0
@@ -143,6 +199,17 @@ def test_runtime_rejects_symlinked_or_existing_explicit_root(tmp_path):
             run_id="run-1",
             shard_index=0,
             fixture_root=alias,
+        )
+
+
+def test_runtime_rejects_explicit_root_inside_temporary_project(tmp_path):
+    project = _project_root(tmp_path)
+    with pytest.raises(ValueError, match="inside the project root"):
+        allocate_shard_runtime(
+            project_root=project,
+            run_id="run-nested-fixture",
+            shard_index=0,
+            fixture_root=project / "nested-runtime",
         )
 
 

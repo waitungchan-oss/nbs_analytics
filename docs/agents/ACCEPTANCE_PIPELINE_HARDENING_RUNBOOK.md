@@ -111,6 +111,21 @@ L3 promotion 才能改變這個邊界。
 
 ## Rollout handoff gate（Task 6）
 
+### Full pytest parallel candidate boundary
+
+`acceptance-parallel-rollout` is an opt-in, diagnostic-only path. It measures
+the fresh `full-pytest-nodeid` population against a serial control exactly
+three times; it does not include the independent `agent-eval-72-slot`
+evaluation population. Its artifact must keep `formalReleaseEnabled=false`,
+and its `speedupMultiple` is evidence for a candidate only. The formal
+aggregate does not download or consume this artifact. A failed, stale or
+contaminated candidate has no retry-based promotion path; return to serial
+Full pytest and use the explicit rollback command:
+
+```bash
+gh workflow run release-gates.yml -f enable_acceptance_parallel_rollout=false
+```
+
 每次 handoff 必須綁定同一份 fresh source seal、`HEAD` commit SHA、manifest
 fingerprint、runner fingerprint 和 canary artifact；同時保存 serial/shard
 parity、三次 timing ratio、UI fixture preflight 狀態，以及 rollback command。

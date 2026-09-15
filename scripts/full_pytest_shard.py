@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -28,10 +29,102 @@ from scripts.pytest_manifest import _identity, _manifest_fingerprint, _parse_nod
 
 
 _TAIL = 4000
+SOCKET_ACTIVATION_PROTOCOL = "reserved-fd-v1"
+_ADOPTED_RESERVED_PORTS: dict[str, socket.socket] = {}
+_ACTIVATED_PORTS: dict[str, int] = {}
+
+
+def _register_activated_socket(name: str, sock: socket.socket, port: int) -> None:
+    """Register an inherited listening socket for a child-side service."""
+    if not isinstance(name, str) or not name or name in _ADOPTED_RESERVED_PORTS:
+        raise ValueError("activation socket name is invalid or already registered")
+    if sock.fileno() < 0 or isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port < 65536:
+        raise ValueError("activation socket is invalid")
+    if sock.getsockname()[:2] != ("127.0.0.1", port):
+        raise ValueError("activation socket endpoint identity mismatch")
+    # A socket-aware child service can consume this descriptor directly or
+    # pass it to its own bootstrap; the pytest wrapper owns final cleanup.
+    sock.set_inheritable(True)
+    _ACTIVATED_PORTS[name] = port
+
+
+def activated_socket(name: str) -> socket.socket:
+    """Return the listening socket a child-side service should consume."""
+    try:
+        return _ADOPTED_RESERVED_PORTS[name]
+    except KeyError as exc:
+        raise RuntimeError(f"activation socket is not available: {name}") from exc
+
+
+def activated_ports() -> Mapping[str, int]:
+    """Return endpoint identities advertised to child-side services."""
+    return dict(_ACTIVATED_PORTS)
+
+
+def close_activated_sockets() -> None:
+    """Close all inherited service sockets at child wrapper shutdown."""
+    for sock in tuple(_ADOPTED_RESERVED_PORTS.values()):
+        try:
+            sock.close()
+        except OSError:
+            pass
+    _ADOPTED_RESERVED_PORTS.clear()
+    _ACTIVATED_PORTS.clear()
 
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _adopt_reserved_port_fds() -> None:
+    """Adopt the socket-activation descriptors passed by ShardRuntime."""
+    if os.environ.get("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL") != "reserved-fd-v1":
+        raise RuntimeError("reserved port handoff protocol is missing")
+    raw = os.environ.get("NBS_ACCEPTANCE_RESERVED_PORT_FDS", "")
+    entries = [item for item in raw.split(",") if item]
+    if not entries:
+        raise RuntimeError("reserved port handoff descriptors are missing")
+    adopted: dict[str, socket.socket] = {}
+    try:
+        for entry in entries:
+            name, descriptor_spec = entry.split("=", 1)
+            descriptor, expected_port = descriptor_spec.split(":", 1)
+            fd = int(descriptor)
+            port = int(expected_port)
+            if name in adopted or fd < 0 or not 1024 <= port < 65536:
+                raise ValueError
+            sock = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
+            adopted[name] = sock
+            if sock.getsockname()[:2] != ("127.0.0.1", port):
+                raise RuntimeError("reserved port endpoint identity mismatch")
+            os.close(fd)
+            _register_activated_socket(name, sock, port)
+    except (OSError, RuntimeError, ValueError) as exc:
+        for sock in adopted.values():
+            sock.close()
+        raise RuntimeError("reserved port descriptor adoption failed") from exc
+    _ADOPTED_RESERVED_PORTS.update(adopted)
+
+
+def _signal_child_ready_and_wait() -> None:
+    """Prove socket adoption, then wait for the controller's start release."""
+    if os.environ.get("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL") != SOCKET_ACTIVATION_PROTOCOL:
+        raise RuntimeError("reserved port handoff protocol is missing")
+    try:
+        ready_fd = int(os.environ["NBS_ACCEPTANCE_CHILD_READY_FD"])
+        start_fd = int(os.environ["NBS_ACCEPTANCE_CHILD_START_FD"])
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError("child readiness descriptors are missing") from exc
+    try:
+        os.write(ready_fd, b"READY\n")
+    finally:
+        os.close(ready_fd)
+    try:
+        release = os.read(start_fd, 16)
+    finally:
+        os.close(start_fd)
+    if release != b"START\n":
+        raise RuntimeError("child start release is invalid")
 
 
 def select_shard_nodeids(nodeids: Sequence[str], shard_index: int, shard_count: int) -> list[str]:
@@ -76,49 +169,93 @@ def _run_pytest_command(
     env: Mapping[str, str],
     timeout: int,
     runtime: ShardRuntime,
+    port_handoff: bool = True,
+    readiness_callback: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if os.name == "nt":
         # A post-Popen Job assignment has an unbounded race before children
         # are contained. Without an approved suspended-process launcher, fail
         # closed instead of running an unqualified Windows shard.
         raise RuntimeError("windows shard launcher is not qualified")
-    process = subprocess.Popen(
-        list(argv),
-        cwd=cwd,
-        env=dict(env),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=os.name != "nt",
-    )
-    try:
-        runtime.register_process_group(process.pid)
-    except Exception:
-        if os.name == "nt":
-            try:
-                process.kill()
-            except OSError:
-                pass
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
+    launcher = getattr(runtime, "launch_process_with_port_handoff", None) if port_handoff else None
+    launch_argv = list(argv)
+    if port_handoff and len(launch_argv) >= 3 and launch_argv[1:3] == ["-m", "pytest"]:
+        launch_argv = [
+            launch_argv[0], "-m", "scripts.full_pytest_shard",
+            "--child-adopt-reserved-fds", *launch_argv[3:],
+        ]
+    if port_handoff and not callable(launcher):
+        raise RuntimeError("qualified port-handoff launcher is required")
+    if callable(launcher):
+        process = launcher(launch_argv, cwd=cwd, env=dict(env))
+    else:
+        process = subprocess.Popen(
+            launch_argv,
+            cwd=cwd,
+            env=dict(env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            runtime.register_process_group(process.pid)
+        except Exception:
+            if os.name == "nt":
                 try:
                     process.kill()
                 except OSError:
                     pass
-        try:
-            process.communicate(timeout=1)
-        except (KeyboardInterrupt, subprocess.TimeoutExpired):
-            try:
-                process.kill()
-            except OSError:
-                pass
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
             try:
                 process.communicate(timeout=1)
             except (KeyboardInterrupt, subprocess.TimeoutExpired):
-                pass
-        raise RuntimeError("pytest process registration failed")
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                try:
+                    process.communicate(timeout=1)
+                except (KeyboardInterrupt, subprocess.TimeoutExpired):
+                    pass
+            raise RuntimeError("pytest process registration failed")
+    readiness_reader = getattr(process, "_nbs_readiness_reader", None)
+    start_writer = getattr(process, "_nbs_start_writer", None)
+    try:
+        if port_handoff and readiness_reader is not None and start_writer is not None:
+            ready_timeout = max(float(timeout), 0.001)
+            readable, _, _ = select.select([readiness_reader], [], [], ready_timeout)
+            if not readable or os.read(readiness_reader, 64) != b"READY\n":
+                raise RuntimeError("child readiness handshake failed")
+            if readiness_callback is not None:
+                readiness_callback()
+            os.write(start_writer, b"START\n")
+    except (OSError, RuntimeError):
+        runtime.terminate_process_groups(force=True)
+        try:
+            process.communicate(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        raise
+    finally:
+        for descriptor_name in ("_nbs_readiness_reader", "_nbs_start_writer"):
+            descriptor = getattr(process, descriptor_name, None)
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                try:
+                    setattr(process, descriptor_name, None)
+                except Exception:
+                    pass
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except KeyboardInterrupt:
@@ -155,7 +292,7 @@ def _run_pytest_command(
             partial_stdout = partial_stdout or _as_text(grace_exc.output)
             partial_stderr = partial_stderr or _as_text(grace_exc.stderr)
         raise subprocess.TimeoutExpired(
-            list(argv), timeout,
+            launch_argv, timeout,
             output=_as_text(stdout) or partial_stdout,
             stderr=_as_text(stderr) or partial_stderr,
         ) from exc
@@ -180,6 +317,7 @@ def _artifact(
     stdout: str,
     stderr: str,
     cleanup_report: Mapping[str, Any] | None = None,
+    lineage: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     unsigned = {
         "schemaVersion": "full-pytest-shard-v1",
@@ -194,6 +332,7 @@ def _artifact(
         "assignedNodeids": assigned,
         "executedNodeids": executed,
         "result": result,
+        "lineage": dict(lineage or {}),
         "startedAt": started_at,
         "finishedAt": finished_at or _timestamp(),
         "metadata": {
@@ -228,6 +367,9 @@ def run_pytest_shard(
     run_id: str | None = None,
     timeout_seconds: int = 1800,
     port_readiness_probe: Callable[[dict[str, int]], bool] | None = None,
+    lineage: Mapping[str, str] | None = None,
+    runtime_observer: Callable[[str, ShardRuntime], None] | None = None,
+    readiness_callback: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     commit_sha, source_fingerprint, nodeids, manifest_fingerprint = _validate_manifest(manifest)
     if timeout_seconds <= 0:
@@ -252,6 +394,8 @@ def run_pytest_shard(
             fixture_root=fixture_root,
         )
         runtime.validate_isolation()
+        if runtime_observer is not None:
+            runtime_observer("registered", runtime)
     except RuntimeError:
         cleanup = runtime.cleanup() if runtime is not None else {
             "status": "PASS", "failureCode": None, "leakedFiles": [],
@@ -265,6 +409,7 @@ def run_pytest_shard(
             started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
             stdout="", stderr="runtime allocation failed",
             cleanup_report=cleanup,
+            lineage=lineage,
         )
     except ValueError:
         cleanup = runtime.cleanup() if runtime is not None else {
@@ -279,6 +424,7 @@ def run_pytest_shard(
             started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
             stdout="", stderr="runtime isolation validation failed",
             cleanup_report=cleanup,
+            lineage=lineage,
         )
 
     cleanup_finished = False
@@ -290,9 +436,12 @@ def run_pytest_shard(
         if cleanup["status"] != "PASS":
             kwargs["status"] = "BLOCKED"
             kwargs["failure_code"] = "isolation_violation"
+        kwargs.setdefault("lineage", lineage)
         return _artifact(cleanup_report=cleanup, **kwargs)
 
     if not assigned:
+        if readiness_callback is not None:
+            readiness_callback()
         return finish(
             status="PASS", failure_code=None, commit_sha=commit_sha,
             source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
@@ -311,10 +460,14 @@ def run_pytest_shard(
             stdout="", stderr="explicit child bind/readiness probe is required",
         )
     try:
-        handoff = getattr(runtime, "handoff_ports_with_readiness", None)
-        if not callable(handoff):
-            raise RuntimeError("runtime does not implement bind/readiness handoff")
-        handoff(port_readiness_probe)
+        validate_reserved = getattr(runtime, "validate_reserved_ports", None)
+        if callable(validate_reserved):
+            validate_reserved(port_readiness_probe)
+        else:
+            handoff = getattr(runtime, "handoff_ports_with_readiness", None)
+            if not callable(handoff):
+                raise RuntimeError("runtime does not implement bind/readiness handoff")
+            handoff(port_readiness_probe)
     except (OSError, RuntimeError, ValueError) as exc:
         return finish(
             status="BLOCKED", failure_code="port_handoff_failed", commit_sha=commit_sha,
@@ -337,6 +490,7 @@ def run_pytest_shard(
             env=env,
             timeout=timeout_seconds,
             runtime=runtime,
+            port_handoff=False,
         )
         collect_stdout, collect_stderr = _as_text(collected.stdout), _as_text(collected.stderr)
         collected_nodeids = sorted(_parse_nodeids(f"{collect_stdout}\n{collect_stderr}"))
@@ -355,6 +509,7 @@ def run_pytest_shard(
             env=env,
             timeout=timeout_seconds,
             runtime=runtime,
+            readiness_callback=readiness_callback,
         )
         stdout, stderr = _as_text(completed.stdout), _as_text(completed.stderr)
         result = _parse_summary(f"{stdout}\n{stderr}")
@@ -408,10 +563,30 @@ def run_pytest_shard(
         raise
     finally:
         if not cleanup_finished:
-            runtime.cleanup()
+            try:
+                runtime.cleanup()
+            finally:
+                if runtime_observer is not None:
+                    runtime_observer("unregistered", runtime)
+        elif runtime_observer is not None:
+            runtime_observer("unregistered", runtime)
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--child-adopt-reserved-fds":
+        try:
+            _adopt_reserved_port_fds()
+            _signal_child_ready_and_wait()
+        except RuntimeError as exc:
+            print(f"reserved port handoff blocked: {exc}", file=sys.stderr)
+            return 2
+        import pytest
+
+        try:
+            return int(pytest.main(arguments[1:]))
+        finally:
+            close_activated_sockets()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--manifest", type=Path, required=True)
@@ -426,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Temporary marker written by the external service bootstrap after all profile ports accept TCP.",
     )
     parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     try:
         assigned = select_shard_nodeids(

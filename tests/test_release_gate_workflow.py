@@ -206,3 +206,27 @@ def test_shard_jobs_are_advisory_and_do_not_replace_serial_authority():
     assert "acceptance-shard-aggregate" in shard_block
     assert "needs: [full-pytest, hermes, ui-acceptance]" in formal_aggregate
     assert "acceptance-shard" not in formal_aggregate
+
+
+def test_parallel_rollout_is_manual_opt_in_and_not_a_formal_need():
+    source = _workflow_text()
+    assert "enable_acceptance_parallel_rollout" in source
+    assert "default: false" in source
+    parallel = source.split("  acceptance-parallel-rollout:\n", 1)[1].split("  aggregate:\n", 1)[0]
+    assert "github.event_name == 'workflow_dispatch'" in parallel
+    assert "inputs.enable_acceptance_parallel_rollout == true" in parallel
+    assert "needs: [full-pytest, hermes, ui-acceptance]" in source
+
+
+def test_parallel_artifacts_are_not_downloaded_by_formal_aggregate():
+    source = _workflow_text()
+    aggregate = source[source.index("  aggregate:"):]
+    formal_downloads = aggregate.split("      - name: Aggregate fresh release evidence", 1)[0]
+    assert "acceptance-parallel" not in formal_downloads
+    assert "acceptance-parallel" not in aggregate.split("      - name: Aggregate fresh release evidence", 1)[1]
+
+
+def test_parallel_rollout_failure_does_not_turn_into_formal_release_pass():
+    source = _workflow_text()
+    assert "formalReleaseEnabled=false" in source or "formalReleaseEnabled: false" in source
+    assert "enable_acceptance_parallel_rollout=false" in source

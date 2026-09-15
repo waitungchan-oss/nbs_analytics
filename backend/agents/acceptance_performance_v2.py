@@ -61,6 +61,7 @@ COMPARISON_KEYS = frozenset(
         "candidateFingerprint",
         "stageDeltasSeconds",
         "totalSpeedRatio",
+        "totalSpeedupMultiple",
         "cacheHit",
         "cacheMiss",
         "failureRate",
@@ -142,6 +143,13 @@ def _normalize_comparison(value: Any) -> dict[str, Any]:
         result["totalSpeedRatio"] = _duration(
             value["totalSpeedRatio"], "comparison.totalSpeedRatio"
         )
+    if "totalSpeedupMultiple" in value:
+        multiple = _duration(
+            value["totalSpeedupMultiple"], "comparison.totalSpeedupMultiple"
+        )
+        if multiple <= 0:
+            raise ValueError("comparison.totalSpeedupMultiple must be positive")
+        result["totalSpeedupMultiple"] = multiple
     for key in ("cacheHit", "cacheMiss"):
         if key in value:
             if not isinstance(value[key], bool):
@@ -343,13 +351,17 @@ def compare_performance_baselines_v2(
             "stageDeltasSeconds": stage_deltas,
             **metrics,
         }
-    return {
+    total_speed_ratio = round(
+        float(candidate["stages"]["totalWallSeconds"]) / baseline_total, 6
+    )
+    comparison = {
         "status": "compared",
         "baselineFingerprint": baseline["evidenceFingerprint"],
         "candidateFingerprint": candidate["evidenceFingerprint"],
         "stageDeltasSeconds": stage_deltas,
-        "totalSpeedRatio": round(
-            float(candidate["stages"]["totalWallSeconds"]) / baseline_total, 6
-        ),
+        "totalSpeedRatio": total_speed_ratio,
         **metrics,
     }
+    if total_speed_ratio > 0:
+        comparison["totalSpeedupMultiple"] = round(1 / total_speed_ratio, 6)
+    return comparison

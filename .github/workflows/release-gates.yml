@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      enable_acceptance_parallel_rollout:
+        description: "Run the three-run parallel Full pytest diagnostic rollout"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -292,6 +297,50 @@ jobs:
           assert canary["status"] in {"PASS", "BLOCKED"}
           assert canary["formalReleaseEnabled"] is False
           PY
+
+  acceptance-parallel-rollout:
+    name: acceptance-parallel-rollout
+    # Diagnostic-only and manual by design; artifact formalReleaseEnabled=false. Roll back with:
+    # gh workflow run release-gates.yml -f enable_acceptance_parallel_rollout=false
+    if: github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_parallel_rollout == true
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Create isolated parallel rollout environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+      - name: Collect source-bound contract and manifest
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          SCOPE_FINGERPRINT=$(printf '%s' 'nbs-acceptance|formal-scope-v1|不含掛賬核銷與TT退款轉團款' | shasum -a 256 | awk '{print $1}')
+          SEMANTIC_RULES_FINGERPRINT=$(printf '%s' 'acceptance-semantic-rules-v1' | shasum -a 256 | awk '{print $1}')
+          DATASET_SNAPSHOT_FINGERPRINT=$(printf '%s' 'release-gate-ci-fixture|dataset-snapshot-v1' | shasum -a 256 | awk '{print $1}')
+          RUNNER_FINGERPRINT=$(python -c 'import hashlib, platform, sys; requirements = hashlib.sha256(open("requirements.txt", "rb").read()).hexdigest(); raw = f"{platform.system()}|{platform.machine()}|{sys.version_info[:3]}|{requirements}"; print(hashlib.sha256(raw.encode("utf-8")).hexdigest())')
+          ENVIRONMENT_FINGERPRINT=$(python -c 'import hashlib, platform, sys; raw = f"{platform.system()}|{platform.machine()}|{sys.version_info[:3]}|acceptance-parallel-rollout-v1"; print(hashlib.sha256(raw.encode("utf-8")).hexdigest())')
+          mkdir -p "$RUNNER_TEMP/nbs-acceptance-parallel-rollout"
+          .venv/bin/python scripts/acceptance_baseline.py contract --contract-id nbs-acceptance --contract-version formal-scope-v1 --scope-fingerprint "$SCOPE_FINGERPRINT" --semantic-rules-fingerprint "$SEMANTIC_RULES_FINGERPRINT" --dataset-snapshot-fingerprint "$DATASET_SNAPSHOT_FINGERPRINT" --output "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/contract.json"
+          .venv/bin/python scripts/pytest_manifest.py --project-root "$GITHUB_WORKSPACE" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/pytest-manifest.json"
+          {
+            echo "SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT"
+            echo "RUNNER_FINGERPRINT=$RUNNER_FINGERPRINT"
+            echo "ENVIRONMENT_FINGERPRINT=$ENVIRONMENT_FINGERPRINT"
+          } >> "$GITHUB_ENV"
+      - name: Run three-run parallel diagnostic rollout
+        run: |
+          .venv/bin/python scripts/acceptance_parallel_rollout.py --project-root "$GITHUB_WORKSPACE" --manifest "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/pytest-manifest.json" --contract "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/contract.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --runner-fingerprint "$RUNNER_FINGERPRINT" --environment-fingerprint "$ENVIRONMENT_FINGERPRINT" --baseline-family-id acceptance-full-serial-ci-v1 --shard-count 4 --repeats 3 --timeout 1800 --output "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/acceptance-parallel-rollout.json"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-parallel-rollout-${{ github.sha }}
+          path: ${{ runner.temp }}/nbs-acceptance-parallel-rollout/
+          if-no-files-found: warn
 
   aggregate:
     name: Release gate aggregate

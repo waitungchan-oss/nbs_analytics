@@ -1,5 +1,10 @@
 # Acceptance Shard Rollout Runbook
 
+> This document covers the legacy shard canary. The newer
+> `acceptance-parallel-rollout` path is a separate three-run Full pytest
+> diagnostic and keeps the `agent-eval-72-slot` population separate. Serial
+> Full pytest remains the authority for both paths.
+
 ## Boundary
 
 This is an advisory, diagnostic rollout. The serial `full-pytest`, Hermes, UI

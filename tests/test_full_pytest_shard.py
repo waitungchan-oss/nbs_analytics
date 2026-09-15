@@ -1,6 +1,8 @@
 import os
 import signal
+import socket
 import subprocess
+import sys
 
 import pytest
 
@@ -281,7 +283,7 @@ def test_run_pytest_command_reaps_process_when_communicate_is_interrupted(monkey
 
     with pytest.raises(KeyboardInterrupt):
         _run_pytest_command(
-            ["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime()
+            ["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime(), port_handoff=False
         )
 
     assert events == [("communicate", 1), ("terminate", True), ("communicate", 1)]
@@ -316,7 +318,7 @@ def test_run_pytest_command_cleans_process_when_registration_fails(monkeypatch, 
     )
 
     with pytest.raises(RuntimeError, match="registration"):
-        _run_pytest_command(["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime())
+        _run_pytest_command(["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime(), port_handoff=False)
 
     assert events == [("killpg", 789, signal.SIGKILL), ("communicate", 1)]
 
@@ -362,6 +364,152 @@ def test_run_pytest_shard_cleans_runtime_when_interrupted(monkeypatch, tmp_path)
     assert calls == [("terminate", True), "cleanup"]
 
 
+def test_run_pytest_command_uses_process_port_handoff_when_available(monkeypatch, tmp_path):
+    events = []
+
+    class FakeProcess:
+        pid = 456
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    class FakeRuntime:
+        def launch_process_with_port_handoff(self, argv, *, cwd, env):
+            events.append((argv, cwd, env))
+            return FakeProcess()
+
+    monkeypatch.setattr(
+        "scripts.full_pytest_shard.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("direct Popen bypassed handoff")),
+    )
+
+    result = _run_pytest_command(
+        ["pytest"], cwd=tmp_path, env={"A": "B"}, timeout=1, runtime=FakeRuntime()
+    )
+
+    assert result.returncode == 0
+    assert events == [(["pytest"], tmp_path, {"A": "B"})]
+
+
+def test_child_adopts_reserved_port_descriptor_contract(monkeypatch):
+    from scripts import full_pytest_shard as subject
+
+    reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    reservation.bind(("127.0.0.1", 0))
+    reservation.listen(1)
+    descriptor = os.dup(reservation.fileno())
+    port = reservation.getsockname()[1]
+    monkeypatch.setenv("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL", "reserved-fd-v1")
+    monkeypatch.setenv("NBS_ACCEPTANCE_RESERVED_PORT_FDS", f"health={descriptor}:{port}")
+
+    try:
+        subject._adopt_reserved_port_fds()
+        adopted = subject._ADOPTED_RESERVED_PORTS.pop("health")
+        assert adopted.getsockname()[:2] == ("127.0.0.1", port)
+        adopted.close()
+    finally:
+        subject.close_activated_sockets()
+        reservation.close()
+
+
+def test_child_closes_socket_when_activation_registration_fails(monkeypatch):
+    from scripts import full_pytest_shard as subject
+
+    reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    reservation.bind(("127.0.0.1", 0))
+    reservation.listen(1)
+    descriptor = os.dup(reservation.fileno())
+    port = reservation.getsockname()[1]
+    created = []
+    real_fromfd = subject.socket.fromfd
+
+    def tracking_fromfd(*args):
+        sock = real_fromfd(*args)
+        created.append(sock)
+        return sock
+
+    monkeypatch.setenv("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL", "reserved-fd-v1")
+    monkeypatch.setenv("NBS_ACCEPTANCE_RESERVED_PORT_FDS", f"health={descriptor}:{port}")
+    monkeypatch.setattr(subject.socket, "fromfd", tracking_fromfd)
+    monkeypatch.setattr(
+        subject,
+        "_register_activated_socket",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("registration failed")),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="descriptor adoption failed"):
+            subject._adopt_reserved_port_fds()
+        assert created and all(sock.fileno() < 0 for sock in created)
+        assert not subject._ADOPTED_RESERVED_PORTS
+    finally:
+        subject.close_activated_sockets()
+        reservation.close()
+
+
+def test_child_side_service_can_consume_every_activated_endpoint(monkeypatch):
+    from scripts import full_pytest_shard as subject
+
+    reservations = {}
+    entries = []
+    try:
+        for name in ("health", "mcp", "streamlit"):
+            reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reservation.bind(("127.0.0.1", 0))
+            reservation.listen(1)
+            descriptor = os.dup(reservation.fileno())
+            port = reservation.getsockname()[1]
+            reservations[name] = reservation
+            entries.append(f"{name}={descriptor}:{port}")
+        monkeypatch.setenv("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL", "reserved-fd-v1")
+        monkeypatch.setenv("NBS_ACCEPTANCE_RESERVED_PORT_FDS", ",".join(entries))
+
+        subject._adopt_reserved_port_fds()
+
+        assert dict(subject.activated_ports()) == {
+            name: reservations[name].getsockname()[1] for name in reservations
+        }
+        for name, reservation in reservations.items():
+            service_socket = subject.activated_socket(name)
+            assert service_socket.get_inheritable() is True
+            with socket.create_connection(("127.0.0.1", reservation.getsockname()[1]), timeout=1):
+                accepted, _ = service_socket.accept()
+                accepted.close()
+    finally:
+        subject.close_activated_sockets()
+        subject._ADOPTED_RESERVED_PORTS.clear()
+        for reservation in reservations.values():
+            reservation.close()
+
+
+def test_pytest_execution_wraps_child_with_reserved_fd_adoption(monkeypatch, tmp_path):
+    events = []
+
+    class FakeProcess:
+        pid = 456
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    class FakeRuntime:
+        def launch_process_with_port_handoff(self, argv, *, cwd, env):
+            events.append((argv, cwd, env))
+            return FakeProcess()
+
+    result = _run_pytest_command(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=tmp_path,
+        env={"A": "B"},
+        timeout=1,
+        runtime=FakeRuntime(),
+    )
+
+    assert result.returncode == 0
+    assert events[0][0] == [sys.executable, "-m", "scripts.full_pytest_shard", "--child-adopt-reserved-fds", "-q"]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX timeout escalation regression")
 def test_run_pytest_command_uses_bounded_grace_and_force_cleanup(monkeypatch, tmp_path):
     timeouts = []
@@ -397,8 +545,21 @@ def test_run_pytest_command_uses_bounded_grace_and_force_cleanup(monkeypatch, tm
 
     with pytest.raises(subprocess.TimeoutExpired):
         _run_pytest_command(
-            ["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime()
+            ["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime(), port_handoff=False
         )
 
     assert timeouts == [1, 1, 1]
     assert terminate_calls == [False, True]
+
+
+def test_run_pytest_command_blocks_unqualified_port_handoff(monkeypatch, tmp_path):
+    class FakeRuntime:
+        pass
+
+    monkeypatch.setattr(
+        "scripts.full_pytest_shard.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unqualified Popen must not run")),
+    )
+
+    with pytest.raises(RuntimeError, match="qualified port-handoff launcher"):
+        _run_pytest_command(["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime())
