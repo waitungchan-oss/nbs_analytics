@@ -1,10 +1,13 @@
 import os
+import json
 import subprocess
 import sys
+import pytest
 from pathlib import Path
 
 from backend.services.dashboard_service import build_dashboard_summary
 from scripts.prepare_release_gate_fixtures import build_release_gate_fixtures
+from scripts.prepare_release_gate_fixtures import main as prepare_fixtures_main
 
 
 def test_release_fixture_preserves_baseline_and_provisions_gmv_cache(tmp_path, monkeypatch):
@@ -74,3 +77,48 @@ def test_release_fixture_drives_real_gmv_ui_smoke(tmp_path, monkeypatch):
     assert set(evidence["downloadedArtifacts"]) == {"total.detail", "paid.detail"}
     assert all(size > 0 for size in evidence["downloadedArtifacts"].values())
     assert all(item["validated"] for item in evidence["uiSmoke"]["downloads"].values())
+
+
+def test_release_fixture_writes_bounded_timing_to_disposable_root(tmp_path):
+    output_root = tmp_path / "fixture"
+    timing_path = output_root / "fixture-timing.json"
+
+    assert prepare_fixtures_main([
+        "--output", str(output_root),
+        "--commit-sha", "a" * 40,
+        "--source-fingerprint", "b" * 64,
+        "--timing-output", str(timing_path),
+    ]) == 0
+
+    timing = json.loads(timing_path.read_text(encoding="utf-8"))
+    assert set(timing) == {"schemaVersion", "commitSha", "sourceFingerprint", "durationSeconds"}
+    assert timing["schemaVersion"] == "acceptance-fixture-timing-v1"
+    assert timing["commitSha"] == "a" * 40
+    assert timing["sourceFingerprint"] == "b" * 64
+    assert timing["durationSeconds"] >= 0
+
+
+def test_release_fixture_rejects_timing_path_outside_disposable_root(tmp_path):
+    with pytest.raises(ValueError, match="timing output"):
+        prepare_fixtures_main([
+            "--output", str(tmp_path / "fixture"),
+            "--timing-output", str(tmp_path / "outside" / "fixture-timing.json"),
+        ])
+
+
+def test_release_fixture_does_not_follow_timing_output_symlink(tmp_path):
+    output_root = tmp_path / "fixture"
+    output_root.mkdir()
+    target = output_root / "real-timing.json"
+    target.write_text("original", encoding="utf-8")
+    link = output_root / "fixture-timing.json"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError, match="symlink"):
+        prepare_fixtures_main([
+            "--output", str(output_root),
+            "--commit-sha", "a" * 40,
+            "--source-fingerprint", "b" * 64,
+            "--timing-output", str(link),
+        ])
+    assert target.read_text(encoding="utf-8") == "original"

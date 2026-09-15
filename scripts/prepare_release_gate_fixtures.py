@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import io
+import json
+import re
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +38,8 @@ ANALYSIS_ROWS = 26640
 EXCLUDED_ROWS = 545
 VERSION_ID = "release-gate-fixture"
 UI_EXCLUDED_ROWS = 1
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+_SHA64 = re.compile(r"^[0-9a-f]{64}$")
 
 PHASE2_BRANCH_ALLOCATION = (
     ("荃灣綠楊坊分社", "", 1_705_339.0),
@@ -60,6 +65,15 @@ class ReleaseGateFixtures:
     db_path: Path
     cache_dir: Path
     active_version_id: str
+
+
+def _contains_symlink(path: Path) -> bool:
+    current = path if path.is_absolute() else Path.cwd() / path
+    while current != current.parent:
+        if current.is_symlink():
+            return True
+        current = current.parent
+    return False
 
 
 def _revenue_rows(*, rows_per_month: int, excluded_rows: int, phase2_dimensions: bool = False) -> pd.DataFrame:
@@ -216,10 +230,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", choices=("full", "ui"), default="full")
     parser.add_argument("--source-fingerprint")
+    parser.add_argument("--commit-sha")
+    parser.add_argument("--timing-output", type=Path)
     args = parser.parse_args(argv)
+    if args.timing_output and (
+        not isinstance(args.commit_sha, str) or not _SHA40.fullmatch(args.commit_sha)
+        or not isinstance(args.source_fingerprint, str) or not _SHA64.fullmatch(args.source_fingerprint)
+    ):
+        raise ValueError("timing output requires valid commit-sha and source-fingerprint")
+    started = time.perf_counter()
+    output_root = Path(args.output).resolve()
+    if args.timing_output:
+        raw_timing_output = Path(args.timing_output)
+        if _contains_symlink(raw_timing_output):
+            raise ValueError("timing output must not contain a symlink")
+        timing_output = raw_timing_output.resolve()
+        try:
+            timing_output.relative_to(output_root)
+        except ValueError as exc:
+            raise ValueError("timing output must stay inside disposable fixture root") from exc
     fixture = build_release_gate_fixtures(
-        args.output, profile=args.profile, source_fingerprint=args.source_fingerprint,
+        output_root, profile=args.profile, source_fingerprint=args.source_fingerprint,
     )
+    if args.timing_output:
+        timing_output.parent.mkdir(parents=True, exist_ok=True)
+        timing_output.write_text(json.dumps({
+            "schemaVersion": "acceptance-fixture-timing-v1",
+            "commitSha": args.commit_sha,
+            "sourceFingerprint": args.source_fingerprint,
+            "durationSeconds": round(time.perf_counter() - started, 6),
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"db={fixture.db_path}")
     print(f"cache={fixture.cache_dir}")
     return 0

@@ -17,6 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from backend.agents.acceptance_rollout_models import RolloutConfig, validate_rollout_config
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.release_gate_models import ReleaseGateValidationError
@@ -29,6 +33,7 @@ from scripts.pytest_manifest import collect_pytest_manifest
 _CANARY_TIMEOUT_SECONDS = 1800
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA64 = re.compile(r"^[0-9a-f]{64}$")
+_LINEAGE_KEYS = ("manifestFingerprint", "contractFingerprint", "testPopulationFingerprint")
 
 
 def _counts(value: Mapping[str, Any]) -> dict[str, int]:
@@ -52,12 +57,24 @@ def _result(status: str, failure_code: str | None, **fields: Any) -> dict[str, A
 def _bind_source_identity(
     result: Mapping[str, Any], *, commit_sha: str, source_fingerprint: str,
     manifest_fingerprint: str | None,
+    contract_fingerprint: str | None = None,
+    test_population_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     unsigned = dict(result)
     unsigned.pop("evidenceFingerprint", None)
     unsigned.update({"commitSha": commit_sha, "sourceFingerprint": source_fingerprint})
     if manifest_fingerprint is not None:
+        if not _SHA64.fullmatch(manifest_fingerprint):
+            raise ValueError("manifestFingerprint is invalid")
         unsigned["manifestFingerprint"] = manifest_fingerprint
+    for field, value in (
+        ("contractFingerprint", contract_fingerprint),
+        ("testPopulationFingerprint", test_population_fingerprint),
+    ):
+        if value is not None:
+            if not _SHA64.fullmatch(value):
+                raise ValueError(f"{field} is invalid")
+            unsigned[field] = value
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
 
@@ -67,10 +84,34 @@ def summarize_canary_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         return _result("BLOCKED", "canary_repeat_count_invalid", runCount=len(runs), runs=[])
     compact_runs: list[dict[str, Any]] = []
     failure_code: str | None = None
+    expected_lineage: dict[str, str] | None = None
+    lineage_mode = any(
+        isinstance(run, Mapping) and any(key in run for key in _LINEAGE_KEYS)
+        for run in runs
+    )
     for run in runs:
         if not isinstance(run, Mapping) or run.get("status") != "PASS":
             failure_code = "canary_run_failed"
             break
+        lineage = {key: run.get(key) for key in _LINEAGE_KEYS if key in run}
+        if lineage_mode:
+            required_lineage_keys = {"manifestFingerprint", "testPopulationFingerprint"}
+            if not required_lineage_keys <= set(lineage) or any(
+                not isinstance(value, str) or not _SHA64.fullmatch(value)
+                for value in lineage.values()
+            ):
+                failure_code = "canary_lineage_invalid"
+                break
+            if expected_lineage is None:
+                expected_lineage = lineage
+            elif set(lineage) != set(expected_lineage) or lineage != expected_lineage:
+                failure_code = (
+                    "canary_population_mismatch"
+                    if lineage.get("testPopulationFingerprint")
+                    != expected_lineage.get("testPopulationFingerprint")
+                    else "canary_lineage_mismatch"
+                )
+                break
         parity = run.get("parity")
         if not isinstance(parity, Mapping) or parity.get("status") != "PASS":
             failure_code = "serial_parity_failed" if isinstance(parity, Mapping) else "serial_parity_missing"
@@ -91,6 +132,7 @@ def summarize_canary_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "shardSeconds": shard_seconds,
             "speedRatio": ratio,
             "parity": {"status": "PASS"},
+            **lineage,
         })
         if ratio > 0.8:
             failure_code = "speedup_threshold_not_met"
@@ -205,10 +247,13 @@ def run_canary(*, project_root: Path, config: RolloutConfig, repeats: int = 3) -
         return _result("BLOCKED", "shards_disabled", runCount=0, runs=[])
     source_fingerprint = os.environ.get("NBS_ACCEPTANCE_SOURCE_FINGERPRINT")
     expected_commit_sha = os.environ.get("NBS_ACCEPTANCE_COMMIT_SHA")
+    contract_fingerprint = os.environ.get("NBS_ACCEPTANCE_CONTRACT_FINGERPRINT")
     if not source_fingerprint or not _SHA64.fullmatch(source_fingerprint):
         return _result("BLOCKED", "source_fingerprint_required", runCount=0, runs=[])
     if not expected_commit_sha or not _SHA40.fullmatch(expected_commit_sha):
         return _result("BLOCKED", "commit_identity_required", runCount=0, runs=[])
+    if contract_fingerprint is not None and not _SHA64.fullmatch(contract_fingerprint):
+        return _result("BLOCKED", "contract_fingerprint_invalid", runCount=0, runs=[])
     root = Path(project_root).resolve()
     commit_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True,
@@ -217,15 +262,40 @@ def run_canary(*, project_root: Path, config: RolloutConfig, repeats: int = 3) -
         return _result("BLOCKED", "commit_identity_mismatch", runCount=0, runs=[])
     runs: list[dict[str, Any]] = []
     manifest_fingerprint: str | None = None
+    test_population_fingerprint: str | None = None
     for repeat in range(3):
         manifest = collect_pytest_manifest(root, commit_sha=commit_sha, source_fingerprint=source_fingerprint)
         if manifest.get("status") != "PASS":
             runs.append({"status": "BLOCKED", "failureCode": "manifest_invalid"})
             break
         manifest_fingerprint = manifest.get("manifestFingerprint")
+        nodeids = manifest.get("nodeids")
+        if (
+            not isinstance(nodeids, list)
+            or any(not isinstance(nodeid, str) or not nodeid.strip() for nodeid in nodeids)
+            or len(nodeids) != len(set(nodeids))
+        ):
+            runs.append({"status": "BLOCKED", "failureCode": "manifest_population_invalid"})
+            break
+        test_population_fingerprint = canonical_fingerprint({"nodeids": sorted(nodeids)})
+        if not isinstance(manifest_fingerprint, str) or not _SHA64.fullmatch(manifest_fingerprint):
+            runs.append({
+                "status": "BLOCKED",
+                "failureCode": "manifest_identity_invalid",
+                "manifestFingerprint": manifest_fingerprint,
+                "contractFingerprint": contract_fingerprint,
+                "testPopulationFingerprint": test_population_fingerprint,
+            })
+            break
+        lineage = {
+            "manifestFingerprint": manifest_fingerprint,
+            "testPopulationFingerprint": test_population_fingerprint,
+        }
+        if contract_fingerprint is not None:
+            lineage["contractFingerprint"] = contract_fingerprint
         serial = _serial_control(root)
         if serial["status"] != "PASS":
-            runs.append({"status": serial["status"], "failureCode": serial.get("failureCode", "serial_control_failed"), "serialSeconds": serial["serialSeconds"], "shardSeconds": 0.0})
+            runs.append({"status": serial["status"], "failureCode": serial.get("failureCode", "serial_control_failed"), "serialSeconds": serial["serialSeconds"], "shardSeconds": 0.0, **lineage})
             break
         shard_started = time.perf_counter()
         def run_one(index: int) -> dict[str, Any]:
@@ -235,21 +305,23 @@ def run_canary(*, project_root: Path, config: RolloutConfig, repeats: int = 3) -
             with ThreadPoolExecutor(max_workers=config.shard_count) as executor:
                 shards = list(executor.map(run_one, range(config.shard_count)))
         except (OSError, RuntimeError, ReleaseGateValidationError, subprocess.TimeoutExpired) as exc:
-            runs.append({"status": "BLOCKED", "failureCode": "shard_runner_error", "detail": str(exc), "serialSeconds": serial["serialSeconds"], "shardSeconds": time.perf_counter() - shard_started})
+            runs.append({"status": "BLOCKED", "failureCode": "shard_runner_error", "detail": str(exc), "serialSeconds": serial["serialSeconds"], "shardSeconds": time.perf_counter() - shard_started, **lineage})
             break
         shard_seconds = time.perf_counter() - shard_started
         if any(shard.get("status") != "PASS" for shard in shards):
-            runs.append({"status": "BLOCKED", "failureCode": "shard_run_failed", "serialSeconds": serial["serialSeconds"], "shardSeconds": shard_seconds})
+            runs.append({"status": "BLOCKED", "failureCode": "shard_run_failed", "serialSeconds": serial["serialSeconds"], "shardSeconds": shard_seconds, **lineage})
             break
         aggregate = aggregate_pytest_shards(manifest, shards, expected_commit_sha=commit_sha, expected_source_fingerprint=source_fingerprint)
         parity = compare_serial_and_shard(serial, aggregate)
-        runs.append({"status": "PASS" if parity["status"] == "PASS" else "BLOCKED", "failureCode": parity.get("failureCode"), "serialSeconds": serial["serialSeconds"], "shardSeconds": shard_seconds, "parity": parity})
+        runs.append({"status": "PASS" if parity["status"] == "PASS" else "BLOCKED", "failureCode": parity.get("failureCode"), "serialSeconds": serial["serialSeconds"], "shardSeconds": shard_seconds, "parity": parity, **lineage})
         if parity["status"] != "PASS":
             break
     summary = summarize_canary_runs(runs) if len(runs) == 3 else _result("BLOCKED", (runs[-1].get("failureCode") if runs else "canary_run_failed"), runCount=len(runs), runs=list(runs))
     return _bind_source_identity(
         summary, commit_sha=commit_sha, source_fingerprint=source_fingerprint,
         manifest_fingerprint=manifest_fingerprint,
+        contract_fingerprint=contract_fingerprint,
+        test_population_fingerprint=test_population_fingerprint,
     )
 
 

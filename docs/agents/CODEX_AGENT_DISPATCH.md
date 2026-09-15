@@ -43,6 +43,8 @@ Agent Operations 只讀 Phase 1 artifacts，不是第二個 source of truth。UI
 
 Implementation Agent 仍不得 commit、merge 或 push；validator 只 read-only 檢查，不自動 stage 或改寫 Git。既有 unrelated dirty changes 必須保留。push、PR、merge 與 rollback 仍由 Codex 依明確授權處理，rollback 預設建立可追蹤的 `git revert` commit。Governance Graph、Memory Hub、Memory Sidecar 與 Hermes 不得批准或建立 checkpoint。
 
+Acceptance contract 與 performance baseline lineage 是 metadata/diagnostic-only 邊界。`acceptance-performance-baseline-v1` 必須維持 exact-key 讀取相容；v2 artifact 以 contract、scope/rules、dataset snapshot、manifest/population、runner 與 environment fingerprints 建立 comparability key。正式口徑或語義變更時，必須建立新的 contract fingerprint 與 `baselineFamilyId`，舊 artifact 只保留歷史用途，不得自動 qualified、promote 或取代 serial Full pytest。CI 的 contract/v2 performance artifact 只能由明確 opt-in workflow 產生，且不能進入 formal aggregate；任何 comparison mismatch 都要 suppress ratio。Memory Hub、Memory Sidecar 與 Governance Graph 只可提供 bounded read-only context，不得寫入 production、批准 lineage、控制 lifecycle 或改變 release authority。
+
 ## Machine-readable dispatch rules
 
 ```json

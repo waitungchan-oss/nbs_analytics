@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      enable_acceptance_performance_v2:
+        description: "Upload opt-in contract and performance v2 diagnostics"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -46,7 +51,7 @@ jobs:
       - name: Prepare isolated full pytest fixture
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
-          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-full-pytest-fixture" --source-fingerprint "$SOURCE_FINGERPRINT"
+          .venv/bin/python scripts/prepare_release_gate_fixtures.py --output "$RUNNER_TEMP/nbs-full-pytest-fixture" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --timing-output "$RUNNER_TEMP/nbs-full-pytest-fixture/fixture-timing.json"
           echo "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_fixture.db" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_cache" >> "$GITHUB_ENV"
           echo "NBS_ANALYTICS_COORDINATION_DB=$RUNNER_TEMP/nbs-full-pytest-fixture/upload_coordination.db" >> "$GITHUB_ENV"
@@ -62,6 +67,25 @@ jobs:
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
           .venv/bin/python scripts/full_pytest_gate.py --sandbox-preflight required --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output full-pytest.json
+      - name: Ensure diagnostic timing artifact exists
+        if: always()
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          if [ ! -s "$RUNNER_TEMP/nbs-full-pytest-fixture/fixture-timing.json" ]; then
+            mkdir -p "$RUNNER_TEMP/nbs-full-pytest-fixture"
+            .venv/bin/python - "$RUNNER_TEMP/nbs-full-pytest-fixture/fixture-timing.json" "$GITHUB_SHA" "$SOURCE_FINGERPRINT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          Path(sys.argv[1]).write_text(json.dumps({
+              "schemaVersion": "acceptance-fixture-timing-unavailable-v1",
+              "status": "BLOCKED",
+              "commitSha": sys.argv[2],
+              "sourceFingerprint": sys.argv[3],
+          }) + "\n", encoding="utf-8")
+          PY
+          fi
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -73,6 +97,12 @@ jobs:
         with:
           name: release-gate-full-pytest-${{ github.sha }}
           path: full-pytest.json
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-full-pytest-timing-${{ github.sha }}
+          path: ${{ runner.temp }}/nbs-full-pytest-fixture/fixture-timing.json
           if-no-files-found: error
 
   hermes:
@@ -283,6 +313,14 @@ jobs:
           path: artifacts/full-pytest
       - uses: actions/download-artifact@v4
         with:
+          name: release-gate-pytest-manifest-${{ github.sha }}
+          path: artifacts/pytest-manifest
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-gate-full-pytest-timing-${{ github.sha }}
+          path: artifacts/full-pytest-timing
+      - uses: actions/download-artifact@v4
+        with:
           name: release-gate-hermes-${{ github.sha }}
           path: artifacts/hermes
       - uses: actions/download-artifact@v4
@@ -293,6 +331,52 @@ jobs:
         run: |
           SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
           python scripts/release_gate.py aggregate --full-pytest artifacts/full-pytest/full-pytest.json --hermes artifacts/hermes/hermes.json --ui-acceptance artifacts/ui-acceptance/ui-acceptance.json --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output release-gate-result.json
+      - name: Compose diagnostic acceptance performance artifact
+        if: always()
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          RUNNER_FINGERPRINT=$(python -c 'import hashlib, platform, sys; requirements = hashlib.sha256(open("requirements.txt", "rb").read()).hexdigest(); raw = f"{platform.system()}|{platform.machine()}|{sys.version_info[:3]}|{requirements}"; print(hashlib.sha256(raw.encode("utf-8")).hexdigest())')
+          set +e
+          python scripts/acceptance_performance_benchmark.py --manifest artifacts/pytest-manifest/pytest-manifest.json --full-pytest artifacts/full-pytest/full-pytest.json --fixture-timing artifacts/full-pytest-timing/fixture-timing.json --aggregate release-gate-result.json --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --runner-fingerprint "$RUNNER_FINGERPRINT" --selection-mode full --output .nbs_agent_runtime/acceptance-optimization/ci-performance.json
+          PERFORMANCE_EXIT=$?
+          echo "acceptance_performance_exit=$PERFORMANCE_EXIT"
+          exit 0
+      - name: Compose opt-in acceptance contract and performance v2 diagnostics
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_performance_v2 == true
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          SCOPE_FINGERPRINT=$(printf '%s' 'nbs-acceptance|formal-scope-v1|不含掛賬核銷與TT退款轉團款' | shasum -a 256 | awk '{print $1}')
+          SEMANTIC_RULES_FINGERPRINT=$(printf '%s' 'acceptance-semantic-rules-v1' | shasum -a 256 | awk '{print $1}')
+          DATASET_SNAPSHOT_FINGERPRINT=$(printf '%s' 'release-gate-ci-fixture|dataset-snapshot-v1' | shasum -a 256 | awk '{print $1}')
+          RUNNER_FINGERPRINT=$(python -c 'import hashlib, platform, sys; requirements = hashlib.sha256(open("requirements.txt", "rb").read()).hexdigest(); raw = f"{platform.system()}|{platform.machine()}|{sys.version_info[:3]}|{requirements}"; print(hashlib.sha256(raw.encode("utf-8")).hexdigest())')
+          ENVIRONMENT_FINGERPRINT=$(python -c 'import hashlib, platform, sys; raw = f"{platform.system()}|{platform.machine()}|{sys.version_info[:3]}|release-gate-aggregate-v1"; print(hashlib.sha256(raw.encode("utf-8")).hexdigest())')
+          mkdir -p .nbs_agent_runtime/acceptance-baseline-v2
+          set +e
+          python scripts/acceptance_baseline.py contract --contract-id nbs-acceptance --contract-version formal-scope-v1 --scope-fingerprint "$SCOPE_FINGERPRINT" --semantic-rules-fingerprint "$SEMANTIC_RULES_FINGERPRINT" --dataset-snapshot-fingerprint "$DATASET_SNAPSHOT_FINGERPRINT" --output .nbs_agent_runtime/acceptance-baseline-v2/contract.json
+          CONTRACT_EXIT=$?
+          if [ "$CONTRACT_EXIT" -eq 0 ]; then
+            python scripts/acceptance_performance_benchmark.py --manifest artifacts/pytest-manifest/pytest-manifest.json --full-pytest artifacts/full-pytest/full-pytest.json --fixture-timing artifacts/full-pytest-timing/fixture-timing.json --aggregate release-gate-result.json --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --runner-fingerprint "$RUNNER_FINGERPRINT" --selection-mode full --contract .nbs_agent_runtime/acceptance-baseline-v2/contract.json --output-schema v2 --environment-fingerprint "$ENVIRONMENT_FINGERPRINT" --baseline-family-id acceptance-full-serial-ci-v1 --baseline-role serial_control --lifecycle draft --output .nbs_agent_runtime/acceptance-baseline-v2/performance-v2.json
+          fi
+          echo "acceptance_contract_exit=$CONTRACT_EXIT"
+          exit 0
+      - if: always() && github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_performance_v2 == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-contract-${{ github.sha }}
+          path: .nbs_agent_runtime/acceptance-baseline-v2/contract.json
+          if-no-files-found: warn
+      - if: always() && github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_performance_v2 == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-performance-v2-${{ github.sha }}
+          path: .nbs_agent_runtime/acceptance-baseline-v2/performance-v2.json
+          if-no-files-found: warn
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-performance-${{ github.sha }}
+          path: .nbs_agent_runtime/acceptance-optimization/ci-performance.json
+          if-no-files-found: warn
       - if: always()
         uses: actions/upload-artifact@v4
         with:
