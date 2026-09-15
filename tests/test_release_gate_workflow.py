@@ -46,7 +46,7 @@ def test_release_workflow_runs_hermes_on_mac_and_ui_against_streamlit_app():
     assert "fetch-depth: 0" in full_block
     assert "git fetch --no-tags origin main:refs/heads/main" in full_block
     assert "prepare_release_gate_fixtures.py --output" in full_block
-    assert "prepare_release_gate_fixtures.py --output \"$RUNNER_TEMP/nbs-full-pytest-fixture\" --source-fingerprint \"$SOURCE_FINGERPRINT\"" in full_block
+    assert "prepare_release_gate_fixtures.py --output \"$RUNNER_TEMP/nbs-full-pytest-fixture\" --commit-sha \"$GITHUB_SHA\" --source-fingerprint \"$SOURCE_FINGERPRINT\"" in full_block
     assert "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_cache" in full_block
     assert "NBS_ANALYTICS_DB_FILE" in full_block
     assert "NBS_ANALYTICS_CACHE_DIR" in full_block
@@ -90,6 +90,44 @@ def test_full_pytest_job_uploads_diagnostic_manifest_without_replacing_serial_ga
     assert "strategy:" not in full_block
 
 
+def test_release_workflow_uploads_diagnostic_performance_artifact_without_making_it_required():
+    source = _workflow_text()
+    full_block = source.split("  full-pytest:\n", 1)[1].split("  hermes:\n", 1)[0]
+    aggregate = source[source.index("  aggregate:"):]
+
+    assert "scripts/acceptance_performance_benchmark.py" in aggregate
+    assert "scripts/acceptance_performance_benchmark.py" not in full_block
+    assert "release-gate-performance-${{ github.sha }}" in aggregate
+    assert "release-gate-full-pytest-${{ github.sha }}" in full_block
+    assert "release-gate-hermes-${{ github.sha }}" in source
+    assert "release-gate-ui-acceptance-${{ github.sha }}" in source
+    assert "full-pytest.json" in full_block
+    assert "hermes.json" in source
+    assert "ui-acceptance.json" in source
+    assert "--aggregate release-gate-result.json" in aggregate
+    assert "acceptance_performance_exit=$PERFORMANCE_EXIT" in aggregate
+    assert "release-gate-full-pytest-timing-${{ github.sha }}" in full_block
+    assert "if-no-files-found: warn" in aggregate
+    formal_downloads = aggregate.split("      - name: Aggregate fresh release evidence", 1)[0]
+    assert "release-gate-performance" not in formal_downloads
+
+
+def test_release_workflow_has_opt_in_v2_diagnostics_outside_formal_aggregate():
+    source = _workflow_text()
+    aggregate = source[source.index("  aggregate:"):]
+    formal_downloads = aggregate.split("      - name: Aggregate fresh release evidence", 1)[0]
+
+    assert "enable_acceptance_performance_v2" in source
+    assert "release-gate-contract-${{ github.sha }}" in aggregate
+    assert "release-gate-performance-v2-${{ github.sha }}" in aggregate
+    assert "inputs.enable_acceptance_performance_v2 == true" in aggregate
+    assert "release-gate-contract-${{ github.sha }}" not in formal_downloads
+    assert "release-gate-performance-v2-${{ github.sha }}" not in formal_downloads
+    assert "--full-pytest artifacts/full-pytest/full-pytest.json" in aggregate
+    assert "--hermes artifacts/hermes/hermes.json" in aggregate
+    assert "--ui-acceptance artifacts/ui-acceptance/ui-acceptance.json" in aggregate
+
+
 def test_release_workflow_cancels_superseded_pr_runs_but_not_release_tags():
     text = _workflow_text()
     assert "concurrency:" in text
@@ -112,6 +150,30 @@ def test_release_aggregate_uses_minimal_runtime_and_runs_after_failed_children()
     assert "pip install -r requirements.txt" not in aggregate
     assert "python scripts/release_gate.py aggregate" in aggregate
     assert "if-no-files-found: error" in aggregate
+
+
+def test_full_pytest_timing_stays_disposable_and_cache_does_not_cover_gate_state():
+    source = _workflow_text()
+    full_block = source.split("  full-pytest:\n", 1)[1].split("  hermes:\n", 1)[0]
+
+    assert '--timing-output "$RUNNER_TEMP/nbs-full-pytest-fixture/fixture-timing.json"' in full_block
+    assert "NBS_ANALYTICS_CACHE_DIR=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_cache" in full_block
+    assert "NBS_ANALYTICS_DB_FILE=$RUNNER_TEMP/nbs-full-pytest-fixture/release_gate_fixture.db" in full_block
+    assert "release-gate-full-pytest-timing-${{ github.sha }}" in full_block
+    assert "actions/cache" not in full_block
+    assert "nbs_marketing_data.db" not in full_block
+
+
+def test_diagnostic_timing_absence_is_isolated_from_formal_aggregate():
+    source = _workflow_text()
+    full_block = source.split("  full-pytest:\n", 1)[1].split("  hermes:\n", 1)[0]
+    aggregate = source[source.index("  aggregate:"):]
+
+    assert "Ensure diagnostic timing artifact exists" in full_block
+    assert "acceptance-fixture-timing-unavailable-v1" in full_block
+    assert "name: release-gate-full-pytest-timing-${{ github.sha }}" in full_block
+    assert "if-no-files-found: error" in full_block
+    assert "python scripts/release_gate.py aggregate" in aggregate
 
 
 def test_serial_full_pytest_remains_default_and_required():

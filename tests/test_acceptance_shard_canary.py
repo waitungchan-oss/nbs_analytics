@@ -1,5 +1,8 @@
+import os
 import socket
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -7,6 +10,22 @@ from backend.agents.acceptance_rollout_models import RolloutConfig
 from backend.agents.evidence_models import canonical_fingerprint
 from scripts import acceptance_shard_canary
 from scripts.acceptance_shard_canary import _port_readiness, summarize_canary_runs
+
+
+def test_canary_script_entrypoint_bootstraps_project_imports():
+    script = Path(__file__).parents[1] / "scripts" / "acceptance_shard_canary.py"
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=script.parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
 
 
 def test_three_runs_require_no_failures_and_twenty_percent_speedup():
@@ -20,6 +39,51 @@ def test_three_runs_require_no_failures_and_twenty_percent_speedup():
     assert result["status"] == "PASS"
     assert result["failureCode"] is None
     assert result["runCount"] == 3
+
+
+def test_canary_speed_threshold_is_diagnostic_only():
+    result = summarize_canary_runs([
+        {
+            "status": "PASS",
+            "serialSeconds": 100.0,
+            "shardSeconds": 70.0,
+            "parity": {"status": "PASS"},
+        }
+        for _ in range(3)
+    ])
+
+    assert result["status"] == "PASS"
+    assert result["authority"] == "prototype"
+    assert result["formalReleaseEnabled"] is False
+    assert result["rolloutCandidate"] == "eligible"
+
+
+def test_canary_never_marks_missing_or_mismatched_run_as_eligible():
+    result = summarize_canary_runs([
+        {"status": "PASS", "serialSeconds": 100.0, "shardSeconds": 70.0, "parity": {"status": "PASS"}},
+        {"status": "BLOCKED", "serialSeconds": 100.0, "shardSeconds": 0.0, "parity": {"status": "BLOCKED"}},
+        {"status": "PASS", "serialSeconds": 100.0, "shardSeconds": 70.0, "parity": {"status": "PASS"}},
+    ])
+
+    assert result["rolloutCandidate"] == "ineligible"
+
+
+def test_canary_source_binding_keeps_prototype_authority():
+    result = acceptance_shard_canary._bind_source_identity(
+        acceptance_shard_canary.summarize_canary_runs([
+            {"status": "PASS", "serialSeconds": 100.0, "shardSeconds": 70.0, "parity": {"status": "PASS"}}
+            for _ in range(3)
+        ]),
+        commit_sha="a" * 40,
+        source_fingerprint="b" * 64,
+        manifest_fingerprint="c" * 64,
+    )
+
+    assert result["authority"] == "prototype"
+    assert result["formalReleaseEnabled"] is False
+    assert result["commitSha"] == "a" * 40
+    assert result["sourceFingerprint"] == "b" * 64
+    assert result["manifestFingerprint"] == "c" * 64
 
 
 @pytest.mark.parametrize(
@@ -100,6 +164,67 @@ def test_source_identity_binding_recomputes_evidence_fingerprint():
     assert result["sourceFingerprint"] == "b" * 64
     assert result["manifestFingerprint"] == "c" * 64
     assert result["evidenceFingerprint"] == canonical_fingerprint({key: value for key, value in result.items() if key != "evidenceFingerprint"})
+
+
+def test_source_identity_binding_rejects_malformed_manifest_fingerprint():
+    with pytest.raises(ValueError, match="manifestFingerprint is invalid"):
+        acceptance_shard_canary._bind_source_identity(
+            {"schemaVersion": "acceptance-shard-canary-v1", "status": "BLOCKED"},
+            commit_sha="a" * 40,
+            source_fingerprint="b" * 64,
+            manifest_fingerprint="not-a-sha256",
+        )
+
+
+def test_v2_shard_binding_keeps_prototype_authority_and_adds_lineage():
+    result = acceptance_shard_canary._bind_source_identity(
+        acceptance_shard_canary.summarize_canary_runs([
+            {"status": "PASS", "serialSeconds": 100.0, "shardSeconds": 70.0, "parity": {"status": "PASS"}}
+            for _ in range(3)
+        ]),
+        commit_sha="a" * 40,
+        source_fingerprint="b" * 64,
+        manifest_fingerprint="c" * 64,
+        contract_fingerprint="d" * 64,
+        test_population_fingerprint="e" * 64,
+    )
+
+    assert result["authority"] == "prototype"
+    assert result["formalReleaseEnabled"] is False
+    assert result["contractFingerprint"] == "d" * 64
+    assert result["testPopulationFingerprint"] == "e" * 64
+
+
+def test_canary_summary_retains_lineage_for_each_repeat_and_rejects_population_drift():
+    runs = [
+        {
+            "status": "PASS",
+            "serialSeconds": 100.0,
+            "shardSeconds": 70.0,
+            "parity": {"status": "PASS"},
+            "manifestFingerprint": "c" * 64,
+            "contractFingerprint": "d" * 64,
+            "testPopulationFingerprint": "e" * 64,
+        }
+        for _ in range(3)
+    ]
+
+    result = summarize_canary_runs(runs)
+
+    assert result["status"] == "PASS"
+    assert all(run["contractFingerprint"] == "d" * 64 for run in result["runs"])
+    assert all(run["testPopulationFingerprint"] == "e" * 64 for run in result["runs"])
+
+    runs[2]["testPopulationFingerprint"] = "f" * 64
+    drifted = summarize_canary_runs(runs)
+    assert drifted["status"] == "BLOCKED"
+    assert drifted["failureCode"] == "canary_population_mismatch"
+
+    runs[2]["testPopulationFingerprint"] = "e" * 64
+    runs[2].pop("contractFingerprint")
+    incomplete = summarize_canary_runs(runs)
+    assert incomplete["status"] == "BLOCKED"
+    assert incomplete["failureCode"] in {"canary_lineage_invalid", "canary_lineage_mismatch"}
 
 
 def test_run_canary_converts_shard_runtime_error_to_bounded_blocker(monkeypatch, tmp_path):
