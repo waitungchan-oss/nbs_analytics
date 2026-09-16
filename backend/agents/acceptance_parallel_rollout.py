@@ -347,16 +347,12 @@ def _validate_run_for_artifact(run, *, expected_lineage, shard_count, blocked):
     if not _population_valid(population_nodeids, population_count, expected_lineage["testPopulationFingerprint"]):
         _invalid_run("population_nodeids_invalid")
     serial_counts = _safe_counts(run.get("serialResult"))
-    if serial_counts is None or sum(serial_counts.values()) > population_count or (
-        run.get("serialStatus") == "PASS" and sum(serial_counts.values()) != population_count
-    ):
+    if serial_counts is None or sum(serial_counts.values()) > population_count or (run.get("serialStatus") == "PASS" and sum(serial_counts.values()) != population_count):
         _invalid_run("serial_counts_invalid")
-    for field in ("serialWallSeconds", "parallelWallSeconds"):
-        if not _is_duration(run.get(field)):
-            _invalid_run("duration_invalid")
-    for field in ("serialStatus", "parallelStatus"):
-        if run.get(field) not in {"PASS", "FAIL", "BLOCKED"}:
-            _invalid_run("run_status_invalid")
+    if any(not _is_duration(run.get(field)) for field in ("serialWallSeconds", "parallelWallSeconds")):
+        _invalid_run("duration_invalid")
+    if any(run.get(field) not in {"PASS", "FAIL", "BLOCKED"} for field in ("serialStatus", "parallelStatus")):
+        _invalid_run("run_status_invalid")
     parity = run.get("parity")
     if not isinstance(parity, Mapping) or parity.get("status") not in {"PASS", "BLOCKED"}:
         _invalid_run("parity_mismatch")
@@ -365,16 +361,13 @@ def _validate_run_for_artifact(run, *, expected_lineage, shard_count, blocked):
         _invalid_run("shard_aggregate_failed")
     if aggregate.get("shardCount", shard_count) != shard_count:
         _invalid_run("shard_count_mismatch")
-    failure = _coverage_error(population_nodeids, run.get("shardCoverage"), shard_count, strict=False,
-                              allow_empty=aggregate.get("status") == "BLOCKED", aggregate_pass=aggregate.get("status") == "PASS")
+    failure = _coverage_error(population_nodeids, run.get("shardCoverage"), shard_count, strict=False, allow_empty=aggregate.get("status") == "BLOCKED", aggregate_pass=aggregate.get("status") == "PASS")
     if failure:
         _invalid_run(failure)
     if not isinstance(parity, Mapping) or not _valid_evidence_fingerprint(parity):
         _invalid_run("parity_evidence_invalid")
     aggregate_result = _safe_counts(aggregate.get("result"))
-    if aggregate_result is None or sum(aggregate_result.values()) > population_count:
-        _invalid_run("shard_counts_invalid")
-    if aggregate.get("status") == "PASS" and sum(aggregate_result.values()) != population_count:
+    if aggregate_result is None or sum(aggregate_result.values()) > population_count or (aggregate.get("status") == "PASS" and sum(aggregate_result.values()) != population_count):
         _invalid_run("shard_counts_invalid")
     aggregate_unsigned = {key: value for key, value in aggregate.items() if key != "evidenceFingerprint"}
     if not ((aggregate.get("status") == "PASS" and _valid_evidence_fingerprint(aggregate))
