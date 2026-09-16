@@ -407,7 +407,7 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
 
 def _write_output(path, payload):
     target = Path(path).expanduser()
-    if target.is_symlink() or target.exists() and not target.is_file():
+    if target.exists():
         raise ValueError("output must be a new regular file")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

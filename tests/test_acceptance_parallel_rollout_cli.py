@@ -166,6 +166,17 @@ def test_cli_runs_three_fresh_measurements_and_writes_rollout_artifact(tmp_path,
     assert all(run["parity"]["status"] == "PASS" for run in rollout["measuredRuns"])
 
 
+def test_cli_refuses_to_overwrite_existing_output(tmp_path):
+    import pytest
+    from scripts import acceptance_parallel_rollout as subject
+
+    output = tmp_path / "rollout.json"
+    output.write_text("keep this evidence", encoding="utf-8")
+    with pytest.raises(ValueError, match="new regular file"):
+        subject._write_output(output, {"status": "PASS"})
+    assert output.read_text(encoding="utf-8") == "keep this evidence"
+
+
 def test_cli_blocks_and_suppresses_speedup_when_one_shard_is_missing(tmp_path, monkeypatch):
     from scripts import acceptance_parallel_rollout as subject
 
