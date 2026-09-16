@@ -185,15 +185,21 @@ def run_parallel_shards(
     lineage = _validate_execution_lineage(execution_lineage) if execution_lineage is not None else None
 
     start_lock = threading.Lock()
-    launch_monotonic: list[float] = []
     launch_timestamp: list[str] = []
+    first_child_monotonic: list[float] = []
+    first_child_timestamp: list[str] = []
     controller_started = time.perf_counter()
     controller_deadline = controller_started + float(timeout_seconds)
 
     def mark_coordinated_start() -> None:
         with start_lock:
-            launch_monotonic.append(time.perf_counter())
             launch_timestamp.append(_timestamp())
+
+    def mark_first_child_launch() -> None:
+        with start_lock:
+            if not first_child_monotonic:
+                first_child_monotonic.append(time.perf_counter())
+                first_child_timestamp.append(_timestamp())
 
     readiness_barrier = threading.Barrier(shard_count, action=mark_coordinated_start)
     runtime_lock = threading.Lock()
@@ -289,6 +295,7 @@ def run_parallel_shards(
                     all_process_groups_terminated=True,
                 )
             else:
+                mark_first_child_launch()
                 artifact = run_pytest_shard(
                     project_root=root,
                     manifest=manifest,
@@ -400,6 +407,8 @@ def run_parallel_shards(
             futures_completed = all(future.done() for future in futures.values())
             if not futures_completed: termination_errors += ["future_not_done"]
             post_cleanup = {index: force_cleanup(index) for index in range(shard_count)}
+            timed_out_cleanup_ok = all(post_cleanup[index] for index in timed_out_indexes)
+            if not timed_out_cleanup_ok: termination_errors += ["timed_out_shard_cleanup_unconfirmed"]
             results = []
             for index, future in futures.items():
                 if future.cancelled():
@@ -440,14 +449,16 @@ def run_parallel_shards(
                 "shardCount": shard_count,
                 "shards": artifacts,
                 "shardArtifactPaths": artifact_paths,
-                "parallelWallSeconds": round(time.perf_counter() - controller_started, 6),
-                "startedAt": launch_timestamp[0] if launch_timestamp else None,
+                "parallelWallSeconds": round(time.perf_counter() - (first_child_monotonic[0] if first_child_monotonic else controller_started), 6),
+                "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
                 "finishedAt": _timestamp(),
                 "readiness": readiness_evidence(),
                 "cleanup": {
                     "allProcessGroupsTerminated": futures_completed and not termination_errors and all(_cleanup_ok(artifact) for artifact in artifacts),
                     "controllerTimeout": True,
                     "shardCount": shard_count,
+                    "futuresCompleted": futures_completed,
+                    "timedOutShardCleanupConfirmed": timed_out_cleanup_ok,
                     "terminationErrors": termination_errors,
                 },
             }
@@ -458,7 +469,7 @@ def run_parallel_shards(
     results.sort(key=lambda item: item[0])
     artifacts = [item[1] for item in results]
     artifact_paths = [str(_write_artifact(output, item[0], item[1])) for item in results]
-    wall_seconds = round(time.perf_counter() - launch_monotonic[0], 6) if launch_monotonic else None
+    wall_seconds = round(time.perf_counter() - (first_child_monotonic[0] if first_child_monotonic else controller_started), 6)
     cleanup_ok = all(_cleanup_ok(artifact) for artifact in artifacts)
     failed = [artifact for artifact in artifacts if artifact.get("status") != "PASS"]
     cleanup = {
@@ -477,7 +488,7 @@ def run_parallel_shards(
             "shards": artifacts,
             "shardArtifactPaths": artifact_paths,
             "parallelWallSeconds": wall_seconds,
-            "startedAt": launch_timestamp[0] if launch_timestamp else None,
+            "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
             "finishedAt": _timestamp(),
             "readiness": readiness_evidence(),
             "cleanup": cleanup,
@@ -493,7 +504,7 @@ def run_parallel_shards(
             "shards": artifacts,
             "shardArtifactPaths": artifact_paths,
             "parallelWallSeconds": wall_seconds,
-            "startedAt": launch_timestamp[0] if launch_timestamp else None,
+            "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
             "finishedAt": _timestamp(),
             "readiness": readiness_evidence(),
             "cleanup": cleanup,
@@ -510,7 +521,7 @@ def run_parallel_shards(
             "shards": artifacts,
             "shardArtifactPaths": artifact_paths,
             "parallelWallSeconds": wall_seconds,
-            "startedAt": launch_timestamp[0] if launch_timestamp else None,
+            "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
             "finishedAt": _timestamp(),
             "cleanup": cleanup,
             "coverage": validation,
@@ -532,7 +543,7 @@ def run_parallel_shards(
         "shardArtifactPaths": artifact_paths,
         "aggregate": aggregate,
         "parallelWallSeconds": wall_seconds,
-        "startedAt": launch_timestamp[0] if launch_timestamp else None,
+        "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
         "finishedAt": _timestamp(),
         "readiness": readiness_evidence(),
         "cleanup": cleanup,
