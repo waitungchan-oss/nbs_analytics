@@ -66,6 +66,8 @@ dirty worktree 視為可信，也不改變 CI 的 clean checkout 或 formal rele
 其中 `verification-session-v1.sourceFingerprint` 是 canonical session identity；它不等同
 於 `git archive HEAD` 的 archive hash。未提供 source seal 時，serial control 才使用 archive
 identity 做 clean-worktree 檢查。
+CI 的 diagnostic manifest 也以 `git archive HEAD` hash 作為自己的
+`sourceFingerprint` contract；兩者不可在同一 artifact 中混用。
 
 ## Speedup and stability
 

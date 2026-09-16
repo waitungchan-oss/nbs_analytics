@@ -373,13 +373,14 @@ def run_parallel_shards(
             try:
                 results.append(future.result())
             except BaseException as exc:
+                cleaned = force_cleanup(index)
                 results.append((
                     index,
                     _blocked_shard(
                         index=index, shard_count=shard_count, commit_sha=commit_sha,
                         source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
                         fixture_root=fixture_roots[index], failure_code="pytest_runner_error",
-                        lineage=lineage, all_process_groups_terminated=False,
+                        lineage=lineage, all_process_groups_terminated=cleaned,
                     ),
                 ))
 
@@ -398,6 +399,7 @@ def run_parallel_shards(
                     termination_errors.append(str(exc)[:256])
             executor.shutdown(wait=True, cancel_futures=True)
             executor_shutdown = True
+            post_cleanup = {index: force_cleanup(index) for index in range(shard_count)}
             results = []
             for index, future in futures.items():
                 if future.cancelled():
@@ -407,7 +409,7 @@ def run_parallel_shards(
                             index=index, shard_count=shard_count, commit_sha=commit_sha,
                             source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
                             fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
-                            all_process_groups_terminated=False,
+                            all_process_groups_terminated=post_cleanup[index],
                         ),
                     ))
                 else:
@@ -421,7 +423,7 @@ def run_parallel_shards(
                                 index=index, shard_count=shard_count, commit_sha=commit_sha,
                                 source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
                                 fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
-                                all_process_groups_terminated=_cleanup_ok(late_artifact),
+                                all_process_groups_terminated=post_cleanup[index] and _cleanup_ok(late_artifact),
                             ),
                         ))
                     else:

@@ -13,8 +13,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.agents.acceptance_contract import contract_fingerprint, validate_acceptance_contract
 from backend.agents.acceptance_parallel_rollout import (
@@ -155,7 +154,7 @@ def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprin
                 failure_code = "serial_source_identity_mismatch"
         elif dirty:
             failure_code = "serial_source_dirty"
-        elif actual_commit != commit_sha or archive_fingerprint != source_fingerprint:
+        elif (actual_commit, archive_fingerprint) != (commit_sha, source_fingerprint):
             failure_code = "serial_source_identity_mismatch"
         if failure_code is None:
             runtime = allocate_shard_runtime(
@@ -203,16 +202,9 @@ def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprin
     if cleanup.get("status") != "PASS":
         status = "BLOCKED"
         failure_code = "isolation_violation"
-    return _serial_artifact(
-        run_index=run_index,
-        status=status,
-        failure_code=failure_code,
-        commit_sha=commit_sha,
-        source_fingerprint=source_fingerprint,
-        result=result,
-        wall_seconds=elapsed,
-        cleanup=cleanup,
-    )
+    return _serial_artifact(run_index=run_index, status=status, failure_code=failure_code,
+                            commit_sha=commit_sha, source_fingerprint=source_fingerprint,
+                            result=result, wall_seconds=elapsed, cleanup=cleanup)
 
 
 def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, Any], commit_sha: str, source_fingerprint: str, baseline_family_id: str, lineage: Mapping[str, Any]) -> dict[str, Any]:
@@ -234,13 +226,9 @@ def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, 
         environment_fingerprint=lineage["environmentFingerprint"],
         dataset_snapshot_fingerprint=lineage["datasetSnapshotFingerprint"],
         selection_mode="full",
-        stages={
-            "collectionSeconds": 0.0,
-            "fixturePreparationSeconds": 0.0,
-            "pytestExecutionSeconds": total,
-            "aggregateSeconds": 0.0,
-            "totalWallSeconds": total,
-        },
+        stages={"collectionSeconds": 0.0, "fixturePreparationSeconds": 0.0,
+                "pytestExecutionSeconds": total, "aggregateSeconds": 0.0,
+                "totalWallSeconds": total},
         test_count={"collected": collected, **counts},
     )
 
@@ -459,10 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, choices=(3,), default=3)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--source-seal", type=Path,
-        help="Optional verification-session-v1/source-seal-v1 for an exact sealed worktree.",
-    )
+    parser.add_argument("--source-seal", type=Path)
     args = parser.parse_args(argv)
     try:
         result = run_parallel_rollout(
