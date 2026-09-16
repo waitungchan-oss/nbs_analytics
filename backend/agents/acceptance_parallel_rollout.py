@@ -119,16 +119,13 @@ def _lineage_error(run, expected):
 
 
 def _coverage_error(population, coverage, shard_count, *, strict, allow_empty=False, aggregate_pass=False):
-    if not isinstance(coverage, list):
-        return "shard_coverage_invalid"
+    if not isinstance(coverage, list): return "shard_coverage_invalid"
     if not coverage:
         return None if allow_empty else "shard_coverage_invalid"
-    if len(coverage) != shard_count:
-        return "shard_coverage_invalid"
+    if len(coverage) != shard_count: return "shard_coverage_invalid"
     by_index = {}
     for item in coverage:
-        if not isinstance(item, Mapping):
-            return "shard_coverage_invalid"
+        if not isinstance(item, Mapping): return "shard_coverage_invalid"
         index, assigned, executed = item.get("shardIndex"), item.get("assignedNodeids"), item.get("executedNodeids")
         values = assigned + executed if isinstance(assigned, list) and isinstance(executed, list) else []
         if (isinstance(index, bool) or not isinstance(index, int) or index not in range(shard_count) or index in by_index
