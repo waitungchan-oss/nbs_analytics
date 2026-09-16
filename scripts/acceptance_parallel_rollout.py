@@ -1,7 +1,3 @@
-"""Run three fresh, source-bound serial/parallel acceptance measurements."""
-
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -17,8 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.acceptance_contract import contract_fingerprint, validate_acceptance_contract
 from backend.agents.acceptance_parallel_rollout import (
@@ -40,29 +35,26 @@ _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 _ALLOWED_SHARDS = frozenset({2, 4, 8, 16})
 _MAX_JSON_BYTES = 1024 * 1024
+_SOURCE_BRIEF = "docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
     candidate = Path(path).expanduser()
-    if candidate.is_symlink() or not candidate.is_file():
-        raise ValueError("input must be a regular file")
-    if candidate.stat().st_size > _MAX_JSON_BYTES:
-        raise ValueError("input exceeds size cap")
+    if candidate.is_symlink() or not candidate.is_file(): raise ValueError("input must be a regular file")
+    if candidate.stat().st_size > _MAX_JSON_BYTES: raise ValueError("input exceeds size cap")
     value = json.loads(candidate.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError("input JSON must be an object")
+    if not isinstance(value, dict): raise ValueError("input JSON must be an object")
     return value
 
 
 def _require_sha(value: Any, pattern: re.Pattern[str], field: str) -> None:
-    if not isinstance(value, str) or pattern.fullmatch(value) is None:
-        raise ValueError(f"{field} is invalid")
+    if not isinstance(value, str) or pattern.fullmatch(value) is None: raise ValueError(f"{field} is invalid")
 
 
 def _safe_counts(value: Any) -> dict[str, int]:
     if not isinstance(value, Mapping):
         raise ValueError("pytest counts are invalid")
-    result = {}
+    result: dict[str, int] = {}
     for field in ("passed", "failed", "skipped"):
         item = value.get(field, 0)
         if isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= MAX_COUNT:
@@ -76,88 +68,33 @@ def _serial_fixture_root() -> Path:
 
 
 def _serial_artifact(*, run_index: int, status: str, failure_code: str | None, commit_sha: str, source_fingerprint: str, result: Mapping[str, int], wall_seconds: float, cleanup: Mapping[str, Any]) -> dict[str, Any]:
-    unsigned = {
-        "schemaVersion": "parallel-serial-control-v1",
-        "status": status,
-        "runIndex": run_index,
-        "commitSha": commit_sha,
-        "sourceFingerprint": source_fingerprint,
-        "result": dict(result),
-        "serialWallSeconds": round(wall_seconds, 6),
-        "failureCode": failure_code,
-        "cleanup": dict(cleanup),
-    }
+    unsigned = {"schemaVersion": "parallel-serial-control-v1", "status": status, "runIndex": run_index,
+                "commitSha": commit_sha, "sourceFingerprint": source_fingerprint, "result": dict(result),
+                "serialWallSeconds": round(wall_seconds, 6), "failureCode": failure_code, "cleanup": dict(cleanup)}
     return {**unsigned, "artifactFingerprint": canonical_fingerprint(unsigned)}
 
 
 def _current_source_identity(project_root: Path) -> tuple[str, str, str]:
-    """Return HEAD, the commit archive fingerprint, and source dirtiness."""
     root = Path(project_root).resolve()
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=False
-    )
-    if head.returncode != 0 or not _SHA40.fullmatch(head.stdout.strip()):
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                          capture_output=True, text=True, check=False)
+    commit = head.stdout.strip()
+    if head.returncode != 0 or not _SHA40.fullmatch(commit):
         raise RuntimeError("current commit identity is unavailable")
-    status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude)docs/superpowers", ":(exclude).superpowers"],
-        cwd=root, capture_output=True, text=True, check=False,
-    )
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude)docs/superpowers", ":(exclude).superpowers"], cwd=root, capture_output=True, text=True, check=False)
     if status.returncode != 0:
         raise RuntimeError("current source status is unavailable")
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", head.stdout.strip()],
-        cwd=root, capture_output=True, check=False,
-    )
+    archive = subprocess.run(["git", "archive", "--format=tar", commit], cwd=root, capture_output=True, check=False)
     if archive.returncode != 0:
         raise RuntimeError("current source archive is unavailable")
-    return head.stdout.strip(), hashlib.sha256(archive.stdout).hexdigest(), status.stdout
+    return commit, hashlib.sha256(archive.stdout).hexdigest(), status.stdout
 
 
 def _current_worktree_fingerprint(project_root: Path) -> str:
-    """Match the verification-session fingerprint for a live worktree."""
     root = Path(project_root).resolve()
-    status = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all", "-z"],
-        cwd=root, capture_output=True, check=False,
-    )
-    if status.returncode != 0:
-        raise RuntimeError("current source status is unavailable")
-    raw_entries = [entry for entry in status.stdout.split(b"\0") if entry]
-    entries: list[dict[str, str]] = []
-    index = 0
-    while index < len(raw_entries):
-        raw_entry = raw_entries[index]
-        if len(raw_entry) < 4:
-            raise ValueError("current source status is malformed")
-        status_code = raw_entry[:2].decode("utf-8", errors="strict")
-        paths = [raw_entry[3:].decode("utf-8", errors="surrogateescape")]
-        if "R" in status_code or "C" in status_code:
-            index += 1
-            if index >= len(raw_entries):
-                raise ValueError("current source status has an incomplete rename")
-            paths.append(raw_entries[index].decode("utf-8", errors="surrogateescape"))
-        fingerprints: dict[str, str] = {}
-        for relative in paths:
-            candidate = (root / relative).resolve()
-            try:
-                candidate.relative_to(root)
-            except ValueError as exc:
-                raise ValueError("current source status escapes project root") from exc
-            fingerprints[relative] = (
-                hashlib.sha256(candidate.read_bytes()).hexdigest()
-                if candidate.is_file() and not candidate.is_symlink()
-                else "missing"
-            )
-        entry = {"status": status_code, "path": paths[0], "contentFingerprint": fingerprints[paths[0]]}
-        if len(paths) == 2:
-            entry["pairedPath"] = paths[1]
-            entry["pairedContentFingerprint"] = fingerprints[paths[1]]
-        entries.append(entry)
-        index += 1
-    return hashlib.sha256(
-        json.dumps(sorted(entries, key=lambda item: (item["path"], item["status"])),
-                   ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    return git_source_probe(root, brief_path=_SOURCE_BRIEF, base_sha=head)["worktree_fingerprint"]
 
 
 def _sealed_worktree_fingerprint(project_root: Path, source_seal: Mapping[str, Any]) -> str:
@@ -190,26 +127,12 @@ def _matches_source_seal(
     sealed_commit = source_seal.get("headSha", source_seal.get("commitSha"))
     sealed_source = source_seal.get("sourceFingerprint")
     sealed_worktree = source_seal.get("worktreeFingerprint")
-    return (
-        sealed_commit == commit_sha == actual_commit
-        and (sealed_source is None or sealed_source == source_fingerprint)
-        and isinstance(sealed_worktree, str)
-        and _SHA64.fullmatch(sealed_worktree) is not None
-        and _sealed_worktree_fingerprint(project_root, source_seal) == sealed_worktree
-    )
+    return sealed_commit == commit_sha == actual_commit and (sealed_source is None or sealed_source == source_fingerprint) and isinstance(sealed_worktree, str) and _SHA64.fullmatch(sealed_worktree) is not None and _sealed_worktree_fingerprint(project_root, source_seal) == sealed_worktree
 
 
-def run_serial_control(
-    *,
-    project_root: Path,
-    commit_sha: str,
-    source_fingerprint: str,
-    nodeids: list[str],
-    run_index: int,
-    timeout_seconds: int,
-    source_seal: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run one serial control in a disposable runtime namespace."""
+def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprint: str,
+                       nodeids: list[str], run_index: int, timeout_seconds: int,
+                       source_seal: Mapping[str, Any] | None = None) -> dict[str, Any]:
     runtime = None
     started = time.perf_counter()
     fixture_root = _serial_fixture_root()
@@ -292,7 +215,7 @@ def run_serial_control(
     )
 
 
-def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, Any], manifest: Mapping[str, Any], contract: Mapping[str, Any], commit_sha: str, source_fingerprint: str, runner_fingerprint: str, environment_fingerprint: str, baseline_family_id: str) -> dict[str, Any]:
+def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, Any], commit_sha: str, source_fingerprint: str, baseline_family_id: str, lineage: Mapping[str, Any]) -> dict[str, Any]:
     counts = _safe_counts(result)
     collected = sum(counts.values())
     total = max(float(total_seconds), 0.001)
@@ -300,14 +223,14 @@ def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, 
         baseline_family_id=baseline_family_id,
         baseline_role=role,
         lifecycle="draft",
-        contract_fingerprint=contract_fingerprint(contract),
+        contract_fingerprint=lineage["contractFingerprint"],
         commit_sha=commit_sha,
         source_fingerprint=source_fingerprint,
-        manifest_fingerprint=manifest["manifestFingerprint"],
-        test_population_fingerprint=canonical_fingerprint({"nodeids": sorted(manifest["nodeids"])}),
-        runner_fingerprint=runner_fingerprint,
-        environment_fingerprint=environment_fingerprint,
-        dataset_snapshot_fingerprint=contract["datasetSnapshotFingerprint"],
+        manifest_fingerprint=lineage["manifestFingerprint"],
+        test_population_fingerprint=lineage["testPopulationFingerprint"],
+        runner_fingerprint=lineage["runnerFingerprint"],
+        environment_fingerprint=lineage["environmentFingerprint"],
+        dataset_snapshot_fingerprint=lineage["datasetSnapshotFingerprint"],
         selection_mode="full",
         stages={
             "collectionSeconds": 0.0,
@@ -321,59 +244,34 @@ def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, 
 
 
 def _blocked_aggregate(parallel: Mapping[str, Any], *, shard_count: int) -> dict[str, Any]:
-    unsigned = {
-        "status": "BLOCKED",
-        "failureCode": parallel.get("failureCode", "shard_set_incomplete"),
-        "shardCount": parallel.get("shardCount", shard_count),
-        "result": {"passed": 0, "failed": 0, "skipped": 0},
-        "shards": [],
-    }
+    unsigned = {"status": "BLOCKED", "failureCode": parallel.get("failureCode", "shard_set_incomplete"),
+                "shardCount": parallel.get("shardCount", shard_count), "result": {"passed": 0, "failed": 0, "skipped": 0}, "shards": []}
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
 
 def _blocked_parallel_result(
-    *,
-    commit_sha: str,
-    source_fingerprint: str,
-    manifest_fingerprint: str,
-    shard_count: int,
-    failure_code: str,
-    wall_seconds: float,
-    error: str | None = None,
+    *, commit_sha: str, source_fingerprint: str, manifest_fingerprint: str,
+    shard_count: int, failure_code: str, wall_seconds: float, error: str | None = None,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "status": "BLOCKED",
-        "failureCode": failure_code,
-        "commitSha": commit_sha,
-        "sourceFingerprint": source_fingerprint,
-        "manifestFingerprint": manifest_fingerprint,
-        "shardCount": shard_count,
-        "shards": [],
-        "parallelWallSeconds": max(round(wall_seconds, 6), 0.001),
-        "cleanup": {"allProcessGroupsTerminated": False},
-    }
+    result: dict[str, Any] = {"status": "BLOCKED", "failureCode": failure_code, "commitSha": commit_sha,
+        "sourceFingerprint": source_fingerprint, "manifestFingerprint": manifest_fingerprint,
+        "shardCount": shard_count, "shards": [], "parallelWallSeconds": max(round(wall_seconds, 6), 0.001),
+        "cleanup": {"allProcessGroupsTerminated": False}}
     if error:
         result["error"] = error[:256]
     return result
 
 
 def run_parallel_rollout(
-    *,
-    project_root: Path,
-    manifest: Mapping[str, Any],
-    contract: Mapping[str, Any],
-    commit_sha: str,
-    source_fingerprint: str,
-    runner_fingerprint: str,
-    environment_fingerprint: str,
-    baseline_family_id: str,
+    *, project_root: Path, manifest: Mapping[str, Any], contract: Mapping[str, Any],
+    commit_sha: str, source_fingerprint: str, runner_fingerprint: str,
+    environment_fingerprint: str, baseline_family_id: str,
     shard_count: int = 4,
     repeats: int = 3,
     timeout_seconds: int = 1800,
     output_root: Path | None = None,
     source_seal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Collect exactly three independent measurements and write no formal state."""
     _require_sha(commit_sha, _SHA40, "commitSha")
     _require_sha(source_fingerprint, _SHA64, "sourceFingerprint")
     _require_sha(runner_fingerprint, _SHA64, "runnerFingerprint")
@@ -389,6 +287,18 @@ def run_parallel_rollout(
     if manifest_commit != commit_sha or manifest_source != source_fingerprint:
         raise ValueError("manifest identity mismatch")
     population_fingerprint = canonical_fingerprint({"nodeids": sorted(nodeids)})
+    contract_fp = contract_fingerprint(contract)
+    dataset_fp = contract["datasetSnapshotFingerprint"]
+    lineage = {
+        "contractFingerprint": contract_fp,
+        "baselineFamilyId": baseline_family_id,
+        "manifestFingerprint": manifest_fingerprint,
+        "testPopulationFingerprint": population_fingerprint,
+        "runnerFingerprint": runner_fingerprint,
+        "environmentFingerprint": environment_fingerprint,
+        "datasetSnapshotFingerprint": dataset_fp,
+        "selectionMode": "full",
+    }
     root = Path(project_root).resolve()
     diagnostics_root = Path(output_root or (Path(tempfile.gettempdir()) / f"nbs-parallel-rollout-{uuid.uuid4().hex}"))
     diagnostics_root.mkdir(parents=True, exist_ok=True)
@@ -396,15 +306,10 @@ def run_parallel_rollout(
     for run_index in range(repeats):
         run_root = diagnostics_root / f"run-{run_index}"
         run_root.mkdir(parents=True, exist_ok=False)
-        serial = run_serial_control(
-            project_root=root,
-            commit_sha=commit_sha,
-            source_fingerprint=source_fingerprint,
-            nodeids=nodeids,
-            run_index=run_index,
-            timeout_seconds=timeout_seconds,
-            source_seal=source_seal,
-        )
+        serial = run_serial_control(project_root=root, commit_sha=commit_sha,
+                                    source_fingerprint=source_fingerprint, nodeids=nodeids,
+                                    run_index=run_index, timeout_seconds=timeout_seconds,
+                                    source_seal=source_seal)
         if serial.get("status") != "PASS":
             parallel = _blocked_parallel_result(
                 commit_sha=commit_sha,
@@ -429,7 +334,7 @@ def run_parallel_rollout(
                     execution_lineage={
                         "runnerFingerprint": runner_fingerprint,
                         "environmentFingerprint": environment_fingerprint,
-                        "datasetSnapshotFingerprint": contract["datasetSnapshotFingerprint"],
+                        "datasetSnapshotFingerprint": dataset_fp,
                     },
                 )
             except Exception as exc:
@@ -473,54 +378,31 @@ def run_parallel_rollout(
         parity = compare_serial_and_shard(serial, aggregate)
         serial_total = float(serial.get("serialWallSeconds", 0.001) or 0.001)
         parallel_total = float(parallel.get("parallelWallSeconds", 0.001) or 0.001) if isinstance(parallel, Mapping) else 0.001
-        serial_v2 = _build_v2_artifact(
-            role="serial_control", total_seconds=serial_total, result=serial.get("result", {}),
-            manifest=manifest, contract=contract, commit_sha=commit_sha, source_fingerprint=source_fingerprint,
-            runner_fingerprint=runner_fingerprint, environment_fingerprint=environment_fingerprint,
-            baseline_family_id=baseline_family_id,
-        )
-        parallel_v2 = _build_v2_artifact(
-            role="parallel_candidate", total_seconds=parallel_total,
+        serial_v2 = _build_v2_artifact(role="serial_control", total_seconds=serial_total,
+            result=serial.get("result", {}), commit_sha=commit_sha,
+            source_fingerprint=source_fingerprint, baseline_family_id=baseline_family_id,
+            lineage=lineage)
+        parallel_v2 = _build_v2_artifact(role="parallel_candidate", total_seconds=parallel_total,
             result=aggregate.get("result", {}) if aggregate.get("status") == "PASS" else {"passed": 0, "failed": 0, "skipped": 0},
-            manifest=manifest, contract=contract, commit_sha=commit_sha, source_fingerprint=source_fingerprint,
-            runner_fingerprint=runner_fingerprint, environment_fingerprint=environment_fingerprint,
-            baseline_family_id=baseline_family_id,
-        )
+            commit_sha=commit_sha, source_fingerprint=source_fingerprint,
+            baseline_family_id=baseline_family_id, lineage=lineage)
         measured_runs.append({
             "runIndex": run_index,
             "populationKind": "full-pytest-nodeid",
-            "contractFingerprint": contract_fingerprint(contract),
+            "contractFingerprint": contract_fp,
             "baselineFamilyId": baseline_family_id,
             "manifestFingerprint": manifest_fingerprint,
             "testPopulationFingerprint": population_fingerprint,
             "runnerFingerprint": runner_fingerprint,
             "environmentFingerprint": environment_fingerprint,
-            "datasetSnapshotFingerprint": contract["datasetSnapshotFingerprint"],
+            "datasetSnapshotFingerprint": dataset_fp,
             "selectionMode": "full",
             "testPopulationCount": len(nodeids),
             "populationNodeids": sorted(nodeids),
             "shardCoverage": shard_coverage,
             "serialResult": dict(serial.get("result", {})),
-            "serialLineage": {
-                "contractFingerprint": contract_fingerprint(contract),
-                "baselineFamilyId": baseline_family_id,
-                "manifestFingerprint": manifest_fingerprint,
-                "testPopulationFingerprint": population_fingerprint,
-                "runnerFingerprint": runner_fingerprint,
-                "environmentFingerprint": environment_fingerprint,
-                "datasetSnapshotFingerprint": contract["datasetSnapshotFingerprint"],
-                "selectionMode": "full",
-            },
-            "parallelLineage": {
-                "contractFingerprint": contract_fingerprint(contract),
-                "baselineFamilyId": baseline_family_id,
-                "manifestFingerprint": manifest_fingerprint,
-                "testPopulationFingerprint": population_fingerprint,
-                "runnerFingerprint": runner_fingerprint,
-                "environmentFingerprint": environment_fingerprint,
-                "datasetSnapshotFingerprint": contract["datasetSnapshotFingerprint"],
-                "selectionMode": "full",
-            },
+            "serialLineage": dict(lineage),
+            "parallelLineage": dict(lineage),
             "serialWallSeconds": serial_total,
             "parallelWallSeconds": parallel_total,
             "serialStatus": serial.get("status"),
@@ -538,13 +420,13 @@ def run_parallel_rollout(
     rollout = build_parallel_rollout_evidence(
         commit_sha=commit_sha,
         source_fingerprint=source_fingerprint,
-        contract_fingerprint=contract_fingerprint(contract),
+        contract_fingerprint=contract_fp,
         baseline_family_id=baseline_family_id,
         manifest_fingerprint=manifest_fingerprint,
         test_population_fingerprint=population_fingerprint,
         runner_fingerprint=runner_fingerprint,
         environment_fingerprint=environment_fingerprint,
-        dataset_snapshot_fingerprint=contract["datasetSnapshotFingerprint"],
+        dataset_snapshot_fingerprint=dataset_fp,
         selection_mode="full",
         shard_count=shard_count,
         measured_runs=measured_runs,
