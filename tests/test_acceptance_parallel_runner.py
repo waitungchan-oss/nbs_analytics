@@ -64,6 +64,7 @@ def _output_root(tmp_path):
 
 
 def _one_failing_shard(index: int, fixture_root, **kwargs) -> dict[str, object]:
+    kwargs["readiness_callback"]()
     result = _passing_shard(index, fixture_root)
     result["status"] = "BLOCKED"
     result["metadata"] = {
@@ -84,6 +85,7 @@ def test_run_parallel_shards_starts_all_child_jobs_before_completion(monkeypatch
 
     def fake_run_shard(*, shard_index, fixture_root, **kwargs):
         started.append((shard_index, fixture_root))
+        kwargs["readiness_callback"]()
         release.wait(timeout=1)
         assert len(started) == 4
         completed.append(shard_index)
@@ -103,6 +105,24 @@ def test_run_parallel_shards_starts_all_child_jobs_before_completion(monkeypatch
     assert len(completed) == 4
     assert len({str(item[1]) for item in started}) == 4
     assert result["parallelWallSeconds"] >= 0
+
+
+def test_runner_blocks_child_without_readiness_callback(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    monkeypatch.setattr(subject, "run_pytest_shard", lambda *, shard_index, fixture_root, **kwargs: _passing_shard(shard_index, fixture_root))
+    result = subject.run_parallel_shards(
+        project_root=tmp_path,
+        manifest=_manifest(16),
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        shard_count=2,
+        output_root=_output_root(tmp_path),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "shard_failed"
+    assert all(item["metadata"]["failureCode"] == "pytest_runner_error" for item in result["shards"])
 
 
 def test_runner_blocks_invalid_shard_count_and_manifest_identity(tmp_path):
@@ -168,6 +188,7 @@ def test_runner_passes_and_requires_execution_lineage(monkeypatch, tmp_path):
 
     def fake_run_shard(*, shard_index, fixture_root, lineage=None, **kwargs):
         observed.append(lineage)
+        kwargs["readiness_callback"]()
         result = _passing_shard(shard_index, fixture_root)
         result["lineage"] = dict(lineage or {})
         unsigned = {key: value for key, value in result.items() if key != "evidenceFingerprint"}
@@ -197,7 +218,11 @@ def test_runner_blocks_child_missing_execution_lineage(monkeypatch, tmp_path):
         "environmentFingerprint": "d" * 64,
         "datasetSnapshotFingerprint": "e" * 64,
     }
-    monkeypatch.setattr(subject, "run_pytest_shard", lambda *, shard_index, fixture_root, **kwargs: _passing_shard(shard_index, fixture_root))
+    def missing_lineage_run(*, shard_index, fixture_root, **kwargs):
+        kwargs["readiness_callback"]()
+        return _passing_shard(shard_index, fixture_root)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", missing_lineage_run)
 
     result = subject.run_parallel_shards(
         project_root=tmp_path,
@@ -263,6 +288,7 @@ def test_runner_emits_bounded_timeout_artifacts(monkeypatch, tmp_path):
     release = threading.Event()
 
     def hanging_run_shard(*, shard_index, fixture_root, **kwargs):
+        kwargs["readiness_callback"]()
         release.wait(timeout=2)
         return _passing_shard(shard_index, fixture_root)
 

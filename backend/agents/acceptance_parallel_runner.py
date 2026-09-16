@@ -302,11 +302,8 @@ def run_parallel_shards(
                     runtime_observer=lambda event, runtime: observe_runtime(index, event, runtime),
                     readiness_callback=child_ready,
                 )
-                # Test doubles and legacy bounded runners may return without
-                # invoking the optional callback; keep the contract explicit
-                # while making the orchestration API backward-compatible.
                 if not readiness_called:
-                    child_ready()
+                    raise RuntimeError("child readiness callback is required")
         except TimeoutError:
             abort_readiness_barrier()
             artifact = _blocked_shard(
