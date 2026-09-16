@@ -443,6 +443,7 @@ def test_child_closes_socket_when_activation_registration_fails(monkeypatch):
             subject._adopt_reserved_port_fds()
         assert created and all(sock.fileno() < 0 for sock in created)
         assert not subject._ADOPTED_RESERVED_PORTS
+        assert not subject._ACTIVATED_PORTS
     finally:
         subject.close_activated_sockets()
         reservation.close()
