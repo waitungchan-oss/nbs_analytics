@@ -11,7 +11,6 @@ import time
 import uuid
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -38,7 +37,7 @@ _MAX_JSON_BYTES = 1024 * 1024
 _SOURCE_BRIEF = "docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md"
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(path):
     candidate = Path(path).expanduser()
     if candidate.is_symlink() or not candidate.is_file(): raise ValueError("input must be a regular file")
     if candidate.stat().st_size > _MAX_JSON_BYTES: raise ValueError("input exceeds size cap")
@@ -47,14 +46,14 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _require_sha(value: Any, pattern: re.Pattern[str], field: str) -> None:
+def _require_sha(value, pattern, field):
     if not isinstance(value, str) or pattern.fullmatch(value) is None: raise ValueError(f"{field} is invalid")
 
 
-def _safe_counts(value: Any) -> dict[str, int]:
+def _safe_counts(value):
     if not isinstance(value, Mapping):
         raise ValueError("pytest counts are invalid")
-    result: dict[str, int] = {}
+    result = {}
     for field in ("passed", "failed", "skipped"):
         item = value.get(field, 0)
         if isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= MAX_COUNT:
@@ -63,18 +62,18 @@ def _safe_counts(value: Any) -> dict[str, int]:
     return result
 
 
-def _serial_fixture_root() -> Path:
+def _serial_fixture_root():
     return Path(tempfile.gettempdir()) / f"nbs-parallel-serial-{uuid.uuid4().hex}"
 
 
-def _serial_artifact(*, run_index: int, status: str, failure_code: str | None, commit_sha: str, source_fingerprint: str, result: Mapping[str, int], wall_seconds: float, cleanup: Mapping[str, Any]) -> dict[str, Any]:
+def _serial_artifact(*, run_index, status, failure_code, commit_sha, source_fingerprint, result, wall_seconds, cleanup):
     unsigned = {"schemaVersion": "parallel-serial-control-v1", "status": status, "runIndex": run_index,
                 "commitSha": commit_sha, "sourceFingerprint": source_fingerprint, "result": dict(result),
                 "serialWallSeconds": round(wall_seconds, 6), "failureCode": failure_code, "cleanup": dict(cleanup)}
     return {**unsigned, "artifactFingerprint": canonical_fingerprint(unsigned)}
 
 
-def _current_source_identity(project_root: Path) -> tuple[str, str, str]:
+def _current_source_identity(project_root):
     root = Path(project_root).resolve()
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
                           capture_output=True, text=True, check=False)
@@ -90,14 +89,14 @@ def _current_source_identity(project_root: Path) -> tuple[str, str, str]:
     return commit, hashlib.sha256(archive.stdout).hexdigest(), status.stdout
 
 
-def _current_worktree_fingerprint(project_root: Path) -> str:
+def _current_worktree_fingerprint(project_root):
     root = Path(project_root).resolve()
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
                           capture_output=True, text=True, check=True).stdout.strip()
     return git_source_probe(root, brief_path=_SOURCE_BRIEF, base_sha=head)["worktree_fingerprint"]
 
 
-def _sealed_worktree_fingerprint(project_root: Path, source_seal: Mapping[str, Any]) -> str:
+def _sealed_worktree_fingerprint(project_root, source_seal):
     if source_seal.get("schemaVersion") == "verification-session-v1":
         brief_path = source_seal.get("briefPath")
         base_sha = source_seal.get("baseSha")
@@ -114,14 +113,7 @@ def _sealed_worktree_fingerprint(project_root: Path, source_seal: Mapping[str, A
     return _current_worktree_fingerprint(project_root)
 
 
-def _matches_source_seal(
-    project_root: Path,
-    source_seal: Mapping[str, Any],
-    *,
-    commit_sha: str,
-    source_fingerprint: str,
-    actual_commit: str,
-) -> bool:
+def _matches_source_seal(project_root, source_seal, *, commit_sha, source_fingerprint, actual_commit):
     if source_seal.get("schemaVersion") not in {"verification-session-v1", "source-seal-v1"}:
         return False
     sealed_commit = source_seal.get("headSha", source_seal.get("commitSha"))
@@ -130,16 +122,14 @@ def _matches_source_seal(
     return sealed_commit == commit_sha == actual_commit and (sealed_source is None or sealed_source == source_fingerprint) and isinstance(sealed_worktree, str) and _SHA64.fullmatch(sealed_worktree) is not None and _sealed_worktree_fingerprint(project_root, source_seal) == sealed_worktree
 
 
-def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprint: str,
-                       nodeids: list[str], run_index: int, timeout_seconds: int,
-                       source_seal: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids, run_index, timeout_seconds, source_seal=None):
     runtime = None
     started = time.perf_counter()
     fixture_root = _serial_fixture_root()
     status = "BLOCKED"
-    failure_code: str | None = None
+    failure_code = None
     result = {"passed": 0, "failed": 0, "skipped": 0}
-    cleanup: Mapping[str, Any] = {"status": "PASS", "allProcessGroupsTerminated": True}
+    cleanup = {"status": "PASS", "allProcessGroupsTerminated": True}
     try:
         root = Path(project_root).resolve()
         actual_commit, archive_fingerprint, dirty = _current_source_identity(root)
@@ -207,7 +197,7 @@ def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprin
                             result=result, wall_seconds=elapsed, cleanup=cleanup)
 
 
-def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, Any], commit_sha: str, source_fingerprint: str, baseline_family_id: str, lineage: Mapping[str, Any]) -> dict[str, Any]:
+def _build_v2_artifact(*, role, total_seconds, result, commit_sha, source_fingerprint, baseline_family_id, lineage):
     counts = _safe_counts(result)
     collected = sum(counts.values())
     total = float(total_seconds)
@@ -233,17 +223,14 @@ def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, 
     )
 
 
-def _blocked_aggregate(parallel: Mapping[str, Any], *, shard_count: int) -> dict[str, Any]:
+def _blocked_aggregate(parallel, *, shard_count):
     unsigned = {"status": "BLOCKED", "failureCode": parallel.get("failureCode", "shard_set_incomplete"),
                 "shardCount": parallel.get("shardCount", shard_count), "result": {"passed": 0, "failed": 0, "skipped": 0}, "shards": []}
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
 
-def _blocked_parallel_result(
-    *, commit_sha: str, source_fingerprint: str, manifest_fingerprint: str,
-    shard_count: int, failure_code: str, wall_seconds: float, error: str | None = None,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {"status": "BLOCKED", "failureCode": failure_code, "commitSha": commit_sha,
+def _blocked_parallel_result(*, commit_sha, source_fingerprint, manifest_fingerprint, shard_count, failure_code, wall_seconds, error=None):
+    result = {"status": "BLOCKED", "failureCode": failure_code, "commitSha": commit_sha,
         "sourceFingerprint": source_fingerprint, "manifestFingerprint": manifest_fingerprint,
         "shardCount": shard_count, "shards": [], "parallelWallSeconds": max(round(wall_seconds, 6), 0.001),
         "cleanup": {"allProcessGroupsTerminated": False}}
@@ -252,16 +239,9 @@ def _blocked_parallel_result(
     return result
 
 
-def run_parallel_rollout(
-    *, project_root: Path, manifest: Mapping[str, Any], contract: Mapping[str, Any],
-    commit_sha: str, source_fingerprint: str, runner_fingerprint: str,
-    environment_fingerprint: str, baseline_family_id: str,
-    shard_count: int = 4,
-    repeats: int = 3,
-    timeout_seconds: int = 1800,
-    output_root: Path | None = None,
-    source_seal: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source_fingerprint, runner_fingerprint,
+                         environment_fingerprint, baseline_family_id, shard_count=4, repeats=3,
+                         timeout_seconds=1800, output_root=None, source_seal=None):
     _require_sha(commit_sha, _SHA40, "commitSha")
     _require_sha(source_fingerprint, _SHA64, "sourceFingerprint")
     _require_sha(runner_fingerprint, _SHA64, "runnerFingerprint")
@@ -292,7 +272,7 @@ def run_parallel_rollout(
     root = Path(project_root).resolve()
     diagnostics_root = Path(output_root or (Path(tempfile.gettempdir()) / f"nbs-parallel-rollout-{uuid.uuid4().hex}"))
     diagnostics_root.mkdir(parents=True, exist_ok=True)
-    measured_runs: list[dict[str, Any]] = []
+    measured_runs = []
     for run_index in range(repeats):
         run_root = diagnostics_root / f"run-{run_index}"
         run_root.mkdir(parents=True, exist_ok=False)
@@ -425,7 +405,7 @@ def run_parallel_rollout(
     return rollout
 
 
-def _write_output(path: Path, payload: Mapping[str, Any]) -> None:
+def _write_output(path, payload):
     target = Path(path).expanduser()
     if target.is_symlink() or target.exists() and not target.is_file():
         raise ValueError("output must be a new regular file")
@@ -433,7 +413,7 @@ def _write_output(path: Path, payload: Mapping[str, Any]) -> None:
     target.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
