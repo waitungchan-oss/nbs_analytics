@@ -143,7 +143,7 @@ def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprin
     cleanup: Mapping[str, Any] = {"status": "PASS", "allProcessGroupsTerminated": True}
     try:
         root = Path(project_root).resolve()
-        actual_commit, actual_source, dirty = _current_source_identity(root)
+        actual_commit, archive_fingerprint, dirty = _current_source_identity(root)
         if source_seal is not None:
             if (
                 not isinstance(source_seal, Mapping)
@@ -155,7 +155,7 @@ def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprin
                 failure_code = "serial_source_identity_mismatch"
         elif dirty:
             failure_code = "serial_source_dirty"
-        elif actual_commit != commit_sha or actual_source != source_fingerprint:
+        elif actual_commit != commit_sha or archive_fingerprint != source_fingerprint:
             failure_code = "serial_source_identity_mismatch"
         if failure_code is None:
             runtime = allocate_shard_runtime(
