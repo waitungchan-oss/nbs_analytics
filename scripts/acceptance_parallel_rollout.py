@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -20,7 +21,7 @@ from backend.agents.acceptance_parallel_rollout import (
     build_parallel_rollout_evidence,
     validate_parallel_rollout_evidence,
 )
-from backend.agents.acceptance_performance import MAX_COUNT
+from backend.agents.acceptance_performance import MAX_COUNT, MAX_DURATION_SECONDS
 from backend.agents.acceptance_performance_v2 import build_performance_baseline_v2
 from backend.agents.acceptance_shard_runtime import allocate_shard_runtime
 from backend.agents.evidence_models import canonical_fingerprint
@@ -217,7 +218,9 @@ def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprin
 def _build_v2_artifact(*, role: str, total_seconds: float, result: Mapping[str, Any], commit_sha: str, source_fingerprint: str, baseline_family_id: str, lineage: Mapping[str, Any]) -> dict[str, Any]:
     counts = _safe_counts(result)
     collected = sum(counts.values())
-    total = max(float(total_seconds), 0.001)
+    total = float(total_seconds)
+    if not math.isfinite(total) or not 0.0 < total <= MAX_DURATION_SECONDS:
+        raise ValueError("performance duration is invalid")
     return build_performance_baseline_v2(
         baseline_family_id=baseline_family_id,
         baseline_role=role,

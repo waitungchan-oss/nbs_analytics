@@ -470,10 +470,13 @@ def _validate_run_for_artifact(run: Any, *, expected_lineage: Mapping[str, Any],
                 or not isinstance(executed, list)
                 or assigned != sorted(assigned)
                 or executed != sorted(executed)
+                or len(executed) != len(set(executed))
                 or any(not isinstance(nodeid, str) or not nodeid for nodeid in assigned + executed)
                 or any(nodeid not in population_nodeids for nodeid in assigned + executed)
                 or any(nodeid not in assigned for nodeid in executed)
             ):
+                raise ValueError("measured run is invalid: shard_coverage_invalid")
+            if aggregate.get("status") == "PASS" and executed != assigned:
                 raise ValueError("measured run is invalid: shard_coverage_invalid")
             coverage_by_index[index] = (assigned, executed)
         if set(coverage_by_index) != set(range(shard_count)):

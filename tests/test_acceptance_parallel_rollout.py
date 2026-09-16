@@ -379,6 +379,39 @@ def test_invalid_duration_is_blocked_before_speedup_calculation():
     assert result["speedup"] is None
 
 
+def test_blocked_payload_rejects_partial_execution_for_pass_aggregate():
+    from backend.agents.acceptance_parallel_rollout import (
+        build_parallel_rollout_evidence,
+        validate_parallel_rollout_evidence,
+    )
+    from backend.agents.evidence_models import canonical_fingerprint
+
+    runs = [_passing_run(0), _passing_run(1), _passing_run(2)]
+    runs[1]["parity"] = _blocked_parity()
+    payload = build_parallel_rollout_evidence(
+        commit_sha="a" * 40,
+        source_fingerprint="b" * 64,
+        contract_fingerprint=_LINEAGE["contractFingerprint"],
+        baseline_family_id=_LINEAGE["baselineFamilyId"],
+        manifest_fingerprint=_LINEAGE["manifestFingerprint"],
+        test_population_fingerprint=_LINEAGE["testPopulationFingerprint"],
+        runner_fingerprint=_LINEAGE["runnerFingerprint"],
+        environment_fingerprint=_LINEAGE["environmentFingerprint"],
+        dataset_snapshot_fingerprint=_LINEAGE["datasetSnapshotFingerprint"],
+        selection_mode="full",
+        shard_count=4,
+        measured_runs=runs,
+    )
+    coverage = payload["measuredRuns"][0]["shardCoverage"][0]
+    coverage["executedNodeids"] = coverage["executedNodeids"][:-1]
+    payload["evidenceFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in payload.items() if key != "evidenceFingerprint"}
+    )
+
+    with pytest.raises(ValueError, match="shard_coverage_invalid"):
+        validate_parallel_rollout_evidence(payload)
+
+
 def test_eligibility_fails_closed_for_malformed_run_index_types():
     from backend.agents.acceptance_parallel_rollout import evaluate_rollout_eligibility
 

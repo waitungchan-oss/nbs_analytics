@@ -408,3 +408,26 @@ def test_v2_comparison_reports_speedup_multiple_without_cross_lineage_ratio():
     result = compare_performance_baselines_v2(baseline, candidate)
     assert result["status"] == "not_compared"
     assert "totalSpeedupMultiple" not in result
+
+
+def test_v2_artifact_rejects_non_finite_duration():
+    import pytest
+    from scripts import acceptance_parallel_rollout as subject
+
+    with pytest.raises(ValueError, match="performance duration"):
+        subject._build_v2_artifact(
+            role="serial_control",
+            total_seconds=float("nan"),
+            result={"passed": 16, "failed": 0, "skipped": 0},
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            baseline_family_id="acceptance-full-serial-ci-v1",
+            lineage={
+                "contractFingerprint": CONTRACT,
+                "manifestFingerprint": MANIFEST,
+                "testPopulationFingerprint": POPULATION,
+                "runnerFingerprint": RUNNER,
+                "environmentFingerprint": ENVIRONMENT,
+                "datasetSnapshotFingerprint": DATASET,
+            },
+        )
