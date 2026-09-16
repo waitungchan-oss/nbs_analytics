@@ -252,6 +252,23 @@ def test_serial_control_blocks_when_source_identity_is_not_current(tmp_path, mon
     assert result["failureCode"] == "serial_source_identity_mismatch"
 
 
+def test_serial_control_requires_a_source_seal_for_matching_clean_identity(tmp_path, monkeypatch):
+    from scripts import acceptance_parallel_rollout as subject
+
+    monkeypatch.setattr(subject, "_current_source_identity", lambda project_root: (COMMIT, SOURCE, ""))
+    result = subject.run_serial_control(
+        project_root=tmp_path,
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        nodeids=["tests/test_parallel.py::test_one"],
+        run_index=0,
+        timeout_seconds=1,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "serial_source_seal_required"
+
+
 def test_serial_control_accepts_only_an_exact_source_seal_for_dirty_worktree(tmp_path, monkeypatch):
     from scripts import acceptance_parallel_rollout as subject
 
@@ -388,6 +405,7 @@ def test_serial_control_converts_cleanup_exception_to_blocked_evidence(tmp_path,
             raise RuntimeError("cleanup unavailable")
 
     monkeypatch.setattr(subject, "_current_source_identity", lambda project_root: (COMMIT, SOURCE, ""))
+    monkeypatch.setattr(subject, "_sealed_worktree_fingerprint", lambda project_root, source_seal: "d" * 64)
     monkeypatch.setattr(subject, "allocate_shard_runtime", lambda **kwargs: Runtime())
 
     result = subject.run_serial_control(
@@ -397,6 +415,12 @@ def test_serial_control_converts_cleanup_exception_to_blocked_evidence(tmp_path,
         nodeids=["tests/test_parallel.py::test_one"],
         run_index=0,
         timeout_seconds=1,
+        source_seal={
+            "schemaVersion": "source-seal-v1",
+            "headSha": COMMIT,
+            "sourceFingerprint": SOURCE,
+            "worktreeFingerprint": "d" * 64,
+        },
     )
 
     assert result["status"] == "BLOCKED"

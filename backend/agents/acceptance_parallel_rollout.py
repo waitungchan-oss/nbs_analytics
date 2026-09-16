@@ -245,10 +245,14 @@ def build_parallel_rollout_evidence(*, commit_sha, source_fingerprint, contract_
     lineage = dict(zip(LINEAGE_FIELDS, (contract_fingerprint, baseline_family_id, manifest_fingerprint,
                                        test_population_fingerprint, runner_fingerprint, environment_fingerprint,
                                        dataset_snapshot_fingerprint, selection_mode)))
-    eligibility = evaluate_rollout_eligibility(measured_runs, lineage, shard_count=shard_count)
     normalized_runs = []
     for run in measured_runs:
         item = dict(run) if isinstance(run, Mapping) else {"runIndex": None}
+        item.setdefault("serialLineage", dict(lineage))
+        item.setdefault("parallelLineage", dict(lineage))
+        normalized_runs.append(item)
+    eligibility = evaluate_rollout_eligibility(normalized_runs, lineage, shard_count=shard_count)
+    for item in normalized_runs:
         if eligibility["status"] == "PASS":
             index = int(item["runIndex"])
             item["speedRatio"] = eligibility["speedup"]["speedRatio"][index]
@@ -256,7 +260,6 @@ def build_parallel_rollout_evidence(*, commit_sha, source_fingerprint, contract_
         else:
             item.pop("speedRatio", None)
             item.pop("speedupMultiple", None)
-        normalized_runs.append(item)
     parity_status = "PASS" if normalized_runs and all(
         isinstance(run.get("parity"), Mapping) and run["parity"].get("status") == "PASS"
         for run in normalized_runs

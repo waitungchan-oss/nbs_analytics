@@ -125,6 +125,35 @@ def test_valid_rollout_evidence_has_exact_keys_and_diagnostic_authority():
     assert payload["populationKind"] == "full-pytest-nodeid"
 
 
+def test_builder_normalizes_missing_artifact_lineage():
+    from backend.agents.acceptance_parallel_rollout import (
+        build_parallel_rollout_evidence,
+        validate_parallel_rollout_evidence,
+    )
+
+    runs = [_passing_run(0), _passing_run(1), _passing_run(2)]
+    for run in runs:
+        run.pop("serialLineage")
+        run.pop("parallelLineage")
+    payload = build_parallel_rollout_evidence(
+        commit_sha="a" * 40,
+        source_fingerprint="b" * 64,
+        contract_fingerprint=_LINEAGE["contractFingerprint"],
+        baseline_family_id=_LINEAGE["baselineFamilyId"],
+        manifest_fingerprint=_LINEAGE["manifestFingerprint"],
+        test_population_fingerprint=_LINEAGE["testPopulationFingerprint"],
+        runner_fingerprint=_LINEAGE["runnerFingerprint"],
+        environment_fingerprint=_LINEAGE["environmentFingerprint"],
+        dataset_snapshot_fingerprint=_LINEAGE["datasetSnapshotFingerprint"],
+        selection_mode=_LINEAGE["selectionMode"],
+        shard_count=4,
+        measured_runs=runs,
+    )
+
+    validate_parallel_rollout_evidence(payload)
+    assert all(run["serialLineage"] == run["parallelLineage"] for run in payload["measuredRuns"])
+
+
 def test_speedup_uses_wall_clock_critical_path():
     from backend.agents.acceptance_parallel_rollout import compute_speedup_metrics
 

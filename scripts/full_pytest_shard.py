@@ -36,7 +36,7 @@ _ACTIVATED_PORTS: dict[str, int] = {}
 
 def _register_activated_socket(name: str, sock: socket.socket, port: int) -> None:
     """Register an inherited listening socket for a child-side service."""
-    if not isinstance(name, str) or not name or name in _ADOPTED_RESERVED_PORTS:
+    if not isinstance(name, str) or not name or name in _ADOPTED_RESERVED_PORTS or name in _ACTIVATED_PORTS:
         raise ValueError("activation socket name is invalid or already registered")
     if sock.fileno() < 0 or isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port < 65536:
         raise ValueError("activation socket is invalid")
@@ -45,6 +45,7 @@ def _register_activated_socket(name: str, sock: socket.socket, port: int) -> Non
     # A socket-aware child service can consume this descriptor directly or
     # pass it to its own bootstrap; the pytest wrapper owns final cleanup.
     sock.set_inheritable(True)
+    _ADOPTED_RESERVED_PORTS[name] = sock
     _ACTIVATED_PORTS[name] = port
 
 
@@ -103,7 +104,6 @@ def _adopt_reserved_port_fds() -> None:
         for sock in adopted.values():
             sock.close()
         raise RuntimeError("reserved port descriptor adoption failed") from exc
-    _ADOPTED_RESERVED_PORTS.update(adopted)
 
 
 def _signal_child_ready_and_wait() -> None:
@@ -230,13 +230,17 @@ def _run_pytest_command(
     start_writer = getattr(process, "_nbs_start_writer", None)
     try:
         if port_handoff and readiness_reader is not None and start_writer is not None:
-            ready_timeout = max(float(timeout), 0.001)
-            readable, _, _ = select.select([readiness_reader], [], [], ready_timeout)
-            if not readable or os.read(readiness_reader, 64) != b"READY\n":
-                raise RuntimeError("child readiness handshake failed")
-            if readiness_callback is not None:
-                readiness_callback()
-            os.write(start_writer, b"START\n")
+            complete_handoff = getattr(runtime, "complete_port_handoff", None)
+            if callable(complete_handoff):
+                complete_handoff(process, timeout=timeout, readiness_callback=readiness_callback)
+            else:
+                ready_timeout = max(float(timeout), 0.001)
+                readable, _, _ = select.select([readiness_reader], [], [], ready_timeout)
+                if not readable or os.read(readiness_reader, 64) != b"READY\n":
+                    raise RuntimeError("child readiness handshake failed")
+                if readiness_callback is not None:
+                    readiness_callback()
+                os.write(start_writer, b"START\n")
     except (OSError, RuntimeError):
         runtime.terminate_process_groups(force=True)
         try:

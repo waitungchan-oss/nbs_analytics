@@ -126,6 +126,34 @@ def test_process_handoff_transfers_reserved_socket_fds_to_child(monkeypatch, tmp
     assert runtime.cleanup()["status"] == "PASS"
 
 
+def test_runtime_completes_bounded_ready_start_handoff(tmp_path):
+    runtime = allocate_shard_runtime(
+        project_root=_project_root(tmp_path), run_id="run-ready-start", shard_index=0
+    )
+    readiness_reader, readiness_writer = os.pipe()
+    start_reader, start_writer = os.pipe()
+
+    class Process:
+        _nbs_readiness_reader = readiness_reader
+        _nbs_start_writer = start_writer
+
+    callbacks = []
+    try:
+        os.write(readiness_writer, b"READY\n")
+        runtime.complete_port_handoff(
+            Process(), timeout=1, readiness_callback=lambda: callbacks.append("ready")
+        )
+        assert callbacks == ["ready"]
+        assert os.read(start_reader, 6) == b"START\n"
+    finally:
+        for descriptor in (readiness_reader, readiness_writer, start_reader, start_writer):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        runtime.cleanup()
+
+
 def test_reserved_port_validation_proves_socket_ownership_and_listening(tmp_path):
     runtime = allocate_shard_runtime(
         project_root=_project_root(tmp_path), run_id="run-readiness-contract", shard_index=0

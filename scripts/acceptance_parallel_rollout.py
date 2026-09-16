@@ -140,12 +140,14 @@ def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids,
                     root, source_seal, commit_sha=commit_sha,
                     source_fingerprint=source_fingerprint, actual_commit=actual_commit,
                 )
-            ):
+                ):
                 failure_code = "serial_source_identity_mismatch"
         elif dirty:
             failure_code = "serial_source_dirty"
         elif (actual_commit, archive_fingerprint) != (commit_sha, source_fingerprint):
             failure_code = "serial_source_identity_mismatch"
+        else:
+            failure_code = "serial_source_seal_required"
         if failure_code is None:
             runtime = allocate_shard_runtime(
                 project_root=root,

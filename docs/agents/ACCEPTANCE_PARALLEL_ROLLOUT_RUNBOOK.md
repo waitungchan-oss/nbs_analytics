@@ -64,10 +64,10 @@ Local inline diagnostic 若必須從尚未 commit 的 implementation worktree �
 `worktreeFingerprint` 的 exact match。這只允許同一份已 seal source 觀測，不會把任意
 dirty worktree 視為可信，也不改變 CI 的 clean checkout 或 formal release authority。
 其中 `verification-session-v1.sourceFingerprint` 是 canonical session identity；它不等同
-於 `git archive HEAD` 的 archive hash。未提供 source seal 時，serial control 才使用 archive
-identity 做 clean-worktree 檢查。
-CI 的 diagnostic manifest 也以 `git archive HEAD` hash 作為自己的
-`sourceFingerprint` contract；兩者不可在同一 artifact 中混用。
+於 `git archive HEAD` 的 archive hash。rollout 現在要求 source seal；即使 worktree clean，
+未提供 source seal 也會以 `serial_source_seal_required` fail closed，不使用 archive hash
+作為可執行 fallback。CI 的 diagnostic manifest 與 source seal 必須先採用同一 identity
+contract，不能把 archive hash 與 canonical session fingerprint 混在同一份 rollout artifact。
 
 ## Speedup and stability
 

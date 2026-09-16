@@ -6,6 +6,7 @@ import hashlib
 import errno
 import os
 import re
+import select
 import signal
 import shutil
 import socket
@@ -233,6 +234,21 @@ class ShardRuntime:
                 os.close(namespace_descriptor)
             except OSError:
                 pass
+
+    def complete_port_handoff(
+        self, process: subprocess.Popen, *, timeout: float, readiness_callback: Callable[[], None] | None = None
+    ) -> None:
+        """Read bounded child READY, invoke the barrier callback, then release START."""
+        readiness_reader = getattr(process, "_nbs_readiness_reader", None)
+        start_writer = getattr(process, "_nbs_start_writer", None)
+        if readiness_reader is None or start_writer is None:
+            raise RuntimeError("child readiness descriptors are missing")
+        readable, _, _ = select.select([readiness_reader], [], [], max(float(timeout), 0.001))
+        if not readable or os.read(readiness_reader, 64) != b"READY\n":
+            raise RuntimeError("child readiness handshake failed")
+        if readiness_callback is not None:
+            readiness_callback()
+        os.write(start_writer, b"START\n")
 
     def handoff_ports(self) -> None:
         """Release probes only through an explicit child bind/readiness protocol."""

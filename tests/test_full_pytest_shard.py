@@ -449,6 +449,22 @@ def test_child_closes_socket_when_activation_registration_fails(monkeypatch):
         reservation.close()
 
 
+def test_direct_activation_registration_is_retrievable_and_cleaned_up():
+    from scripts import full_pytest_shard as subject
+
+    service_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    service_socket.bind(("127.0.0.1", 0))
+    service_socket.listen(1)
+    port = service_socket.getsockname()[1]
+    try:
+        subject._register_activated_socket("direct", service_socket, port)
+        assert subject.activated_socket("direct") is service_socket
+        assert subject.activated_ports() == {"direct": port}
+    finally:
+        subject.close_activated_sockets()
+    assert service_socket.fileno() < 0
+
+
 def test_child_side_service_can_consume_every_activated_endpoint(monkeypatch):
     from scripts import full_pytest_shard as subject
 
