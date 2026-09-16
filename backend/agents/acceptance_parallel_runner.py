@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any
 
 from backend.agents.acceptance_paths import is_temporary_path
 from backend.agents.evidence_models import canonical_fingerprint
@@ -30,11 +29,11 @@ EXECUTION_LINEAGE_FIELDS = (
 )
 
 
-def _timestamp() -> str:
+def _timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _validate_output_root(project_root: Path, output_root: Path) -> Path:
+def _validate_output_root(project_root, output_root):
     root = Path(output_root).expanduser()
     if root.is_symlink():
         raise ValueError("output root must not be a symlink")
@@ -50,7 +49,7 @@ def _validate_output_root(project_root: Path, output_root: Path) -> Path:
     return root.resolve()
 
 
-def _port_readiness(ports: Mapping[str, int]) -> bool:
+def _port_readiness(ports):
     if not isinstance(ports, Mapping) or not ports:
         return False
     values = list(ports.values())
@@ -82,7 +81,7 @@ def _port_readiness(ports: Mapping[str, int]) -> bool:
     return True
 
 
-def _validate_execution_lineage(lineage: Mapping[str, str] | None) -> dict[str, str]:
+def _validate_execution_lineage(lineage):
     if not isinstance(lineage, Mapping):
         raise ValueError("execution lineage is required")
     result = {}
@@ -94,23 +93,15 @@ def _validate_execution_lineage(lineage: Mapping[str, str] | None) -> dict[str, 
     return result
 
 
-def _child_lineage_matches(artifact: Mapping[str, Any], expected: Mapping[str, str]) -> bool:
+def _child_lineage_matches(artifact, expected):
     value = artifact.get("lineage")
     return isinstance(value, Mapping) and all(value.get(field) == expected[field] for field in EXECUTION_LINEAGE_FIELDS)
 
 
 def _blocked_shard(
-    *,
-    index: int,
-    shard_count: int,
-    commit_sha: str,
-    source_fingerprint: str,
-    manifest_fingerprint: str,
-    fixture_root: Path,
-    failure_code: str,
-    lineage: Mapping[str, str] | None = None,
-    all_process_groups_terminated: bool = True,
-) -> dict[str, Any]:
+    *, index, shard_count, commit_sha, source_fingerprint, manifest_fingerprint,
+    fixture_root, failure_code, lineage=None, all_process_groups_terminated=True,
+):
     unsigned = {
         "schemaVersion": "full-pytest-shard-v1",
         "status": "BLOCKED",
@@ -139,7 +130,7 @@ def _blocked_shard(
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
 
-def _write_artifact(output_root: Path, index: int, artifact: Mapping[str, Any]) -> Path:
+def _write_artifact(output_root, index, artifact):
     target = output_root / f"shard-{index}.json"
     if target.is_symlink() or target.exists():
         raise ValueError("shard artifact path must be new and non-symlink")
@@ -147,7 +138,7 @@ def _write_artifact(output_root: Path, index: int, artifact: Mapping[str, Any]) 
     return target
 
 
-def _cleanup_ok(artifact: Mapping[str, Any]) -> bool:
+def _cleanup_ok(artifact):
     metadata = artifact.get("metadata")
     cleanup = metadata.get("cleanup") if isinstance(metadata, Mapping) else None
     return (
@@ -158,16 +149,9 @@ def _cleanup_ok(artifact: Mapping[str, Any]) -> bool:
 
 
 def run_parallel_shards(
-    *,
-    project_root: Path,
-    manifest: Mapping[str, Any],
-    commit_sha: str,
-    source_fingerprint: str,
-    shard_count: int,
-    output_root: Path,
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
-    execution_lineage: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
+    *, project_root, manifest, commit_sha, source_fingerprint, shard_count, output_root,
+    timeout_seconds=DEFAULT_TIMEOUT_SECONDS, execution_lineage=None,
+):
     if isinstance(shard_count, bool) or shard_count not in ALLOWED_SHARD_COUNTS:
         raise ValueError("shard count must be one of 2, 4, 8, or 16")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
@@ -185,17 +169,17 @@ def run_parallel_shards(
     lineage = _validate_execution_lineage(execution_lineage) if execution_lineage is not None else None
 
     start_lock = threading.Lock()
-    launch_timestamp: list[str] = []
-    first_child_monotonic: list[float] = []
-    first_child_timestamp: list[str] = []
+    launch_timestamp = []
+    first_child_monotonic = []
+    first_child_timestamp = []
     controller_started = time.perf_counter()
     controller_deadline = controller_started + float(timeout_seconds)
 
-    def mark_coordinated_start() -> None:
+    def mark_coordinated_start():
         with start_lock:
             launch_timestamp.append(_timestamp())
 
-    def mark_first_child_launch() -> None:
+    def mark_first_child_launch():
         with start_lock:
             if not first_child_monotonic:
                 first_child_monotonic.append(time.perf_counter())
@@ -203,19 +187,19 @@ def run_parallel_shards(
 
     readiness_barrier = threading.Barrier(shard_count, action=mark_coordinated_start)
     runtime_lock = threading.Lock()
-    active_runtimes: dict[int, Any] = {}
-    runtime_seen: set[int] = set()
-    cleanup_confirmed: dict[int, bool] = {}
-    ready_indexes: set[int] = set()
+    active_runtimes = {}
+    runtime_seen = set()
+    cleanup_confirmed = {}
+    ready_indexes = set()
     cancel_requested = threading.Event()
 
-    def abort_readiness_barrier() -> None:
+    def abort_readiness_barrier():
         try:
             readiness_barrier.abort()
         except (threading.BrokenBarrierError, RuntimeError):
             pass
 
-    def observe_runtime(index: int, event: str, runtime: Any) -> None:
+    def observe_runtime(index, event, runtime):
         with runtime_lock:
             if event == "registered":
                 active_runtimes[index] = runtime
@@ -230,7 +214,7 @@ def run_parallel_shards(
                     and not report.get("leakedProcesses")
                 )
 
-    def force_cleanup(index: int) -> bool:
+    def force_cleanup(index):
         with runtime_lock:
             if cleanup_confirmed.get(index) is True:
                 return True
@@ -259,7 +243,7 @@ def run_parallel_shards(
             cleanup_confirmed[index] = confirmed
         return confirmed
 
-    def readiness_evidence() -> dict[str, Any]:
+    def readiness_evidence():
         with runtime_lock:
             ready_count = len(ready_indexes)
         return {
@@ -269,10 +253,10 @@ def run_parallel_shards(
             "releasedAt": launch_timestamp[0] if launch_timestamp else None,
         }
 
-    def one_shard(index: int, fixture_root: Path) -> tuple[int, dict[str, Any]]:
+    def one_shard(index, fixture_root):
         readiness_called = False
 
-        def child_ready() -> None:
+        def child_ready():
             nonlocal readiness_called
             readiness_called = True
             with runtime_lock:
@@ -348,11 +332,11 @@ def run_parallel_shards(
     }
     if any(root.exists() or root.is_symlink() for root in fixture_roots.values()):
         raise ValueError("shard fixture root collision")
-    results: list[tuple[int, dict[str, Any]]] = []
+    results = []
     timed_out = False
-    timed_out_indexes: set[int] = set()
+    timed_out_indexes = set()
     executor_shutdown = False
-    termination_errors: list[str] = []
+    termination_errors = []
     executor = ThreadPoolExecutor(max_workers=shard_count, thread_name_prefix="acceptance-shard")
     try:
         futures = {
