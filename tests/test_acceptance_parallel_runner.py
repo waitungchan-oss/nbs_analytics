@@ -79,11 +79,14 @@ def test_run_parallel_shards_starts_all_child_jobs_before_completion(monkeypatch
     from backend.agents import acceptance_parallel_runner as subject
 
     started = []
+    completed = []
     release = threading.Event()
 
     def fake_run_shard(*, shard_index, fixture_root, **kwargs):
         started.append((shard_index, fixture_root))
         release.wait(timeout=1)
+        assert len(started) == 4
+        completed.append(shard_index)
         return _passing_shard(shard_index, fixture_root)
 
     monkeypatch.setattr(subject, "run_pytest_shard", fake_run_shard)
@@ -97,6 +100,7 @@ def test_run_parallel_shards_starts_all_child_jobs_before_completion(monkeypatch
     )
     assert result["status"] == "PASS"
     assert len(started) == 4
+    assert len(completed) == 4
     assert len({str(item[1]) for item in started}) == 4
     assert result["parallelWallSeconds"] >= 0
 

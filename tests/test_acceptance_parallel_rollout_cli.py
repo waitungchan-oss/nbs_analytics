@@ -278,6 +278,43 @@ def test_serial_control_accepts_only_an_exact_source_seal_for_dirty_worktree(tmp
     assert result["status"] == "PASS"
 
 
+def test_verification_session_source_fingerprint_is_not_archive_hash(tmp_path, monkeypatch):
+    from scripts import acceptance_parallel_rollout as subject
+
+    class Runtime:
+        def environment(self):
+            return {}
+
+        def cleanup(self):
+            return {"status": "PASS", "allProcessGroupsTerminated": True}
+
+    monkeypatch.setattr(subject, "_current_source_identity", lambda project_root: (COMMIT, "a" * 64, " M implementation.py\n"))
+    monkeypatch.setattr(subject, "_sealed_worktree_fingerprint", lambda project_root, source_seal: "d" * 64)
+    monkeypatch.setattr(subject, "allocate_shard_runtime", lambda **kwargs: Runtime())
+    monkeypatch.setattr(
+        subject.subprocess,
+        "run",
+        lambda *args, **kwargs: subject.subprocess.CompletedProcess(args[0], 0, "1 passed in 0.01s\n", ""),
+    )
+
+    result = subject.run_serial_control(
+        project_root=tmp_path,
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        nodeids=["tests/test_parallel.py::test_one"],
+        run_index=0,
+        timeout_seconds=1,
+        source_seal={
+            "schemaVersion": "verification-session-v1",
+            "headSha": COMMIT,
+            "sourceFingerprint": SOURCE,
+            "worktreeFingerprint": "d" * 64,
+        },
+    )
+
+    assert result["status"] == "PASS"
+
+
 def test_real_source_seal_uses_canonical_worktree_fingerprint_for_serial_control(monkeypatch):
     from backend.agents.verification_chain import git_source_probe
     from scripts import acceptance_parallel_rollout as subject

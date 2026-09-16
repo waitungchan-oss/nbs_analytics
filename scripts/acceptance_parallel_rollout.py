@@ -146,7 +146,6 @@ def run_serial_control(*, project_root: Path, commit_sha: str, source_fingerprin
         if source_seal is not None:
             if (
                 not isinstance(source_seal, Mapping)
-                or actual_source != source_fingerprint
                 or not _matches_source_seal(
                     root, source_seal, commit_sha=commit_sha,
                     source_fingerprint=source_fingerprint, actual_commit=actual_commit,
