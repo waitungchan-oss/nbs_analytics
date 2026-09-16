@@ -398,7 +398,7 @@ def run_parallel_shards(
             executor.shutdown(wait=True, cancel_futures=True)
             executor_shutdown = True
             futures_completed = all(future.done() for future in futures.values())
-            if not futures_completed: termination_errors.append("future_not_done")
+            if not futures_completed: termination_errors += ["future_not_done"]
             post_cleanup = {index: force_cleanup(index) for index in range(shard_count)}
             results = []
             for index, future in futures.items():
