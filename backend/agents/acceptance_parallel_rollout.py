@@ -113,10 +113,8 @@ def _population_valid(nodeids, count, fingerprint):
 
 
 def _lineage_error(run, expected):
-    if any(run.get(field) != expected[field] for field in LINEAGE_FIELDS):
-        return "lineage_mismatch"
-    if any(run.get(field) != dict(expected) for field in ("serialLineage", "parallelLineage")):
-        return "artifact_lineage_mismatch"
+    if any(run.get(field) != expected[field] for field in LINEAGE_FIELDS): return "lineage_mismatch"
+    if any(run.get(field) != dict(expected) for field in ("serialLineage", "parallelLineage")): return "artifact_lineage_mismatch"
     return None
 
 
