@@ -605,7 +605,10 @@ def test_run_pytest_command_uses_process_port_handoff_when_available(monkeypatch
     )
 
     assert result.returncode == 0
-    assert events == [(["pytest"], tmp_path, {"A": "B"}), "ready-start"]
+    assert events == [
+        (["pytest"], tmp_path, {"A": "B", "NBS_ACCEPTANCE_CHILD_START_TIMEOUT_SECONDS": "1"}),
+        "ready-start",
+    ]
 
 
 def test_run_pytest_command_shares_one_timeout_budget_with_handoff(monkeypatch, tmp_path):
@@ -851,6 +854,74 @@ def test_direct_activation_registration_is_retrievable_and_cleaned_up():
     finally:
         subject.close_activated_sockets()
     assert service_socket.fileno() < 0
+
+
+def test_child_controller_eof_closes_inherited_service_sockets(monkeypatch):
+    from scripts import full_pytest_shard as subject
+
+    readiness_reader, readiness_writer = os.pipe()
+    start_reader, start_writer = os.pipe()
+    service_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    service_socket.bind(("127.0.0.1", 0))
+    service_socket.listen(1)
+    subject._register_activated_socket("health", service_socket, service_socket.getsockname()[1])
+    monkeypatch.setenv("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL", "reserved-fd-v1")
+    monkeypatch.setenv("NBS_ACCEPTANCE_CHILD_READY_FD", str(readiness_writer))
+    monkeypatch.setenv("NBS_ACCEPTANCE_CHILD_START_FD", str(start_reader))
+    monkeypatch.setenv("NBS_ACCEPTANCE_CHILD_START_TIMEOUT_SECONDS", "1")
+    os.close(start_writer)
+
+    try:
+        with pytest.raises(RuntimeError, match="child start release is invalid"):
+            subject._signal_child_ready_and_wait()
+        assert os.read(readiness_reader, 256).startswith(b"READY health=")
+        assert service_socket.fileno() < 0
+        with pytest.raises(OSError):
+            os.fstat(start_reader)
+    finally:
+        subject.close_activated_sockets()
+        for descriptor in (readiness_reader, readiness_writer, start_reader):
+            _close_raw_fd(descriptor)
+
+
+def test_child_start_wait_has_a_deadline_and_closes_inherited_sockets(monkeypatch):
+    import threading
+    from scripts import full_pytest_shard as subject
+
+    readiness_reader, readiness_writer = os.pipe()
+    start_reader, start_writer = os.pipe()
+    service_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    service_socket.bind(("127.0.0.1", 0))
+    service_socket.listen(1)
+    subject._register_activated_socket("health", service_socket, service_socket.getsockname()[1])
+    monkeypatch.setenv("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL", "reserved-fd-v1")
+    monkeypatch.setenv("NBS_ACCEPTANCE_CHILD_READY_FD", str(readiness_writer))
+    monkeypatch.setenv("NBS_ACCEPTANCE_CHILD_START_FD", str(start_reader))
+    monkeypatch.setenv("NBS_ACCEPTANCE_CHILD_START_TIMEOUT_SECONDS", "0.05")
+    errors = []
+
+    def wait_for_controller():
+        try:
+            subject._signal_child_ready_and_wait()
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=wait_for_controller, daemon=True)
+    worker.start()
+    worker.join(timeout=0.5)
+    try:
+        if worker.is_alive():
+            os.close(start_writer)
+            start_writer = -1
+            worker.join(timeout=1)
+        assert not worker.is_alive()
+        assert len(errors) == 1
+        assert str(errors[0]) == "child start handshake timed out"
+        assert service_socket.fileno() < 0
+    finally:
+        subject.close_activated_sockets()
+        for descriptor in (readiness_reader, readiness_writer, start_reader, start_writer):
+            _close_raw_fd(descriptor)
 
 
 def test_child_side_service_can_consume_every_activated_endpoint(monkeypatch):

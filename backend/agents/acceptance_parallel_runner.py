@@ -657,15 +657,7 @@ def run_parallel_shards(
                     late_index, late_artifact = resolve_future(index, future)
                     if late_index != index:
                         raise RuntimeError("parallel shard future index mismatch")
-                    results.append((
-                        index,
-                        _blocked_shard(
-                            index=index, shard_count=shard_count, commit_sha=commit_sha,
-                            source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
-                            fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
-                            all_process_groups_terminated=post_cleanup[index] and _cleanup_ok(late_artifact),
-                        ),
-                    ))
+                    results.append((index, late_artifact))
             execution_finished.append(time.perf_counter())
             return finish_result("controller_timeout", {
                 "allProcessGroupsTerminated": worker_termination_confirmed and not termination_errors

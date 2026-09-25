@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import select
 import signal
@@ -31,6 +32,7 @@ from scripts.pytest_manifest import _identity, _manifest_fingerprint, _parse_nod
 _TAIL = 4000
 _EXECUTION_EVIDENCE_ENV = "NBS_ACCEPTANCE_EXECUTION_EVIDENCE"
 _EXECUTION_EVIDENCE_LIMIT = 4 * 1024 * 1024
+_CHILD_START_TIMEOUT_ENV = "NBS_ACCEPTANCE_CHILD_START_TIMEOUT_SECONDS"
 SOCKET_ACTIVATION_PROTOCOL = "reserved-fd-v1"
 _ADOPTED_RESERVED_PORTS: dict[str, socket.socket] = {}
 _ACTIVATED_PORTS: dict[str, int] = {}
@@ -235,18 +237,26 @@ def _signal_child_ready_and_wait() -> None:
     try:
         ready_fd = int(os.environ["NBS_ACCEPTANCE_CHILD_READY_FD"])
         start_fd = int(os.environ["NBS_ACCEPTANCE_CHILD_START_FD"])
+        start_timeout = float(os.environ[_CHILD_START_TIMEOUT_ENV])
     except (KeyError, ValueError) as exc:
         raise RuntimeError("child readiness descriptors are missing") from exc
+    if not math.isfinite(start_timeout) or start_timeout <= 0:
+        raise RuntimeError("child start timeout is invalid")
     try:
         identity = ",".join(f"{name}={port}" for name, port in sorted(_ACTIVATED_PORTS.items()))
         os.write(ready_fd, f"READY {identity}\n".encode("ascii"))
     finally:
         os.close(ready_fd)
     try:
+        readable, _, _ = select.select([start_fd], [], [], start_timeout)
+        if not readable:
+            close_activated_sockets()
+            raise RuntimeError("child start handshake timed out")
         release = os.read(start_fd, 16)
     finally:
         os.close(start_fd)
     if release != b"START\n":
+        close_activated_sockets()
         raise RuntimeError("child start release is invalid")
 
 
@@ -311,13 +321,16 @@ def _run_pytest_command(
         ]
     if port_handoff and not callable(launcher):
         raise RuntimeError("qualified port-handoff launcher is required")
+    child_env = dict(env)
+    if port_handoff:
+        child_env[_CHILD_START_TIMEOUT_ENV] = str(timeout)
     if callable(launcher):
-        process = launcher(launch_argv, cwd=cwd, env=dict(env))
+        process = launcher(launch_argv, cwd=cwd, env=child_env)
     else:
         process = subprocess.Popen(
             launch_argv,
             cwd=cwd,
-            env=dict(env),
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -718,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
             _adopt_reserved_port_fds()
             _signal_child_ready_and_wait()
         except RuntimeError as exc:
+            close_activated_sockets()
             print(f"reserved port handoff blocked: {exc}", file=sys.stderr)
             return 2
         import pytest

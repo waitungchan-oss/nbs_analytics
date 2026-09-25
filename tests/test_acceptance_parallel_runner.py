@@ -701,6 +701,63 @@ def test_runner_emits_bounded_timeout_artifacts(monkeypatch, tmp_path):
         release.set()
 
 
+def test_controller_timeout_preserves_a_completed_child_failure_artifact(monkeypatch, tmp_path):
+    from concurrent.futures import ALL_COMPLETED
+    from backend.agents import acceptance_parallel_runner as subject
+
+    release = threading.Event()
+    real_wait = subject.wait
+    wait_calls = 0
+
+    def late_failure(*, shard_index, fixture_root, **kwargs):
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
+        release.wait(timeout=5)
+        artifact = _passing_shard(shard_index, fixture_root)
+        if shard_index == 0:
+            artifact["status"] = "BLOCKED"
+            artifact["metadata"] = {
+                "failureCode": "late_child_failure",
+                "cleanup": {
+                    "status": "BLOCKED",
+                    "allProcessGroupsTerminated": False,
+                    "failureCode": "late_child_cleanup_failure",
+                },
+            }
+            unsigned = {key: value for key, value in artifact.items() if key != "evidenceFingerprint"}
+            artifact["evidenceFingerprint"] = canonical_fingerprint(unsigned)
+        return artifact
+
+    def release_workers_after_timeout(futures, timeout=None, return_when=ALL_COMPLETED):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 2:
+            release.set()
+        return real_wait(futures, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(subject, "wait", release_workers_after_timeout)
+    monkeypatch.setattr(subject, "run_pytest_shard", late_failure)
+    result = _run_parallel_shards(
+        subject,
+        project_root=tmp_path,
+        manifest=_manifest(16),
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        shard_count=4,
+        output_root=_output_root(tmp_path),
+        timeout_seconds=1,
+    )
+
+    assert result["failureCode"] == "controller_timeout"
+    late = next(item for item in result["shards"] if item["shardIndex"] == 0)
+    assert late["metadata"]["failureCode"] == "late_child_failure"
+    assert late["metadata"]["cleanup"] == {
+        "status": "BLOCKED",
+        "allProcessGroupsTerminated": False,
+        "failureCode": "late_child_cleanup_failure",
+    }
+
+
 def test_child_failure_uses_bounded_cleanup_window(monkeypatch, tmp_path):
     from backend.agents import acceptance_parallel_runner as subject
 
