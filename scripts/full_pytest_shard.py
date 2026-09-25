@@ -29,9 +29,117 @@ from scripts.pytest_manifest import _identity, _manifest_fingerprint, _parse_nod
 
 
 _TAIL = 4000
+_EXECUTION_EVIDENCE_ENV = "NBS_ACCEPTANCE_EXECUTION_EVIDENCE"
+_EXECUTION_EVIDENCE_LIMIT = 4 * 1024 * 1024
 SOCKET_ACTIVATION_PROTOCOL = "reserved-fd-v1"
 _ADOPTED_RESERVED_PORTS: dict[str, socket.socket] = {}
 _ACTIVATED_PORTS: dict[str, int] = {}
+
+
+class _PytestExecutionRecorder:
+    """Capture actual collection and test-start events in the child process."""
+
+    def __init__(self) -> None:
+        self.collected_nodeids: list[str] = []
+        self.started_nodeids: list[str] = []
+
+    def pytest_collection_finish(self, session: Any) -> None:
+        self.collected_nodeids = [item.nodeid for item in session.items]
+
+    def pytest_runtest_logstart(self, nodeid: str, location: tuple[Any, ...]) -> None:
+        self.started_nodeids.append(nodeid)
+
+
+def _write_child_execution_evidence(
+    path: Path, recorder: _PytestExecutionRecorder
+) -> None:
+    unsigned = {
+        "schemaVersion": "pytest-shard-execution-v1",
+        "collectedNodeids": recorder.collected_nodeids,
+        "startedNodeids": recorder.started_nodeids,
+    }
+    payload = {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
+    encoded = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(encoded) > _EXECUTION_EVIDENCE_LIMIT:
+        raise ValueError("child execution evidence exceeds the size limit")
+    if path.is_symlink() or path.exists() or not is_temporary_path(path):
+        raise ValueError("child execution evidence path is not a fresh temporary file")
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _read_child_execution_evidence(path: Path) -> dict[str, list[str]]:
+    if path.is_symlink() or not path.is_file() or not is_temporary_path(path):
+        raise ValueError("child execution evidence is missing or unsafe")
+    if path.stat().st_size > _EXECUTION_EVIDENCE_LIMIT:
+        raise ValueError("child execution evidence exceeds the size limit")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    required = {"schemaVersion", "collectedNodeids", "startedNodeids", "evidenceFingerprint"}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("child execution evidence schema is invalid")
+    unsigned = {key: payload[key] for key in required if key != "evidenceFingerprint"}
+    if (
+        payload["schemaVersion"] != "pytest-shard-execution-v1"
+        or not _valid_fingerprint(payload["evidenceFingerprint"])
+        or canonical_fingerprint(unsigned) != payload["evidenceFingerprint"]
+    ):
+        raise ValueError("child execution evidence identity is invalid")
+    result = {}
+    for field in ("collectedNodeids", "startedNodeids"):
+        values = payload[field]
+        if not isinstance(values, list) or any(not isinstance(item, str) or not item for item in values):
+            raise ValueError("child execution nodeids are invalid")
+        result[field] = values
+    return result
+
+
+def _valid_fingerprint(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _validate_shard_output_path(path: Path, project_root: Path) -> Path:
+    target = Path(os.path.abspath(Path(path).expanduser()))
+    if target.name in {"", ".", ".."} or target.is_symlink() or target.exists():
+        raise ValueError("shard output must be a new regular file")
+    if not target.parent.is_dir():
+        raise ValueError("shard output parent must already exist")
+
+    resolved_target = target.resolve(strict=False)
+    if is_temporary_path(resolved_target):
+        return resolved_target
+
+    project = Path(project_root).expanduser().resolve()
+    runtime_root = project / ".nbs_agent_runtime" / "acceptance-parallel-rollout"
+    try:
+        relative = target.relative_to(runtime_root)
+    except ValueError:
+        relative = None
+    if relative is not None and relative.parts:
+        current = project
+        runtime_parts = (".nbs_agent_runtime", "acceptance-parallel-rollout", *relative.parts[:-1])
+        for part in runtime_parts:
+            current = current / part
+            if current.is_symlink() or not current.is_dir():
+                raise ValueError("shard output parent must be a real directory")
+        return target
+
+    raise ValueError("shard output must be inside a temporary root or acceptance-parallel-rollout runtime")
+
+
+def _write_shard_output(path: Path, result: Mapping[str, Any], project_root: Path) -> None:
+    target = _validate_shard_output_path(path, project_root)
+    encoded = (json.dumps(dict(result), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(target, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _register_activated_socket(name: str, sock: socket.socket, port: int) -> None:
@@ -86,23 +194,37 @@ def _adopt_reserved_port_fds() -> None:
     if not entries:
         raise RuntimeError("reserved port handoff descriptors are missing")
     adopted: dict[str, socket.socket] = {}
+    raw_fds: set[int] = set()
+    seen_fds: set[int] = set()
     try:
         for entry in entries:
             name, descriptor_spec = entry.split("=", 1)
             descriptor, expected_port = descriptor_spec.split(":", 1)
             fd = int(descriptor)
             port = int(expected_port)
-            if name in adopted or fd < 0 or not 1024 <= port < 65536:
+            if name in adopted or fd < 0 or fd in seen_fds or not 1024 <= port < 65536:
                 raise ValueError
+            seen_fds.add(fd)
+            raw_fds.add(fd)
             sock = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
             adopted[name] = sock
             if sock.getsockname()[:2] != ("127.0.0.1", port):
                 raise RuntimeError("reserved port endpoint identity mismatch")
             os.close(fd)
+            raw_fds.remove(fd)
             _register_activated_socket(name, sock, port)
     except (OSError, RuntimeError, ValueError) as exc:
+        for fd in tuple(raw_fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        close_activated_sockets()
         for sock in adopted.values():
-            sock.close()
+            try:
+                sock.close()
+            except OSError:
+                pass
         raise RuntimeError("reserved port descriptor adoption failed") from exc
 
 
@@ -116,7 +238,8 @@ def _signal_child_ready_and_wait() -> None:
     except (KeyError, ValueError) as exc:
         raise RuntimeError("child readiness descriptors are missing") from exc
     try:
-        os.write(ready_fd, b"READY\n")
+        identity = ",".join(f"{name}={port}" for name, port in sorted(_ACTIVATED_PORTS.items()))
+        os.write(ready_fd, f"READY {identity}\n".encode("ascii"))
     finally:
         os.close(ready_fd)
     try:
@@ -171,6 +294,8 @@ def _run_pytest_command(
     runtime: ShardRuntime,
     port_handoff: bool = True,
     readiness_callback: Callable[[], None] | None = None,
+    start_callback: Callable[[], None] | None = None,
+    readiness_probe: Callable[[dict[str, int]], bool] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if os.name == "nt":
         # A post-Popen Job assignment has an unbounded race before children
@@ -226,22 +351,27 @@ def _run_pytest_command(
                 except (KeyboardInterrupt, subprocess.TimeoutExpired):
                     pass
             raise RuntimeError("pytest process registration failed")
+    deadline = time.monotonic() + float(timeout) if port_handoff else None
+
+    def remaining_timeout() -> float:
+        if deadline is None:
+            return float(timeout)
+        return max(deadline - time.monotonic(), 0.0)
+
     readiness_reader = getattr(process, "_nbs_readiness_reader", None)
     start_writer = getattr(process, "_nbs_start_writer", None)
     try:
-        if port_handoff and readiness_reader is not None and start_writer is not None:
+        if port_handoff:
             complete_handoff = getattr(runtime, "complete_port_handoff", None)
-            if callable(complete_handoff):
-                complete_handoff(process, timeout=timeout, readiness_callback=readiness_callback)
-            else:
-                ready_timeout = max(float(timeout), 0.001)
-                readable, _, _ = select.select([readiness_reader], [], [], ready_timeout)
-                if not readable or os.read(readiness_reader, 64) != b"READY\n":
-                    raise RuntimeError("child readiness handshake failed")
-                if readiness_callback is not None:
-                    readiness_callback()
-                os.write(start_writer, b"START\n")
-    except (OSError, RuntimeError):
+            if readiness_reader is None or start_writer is None or not callable(complete_handoff):
+                raise RuntimeError("child readiness handshake contract is missing")
+            handoff_kwargs = {"timeout": remaining_timeout(), "readiness_callback": readiness_callback}
+            if start_callback is not None:
+                handoff_kwargs["start_callback"] = start_callback
+            if readiness_probe is not None:
+                handoff_kwargs["readiness_probe"] = readiness_probe
+            complete_handoff(process, **handoff_kwargs)
+    except (OSError, RuntimeError, ValueError):
         runtime.terminate_process_groups(force=True)
         try:
             process.communicate(timeout=1)
@@ -261,7 +391,7 @@ def _run_pytest_command(
                 except Exception:
                     pass
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(timeout=remaining_timeout())
     except KeyboardInterrupt:
         runtime.terminate_process_groups(force=True)
         try:
@@ -374,6 +504,7 @@ def run_pytest_shard(
     lineage: Mapping[str, str] | None = None,
     runtime_observer: Callable[[str, ShardRuntime], None] | None = None,
     readiness_callback: Callable[[], None] | None = None,
+    start_callback: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     commit_sha, source_fingerprint, nodeids, manifest_fingerprint = _validate_manifest(manifest)
     if timeout_seconds <= 0:
@@ -446,6 +577,8 @@ def run_pytest_shard(
     if not assigned:
         if readiness_callback is not None:
             readiness_callback()
+        if start_callback is not None:
+            start_callback()
         return finish(
             status="PASS", failure_code=None, commit_sha=commit_sha,
             source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
@@ -463,50 +596,22 @@ def run_pytest_shard(
             started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
             stdout="", stderr="explicit child bind/readiness probe is required",
         )
-    try:
-        validate_reserved = getattr(runtime, "validate_reserved_ports", None)
-        if callable(validate_reserved):
-            validate_reserved(port_readiness_probe)
-        else:
-            handoff = getattr(runtime, "handoff_ports_with_readiness", None)
-            if not callable(handoff):
-                raise RuntimeError("runtime does not implement bind/readiness handoff")
-            handoff(port_readiness_probe)
-    except (OSError, RuntimeError, ValueError) as exc:
+    env = os.environ.copy()
+    env.update(runtime.environment())
+    execution_evidence_path = Path(runtime.root) / "pytest-shard-execution-evidence.json"
+    if execution_evidence_path.exists() or execution_evidence_path.is_symlink():
         return finish(
-            status="BLOCKED", failure_code="port_handoff_failed", commit_sha=commit_sha,
+            status="BLOCKED", failure_code="runner_unexpected_error", commit_sha=commit_sha,
             source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
             shard_index=shard_index, shard_count=shard_count, assigned=assigned, executed=[],
             result={"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0},
             started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
-            stdout="", stderr=str(exc),
+            stdout="", stderr="child execution evidence path is not fresh",
         )
-
-    env = os.environ.copy()
-    env.update(runtime.environment())
-    collect_argv = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--sandbox-preflight", "required", *assigned]
-    run_argv = [sys.executable, "-m", "pytest", "-q", "--sandbox-preflight", "required", *assigned]
+    env[_EXECUTION_EVIDENCE_ENV] = str(execution_evidence_path)
+    run_argv = [sys.executable, "-m", "pytest", "-q", "--sandbox-preflight", "required", "--", *assigned]
     stdout = stderr = ""
     try:
-        collected = _run_pytest_command(
-            collect_argv,
-            cwd=Path(project_root).resolve(),
-            env=env,
-            timeout=timeout_seconds,
-            runtime=runtime,
-            port_handoff=False,
-        )
-        collect_stdout, collect_stderr = _as_text(collected.stdout), _as_text(collected.stderr)
-        collected_nodeids = sorted(_parse_nodeids(f"{collect_stdout}\n{collect_stderr}"))
-        if collected.returncode != 0 or collected_nodeids != assigned:
-            return finish(
-                status="FAIL", failure_code="collection_mismatch", commit_sha=commit_sha,
-                source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
-                shard_index=shard_index, shard_count=shard_count, assigned=assigned, executed=[],
-                result={"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0},
-                started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
-                stdout=collect_stdout, stderr=collect_stderr,
-            )
         completed = _run_pytest_command(
             run_argv,
             cwd=Path(project_root).resolve(),
@@ -514,15 +619,45 @@ def run_pytest_shard(
             timeout=timeout_seconds,
             runtime=runtime,
             readiness_callback=readiness_callback,
+            start_callback=start_callback,
+            readiness_probe=port_readiness_probe,
         )
         stdout, stderr = _as_text(completed.stdout), _as_text(completed.stderr)
-        result = _parse_summary(f"{stdout}\n{stderr}")
+        combined_output = f"{stdout}\n{stderr}"
+        execution_evidence = _read_child_execution_evidence(execution_evidence_path)
+        execution_evidence_path.unlink()
+        collected_nodeids = execution_evidence["collectedNodeids"]
+        started_nodeids = execution_evidence["startedNodeids"]
+        if sorted(collected_nodeids) != assigned or sorted(started_nodeids) != assigned:
+            return finish(
+                status="FAIL", failure_code="collection_mismatch", commit_sha=commit_sha,
+                source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+                shard_index=shard_index, shard_count=shard_count, assigned=assigned,
+                executed=sorted(started_nodeids),
+                result={"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0},
+                started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
+                stdout=stdout, stderr=stderr,
+            )
+        try:
+            result = _parse_summary(combined_output)
+        except ValueError:
+            if completed.returncode != 0 and "ERROR: not found:" in combined_output:
+                return finish(
+                    status="FAIL", failure_code="collection_mismatch", commit_sha=commit_sha,
+                    source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+                    shard_index=shard_index, shard_count=shard_count, assigned=assigned, executed=[],
+                    result={"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0},
+                    started_at=started_at, monotonic_started=monotonic_started,
+                    finished_at=None, stdout=stdout, stderr=stderr,
+                )
+            raise
         status = "PASS" if completed.returncode == 0 and result["failed"] == 0 else "FAIL"
         failure_code = None if status == "PASS" else "pytest_failed"
         return finish(
             status=status, failure_code=failure_code, commit_sha=commit_sha,
             source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
-            shard_index=shard_index, shard_count=shard_count, assigned=assigned, executed=assigned,
+            shard_index=shard_index, shard_count=shard_count, assigned=assigned,
+            executed=sorted(started_nodeids),
             result=result, started_at=started_at, monotonic_started=monotonic_started,
             finished_at=None,
             stdout=stdout, stderr=stderr,
@@ -588,7 +723,16 @@ def main(argv: list[str] | None = None) -> int:
         import pytest
 
         try:
-            return int(pytest.main(arguments[1:]))
+            raw_evidence_path = os.environ.get(_EXECUTION_EVIDENCE_ENV)
+            if not raw_evidence_path:
+                raise RuntimeError("child execution evidence path is missing")
+            recorder = _PytestExecutionRecorder()
+            exit_code = int(pytest.main(arguments[1:], plugins=[recorder]))
+            _write_child_execution_evidence(Path(raw_evidence_path), recorder)
+            return exit_code
+        except Exception as exc:
+            print(f"child execution evidence failed: {type(exc).__name__}", file=sys.stderr)
+            return 2
         finally:
             close_activated_sockets()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -606,6 +750,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(arguments)
+    try:
+        output_path = _validate_shard_output_path(args.output, args.project_root)
+    except (OSError, ValueError) as exc:
+        print(f"shard output path rejected: {exc}", file=sys.stderr)
+        return 2
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     try:
         assigned = select_shard_nodeids(
@@ -640,9 +789,22 @@ def main(argv: list[str] | None = None) -> int:
         fixture_root=args.fixture_root, run_id=args.run_id, timeout_seconds=args.timeout,
         port_readiness_probe=readiness_probe,
     )
-    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        _write_shard_output(output_path, result, args.project_root)
+    except (OSError, ValueError) as exc:
+        print(f"shard output write rejected: {exc}", file=sys.stderr)
+        return 2
     return 0 if result["status"] == "PASS" else 2
 
 
 if __name__ == "__main__":
+    import scripts as scripts_package
+
+    wrapper_module = sys.modules[__name__]
+    imported_module = sys.modules.get("scripts.full_pytest_shard")
+    package_module = getattr(scripts_package, "full_pytest_shard", None)
+    if any(module is not None and module is not wrapper_module for module in (imported_module, package_module)):
+        raise RuntimeError("shard wrapper module identity is already occupied")
+    sys.modules["scripts.full_pytest_shard"] = wrapper_module
+    scripts_package.full_pytest_shard = wrapper_module
     raise SystemExit(main())

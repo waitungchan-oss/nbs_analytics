@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -20,20 +19,28 @@ from backend.agents.acceptance_parallel_rollout import (
     validate_parallel_rollout_evidence,
 )
 from backend.agents.acceptance_performance import MAX_COUNT, MAX_DURATION_SECONDS
-from backend.agents.acceptance_performance_v2 import build_performance_baseline_v2
+from backend.agents.acceptance_performance_v2 import (
+    build_execution_performance_v2 as _build_v2_artifact,
+    build_unobserved_runtime_lineage,
+    validate_performance_baseline_v2,
+)
 from backend.agents.acceptance_shard_runtime import allocate_shard_runtime
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.verification_chain import git_source_probe
+from backend.agents.verification_session import VerificationSession
 from scripts.full_pytest_gate import _parse_summary
 from scripts.full_pytest_shard_aggregate import aggregate_pytest_shards, compare_serial_and_shard, validate_shard_set
-from scripts.full_pytest_shard import _validate_manifest
-from backend.agents.acceptance_parallel_runner import run_parallel_shards
+from scripts.full_pytest_shard import _validate_manifest, _run_pytest_command
+from backend.agents.acceptance_parallel_runner import (
+    _validate_output_root, build_runner_capability_receipt, run_parallel_shards,
+)
 
 
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 _ALLOWED_SHARDS = frozenset({2, 4, 8, 16})
 _MAX_JSON_BYTES = 1024 * 1024
+_SUPPORTED_PARALLEL_PLATFORMS = frozenset({"darwin", "linux"})
 _SOURCE_BRIEF = "docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md"
 
 
@@ -62,18 +69,43 @@ def _safe_counts(value):
     return result
 
 
+def _valid_measured_duration(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    seconds = float(value)
+    if not math.isfinite(seconds) or not 0.0 < seconds <= MAX_DURATION_SECONDS:
+        return None
+    return seconds
+
+
 def _serial_fixture_root():
     return Path(tempfile.gettempdir()) / f"nbs-parallel-serial-{uuid.uuid4().hex}"
 
 
-def _serial_artifact(*, run_index, status, failure_code, commit_sha, source_fingerprint, result, wall_seconds, cleanup):
+def _serial_artifact(*, run_index, status, failure_code, commit_sha, source_fingerprint, result, wall_seconds, cleanup, execution_lineage=None):
+    measured_seconds = _valid_measured_duration(wall_seconds)
+    if measured_seconds is None:
+        status = "BLOCKED"
+        failure_code = failure_code or "duration_invalid"
     unsigned = {"schemaVersion": "parallel-serial-control-v1", "status": status, "runIndex": run_index,
                 "commitSha": commit_sha, "sourceFingerprint": source_fingerprint, "result": dict(result),
-                "serialWallSeconds": round(wall_seconds, 6), "failureCode": failure_code, "cleanup": dict(cleanup)}
+                "serialWallSeconds": measured_seconds, "failureCode": failure_code, "cleanup": dict(cleanup),
+                "executionLineage": dict(execution_lineage or {})}
     return {**unsigned, "artifactFingerprint": canonical_fingerprint(unsigned)}
 
 
-def _current_source_identity(project_root):
+def _blocked_parity(failure_code):
+    unsigned = {
+        "schemaVersion": "serial-shard-parity-v1",
+        "status": "BLOCKED",
+        "failureCode": failure_code,
+        "serial": {},
+        "shard": {},
+    }
+    return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
+
+
+def _current_source_identity(project_root, *, base_sha=None, brief_path=None):
     root = Path(project_root).resolve()
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
                           capture_output=True, text=True, check=False)
@@ -83,48 +115,120 @@ def _current_source_identity(project_root):
     status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude)docs/superpowers", ":(exclude).superpowers"], cwd=root, capture_output=True, text=True, check=False)
     if status.returncode != 0:
         raise RuntimeError("current source status is unavailable")
-    archive = subprocess.run(["git", "archive", "--format=tar", commit], cwd=root, capture_output=True, check=False)
-    if archive.returncode != 0:
-        raise RuntimeError("current source archive is unavailable")
-    return commit, hashlib.sha256(archive.stdout).hexdigest(), status.stdout
+    source_fingerprint = None
+    if base_sha is not None and brief_path is not None:
+        probe = git_source_probe(
+            root,
+            brief_path=brief_path,
+            base_sha=base_sha,
+            contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+            policy_path="agent_config/token_budgets.json",
+        )
+        source_session = VerificationSession.create(
+            project_id="acceptance-parallel-rollout-live",
+            base_sha=base_sha,
+            brief_path=brief_path,
+            **{key: value for key, value in probe.items() if key != "source_probe_version"},
+        )
+        source_fingerprint = source_session.source_fingerprint
+    return commit, source_fingerprint, status.stdout
 
 
-def _current_worktree_fingerprint(project_root):
-    root = Path(project_root).resolve()
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
-                          capture_output=True, text=True, check=True).stdout.strip()
-    return git_source_probe(root, brief_path=_SOURCE_BRIEF, base_sha=head)["worktree_fingerprint"]
+_SOURCE_SESSION_FIELDS = (
+    "baseSha", "briefPath", "briefFingerprint", "contractFingerprint",
+    "diffFingerprint", "policyFingerprint", "headSha", "sourceFingerprint",
+    "worktreeFingerprint",
+)
+_SOURCE_SESSION_SHA64_FIELDS = (
+    "briefFingerprint", "contractFingerprint", "diffFingerprint",
+    "policyFingerprint", "sourceFingerprint", "worktreeFingerprint",
+)
 
 
-def _sealed_worktree_fingerprint(project_root, source_seal):
-    if source_seal.get("schemaVersion") == "verification-session-v1":
-        brief_path = source_seal.get("briefPath")
-        base_sha = source_seal.get("baseSha")
-        if isinstance(brief_path, str) and isinstance(base_sha, str):
-            probe = git_source_probe(
-                project_root,
-                brief_path=brief_path,
-                base_sha=base_sha,
-                head_ref="WORKTREE",
-                contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
-                policy_path="agent_config/token_budgets.json",
-            )
-            return probe["worktree_fingerprint"]
-    return _current_worktree_fingerprint(project_root)
+def _normalized_source_session(value):
+    if not isinstance(value, Mapping):
+        raise ValueError("source session is required")
+    if value.get("schemaVersion") == "verification-session-v1":
+        session = VerificationSession.from_dict(dict(value))
+        return {**session.to_dict(), "sourceFingerprint": session.source_fingerprint}
+    if value.get("schemaVersion") != "source-seal-v1":
+        raise ValueError("source session schema is invalid")
+    if set(value) != {"schemaVersion", *_SOURCE_SESSION_FIELDS}:
+        raise ValueError("source seal schema keys are invalid")
+    return dict(value)
 
 
-def _matches_source_seal(project_root, source_seal, *, commit_sha, source_fingerprint, actual_commit):
-    if source_seal.get("schemaVersion") not in {"verification-session-v1", "source-seal-v1"}:
+def _valid_source_session(value):
+    try:
+        value = _normalized_source_session(value)
+    except (TypeError, ValueError):
         return False
-    sealed_commit = source_seal.get("headSha", source_seal.get("commitSha"))
-    sealed_source = source_seal.get("sourceFingerprint")
-    sealed_worktree = source_seal.get("worktreeFingerprint")
-    return sealed_commit == commit_sha == actual_commit and (sealed_source is None or sealed_source == source_fingerprint) and isinstance(sealed_worktree, str) and _SHA64.fullmatch(sealed_worktree) is not None and _sealed_worktree_fingerprint(project_root, source_seal) == sealed_worktree
+    if not all(isinstance(value.get(field), str) and value[field] for field in _SOURCE_SESSION_FIELDS):
+        return False
+    brief_path = value["briefPath"]
+    path = Path(brief_path)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != brief_path or "\\" in brief_path:
+        return False
+    return (
+        _SHA40.fullmatch(value["baseSha"]) is not None
+        and _SHA40.fullmatch(value["headSha"]) is not None
+        and all(_SHA64.fullmatch(value[field]) is not None for field in _SOURCE_SESSION_SHA64_FIELDS)
+    )
 
 
-def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids, run_index, timeout_seconds, source_seal=None):
+def _matches_source_seal(project_root, source_seal, *, expected_source_session, commit_sha, source_fingerprint, actual_commit, actual_source_fingerprint=None):
+    if not _valid_source_session(source_seal) or not _valid_source_session(expected_source_session):
+        return False
+    seal = _normalized_source_session(source_seal)
+    expected = _normalized_source_session(expected_source_session)
+    if any(seal[field] != expected[field] for field in _SOURCE_SESSION_FIELDS):
+        return False
+    if (seal["headSha"] != commit_sha or commit_sha != actual_commit
+            or seal["sourceFingerprint"] != source_fingerprint
+            or (actual_source_fingerprint is not None and actual_source_fingerprint != source_fingerprint)):
+        return False
+    probe = git_source_probe(
+        project_root, brief_path=seal["briefPath"], base_sha=seal["baseSha"],
+        head_ref="WORKTREE", contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+        policy_path="agent_config/token_budgets.json",
+    )
+    fields = {
+        "headSha": "head_sha", "briefFingerprint": "brief_fingerprint",
+        "worktreeFingerprint": "worktree_fingerprint", "diffFingerprint": "diff_fingerprint",
+        "contractFingerprint": "contract_fingerprint", "policyFingerprint": "policy_fingerprint",
+    }
+    return all(seal[field] == probe[key] for field, key in fields.items())
+
+
+def _source_is_current(root, seal, expected, commit_sha, source_fingerprint):
+    try:
+        expected_session = _normalized_source_session(expected)
+        try:
+            actual_commit, actual_source_fingerprint, _ = _current_source_identity(
+                root,
+                base_sha=expected_session["baseSha"],
+                brief_path=expected_session["briefPath"],
+            )
+        except TypeError:
+            # Keep test doubles and older injected probes source-bound; the
+            # production implementation above always recomputes the fingerprint.
+            actual_commit, actual_source_fingerprint, _ = _current_source_identity(root)
+        return _matches_source_seal(
+            root, seal, expected_source_session=expected, commit_sha=commit_sha,
+            source_fingerprint=source_fingerprint, actual_commit=actual_commit,
+            actual_source_fingerprint=actual_source_fingerprint,
+        )
+    except (
+        OSError, ValueError, RuntimeError, subprocess.SubprocessError,
+        KeyError, TypeError, AttributeError, IndexError,
+    ):
+        return False
+
+
+def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids, run_index, timeout_seconds, source_seal=None, expected_source_session=None, execution_lineage=None):
     runtime = None
     started = time.perf_counter()
+    execution_start = []
     fixture_root = _serial_fixture_root()
     status = "BLOCKED"
     failure_code = None
@@ -132,19 +236,13 @@ def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids,
     cleanup = {"status": "PASS", "allProcessGroupsTerminated": True}
     try:
         root = Path(project_root).resolve()
-        actual_commit, archive_fingerprint, dirty = _current_source_identity(root)
+        actual_commit, _, dirty = _current_source_identity(root)
         if source_seal is not None:
-            if (
-                not isinstance(source_seal, Mapping)
-                or not _matches_source_seal(
-                    root, source_seal, commit_sha=commit_sha,
-                    source_fingerprint=source_fingerprint, actual_commit=actual_commit,
-                )
-                ):
-                failure_code = "serial_source_identity_mismatch"
+            if not _source_is_current(root, source_seal, expected_source_session, commit_sha, source_fingerprint):
+                failure_code = "serial_source_session_required" if expected_source_session is None else "serial_source_identity_mismatch"
         elif dirty:
             failure_code = "serial_source_dirty"
-        elif (actual_commit, archive_fingerprint) != (commit_sha, source_fingerprint):
+        elif actual_commit != commit_sha:
             failure_code = "serial_source_identity_mismatch"
         else:
             failure_code = "serial_source_seal_required"
@@ -160,18 +258,21 @@ def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids,
             if not nodeids or len(nodeids) != len(set(nodeids)) or any(not isinstance(nodeid, str) or not nodeid for nodeid in nodeids):
                 failure_code = "serial_manifest_population_invalid"
             else:
-                completed = subprocess.run(
-                    [sys.executable, "-m", "pytest", "-q", "--sandbox-preflight", "required", *nodeids],
+                completed = _run_pytest_command(
+                    [sys.executable, "-m", "pytest", "-q", "--sandbox-preflight", "required", "--", *nodeids],
                     cwd=root,
                     env=environment,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                    check=False,
+                    timeout=timeout_seconds, runtime=runtime,
+                    readiness_callback=lambda: execution_start.append(time.perf_counter()),
                 )
                 parsed = _parse_summary(f"{completed.stdout}\n{completed.stderr}")
                 result = _safe_counts(parsed)
-                failure_code = None if completed.returncode == 0 and result["failed"] == 0 else "serial_control_failed"
+                if completed.returncode != 0 or result["failed"] != 0:
+                    failure_code = "serial_control_failed"
+                elif sum(result.values()) != len(nodeids):
+                    failure_code = "serial_population_count_mismatch"
+                else:
+                    failure_code = None
                 status = "PASS" if failure_code is None else "FAIL"
     except subprocess.TimeoutExpired:
         failure_code = "serial_control_timeout"
@@ -190,51 +291,65 @@ def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids,
                 }
                 failure_code = failure_code or "isolation_violation"
                 status = "BLOCKED"
-    elapsed = max(time.perf_counter() - started, 0.001)
+    elapsed = time.perf_counter() - (execution_start[0] if execution_start else started)
     if cleanup.get("status") != "PASS":
         status = "BLOCKED"
         failure_code = "isolation_violation"
+    expected_execution_fields = {
+        "runnerFingerprint", "environmentFingerprint", "datasetSnapshotFingerprint",
+    }
+    execution_lineage_observed = (
+        bool(execution_start)
+        and isinstance(execution_lineage, Mapping)
+        and set(execution_lineage) == expected_execution_fields
+        and all(isinstance(value, str) and _SHA64.fullmatch(value) for value in execution_lineage.values())
+    )
+    if not execution_lineage_observed:
+        failure_code = failure_code or (
+            "serial_execution_lineage_unobserved"
+            if execution_start else "serial_execution_not_started"
+        )
+        status = "BLOCKED"
+        execution_lineage = build_unobserved_runtime_lineage(
+            failure_code=failure_code,
+            commit_sha=commit_sha,
+            source_fingerprint=source_fingerprint,
+        )
     return _serial_artifact(run_index=run_index, status=status, failure_code=failure_code,
                             commit_sha=commit_sha, source_fingerprint=source_fingerprint,
-                            result=result, wall_seconds=elapsed, cleanup=cleanup)
+                            result=result, wall_seconds=elapsed, cleanup=cleanup,
+                            execution_lineage=execution_lineage)
 
 
-def _build_v2_artifact(*, role, total_seconds, result, commit_sha, source_fingerprint, baseline_family_id, lineage):
-    counts = _safe_counts(result)
-    collected = sum(counts.values())
-    total = float(total_seconds)
-    if not math.isfinite(total) or not 0.0 < total <= MAX_DURATION_SECONDS:
-        raise ValueError("performance duration is invalid")
-    return build_performance_baseline_v2(
-        baseline_family_id=baseline_family_id,
-        baseline_role=role,
-        lifecycle="draft",
-        contract_fingerprint=lineage["contractFingerprint"],
-        commit_sha=commit_sha,
-        source_fingerprint=source_fingerprint,
-        manifest_fingerprint=lineage["manifestFingerprint"],
-        test_population_fingerprint=lineage["testPopulationFingerprint"],
-        runner_fingerprint=lineage["runnerFingerprint"],
-        environment_fingerprint=lineage["environmentFingerprint"],
-        dataset_snapshot_fingerprint=lineage["datasetSnapshotFingerprint"],
-        selection_mode="full",
-        stages={"collectionSeconds": 0.0, "fixturePreparationSeconds": 0.0,
-                "pytestExecutionSeconds": total, "aggregateSeconds": 0.0,
-                "totalWallSeconds": total},
-        test_count={"collected": collected, **counts},
-    )
-
-
-def _blocked_aggregate(parallel, *, shard_count):
+def _blocked_aggregate(
+    parallel, *, commit_sha, source_fingerprint, manifest_fingerprint, shard_count,
+):
     unsigned = {"status": "BLOCKED", "failureCode": parallel.get("failureCode", "shard_set_incomplete"),
-                "shardCount": parallel.get("shardCount", shard_count), "result": {"passed": 0, "failed": 0, "skipped": 0}, "shards": []}
+                "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,
+                "manifestFingerprint": manifest_fingerprint, "shardCount": shard_count,
+                "result": {"passed": 0, "failed": 0, "skipped": 0}, "shards": []}
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
 
+def _execution_lineage_mismatch(serial, shards, expected):
+    """Fail closed unless serial and every shard independently report the expected run lineage."""
+    if not isinstance(serial, Mapping) or dict(serial.get("executionLineage", {})) != dict(expected):
+        return True
+    if not isinstance(shards, list) or not shards:
+        return True
+    return any(
+        not isinstance(shard, Mapping)
+        or not isinstance(shard.get("lineage"), Mapping)
+        or dict(shard["lineage"]) != dict(expected)
+        for shard in shards
+    )
+
+
 def _blocked_parallel_result(*, commit_sha, source_fingerprint, manifest_fingerprint, shard_count, failure_code, wall_seconds, error=None):
+    measured_seconds = _valid_measured_duration(wall_seconds)
     result = {"status": "BLOCKED", "failureCode": failure_code, "commitSha": commit_sha,
         "sourceFingerprint": source_fingerprint, "manifestFingerprint": manifest_fingerprint,
-        "shardCount": shard_count, "shards": [], "parallelWallSeconds": max(round(wall_seconds, 6), 0.001),
+        "shardCount": shard_count, "shards": [], "parallelWallSeconds": measured_seconds,
         "cleanup": {"allProcessGroupsTerminated": False}}
     if error:
         result["error"] = error[:256]
@@ -243,7 +358,8 @@ def _blocked_parallel_result(*, commit_sha, source_fingerprint, manifest_fingerp
 
 def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source_fingerprint, runner_fingerprint,
                          environment_fingerprint, baseline_family_id, shard_count=4, repeats=3,
-                         timeout_seconds=1800, output_root=None, source_seal=None):
+                         timeout_seconds=1800, output_root=None, source_seal=None, expected_source_session=None,
+                         runner_max_workers=None):
     _require_sha(commit_sha, _SHA40, "commitSha")
     _require_sha(source_fingerprint, _SHA64, "sourceFingerprint")
     _require_sha(runner_fingerprint, _SHA64, "runnerFingerprint")
@@ -252,8 +368,18 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
         raise ValueError("shard count is invalid")
     if repeats != 3 or isinstance(repeats, bool):
         raise ValueError("repeats must be exactly 3")
-    if timeout_seconds <= 0:
-        raise ValueError("timeout must be positive")
+    if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds)) or not 0.0 < float(timeout_seconds) <= MAX_DURATION_SECONDS):
+        raise ValueError("timeout is invalid")
+    if runner_max_workers is not None:
+        raise ValueError("caller-supplied runner max workers are not trusted")
+    runner_capability = build_runner_capability_receipt(runner_fingerprint)
+    if shard_count > runner_capability["maxWorkers"]:
+        raise ValueError("shard count exceeds verified live runner capacity")
+    if source_seal is None or expected_source_session is None:
+        raise ValueError("source seal and expected source session are required")
+    if not _valid_source_session(source_seal) or not _valid_source_session(expected_source_session):
+        raise ValueError("source seal and expected source session are invalid")
     validate_acceptance_contract(contract)
     manifest_commit, manifest_source, nodeids, manifest_fingerprint = _validate_manifest(manifest)
     if manifest_commit != commit_sha or manifest_source != source_fingerprint:
@@ -272,25 +398,46 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
         "selectionMode": "full",
     }
     root = Path(project_root).resolve()
-    diagnostics_root = Path(output_root or (Path(tempfile.gettempdir()) / f"nbs-parallel-rollout-{uuid.uuid4().hex}"))
-    diagnostics_root.mkdir(parents=True, exist_ok=True)
+    diagnostics_root = _validate_output_root(
+        root,
+        Path(output_root or (Path(tempfile.gettempdir()) / f"nbs-parallel-rollout-{uuid.uuid4().hex}")),
+    )
     measured_runs = []
+    performance_identity = dict(
+        commit_sha=commit_sha, source_fingerprint=source_fingerprint,
+        baseline_family_id=baseline_family_id, lineage=lineage,
+    )
+    source_identity = dict(commit_sha=commit_sha, source_fingerprint=source_fingerprint)
+    parallel_identity = dict(**source_identity, manifest_fingerprint=manifest_fingerprint, shard_count=shard_count)
     for run_index in range(repeats):
         run_root = diagnostics_root / f"run-{run_index}"
-        run_root.mkdir(parents=True, exist_ok=False)
         serial = run_serial_control(project_root=root, commit_sha=commit_sha,
                                     source_fingerprint=source_fingerprint, nodeids=nodeids,
                                     run_index=run_index, timeout_seconds=timeout_seconds,
-                                    source_seal=source_seal)
+                                    source_seal=source_seal, expected_source_session=expected_source_session,
+                                    execution_lineage={
+                                        "runnerFingerprint": runner_fingerprint,
+                                        "environmentFingerprint": environment_fingerprint,
+                                        "datasetSnapshotFingerprint": dataset_fp,
+                                    })
         if serial.get("status") != "PASS":
             parallel = _blocked_parallel_result(
-                commit_sha=commit_sha,
-                source_fingerprint=source_fingerprint,
-                manifest_fingerprint=manifest_fingerprint,
-                shard_count=shard_count,
+                **parallel_identity,
                 failure_code=serial.get("failureCode") or "serial_control_failed",
-                wall_seconds=0.001,
+                wall_seconds=None,
                 error="parallel execution skipped because serial control did not pass",
+            )
+        elif not _source_is_current(root, source_seal, expected_source_session, commit_sha, source_fingerprint):
+            parallel = _blocked_parallel_result(
+                **parallel_identity,
+                failure_code="parallel_source_identity_mismatch", wall_seconds=None,
+            )
+        elif sys.platform not in _SUPPORTED_PARALLEL_PLATFORMS:
+            parallel = _blocked_parallel_result(
+                **parallel_identity,
+                failure_code="unsupported_platform",
+                wall_seconds=None,
+                error="reserved-fd-v1 parallel runner supports macOS and Linux only",
             )
         else:
             parallel_started = time.perf_counter()
@@ -308,20 +455,32 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
                         "environmentFingerprint": environment_fingerprint,
                         "datasetSnapshotFingerprint": dataset_fp,
                     },
+                    runner_capability=runner_capability,
                 )
             except Exception as exc:
                 parallel = _blocked_parallel_result(
-                    commit_sha=commit_sha,
-                    source_fingerprint=source_fingerprint,
-                    manifest_fingerprint=manifest_fingerprint,
-                    shard_count=shard_count,
+                    **parallel_identity,
                     failure_code="parallel_runner_error",
                     wall_seconds=time.perf_counter() - parallel_started,
                     error=str(exc),
                 )
+        if parallel.get("status") == "PASS" and not _source_is_current(
+            root, source_seal, expected_source_session, commit_sha, source_fingerprint,
+        ):
+            parallel = {**parallel, "status": "BLOCKED", "failureCode": "parallel_source_identity_mismatch"}
         aggregate = parallel.get("aggregate") if isinstance(parallel, Mapping) else None
         shards = parallel.get("shards") if isinstance(parallel, Mapping) else None
-        if isinstance(shards, list):
+        cleanup_evidence = parallel.get("cleanup") if isinstance(parallel, Mapping) else None
+        cleanup_confirmed = (
+            isinstance(cleanup_evidence, Mapping)
+            and cleanup_evidence.get("allProcessGroupsTerminated") is True
+            and cleanup_evidence.get("runtimeCleanupConfirmed") is True
+            and cleanup_evidence.get("fixtureRootsRemoved") is True
+        )
+        if parallel.get("status") == "PASS" and not cleanup_confirmed:
+            parallel = {**parallel, "status": "BLOCKED", "failureCode": "isolation_violation"}
+            aggregate = None
+        if parallel.get("status") == "PASS" and isinstance(shards, list):
             validation = validate_shard_set(manifest, shards, commit_sha, source_fingerprint)
             if validation["status"] == "PASS":
                 aggregate = aggregate_pytest_shards(
@@ -332,10 +491,27 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
                 )
             else:
                 aggregate = {"status": "BLOCKED", "failureCode": validation["failureCode"]}
+                parallel = {
+                    **parallel,
+                    "status": "BLOCKED",
+                    "failureCode": validation["failureCode"],
+                }
         if not isinstance(aggregate, Mapping) or aggregate.get("status") != "PASS":
-            aggregate = _blocked_aggregate(parallel, shard_count=shard_count)
+            aggregate = _blocked_aggregate(
+                parallel,
+                commit_sha=commit_sha,
+                source_fingerprint=source_fingerprint,
+                manifest_fingerprint=manifest_fingerprint,
+                shard_count=shard_count,
+            )
+            if parallel.get("status") == "PASS":
+                parallel = {
+                    **parallel,
+                    "status": "BLOCKED",
+                    "failureCode": aggregate.get("failureCode") or "shard_aggregate_failed",
+                }
         shard_coverage = []
-        if isinstance(shards, list):
+        if cleanup_confirmed and isinstance(shards, list):
             shard_coverage = [
                 {
                     "shardIndex": shard.get("shardIndex"),
@@ -347,47 +523,138 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
                     key=lambda item: item.get("shardIndex", -1),
                 )
             ]
-        parity = compare_serial_and_shard(serial, aggregate)
-        serial_total = float(serial.get("serialWallSeconds", 0.001) or 0.001)
-        parallel_total = float(parallel.get("parallelWallSeconds", 0.001) or 0.001) if isinstance(parallel, Mapping) else 0.001
-        serial_v2 = _build_v2_artifact(role="serial_control", total_seconds=serial_total,
-            result=serial.get("result", {}), commit_sha=commit_sha,
-            source_fingerprint=source_fingerprint, baseline_family_id=baseline_family_id,
-            lineage=lineage)
-        parallel_v2 = _build_v2_artifact(role="parallel_candidate", total_seconds=parallel_total,
-            result=aggregate.get("result", {}) if aggregate.get("status") == "PASS" else {"passed": 0, "failed": 0, "skipped": 0},
-            commit_sha=commit_sha, source_fingerprint=source_fingerprint,
-            baseline_family_id=baseline_family_id, lineage=lineage)
-        measured_runs.append({
-            "runIndex": run_index,
-            "populationKind": "full-pytest-nodeid",
-            "contractFingerprint": contract_fp,
-            "baselineFamilyId": baseline_family_id,
-            "manifestFingerprint": manifest_fingerprint,
-            "testPopulationFingerprint": population_fingerprint,
+        expected_execution_lineage = {
             "runnerFingerprint": runner_fingerprint,
             "environmentFingerprint": environment_fingerprint,
             "datasetSnapshotFingerprint": dataset_fp,
-            "selectionMode": "full",
+        }
+        parity = compare_serial_and_shard(serial, aggregate)
+        if parity.get("status") == "PASS" and _execution_lineage_mismatch(
+            serial, shards, expected_execution_lineage,
+        ):
+            parity = _blocked_parity("execution_lineage_mismatch")
+        serial_total = _valid_measured_duration(serial.get("serialWallSeconds"))
+        parallel_total = _valid_measured_duration(
+            parallel.get("parallelWallSeconds") if isinstance(parallel, Mapping) else None
+        )
+        duration_blockers = []
+        if serial_total is None and serial.get("status") == "PASS":
+            duration_blockers.append("duration_invalid")
+            serial = {
+                **serial,
+                "status": "BLOCKED",
+                "failureCode": serial.get("failureCode") or "duration_invalid",
+            }
+        if parallel_total is None and parallel.get("status") == "PASS":
+            duration_blockers.append("duration_invalid")
+            parallel = {
+                **parallel,
+                "status": "BLOCKED",
+                "failureCode": parallel.get("failureCode") or "duration_invalid",
+            }
+        if parity.get("status") == "PASS" and (
+            serial.get("status") != "PASS"
+            or parallel.get("status") != "PASS"
+            or aggregate.get("status") != "PASS"
+        ):
+            parity = _blocked_parity("serial_or_shard_status_invalid")
+        serial_runtime_fingerprint = serial.get("artifactFingerprint")
+        if not isinstance(serial_runtime_fingerprint, str) or _SHA64.fullmatch(serial_runtime_fingerprint) is None:
+            serial_runtime_fingerprint = canonical_fingerprint(dict(serial))
+        parallel_runtime_fingerprint = aggregate.get("evidenceFingerprint")
+        if not isinstance(parallel_runtime_fingerprint, str) or _SHA64.fullmatch(parallel_runtime_fingerprint) is None:
+            parallel_runtime_fingerprint = canonical_fingerprint(dict(aggregate))
+        if serial.get("status") == "PASS" and serial_total is not None:
+            serial_v2 = _build_v2_artifact(role="serial_control", total_seconds=serial_total,
+                result=serial.get("result", {}), **performance_identity)
+            validate_performance_baseline_v2(serial_v2)
+            serial_artifact_fingerprint = serial_v2["evidenceFingerprint"]
+        else:
+            serial_artifact_fingerprint = serial_runtime_fingerprint
+        if parallel.get("status") == "PASS" and parallel_total is not None:
+            parallel_v2 = _build_v2_artifact(role="parallel_candidate", total_seconds=parallel_total,
+                result=aggregate.get("result", {}) if aggregate.get("status") == "PASS" else {"passed": 0, "failed": 0, "skipped": 0},
+                **performance_identity)
+            validate_performance_baseline_v2(parallel_v2)
+            parallel_artifact_fingerprint = parallel_v2["evidenceFingerprint"]
+        else:
+            parallel_artifact_fingerprint = parallel_runtime_fingerprint
+        serial_runtime_lineage = serial.get("executionLineage")
+        if not isinstance(serial_runtime_lineage, Mapping):
+            serial_runtime_lineage = {}
+        parallel_runtime_lineage = [
+            dict(shard["lineage"])
+            for shard in (shards if isinstance(shards, list) else [])
+            if isinstance(shard, Mapping) and isinstance(shard.get("lineage"), Mapping)
+        ]
+        failure_candidates = [
+            value for value in (
+                serial.get("failureCode"),
+                parallel.get("failureCode") if isinstance(parallel, Mapping) else None,
+                aggregate.get("failureCode"),
+                parity.get("failureCode"),
+            ) if isinstance(value, str) and value
+        ]
+        for value in duration_blockers:
+            if value not in failure_candidates:
+                failure_candidates.append(value)
+        failure_code = next(iter(failure_candidates), None)
+        if not serial_runtime_lineage and serial.get("status") != "PASS":
+            failure_code = failure_code or "serial_execution_lineage_unobserved"
+            if failure_code not in failure_candidates:
+                failure_candidates.append(failure_code)
+            serial_runtime_lineage = build_unobserved_runtime_lineage(
+                failure_code=failure_code,
+                commit_sha=commit_sha,
+                source_fingerprint=source_fingerprint,
+            )
+        if (
+            parallel.get("status") != "PASS"
+            and not parallel_runtime_lineage
+            and not (isinstance(shards, list) and shards)
+        ):
+            failure_code = failure_code or "parallel_execution_lineage_unobserved"
+            if failure_code not in failure_candidates:
+                failure_candidates.append(failure_code)
+            parallel_runtime_lineage = build_unobserved_runtime_lineage(
+                failure_code=failure_code,
+                commit_sha=commit_sha,
+                source_fingerprint=source_fingerprint,
+            )
+        measured_runs.append({
+            "runIndex": run_index,
+            "populationKind": "full-pytest-nodeid",
+            "commitSha": commit_sha,
+            "sourceFingerprint": source_fingerprint,
+            **lineage,
             "testPopulationCount": len(nodeids),
             "populationNodeids": sorted(nodeids),
+            "runnerCapability": dict(runner_capability),
+            "serialRuntimeArtifactFingerprint": serial_runtime_fingerprint,
+            "parallelRuntimeArtifactFingerprint": parallel_runtime_fingerprint,
             "shardCoverage": shard_coverage,
             "serialResult": dict(serial.get("result", {})),
-            "serialLineage": dict(lineage),
-            "parallelLineage": dict(lineage),
+            "serialLineage": {
+                "canonical": dict(lineage),
+                "runtimeExecutionLineage": dict(serial_runtime_lineage),
+                "runtimeArtifactFingerprint": serial_runtime_fingerprint,
+            },
+            "parallelLineage": {
+                "canonical": dict(lineage),
+                "runtimeExecutionLineage": parallel_runtime_lineage,
+                "runtimeArtifactFingerprint": parallel_runtime_fingerprint,
+            },
             "serialWallSeconds": serial_total,
             "parallelWallSeconds": parallel_total,
             "serialStatus": serial.get("status"),
             "parallelStatus": parallel.get("status") if isinstance(parallel, Mapping) else "BLOCKED",
             "parity": parity,
             "shardAggregate": aggregate,
-            "serialArtifactFingerprint": serial_v2["evidenceFingerprint"],
-            "parallelArtifactFingerprint": parallel_v2["evidenceFingerprint"],
+            "serialArtifactFingerprint": serial_artifact_fingerprint,
+            "parallelArtifactFingerprint": parallel_artifact_fingerprint,
             "shardAggregateFingerprint": aggregate.get("evidenceFingerprint") or canonical_fingerprint(aggregate),
-            "failureCode": next((value for value in (
-                serial.get("failureCode"), parallel.get("failureCode") if isinstance(parallel, Mapping) else None,
-                aggregate.get("failureCode"), parity.get("failureCode"),
-            ) if isinstance(value, str) and value), None),
+            "failureCode": failure_code,
+            "blockers": failure_candidates,
         })
     rollout = build_parallel_rollout_evidence(
         commit_sha=commit_sha,
@@ -403,16 +670,31 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
         shard_count=shard_count,
         measured_runs=measured_runs,
     )
-    validate_parallel_rollout_evidence(rollout)
+    validate_parallel_rollout_evidence(
+        rollout,
+        expected_source_lineage={"commitSha": commit_sha, "sourceFingerprint": source_fingerprint, **lineage},
+    )
     return rollout
 
 
-def _write_output(path, payload):
+def _write_output(path, payload, *, diagnostics_root, project_root):
     target = Path(path).expanduser()
-    if target.exists():
+    if target.is_symlink() or target.exists():
         raise ValueError("output must be a new regular file")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    validated_root = _validate_output_root(
+        project_root, Path(diagnostics_root), require_fresh=False,
+    )
+    lexical_parent = Path(os.path.abspath(target.parent))
+    resolved_parent = lexical_parent.resolve(strict=False)
+    parent = target.parent
+    if parent.is_symlink() or resolved_parent != lexical_parent:
+        raise ValueError("output parent must not be a symlink")
+    if resolved_parent != validated_root or target.name in {"", ".", ".."}:
+        raise ValueError("output must stay inside the diagnostic root")
+    if target.is_symlink() or target.exists():
+        raise ValueError("output must be a new regular file")
+    with target.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n")
 
 
 def main(argv=None):
@@ -429,7 +711,8 @@ def main(argv=None):
     parser.add_argument("--repeats", type=int, choices=(3,), default=3)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--source-seal", type=Path)
+    parser.add_argument("--source-seal", type=Path, required=True)
+    parser.add_argument("--source-session", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         result = run_parallel_rollout(
@@ -446,8 +729,13 @@ def main(argv=None):
             timeout_seconds=args.timeout,
             output_root=args.output.parent / f".{args.output.stem}-runtime",
             source_seal=_read_json(args.source_seal) if args.source_seal else None,
+            expected_source_session=_read_json(args.source_session) if args.source_session else None,
         )
-        _write_output(args.output, result)
+        _write_output(
+            args.output, result,
+            diagnostics_root=args.output.parent,
+            project_root=args.project_root,
+        )
         return 0 if result["status"] == "PASS" else 2
     except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         print(f"parallel rollout blocked: {exc}", file=sys.stderr)

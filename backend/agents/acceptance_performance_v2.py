@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -51,6 +52,8 @@ COMPARISON_REASONS = frozenset(
         "environment_mismatch",
         "dataset_mismatch",
         "baseline_total_non_positive",
+        "candidate_total_non_positive",
+        "speedup_metric_precision_lost",
     }
 )
 COMPARISON_KEYS = frozenset(
@@ -67,6 +70,11 @@ COMPARISON_KEYS = frozenset(
         "failureRate",
     }
 )
+# Duration stages are rounded to six decimal places by the shared contract;
+# one microsecond is therefore the smallest positive total eligible for a ratio.
+MIN_POSITIVE_DURATION_SECONDS = 0.000001
+MAX_SPEEDUP_METRIC = MAX_DURATION_SECONDS / MIN_POSITIVE_DURATION_SECONDS
+SPEEDUP_ROUNDING_HALF_UNIT = 0.5e-6
 V2_KEYS = frozenset(
     {
         "schemaVersion",
@@ -140,16 +148,21 @@ def _normalize_comparison(value: Any) -> dict[str, Any]:
             for key in STAGE_KEYS
         }
     if "totalSpeedRatio" in value:
-        result["totalSpeedRatio"] = _duration(
+        result["totalSpeedRatio"] = _speedup_metric(
             value["totalSpeedRatio"], "comparison.totalSpeedRatio"
         )
     if "totalSpeedupMultiple" in value:
-        multiple = _duration(
+        result["totalSpeedupMultiple"] = _speedup_metric(
             value["totalSpeedupMultiple"], "comparison.totalSpeedupMultiple"
         )
-        if multiple <= 0:
-            raise ValueError("comparison.totalSpeedupMultiple must be positive")
-        result["totalSpeedupMultiple"] = multiple
+    if {"totalSpeedRatio", "totalSpeedupMultiple"} <= set(result):
+        ratio = result["totalSpeedRatio"]
+        if ratio <= 0:
+            raise ValueError("comparison.totalSpeedRatio must be positive when speedup is supplied")
+        if not _rounded_reciprocals_are_consistent(
+            ratio, result["totalSpeedupMultiple"]
+        ):
+            raise ValueError("comparison speedup multiple is inconsistent with total speed ratio")
     for key in ("cacheHit", "cacheMiss"):
         if key in value:
             if not isinstance(value[key], bool):
@@ -183,12 +196,38 @@ def _normalize_comparison(value: Any) -> dict[str, Any]:
                 raise ValueError("not_compared comparison fields are incomplete")
             if "totalSpeedRatio" in result:
                 raise ValueError("not_compared comparison cannot contain a ratio")
+            if "totalSpeedupMultiple" in result:
+                raise ValueError("not_compared comparison cannot contain a speedup multiple")
     else:
         if "reason" not in result or not has_fingerprints:
             raise ValueError("ineligible comparison fields are incomplete")
         if "totalSpeedRatio" in result:
             raise ValueError("ineligible comparison cannot contain a ratio")
+        if "totalSpeedupMultiple" in result:
+            raise ValueError("ineligible comparison cannot contain a speedup multiple")
     return result
+
+
+def _speedup_metric(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} speedup metric is invalid")
+    result = float(value)
+    if not math.isfinite(result) or not 0.0 < result <= MAX_SPEEDUP_METRIC:
+        raise ValueError(f"{field} speedup metric is out of range")
+    return result
+
+
+def _rounded_reciprocals_are_consistent(ratio: float, multiple: float) -> bool:
+    if abs((ratio * multiple) - 1.0) <= 1e-12:
+        return True
+    half_unit = SPEEDUP_ROUNDING_HALF_UNIT
+    ratio_low = max(0.0, ratio - half_unit)
+    ratio_high = ratio + half_unit
+    multiple_low = max(0.0, multiple - half_unit)
+    multiple_high = multiple + half_unit
+    reciprocal_low = 1.0 / ratio_high
+    reciprocal_high = math.inf if ratio_low == 0.0 else 1.0 / ratio_low
+    return multiple_high >= reciprocal_low and multiple_low <= reciprocal_high
 
 
 def _validate_unsigned(payload: Mapping[str, Any]) -> None:
@@ -351,17 +390,409 @@ def compare_performance_baselines_v2(
             "stageDeltasSeconds": stage_deltas,
             **metrics,
         }
-    total_speed_ratio = round(
-        float(candidate["stages"]["totalWallSeconds"]) / baseline_total, 6
-    )
+    candidate_total = float(candidate["stages"]["totalWallSeconds"])
+    if candidate_total <= 0:
+        return _not_compared(baseline, candidate, "candidate_total_non_positive")
+    raw_total_speed_ratio = round(candidate_total / baseline_total, 6)
+    raw_total_speedup_multiple = round(baseline_total / candidate_total, 6)
+    if raw_total_speed_ratio <= 0 or raw_total_speedup_multiple <= 0:
+        return _not_compared(baseline, candidate, "speedup_metric_precision_lost")
     comparison = {
         "status": "compared",
         "baselineFingerprint": baseline["evidenceFingerprint"],
         "candidateFingerprint": candidate["evidenceFingerprint"],
         "stageDeltasSeconds": stage_deltas,
-        "totalSpeedRatio": total_speed_ratio,
+        "totalSpeedRatio": raw_total_speed_ratio,
         **metrics,
     }
-    if total_speed_ratio > 0:
-        comparison["totalSpeedupMultiple"] = round(1 / total_speed_ratio, 6)
+    if raw_total_speed_ratio > 0:
+        comparison["totalSpeedupMultiple"] = raw_total_speedup_multiple
     return comparison
+
+
+# Shared measured-evidence validation; rollout policy depends on these predicates.
+POPULATION_KIND = "full-pytest-nodeid"
+LINEAGE_FIELDS = ("contractFingerprint", "baselineFamilyId", "manifestFingerprint", "testPopulationFingerprint", "runnerFingerprint", "environmentFingerprint", "datasetSnapshotFingerprint", "selectionMode")
+FINGERPRINT_FIELDS = (
+    "serialArtifactFingerprint", "parallelArtifactFingerprint", "shardAggregateFingerprint",
+    "serialRuntimeArtifactFingerprint", "parallelRuntimeArtifactFingerprint",
+)
+
+
+def _valid_failure_code(value):
+    return isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None
+
+
+def _is_duration(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    numeric = float(value)
+    return math.isfinite(numeric) and 0.0 < numeric <= MAX_DURATION_SECONDS
+
+
+def _is_speedup_metric(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    numeric = float(value)
+    return math.isfinite(numeric) and 0.0 < numeric <= MAX_SPEEDUP_METRIC
+
+
+def _is_sha(value, pattern):
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _safe_counts(value):
+    if not isinstance(value, Mapping):
+        return None
+    counts = {}
+    for field in ("passed", "failed", "skipped"):
+        item = value.get(field, 0)
+        if isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= MAX_COUNT:
+            return None
+        counts[field] = item
+    return counts
+
+
+def _valid_evidence_fingerprint(value):
+    fingerprint = value.get("evidenceFingerprint")
+    unsigned = {key: item for key, item in value.items() if key != "evidenceFingerprint"}
+    return _is_sha(fingerprint, _SHA64) and canonical_fingerprint(unsigned) == fingerprint
+
+
+def _all_sha(value, fields):
+    return all(_is_sha(value.get(field), _SHA64) for field in fields)
+
+
+def _invalid_run(code=None):
+    raise ValueError("measured run is invalid" + (f": {code}" if code else ""))
+
+
+_UNOBSERVED_RUNTIME_LINEAGE_KEYS = frozenset({
+    "observation", "failureCode", "commitSha", "sourceFingerprint",
+})
+
+
+def build_unobserved_runtime_lineage(*, failure_code, commit_sha, source_fingerprint):
+    """Describe a blocked stage with no observed runtime lineage, bound to its source."""
+    if not _valid_failure_code(failure_code) or not _is_sha(commit_sha, _SHA40) or not _is_sha(source_fingerprint, _SHA64):
+        raise ValueError("unobserved runtime lineage identity is invalid")
+    return {
+        "observation": "unobserved",
+        "failureCode": failure_code,
+        "commitSha": commit_sha,
+        "sourceFingerprint": source_fingerprint,
+    }
+
+
+def _is_unobserved_runtime_lineage(value, run):
+    return (
+        isinstance(value, Mapping)
+        and set(value) == _UNOBSERVED_RUNTIME_LINEAGE_KEYS
+        and value.get("observation") == "unobserved"
+        and _valid_failure_code(value.get("failureCode"))
+        and value.get("failureCode") == run.get("failureCode")
+        and value.get("commitSha") == run.get("commitSha")
+        and value.get("sourceFingerprint") == run.get("sourceFingerprint")
+    )
+
+
+def _population_valid(nodeids, count, fingerprint):
+    return (isinstance(nodeids, list) and all(isinstance(nodeid, str) and nodeid for nodeid in nodeids)
+            and nodeids == sorted(nodeids) and len(nodeids) == len(set(nodeids)) == count
+            and canonical_fingerprint({"nodeids": nodeids}) == fingerprint)
+
+
+def _lineage_error(run, expected, *, blocked=False, shard_count=None):
+    if any(run.get(field) != expected[field] for field in LINEAGE_FIELDS): return "lineage_mismatch"
+    execution_expected = {
+        field: expected[field]
+        for field in ("runnerFingerprint", "environmentFingerprint", "datasetSnapshotFingerprint")
+    }
+    serial = run.get("serialLineage")
+    parallel = run.get("parallelLineage")
+    required = {"canonical", "runtimeExecutionLineage", "runtimeArtifactFingerprint"}
+    if not isinstance(serial, Mapping) or set(serial) != required or serial.get("canonical") != dict(expected):
+        return "artifact_lineage_mismatch"
+    if serial.get("runtimeArtifactFingerprint") != run.get("serialRuntimeArtifactFingerprint"):
+        return "artifact_lineage_mismatch"
+    serial_runtime = serial.get("runtimeExecutionLineage")
+    serial_observed = (
+        isinstance(serial_runtime, Mapping)
+        and set(serial_runtime) == set(execution_expected)
+        and all(_is_sha(value, _SHA64) for value in serial_runtime.values())
+        and dict(serial_runtime) == execution_expected
+    )
+    serial_unobserved = (
+        blocked and run.get("serialStatus") != "PASS"
+        and _is_unobserved_runtime_lineage(serial_runtime, run)
+    )
+    if not serial_observed and not serial_unobserved:
+        return "artifact_lineage_mismatch"
+    if not isinstance(parallel, Mapping) or set(parallel) != required or parallel.get("canonical") != dict(expected):
+        return "artifact_lineage_mismatch"
+    if parallel.get("runtimeArtifactFingerprint") != run.get("parallelRuntimeArtifactFingerprint"):
+        return "artifact_lineage_mismatch"
+    parallel_runtime = parallel.get("runtimeExecutionLineage")
+    parallel_unobserved = (
+        blocked and run.get("parallelStatus") != "PASS"
+        and _is_unobserved_runtime_lineage(parallel_runtime, run)
+    )
+    if parallel_unobserved:
+        return None
+    if not isinstance(parallel_runtime, list) or not parallel_runtime:
+        return "artifact_lineage_mismatch"
+    for item in parallel_runtime:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != set(execution_expected)
+            or not all(_is_sha(value, _SHA64) for value in item.values())
+            or dict(item) != execution_expected
+        ):
+            return "artifact_lineage_mismatch"
+    if (not blocked or run.get("parallelStatus") == "PASS") and (
+        len(parallel_runtime) != shard_count
+        or any(dict(item) != execution_expected for item in parallel_runtime)
+    ):
+        return "artifact_lineage_mismatch"
+    return None
+
+
+def _runner_capability_error(run, expected_lineage, shard_count, *, blocked=False):
+    receipt = run.get("runnerCapability")
+    required = {"schemaVersion", "runnerFingerprint", "maxWorkers", "capabilityFingerprint"}
+    if not isinstance(receipt, Mapping) or set(receipt) != required:
+        return "runner_capability_receipt_invalid"
+    if receipt.get("schemaVersion") != "acceptance-runner-capability-v1":
+        return "runner_capability_receipt_invalid"
+    if receipt.get("runnerFingerprint") != expected_lineage.get("runnerFingerprint"):
+        return "runner_capability_fingerprint_mismatch"
+    workers = receipt.get("maxWorkers")
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        return "runner_capability_insufficient"
+    unsigned = {key: receipt[key] for key in ("schemaVersion", "runnerFingerprint", "maxWorkers")}
+    if receipt.get("capabilityFingerprint") != canonical_fingerprint(unsigned):
+        return "runner_capability_receipt_invalid"
+    if (not blocked or run.get("parallelStatus") == "PASS") and workers < shard_count:
+        return "runner_capability_insufficient"
+    return None
+
+
+def _coverage_error(population, coverage, shard_count, *, strict, allow_empty=False, aggregate_pass=False, allow_partial=False):
+    if not isinstance(coverage, list): return "shard_coverage_invalid"
+    if not coverage:
+        return None if allow_empty else "shard_coverage_invalid"
+    if (strict or aggregate_pass) and len(coverage) != shard_count: return "shard_coverage_invalid"
+    if allow_partial and len(coverage) > shard_count: return "shard_coverage_invalid"
+    by_index = {}
+    for item in coverage:
+        if not isinstance(item, Mapping): return "shard_coverage_invalid"
+        index, assigned, executed = item.get("shardIndex"), item.get("assignedNodeids"), item.get("executedNodeids")
+        values = assigned + executed if isinstance(assigned, list) and isinstance(executed, list) else []
+        if (isinstance(index, bool) or not isinstance(index, int) or index not in range(shard_count) or index in by_index
+                or not isinstance(assigned, list) or not isinstance(executed, list) or assigned != sorted(assigned)
+                or executed != sorted(executed) or len(assigned) != len(set(assigned))
+                or len(executed) != len(set(executed))
+                or any(not isinstance(nodeid, str) or not nodeid for nodeid in values)
+                or any(nodeid not in population for nodeid in values) or any(nodeid not in assigned for nodeid in executed)):
+            return "shard_coverage_invalid"
+        if strict:
+            expected = [nodeid for position, nodeid in enumerate(population) if position % shard_count == index]
+            if assigned != expected or executed != assigned:
+                return "shard_coverage_invalid"
+        elif aggregate_pass and executed != assigned:
+            return "shard_coverage_invalid"
+        by_index[index] = (assigned, executed)
+    if not allow_partial and set(by_index) != set(range(shard_count)):
+        return "shard_coverage_invalid"
+    assigned_all = [nodeid for index in sorted(by_index) for nodeid in by_index[index][0]]
+    if len(assigned_all) != len(set(assigned_all)):
+        return "shard_coverage_invalid"
+    if strict or aggregate_pass:
+        return None if sorted(assigned_all) == population else "shard_coverage_invalid"
+    return None
+
+
+def _validate_run_shape(run, expected_lineage, shard_count, *, expected_commit_sha=None, expected_source_fingerprint=None):
+    if not isinstance(run, Mapping): return "run_invalid"
+    if run.get("populationKind") != POPULATION_KIND: return "population_kind_mismatch"
+    run_index = run.get("runIndex")
+    if isinstance(run_index, bool) or not isinstance(run_index, int) or run_index not in {0, 1, 2}: return "run_index_invalid"
+    if expected_commit_sha is not None and run.get("commitSha") != expected_commit_sha: return "run_source_identity_mismatch"
+    if expected_source_fingerprint is not None and run.get("sourceFingerprint") != expected_source_fingerprint: return "run_source_identity_mismatch"
+    if failure := _lineage_error(run, expected_lineage, shard_count=shard_count): return failure
+    if failure := _runner_capability_error(run, expected_lineage, shard_count): return failure
+    population_count = run.get("testPopulationCount")
+    if isinstance(population_count, bool) or not isinstance(population_count, int) or not 0 < population_count <= MAX_COUNT: return "population_count_invalid"
+    if run.get("serialStatus") != "PASS" or run.get("parallelStatus") != "PASS": return "run_status_failed"
+    serial_counts = _safe_counts(run.get("serialResult"))
+    if serial_counts is None or sum(serial_counts.values()) != population_count: return "serial_counts_invalid"
+    population_nodeids = run.get("populationNodeids")
+    if not _population_valid(population_nodeids, population_count, expected_lineage["testPopulationFingerprint"]): return "population_nodeids_invalid"
+    failure = _coverage_error(population_nodeids, run.get("shardCoverage"), shard_count, strict=True)
+    if failure: return failure
+    parity = run.get("parity")
+    if not isinstance(parity, Mapping) or parity.get("status") != "PASS" or not _valid_evidence_fingerprint(parity): return "parity_mismatch"
+    if parity.get("serial") != serial_counts: return "serial_parity_evidence_mismatch"
+    aggregate = run.get("shardAggregate")
+    if not isinstance(aggregate, Mapping) or aggregate.get("status") != "PASS": return "shard_aggregate_failed"
+    if not _valid_evidence_fingerprint(aggregate): return "shard_aggregate_evidence_invalid"
+    aggregate_counts = _safe_counts(aggregate.get("result"))
+    if aggregate_counts is None or sum(aggregate_counts.values()) != population_count: return "shard_counts_invalid"
+    if parity.get("shard") != aggregate_counts: return "parallel_parity_evidence_mismatch"
+    if (
+        aggregate.get("manifestFingerprint") != expected_lineage["manifestFingerprint"]
+        or aggregate.get("shardCount") != shard_count
+        or aggregate.get("coveredNodeids") != population_count
+    ):
+        return "shard_count_mismatch"
+    shard_fingerprints = aggregate.get("shards")
+    if not isinstance(shard_fingerprints, Mapping) or set(shard_fingerprints) != {str(index) for index in range(shard_count)}: return "shard_coverage_invalid"
+    if any(not _is_sha(value, _SHA64) for value in shard_fingerprints.values()): return "shard_coverage_invalid"
+    if not _all_sha(run, FINGERPRINT_FIELDS): return "artifact_missing"
+    if run.get("failureCode"): return "run_failed"
+    if run.get("blockers"): return "run_blocked"
+    return None
+
+
+def validate_parallel_run_for_artifact(
+    run: Mapping[str, Any], *, expected_lineage: Mapping[str, Any],
+    commit_sha: str, source_fingerprint: str, shard_count: int, blocked: bool,
+) -> None:
+    """Validate bounded measured evidence, including failed partial runs."""
+    if not isinstance(run, Mapping):
+        _invalid_run()
+    if run.get("populationKind") != POPULATION_KIND:
+        _invalid_run("population_kind_mismatch")
+    run_index = run.get("runIndex")
+    if isinstance(run_index, bool) or not isinstance(run_index, int) or run_index not in {0, 1, 2}:
+        _invalid_run("run_index_invalid")
+    if run.get("commitSha") != commit_sha or run.get("sourceFingerprint") != source_fingerprint:
+        _invalid_run("run_source_identity_mismatch")
+    if failure := _lineage_error(run, expected_lineage, blocked=blocked, shard_count=shard_count):
+        _invalid_run(failure)
+    if failure := _runner_capability_error(
+        run, expected_lineage, shard_count, blocked=blocked
+    ):
+        _invalid_run(failure)
+    population_count = run.get("testPopulationCount")
+    if isinstance(population_count, bool) or not isinstance(population_count, int) or not 0 < population_count <= MAX_COUNT:
+        _invalid_run("population_count_invalid")
+    population_nodeids = run.get("populationNodeids")
+    if not _population_valid(population_nodeids, population_count, expected_lineage["testPopulationFingerprint"]):
+        _invalid_run("population_nodeids_invalid")
+    serial_counts = _safe_counts(run.get("serialResult"))
+    if serial_counts is None or sum(serial_counts.values()) > population_count or (
+        run.get("serialStatus") == "PASS" and sum(serial_counts.values()) != population_count
+    ):
+        _invalid_run("serial_counts_invalid")
+    durations = (run.get("serialWallSeconds"), run.get("parallelWallSeconds"))
+    if blocked:
+        if any(value is not None and not _is_duration(value) for value in durations):
+            _invalid_run("duration_invalid")
+    elif any(not _is_duration(value) for value in durations):
+        _invalid_run("duration_invalid")
+    if any(run.get(field) not in {"PASS", "FAIL", "BLOCKED"} for field in ("serialStatus", "parallelStatus")):
+        _invalid_run("run_status_invalid")
+    parity = run.get("parity")
+    if not isinstance(parity, Mapping) or parity.get("status") not in {"PASS", "BLOCKED"}:
+        _invalid_run("parity_mismatch")
+    aggregate = run.get("shardAggregate")
+    if not isinstance(aggregate, Mapping) or aggregate.get("status") not in {"PASS", "BLOCKED"}:
+        _invalid_run("shard_aggregate_failed")
+    if parity.get("status") == "PASS" and (
+        run.get("serialStatus") != "PASS"
+        or run.get("parallelStatus") != "PASS"
+        or aggregate.get("status") != "PASS"
+    ):
+        _invalid_run("parity_status_inconsistent")
+    if aggregate.get("commitSha") != commit_sha or aggregate.get("sourceFingerprint") != source_fingerprint:
+        _invalid_run("shard_aggregate_source_identity_mismatch")
+    if aggregate.get("manifestFingerprint") != expected_lineage.get("manifestFingerprint"):
+        _invalid_run("shard_aggregate_manifest_mismatch")
+    if aggregate.get("shardCount", shard_count) != shard_count:
+        _invalid_run("shard_count_mismatch")
+    failure = _coverage_error(
+        population_nodeids, run.get("shardCoverage"), shard_count, strict=False,
+        allow_empty=aggregate.get("status") == "BLOCKED",
+        aggregate_pass=aggregate.get("status") == "PASS",
+        allow_partial=aggregate.get("status") == "BLOCKED",
+    )
+    if failure:
+        _invalid_run(failure)
+    if not isinstance(parity, Mapping) or not _valid_evidence_fingerprint(parity):
+        _invalid_run("parity_evidence_invalid")
+    aggregate_result = _safe_counts(aggregate.get("result"))
+    if aggregate_result is None or sum(aggregate_result.values()) > population_count or (
+        aggregate.get("status") == "PASS" and sum(aggregate_result.values()) != population_count
+    ):
+        _invalid_run("shard_counts_invalid")
+    if aggregate.get("status") == "BLOCKED" and "coveredNodeids" in aggregate:
+        covered = aggregate.get("coveredNodeids")
+        assigned = sum(
+            len(item.get("assignedNodeids", []))
+            for item in (run.get("shardCoverage") or [])
+            if isinstance(item, Mapping) and isinstance(item.get("assignedNodeids"), list)
+        )
+        if (
+            isinstance(covered, bool) or not isinstance(covered, int)
+            or not 0 <= covered <= population_count
+            or covered != assigned
+            or sum(aggregate_result.values()) > covered
+        ):
+            raise ValueError("blocked aggregate metadata is inconsistent")
+    if not (
+        _valid_evidence_fingerprint(aggregate)
+        and run.get("shardAggregateFingerprint") == aggregate.get("evidenceFingerprint")
+    ):
+        _invalid_run("shard_aggregate_evidence_invalid")
+    if not _all_sha(run, FINGERPRINT_FIELDS):
+        _invalid_run("artifact_missing")
+    if "blockers" in run and (
+        not isinstance(run["blockers"], list)
+        or any(not isinstance(item, str) or not item for item in run["blockers"])
+    ):
+        _invalid_run("blockers_invalid")
+    if blocked and {"speedRatio", "speedupMultiple"} & run.keys():
+        raise ValueError("blocked rollout cannot contain speedup values")
+    if not blocked:
+        failure = _validate_run_shape(
+            run, expected_lineage, shard_count,
+            expected_commit_sha=commit_sha, expected_source_fingerprint=source_fingerprint,
+        )
+        if failure:
+            _invalid_run(failure)
+        expected_ratio = round(float(run["parallelWallSeconds"]) / float(run["serialWallSeconds"]), 6)
+        expected_multiple = round(float(run["serialWallSeconds"]) / float(run["parallelWallSeconds"]), 6)
+        if run.get("speedRatio") != expected_ratio or run.get("speedupMultiple") != expected_multiple:
+            raise ValueError("measured run speedup is inconsistent")
+        for field in ("speedRatio", "speedupMultiple"):
+            if not _is_speedup_metric(run.get(field)):
+                raise ValueError("measured run speedup is invalid")
+
+
+def build_execution_performance_v2(*, role, total_seconds, result, commit_sha, source_fingerprint, baseline_family_id, lineage):
+    counts = _safe_counts(result)
+    if counts is None:
+        raise ValueError("pytest counts are invalid")
+    collected = sum(counts.values())
+    total = float(total_seconds)
+    if not math.isfinite(total) or not 0.0 < total <= MAX_DURATION_SECONDS:
+        raise ValueError("performance duration is invalid")
+    return build_performance_baseline_v2(
+        baseline_family_id=baseline_family_id,
+        baseline_role=role,
+        lifecycle="draft",
+        contract_fingerprint=lineage["contractFingerprint"],
+        commit_sha=commit_sha,
+        source_fingerprint=source_fingerprint,
+        manifest_fingerprint=lineage["manifestFingerprint"],
+        test_population_fingerprint=lineage["testPopulationFingerprint"],
+        runner_fingerprint=lineage["runnerFingerprint"],
+        environment_fingerprint=lineage["environmentFingerprint"],
+        dataset_snapshot_fingerprint=lineage["datasetSnapshotFingerprint"],
+        selection_mode=lineage["selectionMode"],
+        stages={"collectionSeconds": 0.0, "fixturePreparationSeconds": 0.0,
+                "pytestExecutionSeconds": total, "aggregateSeconds": 0.0,
+                "totalWallSeconds": total},
+        test_count={"collected": collected, **counts},
+    )

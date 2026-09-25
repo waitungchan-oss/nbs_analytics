@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from backend.agents.acceptance_parallel_rollout import build_parallel_rollout_evidence
 from backend.agents.evidence_models import canonical_fingerprint
 
@@ -16,6 +18,15 @@ LINEAGE = {
 }
 
 
+def _runner_capability(fingerprint: str) -> dict[str, object]:
+    unsigned = {
+        "schemaVersion": "acceptance-runner-capability-v1",
+        "runnerFingerprint": fingerprint,
+        "maxWorkers": 4,
+    }
+    return {**unsigned, "capabilityFingerprint": canonical_fingerprint(unsigned)}
+
+
 def _run(index: int) -> dict:
     from backend.agents.evidence_models import canonical_fingerprint
 
@@ -25,6 +36,8 @@ def _run(index: int) -> dict:
         "status": "PASS",
         "authority": "prototype",
         "formalReleaseEnabled": False,
+        "commitSha": "a" * 40,
+        "sourceFingerprint": "b" * 64,
         "manifestFingerprint": LINEAGE["manifest_fingerprint"],
         "shardCount": 4,
         "coveredNodeids": 16,
@@ -56,8 +69,14 @@ def _run(index: int) -> dict:
         "datasetSnapshotFingerprint": LINEAGE["dataset_snapshot_fingerprint"],
         "selectionMode": LINEAGE["selection_mode"],
     }
+    execution_lineage = {
+        key: lineage[key]
+        for key in ("runnerFingerprint", "environmentFingerprint", "datasetSnapshotFingerprint")
+    }
     return {
         **lineage,
+        "commitSha": "a" * 40,
+        "sourceFingerprint": "b" * 64,
         "populationKind": "full-pytest-nodeid",
         "runIndex": index,
         "serialStatus": "PASS",
@@ -79,13 +98,24 @@ def _run(index: int) -> dict:
             for shard in range(4)
         ],
         "serialResult": serial_result,
-        "serialLineage": lineage,
-        "parallelLineage": lineage,
+        "serialLineage": {
+            "canonical": lineage,
+            "runtimeExecutionLineage": execution_lineage,
+            "runtimeArtifactFingerprint": "4" * 64,
+        },
+        "parallelLineage": {
+            "canonical": lineage,
+            "runtimeExecutionLineage": [execution_lineage for _ in range(4)],
+            "runtimeArtifactFingerprint": "5" * 64,
+        },
+        "serialRuntimeArtifactFingerprint": "4" * 64,
+        "parallelRuntimeArtifactFingerprint": "5" * 64,
+        "runnerCapability": _runner_capability(lineage["runnerFingerprint"]),
         "serialWallSeconds": 100.0,
         "parallelWallSeconds": 75.0,
         "serialArtifactFingerprint": "2" * 64,
         "parallelArtifactFingerprint": "3" * 64,
-        "shardAggregateFingerprint": "4" * 64,
+        "shardAggregateFingerprint": aggregate["evidenceFingerprint"],
         "parity": parity,
         "shardAggregate": aggregate,
         "blockers": [],
@@ -102,10 +132,27 @@ def _artifact() -> dict:
     )
 
 
+def _expected_source_lineage() -> dict:
+    return {
+        "commitSha": "a" * 40,
+        "sourceFingerprint": "b" * 64,
+        "contractFingerprint": LINEAGE["contract_fingerprint"],
+        "baselineFamilyId": LINEAGE["baseline_family_id"],
+        "manifestFingerprint": LINEAGE["manifest_fingerprint"],
+        "testPopulationFingerprint": LINEAGE["test_population_fingerprint"],
+        "runnerFingerprint": LINEAGE["runner_fingerprint"],
+        "environmentFingerprint": LINEAGE["environment_fingerprint"],
+        "datasetSnapshotFingerprint": LINEAGE["dataset_snapshot_fingerprint"],
+        "selectionMode": LINEAGE["selection_mode"],
+    }
+
+
 def test_hermes_accepts_parallel_artifact_as_diagnostic_only():
     from backend.agents.hermes_parallel_rollout_boundary import validate_parallel_rollout_boundary
 
-    result = validate_parallel_rollout_boundary(_artifact())
+    result = validate_parallel_rollout_boundary(
+        _artifact(), expected_source_lineage=_expected_source_lineage(),
+    )
 
     assert result["status"] == "PASS"
     assert result["authority"] == "diagnostic"
@@ -122,7 +169,9 @@ def test_hermes_blocks_72_slot_population_from_parallel_comparison():
         {key: value for key, value in artifact.items() if key != "evidenceFingerprint"}
     )
 
-    result = validate_parallel_rollout_boundary(artifact)
+    result = validate_parallel_rollout_boundary(
+        artifact, expected_source_lineage=_expected_source_lineage(),
+    )
 
     assert result["status"] == "BLOCKED"
     assert result["failureCode"] == "population_kind_mismatch"
@@ -133,9 +182,32 @@ def test_hermes_boundary_does_not_promote_or_mutate_input():
     from backend.agents.hermes_parallel_rollout_boundary import validate_parallel_rollout_boundary
 
     artifact = _artifact()
-    before = dict(artifact)
+    before = deepcopy(artifact)
 
-    result = validate_parallel_rollout_boundary(artifact)
+    result = validate_parallel_rollout_boundary(
+        artifact, expected_source_lineage=_expected_source_lineage(),
+    )
 
     assert result["formalReleaseEnabled"] is False
     assert artifact == before
+
+
+def test_hermes_boundary_blocks_malformed_nested_shard_coverage():
+    from backend.agents.hermes_parallel_rollout_boundary import validate_parallel_rollout_boundary
+
+    artifact = _artifact()
+    artifact["measuredRuns"][0]["shardCoverage"][0]["assignedNodeids"] = [
+        {"malformed": "nodeid"},
+        "tests/test_parallel.py::test_case_00",
+    ]
+    artifact["evidenceFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in artifact.items() if key != "evidenceFingerprint"}
+    )
+
+    result = validate_parallel_rollout_boundary(
+        artifact, expected_source_lineage=_expected_source_lineage(),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "evidence_invalid"
+    assert result["formalReleaseEnabled"] is False

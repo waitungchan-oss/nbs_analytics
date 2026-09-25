@@ -45,7 +45,9 @@ def _failure_code(message: str) -> str:
     return "evidence_invalid"
 
 
-def validate_parallel_rollout_boundary(payload: Mapping[str, Any]) -> dict[str, Any]:
+def validate_parallel_rollout_boundary(
+    payload: Mapping[str, Any], *, expected_source_lineage: Mapping[str, Any]
+) -> dict[str, Any]:
     """Validate a candidate without promoting it or mutating its input.
 
     Hermes can report that the diagnostic artifact is internally valid, but
@@ -63,8 +65,10 @@ def validate_parallel_rollout_boundary(payload: Mapping[str, Any]) -> dict[str, 
         return _blocked("authority_mismatch", payload)
 
     try:
-        validate_parallel_rollout_evidence(payload)
-    except ValueError as exc:
+        validate_parallel_rollout_evidence(
+            payload, expected_source_lineage=expected_source_lineage,
+        )
+    except (ValueError, TypeError, AttributeError, KeyError) as exc:
         return _blocked(_failure_code(str(exc)), payload)
 
     result = {
@@ -77,4 +81,3 @@ def validate_parallel_rollout_boundary(payload: Mapping[str, Any]) -> dict[str, 
         "evidenceFingerprint": payload["evidenceFingerprint"],
     }
     return result
-

@@ -1,8 +1,10 @@
 import os
+import json
 import signal
 import socket
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,13 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 COMMIT = "a" * 40
 SOURCE = "b" * 64
+
+
+def _close_raw_fd(descriptor):
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
 
 
 def _project_root(tmp_path):
@@ -37,6 +46,114 @@ def _manifest(nodeids):
     return payload
 
 
+def _write_execution_evidence(env, *, collected, started):
+    report_path = Path(env["NBS_ACCEPTANCE_EXECUTION_EVIDENCE"])
+    unsigned = {
+        "schemaVersion": "pytest-shard-execution-v1",
+        "collectedNodeids": list(collected),
+        "startedNodeids": list(started),
+    }
+    report_path.write_text(
+        json.dumps({**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}),
+        encoding="utf-8",
+    )
+
+
+def _shard_cli_args(project_root, manifest_path, output_path):
+    return [
+        "--project-root", str(project_root),
+        "--manifest", str(manifest_path),
+        "--shard-index", "0",
+        "--shard-count", "1",
+        "--output", str(output_path),
+    ]
+
+
+def test_shard_cli_rejects_existing_output_before_running_shard(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    project_root = _project_root(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest([])), encoding="utf-8")
+    output_path = tmp_path / "existing-shard.json"
+    output_path.write_text("keep existing evidence", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        subject, "run_pytest_shard",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"status": "PASS"},
+    )
+
+    exit_code = subject.main(_shard_cli_args(project_root, manifest_path, output_path))
+
+    assert exit_code == 2
+    assert calls == []
+    assert output_path.read_text(encoding="utf-8") == "keep existing evidence"
+
+
+def test_shard_cli_rejects_dangling_symlink_before_running_shard(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    project_root = _project_root(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest([])), encoding="utf-8")
+    output_path = tmp_path / "shard-link.json"
+    target_path = tmp_path / "missing-shard.json"
+    output_path.symlink_to(target_path)
+    calls = []
+    monkeypatch.setattr(
+        subject, "run_pytest_shard",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"status": "PASS"},
+    )
+
+    exit_code = subject.main(_shard_cli_args(project_root, manifest_path, output_path))
+
+    assert exit_code == 2
+    assert calls == []
+    assert output_path.is_symlink()
+    assert not target_path.exists()
+
+
+def test_shard_cli_writes_a_new_temporary_output(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    project_root = _project_root(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest([])), encoding="utf-8")
+    output_path = tmp_path / "artifacts" / "shard.json"
+    output_path.parent.mkdir()
+    monkeypatch.setattr(
+        subject, "run_pytest_shard",
+        lambda *args, **kwargs: {"status": "PASS", "evidence": "source-bound"},
+    )
+
+    exit_code = subject.main(_shard_cli_args(project_root, manifest_path, output_path))
+
+    assert exit_code == 0
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {
+        "status": "PASS", "evidence": "source-bound"
+    }
+
+
+def test_shard_cli_does_not_overwrite_path_created_after_validation(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    project_root = _project_root(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest([])), encoding="utf-8")
+    output_path = tmp_path / "raced-shard.json"
+
+    def create_competing_output(*args, **kwargs):
+        output_path.write_text("other writer evidence", encoding="utf-8")
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(subject, "run_pytest_shard", create_competing_output)
+
+    exit_code = subject.main(_shard_cli_args(project_root, manifest_path, output_path))
+
+    assert exit_code == 2
+    assert output_path.read_text(encoding="utf-8") == "other writer evidence"
+
+
 def test_select_shard_nodeids_is_stable_and_covers_every_node_once():
     nodeids = ["tests/test_c.py::test_3", "tests/test_a.py::test_1", "tests/test_b.py::test_2"]
 
@@ -46,14 +163,22 @@ def test_select_shard_nodeids_is_stable_and_covers_every_node_once():
     assert set(shards[0]).isdisjoint(shards[1])
 
 
-def test_run_pytest_shard_requires_exact_collection_before_pass(monkeypatch, tmp_path):
+def test_run_pytest_shard_executes_manifest_nodeids_once_under_port_handoff(monkeypatch, tmp_path):
     manifest = _manifest(["tests/test_a.py::test_one"])
     captured_env = {}
+    commands = []
+    handoffs = []
+    callbacks = []
 
     def run(argv, **kwargs):
+        commands.append(argv)
         captured_env.update(kwargs["env"])
-        if "--collect-only" in argv:
-            return subprocess.CompletedProcess(argv, 0, "tests/test_a.py::test_one\n", "")
+        handoffs.append(kwargs)
+        _write_execution_evidence(
+            kwargs["env"], collected=manifest["nodeids"], started=manifest["nodeids"]
+        )
+        kwargs["readiness_callback"]()
+        kwargs["start_callback"]()
         return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
 
     monkeypatch.setattr("scripts.full_pytest_shard._run_pytest_command", run)
@@ -64,23 +189,39 @@ def test_run_pytest_shard_requires_exact_collection_before_pass(monkeypatch, tmp
         shard_count=1,
         fixture_root=tmp_path / "shard-0",
         port_readiness_probe=lambda ports: True,
+        readiness_callback=lambda: callbacks.append("ready"),
+        start_callback=lambda: callbacks.append("start"),
     )
 
     assert result["schemaVersion"] == "full-pytest-shard-v1"
-    assert result["status"] == "PASS"
+    assert result["status"] == "PASS", result["metadata"]
     assert result["authority"] == "prototype"
     assert result["formalReleaseEnabled"] is False
     assert result["executedNodeids"] == manifest["nodeids"]
     assert result["metadata"]["cleanup"]["status"] == "PASS"
     assert captured_env["NBS_ANALYTICS_DB_FILE"].startswith(str(tmp_path / "shard-0"))
+    assert len(commands) == 1
+    assert "--collect-only" not in commands[0]
+    assert commands[0][-2:] == ["--", manifest["nodeids"][0]]
+    assert len(handoffs) == 1
+    assert handoffs[0]["readiness_probe"] is not None
+    assert handoffs[0]["readiness_callback"] is not None
+    assert handoffs[0]["start_callback"] is not None
+    assert callbacks == ["ready", "start"]
 
 
-def test_run_pytest_shard_blocks_collection_mismatch(monkeypatch, tmp_path):
+def test_run_pytest_shard_fails_when_manifest_nodeid_is_not_found(monkeypatch, tmp_path):
     manifest = _manifest(["tests/test_a.py::test_one"])
+
+    def missing_nodeid(argv, **kwargs):
+        _write_execution_evidence(kwargs["env"], collected=[], started=[])
+        return subprocess.CompletedProcess(
+            argv, 4, "", "ERROR: not found: tests/test_a.py::test_one\n"
+        )
 
     monkeypatch.setattr(
         "scripts.full_pytest_shard._run_pytest_command",
-        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "tests/test_other.py::test_two\n", ""),
+        missing_nodeid,
     )
     result = run_pytest_shard(
         _project_root(tmp_path),
@@ -91,8 +232,78 @@ def test_run_pytest_shard_blocks_collection_mismatch(monkeypatch, tmp_path):
         port_readiness_probe=lambda ports: True,
     )
 
+    assert result["metadata"]["failureCode"] == "collection_mismatch"
+
+
+def test_run_pytest_shard_does_not_claim_nodeids_that_child_did_not_start(monkeypatch, tmp_path):
+    manifest = _manifest(["tests/test_a.py::test_one"])
+
+    def child_omits_test(argv, **kwargs):
+        _write_execution_evidence(
+            kwargs["env"], collected=manifest["nodeids"], started=[]
+        )
+        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
+
+    monkeypatch.setattr("scripts.full_pytest_shard._run_pytest_command", child_omits_test)
+    result = run_pytest_shard(
+        _project_root(tmp_path), manifest, shard_index=0, shard_count=1,
+        fixture_root=tmp_path / "shard-0", port_readiness_probe=lambda ports: True,
+    )
+
     assert result["status"] == "FAIL"
     assert result["metadata"]["failureCode"] == "collection_mismatch"
+    assert result["executedNodeids"] == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="reserved-fd child handoff is POSIX-only")
+def test_real_child_reports_exact_execution_after_reserved_fd_handoff(monkeypatch, tmp_path):
+    from scripts.full_pytest_shard import PROJECT_ROOT
+
+    project_root = _project_root(tmp_path)
+    tests_root = project_root / "tests"
+    tests_root.mkdir()
+    (project_root / "conftest.py").write_text(
+        "def pytest_addoption(parser):\n"
+        "    parser.addoption('--sandbox-preflight', choices=('required',))\n",
+        encoding="utf-8",
+    )
+    (tests_root / "test_child_execution.py").write_text(
+        "import os\n"
+        "import sys\n"
+        "from scripts import full_pytest_shard\n"
+        "def test_child_first():\n"
+        "    assert os.environ['NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL'] == 'reserved-fd-v1'\n"
+        "    assert full_pytest_shard._ACTIVATED_PORTS\n"
+        "    assert full_pytest_shard is sys.modules['__main__']\n"
+        "def test_child_second():\n"
+        "    assert os.environ['NBS_ACCEPTANCE_EXECUTION_EVIDENCE']\n",
+        encoding="utf-8",
+    )
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(part for part in (str(PROJECT_ROOT), existing_pythonpath) if part),
+    )
+    manifest = _manifest([
+        "tests/test_child_execution.py::test_child_first",
+        "tests/test_child_execution.py::test_child_second",
+    ])
+
+    result = run_pytest_shard(
+        project_root,
+        manifest,
+        shard_index=0,
+        shard_count=1,
+        fixture_root=tmp_path / "child-runtime",
+        timeout_seconds=20,
+        port_readiness_probe=lambda ports: bool(ports),
+    )
+
+    assert result["status"] == "PASS"
+    assert result["executedNodeids"] == manifest["nodeids"]
+    assert result["result"]["passed"] == 2
+    assert result["metadata"]["cleanup"]["status"] == "PASS"
+    assert not (tmp_path / "child-runtime").exists()
 
 
 def test_run_pytest_shard_rejects_existing_fixture_root(tmp_path):
@@ -370,11 +581,16 @@ def test_run_pytest_command_uses_process_port_handoff_when_available(monkeypatch
     class FakeProcess:
         pid = 456
         returncode = 0
+        _nbs_readiness_reader = -1
+        _nbs_start_writer = -1
 
         def communicate(self, timeout=None):
             return "", ""
 
     class FakeRuntime:
+        def complete_port_handoff(self, process, *, timeout, readiness_callback):
+            events.append("ready-start")
+
         def launch_process_with_port_handoff(self, argv, *, cwd, env):
             events.append((argv, cwd, env))
             return FakeProcess()
@@ -389,7 +605,92 @@ def test_run_pytest_command_uses_process_port_handoff_when_available(monkeypatch
     )
 
     assert result.returncode == 0
-    assert events == [(["pytest"], tmp_path, {"A": "B"})]
+    assert events == [(["pytest"], tmp_path, {"A": "B"}), "ready-start"]
+
+
+def test_run_pytest_command_shares_one_timeout_budget_with_handoff(monkeypatch, tmp_path):
+    budgets = []
+    clock = iter([100.0, 100.2, 100.7])
+
+    class FakeProcess:
+        returncode = 0
+        _nbs_readiness_reader = -1
+        _nbs_start_writer = -1
+
+        def communicate(self, timeout=None):
+            budgets.append(timeout)
+            return "", ""
+
+    class FakeRuntime:
+        def complete_port_handoff(self, process, *, timeout, readiness_callback):
+            budgets.append(timeout)
+
+        def launch_process_with_port_handoff(self, argv, *, cwd, env):
+            return FakeProcess()
+
+    monkeypatch.setattr("scripts.full_pytest_shard.time.monotonic", lambda: next(clock))
+
+    result = _run_pytest_command(
+        ["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime()
+    )
+
+    assert result.returncode == 0
+    assert budgets == pytest.approx([0.8, 0.3])
+
+
+def test_run_pytest_command_cleans_up_when_handoff_rejects_expired_timeout(monkeypatch, tmp_path):
+    events = []
+
+    class FakeProcess:
+        pid = 457
+        returncode = None
+        _nbs_readiness_reader = -1
+        _nbs_start_writer = -1
+
+        def communicate(self, timeout=None):
+            events.append(("communicate", timeout))
+            return "", ""
+
+    class FakeRuntime:
+        def complete_port_handoff(self, process, *, timeout, readiness_callback):
+            assert timeout == 0
+            raise ValueError("handoff timeout must be finite and strictly positive")
+
+        def launch_process_with_port_handoff(self, argv, *, cwd, env):
+            return FakeProcess()
+
+        def terminate_process_groups(self, *, force=False):
+            events.append(("terminate", force))
+
+    clock = iter([100.0, 101.0])
+    monkeypatch.setattr("scripts.full_pytest_shard.time.monotonic", lambda: next(clock))
+
+    with pytest.raises(ValueError, match="handoff timeout"):
+        _run_pytest_command(
+            ["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=FakeRuntime()
+        )
+
+    assert events == [("terminate", True), ("communicate", 1)]
+
+
+@pytest.mark.parametrize("missing", ["reader", "writer", "callback"])
+def test_missing_ready_start_contract_fails_closed(tmp_path, missing):
+    from types import SimpleNamespace
+
+    terminated = []
+    process = SimpleNamespace(
+        pid=456, returncode=0, communicate=lambda **kw: ("", ""),
+        _nbs_readiness_reader=None if missing == "reader" else -1,
+        _nbs_start_writer=None if missing == "writer" else -1,
+    )
+    runtime = SimpleNamespace(
+        launch_process_with_port_handoff=lambda *a, **kw: process,
+        terminate_process_groups=lambda **kw: terminated.append(True),
+        complete_port_handoff=None if missing == "callback" else lambda *a, **kw: None,
+    )
+    with pytest.raises(RuntimeError, match="handshake"):
+        _run_pytest_command(["pytest"], cwd=tmp_path, env={}, timeout=1, runtime=runtime)
+    assert terminated == [True]
 
 
 def test_child_adopts_reserved_port_descriptor_contract(monkeypatch):
@@ -410,6 +711,7 @@ def test_child_adopts_reserved_port_descriptor_contract(monkeypatch):
         adopted.close()
     finally:
         subject.close_activated_sockets()
+        _close_raw_fd(descriptor)
         reservation.close()
 
 
@@ -446,6 +748,92 @@ def test_child_closes_socket_when_activation_registration_fails(monkeypatch):
         assert not subject._ACTIVATED_PORTS
     finally:
         subject.close_activated_sockets()
+        _close_raw_fd(descriptor)
+        reservation.close()
+
+
+def test_child_clears_all_socket_registries_after_late_adoption_failure(monkeypatch):
+    from scripts import full_pytest_shard as subject
+
+    reservations = []
+    entries = []
+    created = []
+    real_fromfd = subject.socket.fromfd
+    real_register = subject._register_activated_socket
+
+    def tracking_fromfd(*args):
+        sock = real_fromfd(*args)
+        created.append(sock)
+        return sock
+
+    calls = 0
+
+    def fail_on_second_registration(name, sock, port):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("late registration failed")
+        return real_register(name, sock, port)
+
+    try:
+        for name in ("health", "mcp"):
+            reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reservation.bind(("127.0.0.1", 0))
+            reservation.listen(1)
+            descriptor = os.dup(reservation.fileno())
+            reservations.append(reservation)
+            entries.append(f"{name}={descriptor}:{reservation.getsockname()[1]}")
+        monkeypatch.setenv("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL", "reserved-fd-v1")
+        monkeypatch.setenv("NBS_ACCEPTANCE_RESERVED_PORT_FDS", ",".join(entries))
+        monkeypatch.setattr(subject.socket, "fromfd", tracking_fromfd)
+        monkeypatch.setattr(subject, "_register_activated_socket", fail_on_second_registration)
+
+        with pytest.raises(RuntimeError, match="descriptor adoption failed"):
+            subject._adopt_reserved_port_fds()
+
+        assert calls == 2
+        assert created and all(sock.fileno() < 0 for sock in created)
+        assert not subject._ADOPTED_RESERVED_PORTS
+        assert not subject._ACTIVATED_PORTS
+    finally:
+        subject.close_activated_sockets()
+        for entry in entries:
+            _close_raw_fd(int(entry.split("=", 1)[1].split(":", 1)[0]))
+        for reservation in reservations:
+            reservation.close()
+
+
+def test_child_rejects_duplicate_reserved_fd_entries(monkeypatch):
+    from scripts import full_pytest_shard as subject
+
+    reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    reservation.bind(("127.0.0.1", 0))
+    reservation.listen(1)
+    descriptor = os.dup(reservation.fileno())
+    port = reservation.getsockname()[1]
+    fromfd_calls = []
+    real_fromfd = subject.socket.fromfd
+
+    def tracking_fromfd(*args):
+        fromfd_calls.append(args[0])
+        return real_fromfd(*args)
+
+    monkeypatch.setenv("NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL", "reserved-fd-v1")
+    monkeypatch.setenv(
+        "NBS_ACCEPTANCE_RESERVED_PORT_FDS",
+        f"health={descriptor}:{port},mcp={descriptor}:{port}",
+    )
+    monkeypatch.setattr(subject.socket, "fromfd", tracking_fromfd)
+
+    try:
+        with pytest.raises(RuntimeError, match="descriptor adoption failed"):
+            subject._adopt_reserved_port_fds()
+        assert fromfd_calls == [descriptor]
+        assert not subject._ADOPTED_RESERVED_PORTS
+        assert not subject._ACTIVATED_PORTS
+    finally:
+        subject.close_activated_sockets()
+        _close_raw_fd(descriptor)
         reservation.close()
 
 
@@ -496,6 +884,8 @@ def test_child_side_service_can_consume_every_activated_endpoint(monkeypatch):
     finally:
         subject.close_activated_sockets()
         subject._ADOPTED_RESERVED_PORTS.clear()
+        for entry in entries:
+            _close_raw_fd(int(entry.split("=", 1)[1].split(":", 1)[0]))
         for reservation in reservations.values():
             reservation.close()
 
@@ -506,11 +896,16 @@ def test_pytest_execution_wraps_child_with_reserved_fd_adoption(monkeypatch, tmp
     class FakeProcess:
         pid = 456
         returncode = 0
+        _nbs_readiness_reader = -1
+        _nbs_start_writer = -1
 
         def communicate(self, timeout=None):
             return "", ""
 
     class FakeRuntime:
+        def complete_port_handoff(self, process, **kwargs):
+            pass
+
         def launch_process_with_port_handoff(self, argv, *, cwd, env):
             events.append((argv, cwd, env))
             return FakeProcess()

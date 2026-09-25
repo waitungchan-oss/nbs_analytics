@@ -5,6 +5,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,16 @@ from scripts.pytest_manifest import _manifest_fingerprint
 
 COMMIT = "a" * 40
 SOURCE = "b" * 64
+_EXECUTION_LINEAGE = {
+    "runnerFingerprint": "c" * 64,
+    "environmentFingerprint": "d" * 64,
+    "datasetSnapshotFingerprint": "e" * 64,
+}
+_RUNNER_CAPABILITY_UNSIGNED = {"schemaVersion": "acceptance-runner-capability-v1", "runnerFingerprint": "c" * 64, "maxWorkers": 4}
+_RUNNER_CAPABILITY = {
+    **_RUNNER_CAPABILITY_UNSIGNED,
+    "capabilityFingerprint": canonical_fingerprint(_RUNNER_CAPABILITY_UNSIGNED),
+}
 
 
 def _manifest(node_count: int) -> dict[str, object]:
@@ -55,6 +66,7 @@ def _passing_shard(index: int, fixture_root) -> dict[str, object]:
             }
         },
         "fixtureRoot": str(fixture_root),
+        "lineage": dict(_EXECUTION_LINEAGE),
     }
     return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
 
@@ -76,6 +88,177 @@ def _one_failing_shard(index: int, fixture_root, **kwargs) -> dict[str, object]:
     return result
 
 
+def _ready_and_start(kwargs):
+    kwargs["readiness_callback"]()
+    kwargs["start_callback"]()
+
+
+def _run_parallel_shards(subject, **kwargs):
+    kwargs.setdefault("execution_lineage", dict(_EXECUTION_LINEAGE))
+    kwargs.setdefault("runner_capability", dict(_RUNNER_CAPABILITY))
+    return subject.run_parallel_shards(**kwargs)
+
+
+def test_shard_artifact_writer_rejects_dangling_symlink(tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    output_root = tmp_path / "runtime"
+    output_root.mkdir()
+    target = output_root / "shard-0.json"
+    target.symlink_to(tmp_path / "missing.json")
+
+    with pytest.raises(ValueError, match="new and non-symlink"):
+        subject._write_artifact(output_root, 0, {"status": "PASS"})
+
+    assert target.is_symlink()
+
+
+def test_runner_requires_fresh_output_root(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    output_root = _output_root(tmp_path)
+    output_root.mkdir()
+    marker = output_root / "keep.txt"
+    marker.write_text("pre-existing evidence", encoding="utf-8")
+
+    def passing_run(*, shard_index, fixture_root, **kwargs):
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
+        return _passing_shard(shard_index, fixture_root)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", passing_run)
+    with pytest.raises(ValueError, match="fresh|new"):
+        _run_parallel_shards(subject,
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=output_root,
+        )
+
+    assert marker.read_text(encoding="utf-8") == "pre-existing evidence"
+
+
+def test_artifact_write_failure_returns_structured_blocked_result(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    def passing_run(*, shard_index, fixture_root, **kwargs):
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
+        return _passing_shard(shard_index, fixture_root)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", passing_run)
+    original_write = subject._write_artifact
+    writes = 0
+
+    def fail_second_write(output_root, index, artifact):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("simulated disk full")
+        return original_write(output_root, index, artifact)
+
+    monkeypatch.setattr(subject, "_write_artifact", fail_second_write)
+    result = _run_parallel_shards(subject,
+        project_root=tmp_path,
+        manifest=_manifest(16),
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        shard_count=4,
+        output_root=_output_root(tmp_path),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "artifact_write_failed"
+    assert result["artifactWrite"]["status"] == "BLOCKED"
+    assert result["artifactWrite"]["expectedShardArtifacts"] == 4
+    assert result["artifactWrite"]["writtenShardArtifacts"] == 1
+    assert len(result["shardArtifactPaths"]) == 1
+    for field in (
+        "aggregate", "coverage", "parity", "speedupMultiple", "speedRatio",
+        "comparison", "performance",
+    ):
+        assert field not in result
+
+
+def test_timeout_does_not_cleanup_runtime_while_worker_is_active(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    release_worker = threading.Event()
+    worker_active = threading.Event()
+    cleanup_calls = []
+    owner_thread = []
+
+    class OwnedRuntime:
+        def __init__(self):
+            self._cleanup = None
+
+        def terminate_process_groups(self, *, force=False):
+            return None
+
+        def cleanup(self):
+            cleanup_calls.append({
+                "thread": threading.get_ident(),
+                "workerActive": worker_active.is_set(),
+            })
+            self._cleanup = {
+                "status": "PASS",
+                "allProcessGroupsTerminated": True,
+                "leakedProcesses": [],
+            }
+            return dict(self._cleanup)
+
+    def blocked_run(*, shard_index, fixture_root, runtime_observer, **kwargs):
+        runtime = OwnedRuntime()
+        owner_thread.append(threading.get_ident())
+        worker_active.set()
+        runtime_observer("registered", runtime)
+        _ready_and_start(kwargs)
+        try:
+            release_worker.wait(timeout=10)
+            return _passing_shard(shard_index, fixture_root)
+        finally:
+            worker_active.clear()
+            runtime.cleanup()
+            runtime_observer("unregistered", runtime)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", blocked_run)
+    try:
+        result = _run_parallel_shards(subject,
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            timeout_seconds=1,
+        )
+        assert result["status"] == "BLOCKED"
+        assert cleanup_calls == []
+        assert result["cleanup"]["runtimeCleanupConfirmed"] is False
+    finally:
+        release_worker.set()
+
+
+class _TestRuntime:
+    def __init__(self):
+        self._cleanup = {
+            "status": "PASS",
+            "allProcessGroupsTerminated": True,
+            "leakedProcesses": [],
+        }
+
+
+def _mark_runtime_cleanup(kwargs):
+    observer = kwargs.get("runtime_observer")
+    if observer is None:
+        return
+    runtime = _TestRuntime()
+    observer("registered", runtime)
+    observer("unregistered", runtime)
+
+
 def test_run_parallel_shards_starts_all_child_jobs_before_completion(monkeypatch, tmp_path):
     from backend.agents import acceptance_parallel_runner as subject
 
@@ -85,14 +268,15 @@ def test_run_parallel_shards_starts_all_child_jobs_before_completion(monkeypatch
 
     def fake_run_shard(*, shard_index, fixture_root, **kwargs):
         started.append((shard_index, fixture_root))
-        kwargs["readiness_callback"]()
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
         release.wait(timeout=1)
         assert len(started) == 4
         completed.append(shard_index)
         return _passing_shard(shard_index, fixture_root)
 
     monkeypatch.setattr(subject, "run_pytest_shard", fake_run_shard)
-    result = subject.run_parallel_shards(
+    result = _run_parallel_shards(subject,
         project_root=tmp_path,
         manifest=_manifest(16),
         commit_sha=COMMIT,
@@ -107,29 +291,76 @@ def test_run_parallel_shards_starts_all_child_jobs_before_completion(monkeypatch
     assert result["parallelWallSeconds"] >= 0
 
 
+def test_execution_clock_excludes_worker_preparation(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    clock = [100.0]
+    lock = threading.Lock()
+    started = 0
+    all_started = threading.Event()
+
+    def fake_run_shard(*, shard_index, fixture_root, readiness_callback, start_callback, **kwargs):
+        nonlocal started
+        _mark_runtime_cleanup(kwargs)
+        with lock:
+            clock[0] += 10.0
+        readiness_callback()
+        with lock:
+            clock[0] += 7.0
+        start_callback()
+        with lock:
+            started += 1
+            if started == 4:
+                all_started.set()
+        all_started.wait(timeout=1)
+        with lock:
+            clock[0] += 1.0
+        return _passing_shard(shard_index, fixture_root)
+
+    monkeypatch.setattr(subject.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(subject, "run_pytest_shard", fake_run_shard)
+    result = _run_parallel_shards(subject,
+        project_root=tmp_path, manifest=_manifest(16), commit_sha=COMMIT,
+        source_fingerprint=SOURCE, shard_count=4, output_root=_output_root(tmp_path),
+    )
+    assert result["status"] == "PASS"
+    assert result["parallelWallSeconds"] == 4.0
+    assert result["startedAt"] == result["readiness"]["releasedAt"]
+
+
 def test_runner_blocks_child_without_readiness_callback(monkeypatch, tmp_path):
     from backend.agents import acceptance_parallel_runner as subject
 
-    monkeypatch.setattr(subject, "run_pytest_shard", lambda *, shard_index, fixture_root, **kwargs: _passing_shard(shard_index, fixture_root))
-    result = subject.run_parallel_shards(
+    def collection_timeout(*, shard_index, fixture_root, **kwargs):
+        artifact = _passing_shard(shard_index, fixture_root)
+        artifact["status"] = "BLOCKED"
+        artifact["metadata"] = {
+            "cleanup": {"status": "PASS", "allProcessGroupsTerminated": True},
+            "failureCode": "pytest_collection_timeout",
+        }
+        unsigned = {key: value for key, value in artifact.items() if key != "evidenceFingerprint"}
+        return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
+
+    monkeypatch.setattr(subject, "run_pytest_shard", collection_timeout)
+    result = _run_parallel_shards(subject,
         project_root=tmp_path,
         manifest=_manifest(16),
         commit_sha=COMMIT,
         source_fingerprint=SOURCE,
-        shard_count=2,
+        shard_count=4,
         output_root=_output_root(tmp_path),
     )
 
     assert result["status"] == "BLOCKED"
     assert result["failureCode"] == "shard_failed"
-    assert all(item["metadata"]["failureCode"] == "pytest_runner_error" for item in result["shards"])
+    assert any(item["metadata"]["failureCode"] == "pytest_collection_timeout" for item in result["shards"])
 
 
 def test_runner_blocks_invalid_shard_count_and_manifest_identity(tmp_path):
     from backend.agents import acceptance_parallel_runner as subject
 
     with pytest.raises(ValueError, match="inside the project root"):
-        subject.run_parallel_shards(
+        _run_parallel_shards(subject,
             project_root=tmp_path,
             manifest=_manifest(16),
             commit_sha=COMMIT,
@@ -139,7 +370,7 @@ def test_runner_blocks_invalid_shard_count_and_manifest_identity(tmp_path):
         )
 
     with pytest.raises(ValueError, match="shard count"):
-        subject.run_parallel_shards(
+        _run_parallel_shards(subject,
             project_root=tmp_path,
             manifest=_manifest(16),
             commit_sha=COMMIT,
@@ -149,7 +380,7 @@ def test_runner_blocks_invalid_shard_count_and_manifest_identity(tmp_path):
         )
 
     with pytest.raises(ValueError, match="manifest identity"):
-        subject.run_parallel_shards(
+        _run_parallel_shards(subject,
             project_root=tmp_path,
             manifest=_manifest(16),
             commit_sha="c" * 40,
@@ -159,11 +390,114 @@ def test_runner_blocks_invalid_shard_count_and_manifest_identity(tmp_path):
         )
 
 
+def test_runner_requires_lineage_and_respects_capability_bound(tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    with pytest.raises(ValueError, match="execution lineage is required"):
+        subject.run_parallel_shards(
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            runner_capability=_RUNNER_CAPABILITY,
+        )
+
+    with pytest.raises(ValueError, match="runner capability is required"):
+        subject.run_parallel_shards(
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            execution_lineage=_EXECUTION_LINEAGE,
+        )
+
+    with pytest.raises(ValueError, match="exceeds runner capability"):
+        restricted = {**_RUNNER_CAPABILITY_UNSIGNED, "maxWorkers": 2}
+        subject.run_parallel_shards(
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            execution_lineage=_EXECUTION_LINEAGE,
+            runner_capability={
+                **restricted,
+                "capabilityFingerprint": canonical_fingerprint(restricted),
+            },
+        )
+
+
+def test_runner_capability_receipt_is_bound_to_live_runner_and_capacity(monkeypatch):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    monkeypatch.setattr(subject, "_live_worker_capacity", lambda: 4)
+    receipt = subject.build_runner_capability_receipt("c" * 64)
+    assert receipt["maxWorkers"] == 4
+    assert subject._validate_runner_capability(receipt, "c" * 64) == 4
+    with pytest.raises(ValueError, match="binding mismatch"):
+        subject._validate_runner_capability(receipt, "d" * 64)
+    unsigned = {key: receipt[key] for key in ("schemaVersion", "runnerFingerprint", "maxWorkers")}
+    forged = {**unsigned, "maxWorkers": 16, "capabilityFingerprint": canonical_fingerprint({**unsigned, "maxWorkers": 16})}
+    with pytest.raises(ValueError, match="exceeds live worker capacity"):
+        subject._validate_runner_capability(forged, "c" * 64)
+
+
 def test_child_failure_terminates_remaining_process_groups(monkeypatch, tmp_path):
     from backend.agents import acceptance_parallel_runner as subject
 
-    monkeypatch.setattr(subject, "run_pytest_shard", _one_failing_shard)
-    result = subject.run_parallel_shards(
+    stop_event = threading.Event()
+    termination_calls = []
+
+    class FakeRuntime:
+        def __init__(self, index):
+            self.index = index
+            self._cleanup = None
+
+        def terminate_process_groups(self, *, force=False):
+            termination_calls.append((self.index, force))
+            stop_event.set()
+
+        def cleanup(self):
+            self._cleanup = {
+                "status": "PASS",
+                "allProcessGroupsTerminated": True,
+                "leakedProcesses": [],
+            }
+            return dict(self._cleanup)
+
+    def fake_run_shard(*, shard_index, fixture_root, runtime_observer, readiness_callback, start_callback, **kwargs):
+        runtime = FakeRuntime(shard_index)
+        runtime_observer("registered", runtime)
+        try:
+            readiness_callback()
+            start_callback()
+            if shard_index == 0:
+                artifact = _one_failing_shard(
+                    shard_index, fixture_root, readiness_callback=lambda: None,
+                )
+            else:
+                stopped = stop_event.wait(timeout=1)
+                artifact = _passing_shard(shard_index, fixture_root)
+                if not stopped:
+                    artifact["status"] = "BLOCKED"
+                    artifact["metadata"] = {
+                        "cleanup": {"status": "PASS", "allProcessGroupsTerminated": True},
+                        "failureCode": "sibling_not_terminated",
+                    }
+                    unsigned = {key: value for key, value in artifact.items() if key != "evidenceFingerprint"}
+                    artifact["evidenceFingerprint"] = canonical_fingerprint(unsigned)
+            return artifact
+        finally:
+            runtime.cleanup()
+            runtime_observer("unregistered", runtime)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", fake_run_shard)
+    result = _run_parallel_shards(subject,
         project_root=tmp_path,
         manifest=_manifest(16),
         commit_sha=COMMIT,
@@ -174,6 +508,7 @@ def test_child_failure_terminates_remaining_process_groups(monkeypatch, tmp_path
     assert result["status"] == "BLOCKED"
     assert result["failureCode"] == "shard_failed"
     assert result["cleanup"]["allProcessGroupsTerminated"] is True
+    assert {index for index, force in termination_calls if force} >= {1, 2, 3}
 
 
 def test_runner_passes_and_requires_execution_lineage(monkeypatch, tmp_path):
@@ -187,8 +522,9 @@ def test_runner_passes_and_requires_execution_lineage(monkeypatch, tmp_path):
     observed = []
 
     def fake_run_shard(*, shard_index, fixture_root, lineage=None, **kwargs):
+        _mark_runtime_cleanup(kwargs)
         observed.append(lineage)
-        kwargs["readiness_callback"]()
+        _ready_and_start(kwargs)
         result = _passing_shard(shard_index, fixture_root)
         result["lineage"] = dict(lineage or {})
         unsigned = {key: value for key, value in result.items() if key != "evidenceFingerprint"}
@@ -196,7 +532,7 @@ def test_runner_passes_and_requires_execution_lineage(monkeypatch, tmp_path):
         return result
 
     monkeypatch.setattr(subject, "run_pytest_shard", fake_run_shard)
-    result = subject.run_parallel_shards(
+    result = _run_parallel_shards(subject,
         project_root=tmp_path,
         manifest=_manifest(16),
         commit_sha=COMMIT,
@@ -210,6 +546,45 @@ def test_runner_passes_and_requires_execution_lineage(monkeypatch, tmp_path):
     assert observed == [lineage] * 4
 
 
+def test_runner_blocks_when_runtime_cleanup_confirmation_is_missing(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    def missing_unregistration(*, shard_index, fixture_root, runtime_observer, **kwargs):
+        runtime_observer("registered", _TestRuntime())
+        _ready_and_start(kwargs)
+        return _passing_shard(shard_index, fixture_root)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", missing_unregistration)
+    result = _run_parallel_shards(subject,
+        project_root=tmp_path,
+        manifest=_manifest(16),
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        shard_count=4,
+        output_root=_output_root(tmp_path),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "isolation_violation"
+    assert result["cleanup"]["runtimeCleanupConfirmed"] is False
+    assert result["cleanup"]["cleanupConfirmationMissingShards"] == [0, 1, 2, 3]
+    assert "aggregate" not in result
+    assert "coverage" not in result
+    assert "nodeidCount" not in result
+
+
+def test_daemon_workers_are_not_registered_for_interpreter_exit_join(monkeypatch):
+    from concurrent.futures.thread import _threads_queues
+    from backend.agents import acceptance_parallel_runner as subject
+
+    executor = subject._DaemonThreadPoolExecutor(max_workers=1)
+    try:
+        assert executor.submit(lambda: None).result(timeout=1) is None
+        assert all(thread not in _threads_queues for thread in executor._threads)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def test_runner_blocks_child_missing_execution_lineage(monkeypatch, tmp_path):
     from backend.agents import acceptance_parallel_runner as subject
 
@@ -219,12 +594,17 @@ def test_runner_blocks_child_missing_execution_lineage(monkeypatch, tmp_path):
         "datasetSnapshotFingerprint": "e" * 64,
     }
     def missing_lineage_run(*, shard_index, fixture_root, **kwargs):
-        kwargs["readiness_callback"]()
-        return _passing_shard(shard_index, fixture_root)
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
+        result = _passing_shard(shard_index, fixture_root)
+        result.pop("lineage", None)
+        unsigned = {key: value for key, value in result.items() if key != "evidenceFingerprint"}
+        result["evidenceFingerprint"] = canonical_fingerprint(unsigned)
+        return result
 
     monkeypatch.setattr(subject, "run_pytest_shard", missing_lineage_run)
 
-    result = subject.run_parallel_shards(
+    result = _run_parallel_shards(subject,
         project_root=tmp_path,
         manifest=_manifest(16),
         commit_sha=COMMIT,
@@ -268,7 +648,7 @@ def test_runner_fail_closes_and_cleans_up_after_base_exception(monkeypatch, tmp_
         raise SystemExit("simulated child interruption")
 
     monkeypatch.setattr(subject, "run_pytest_shard", interrupted_run)
-    result = subject.run_parallel_shards(
+    result = _run_parallel_shards(subject,
         project_root=tmp_path,
         manifest=_manifest(16),
         commit_sha=COMMIT,
@@ -279,7 +659,10 @@ def test_runner_fail_closes_and_cleans_up_after_base_exception(monkeypatch, tmp_
 
     assert result["status"] == "BLOCKED"
     assert all(runtime.terminated is True and runtime.cleaned is True for runtime in runtimes)
-    assert result["cleanup"]["allProcessGroupsTerminated"] is True
+    assert result["cleanup"]["allProcessGroupsTerminated"] == all(
+        item["metadata"]["cleanup"]["allProcessGroupsTerminated"]
+        for item in result["shards"]
+    )
 
 
 def test_runner_emits_bounded_timeout_artifacts(monkeypatch, tmp_path):
@@ -288,14 +671,15 @@ def test_runner_emits_bounded_timeout_artifacts(monkeypatch, tmp_path):
     release = threading.Event()
 
     def hanging_run_shard(*, shard_index, fixture_root, **kwargs):
-        kwargs["readiness_callback"]()
-        release.wait(timeout=2)
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
+        release.wait(timeout=10)
         return _passing_shard(shard_index, fixture_root)
 
     monkeypatch.setattr(subject, "run_pytest_shard", hanging_run_shard)
     started = time.perf_counter()
     try:
-        result = subject.run_parallel_shards(
+        result = _run_parallel_shards(subject,
             project_root=tmp_path,
             manifest=_manifest(16),
             commit_sha=COMMIT,
@@ -310,7 +694,45 @@ def test_runner_emits_bounded_timeout_artifacts(monkeypatch, tmp_path):
         assert result["failureCode"] == "controller_timeout"
         assert len(result["shards"]) == 4
         assert all(item["metadata"]["failureCode"] == "controller_timeout" for item in result["shards"])
-        assert result["cleanup"]["allProcessGroupsTerminated"] is True
+        # The fake worker is still alive after the bounded join window. A
+        # timeout must fail closed instead of claiming worker termination.
+        assert result["cleanup"]["allProcessGroupsTerminated"] is False
+    finally:
+        release.set()
+
+
+def test_child_failure_uses_bounded_cleanup_window(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    release = threading.Event()
+
+    def failing_or_hanging(*, shard_index, fixture_root, **kwargs):
+        _ready_and_start(kwargs)
+        if shard_index == 0:
+            return _one_failing_shard(shard_index, fixture_root)
+        release.wait(timeout=30)
+        return _passing_shard(shard_index, fixture_root)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", failing_or_hanging)
+    started = time.perf_counter()
+    try:
+        result = _run_parallel_shards(subject,
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            timeout_seconds=120,
+        )
+        elapsed = time.perf_counter() - started
+
+        assert result["status"] == "BLOCKED"
+        assert result["failureCode"] in {"shard_failed", "controller_timeout"}
+        assert result["cleanup"]["allProcessGroupsTerminated"] is (
+            result["failureCode"] == "shard_failed"
+        )
+        assert elapsed < 8
     finally:
         release.set()
 
@@ -320,11 +742,14 @@ def test_real_child_processes_complete_ready_start_and_cleanup_contract(tmp_path
     from backend.agents import acceptance_shard_runtime
 
     project_root = Path(__file__).resolve().parents[1]
-    available_ports = []
+    held_sockets = []
     for _ in range(6):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.bind(("127.0.0.1", 0))
-            available_ports.append(probe.getsockname()[1])
+        reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        reservation.bind(("127.0.0.1", 0))
+        reservation.listen(1)
+        held_sockets.append(reservation)
+    available_ports = [reservation.getsockname()[1] for reservation in held_sockets]
     port_sets = [
         {
             name: available_ports[shard * 3 + offset]
@@ -337,6 +762,27 @@ def test_real_child_processes_complete_ready_start_and_cleanup_contract(tmp_path
         "_ports_for",
         lambda run_id, shard_index: dict(port_sets[shard_index]),
     )
+
+    def reserve_held_ports(ports, allocation_id):
+        return (
+            {name: held_sockets[available_ports.index(port)] for name, port in ports.items()},
+            {},
+            {},
+        )
+
+    monkeypatch.setattr(acceptance_shard_runtime, "_reserve_ports", reserve_held_ports)
+    real_port_readiness = subject._port_readiness
+    readiness_probe_calls = []
+
+    def child_owned_port_readiness(ports):
+        parent_reservations = [held_sockets[available_ports.index(port)] for port in ports.values()]
+        assert all(reservation.fileno() == -1 for reservation in parent_reservations), (
+            "parent reservation handles must be closed before child readiness is probed"
+        )
+        readiness_probe_calls.append(tuple(ports.values()))
+        return real_port_readiness(ports)
+
+    monkeypatch.setattr(subject, "_port_readiness", child_owned_port_readiness)
     nodeids = sorted([
         "tests/test_full_pytest_shard.py::test_select_shard_nodeids_is_stable_and_covers_every_node_once",
         "tests/test_full_pytest_shard.py::test_run_pytest_command_uses_process_port_handoff_when_available",
@@ -355,44 +801,64 @@ def test_real_child_processes_complete_ready_start_and_cleanup_contract(tmp_path
         text=True,
     )
 
-    result = subject.run_parallel_shards(
-        project_root=project_root,
-        manifest=manifest,
-        commit_sha=COMMIT,
-        source_fingerprint=SOURCE,
-        shard_count=2,
-        output_root=tmp_path / "parallel-runtime",
-        timeout_seconds=120,
-    )
+    try:
+        result = _run_parallel_shards(subject,
+            project_root=project_root,
+            manifest=manifest,
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=2,
+            output_root=tmp_path / "parallel-runtime",
+            timeout_seconds=120,
+        )
 
-    after = subprocess.check_output(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=project_root,
-        text=True,
-    )
-    assert result["status"] == "PASS"
-    assert result["readiness"]["status"] == "PASS"
-    assert result["readiness"]["expectedShardCount"] == 2
-    assert result["readiness"]["readyShardCount"] == 2
-    assert result["startedAt"] <= result["readiness"]["releasedAt"]
-    assert result["parallelWallSeconds"] > 0
-    assert all(item["status"] == "PASS" for item in result["shards"])
-    assert all(item["metadata"]["cleanup"]["status"] == "PASS" for item in result["shards"])
-    assert before == after
+        after = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=project_root,
+            text=True,
+        )
+        assert result["status"] == "PASS"
+        assert result["readiness"]["status"] == "PASS"
+        assert result["readiness"]["expectedShardCount"] == 2
+        assert result["readiness"]["readyShardCount"] == 2
+        assert len(readiness_probe_calls) == 2
+        assert result["startedAt"] <= result["readiness"]["releasedAt"]
+        assert result["parallelWallSeconds"] > 0
+        assert all(item["status"] == "PASS" for item in result["shards"])
+        assert all(item["metadata"]["cleanup"]["status"] == "PASS" for item in result["shards"])
+        assert before == after
+    finally:
+        for reservation in held_sockets:
+            try:
+                reservation.close()
+            except OSError:
+                pass
 
 
-def test_real_child_timeout_is_terminated_and_reported_blocked(tmp_path):
+_TIMEOUT_CHILD_ENV = "NBS_ACCEPTANCE_TEST_TIMEOUT_CHILD"
+
+
+def _run_timeout_child_fixture():
+    if os.environ.get(_TIMEOUT_CHILD_ENV) == "1":
+        time.sleep(20)
+
+
+def test_parallel_timeout_child_a():
+    _run_timeout_child_fixture()
+
+
+def test_parallel_timeout_child_b():
+    _run_timeout_child_fixture()
+
+
+def test_real_child_timeout_is_terminated_and_reported_blocked(tmp_path, monkeypatch):
     from backend.agents import acceptance_parallel_runner as subject
 
     project_root = Path(__file__).resolve().parents[1]
-    slow_test = project_root / "tests" / f"test_timeout_child_{os.getpid()}.py"
-    slow_test.write_text(
-        "import time\n\n"
-        "def test_slow_child():\n"
-        "    time.sleep(5)\n",
-        encoding="utf-8",
-    )
-    nodeids = [f"tests/{slow_test.name}::test_slow_child"]
+    nodeids = [
+        "tests/test_acceptance_parallel_runner.py::test_parallel_timeout_child_a",
+        "tests/test_acceptance_parallel_runner.py::test_parallel_timeout_child_b",
+    ]
     manifest = {
         "schemaVersion": "pytest-test-manifest-v1",
         "status": "PASS",
@@ -402,20 +868,29 @@ def test_real_child_timeout_is_terminated_and_reported_blocked(tmp_path):
         "manifestFingerprint": _manifest_fingerprint(COMMIT, SOURCE, nodeids),
     }
 
-    try:
-        result = subject.run_parallel_shards(
+    with monkeypatch.context() as timeout_environment:
+        timeout_environment.setenv(_TIMEOUT_CHILD_ENV, "1")
+        result = _run_parallel_shards(subject,
             project_root=project_root,
             manifest=manifest,
             commit_sha=COMMIT,
             source_fingerprint=SOURCE,
             shard_count=2,
             output_root=tmp_path / "timeout-runtime",
-            timeout_seconds=1,
+            timeout_seconds=5,
         )
 
         assert result["status"] == "BLOCKED"
         assert result["failureCode"] in {"shard_failed", "controller_timeout"}
-        assert result["cleanup"]["allProcessGroupsTerminated"] is True
+        assert result["cleanup"]["allProcessGroupsTerminated"] is True, {
+            "cleanup": result["cleanup"],
+            "status": result["status"],
+            "failureCode": result["failureCode"],
+            "shards": [
+                {"status": item.get("status"), "metadata": item.get("metadata")}
+                for item in result["shards"]
+            ],
+        }
         assert any(
             item["metadata"]["failureCode"] in {"timeout", "controller_timeout"}
             for item in result["shards"]
@@ -424,5 +899,3 @@ def test_real_child_timeout_is_terminated_and_reported_blocked(tmp_path):
             item["metadata"]["cleanup"]["status"] == "PASS"
             for item in result["shards"]
         )
-    finally:
-        slow_test.unlink(missing_ok=True)

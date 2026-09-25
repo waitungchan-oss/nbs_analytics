@@ -68,6 +68,65 @@ def test_v2_comparison_allows_cross_commit_same_contract():
     assert "commit" not in result.get("reason", "")
 
 
+def test_v2_comparison_rounds_total_speed_metrics_to_six_decimals():
+    from backend.agents.acceptance_performance_v2 import compare_performance_baselines_v2
+
+    baseline = _v2()
+    candidate = _v2(
+        baseline_role="parallel_candidate",
+        stages={
+            "collectionSeconds": 1.0,
+            "fixturePreparationSeconds": 3.0,
+            "pytestExecutionSeconds": 60.0,
+            "aggregateSeconds": 1.0,
+            "totalWallSeconds": 65.0,
+        },
+    )
+
+    comparison = compare_performance_baselines_v2(baseline, candidate)
+
+    assert comparison["totalSpeedRatio"] == round(65.0 / 87.0, 6) == 0.747126
+    assert comparison["totalSpeedupMultiple"] == round(87.0 / 65.0, 6) == 1.338462
+
+
+def test_v2_comparison_suppresses_metrics_lost_to_six_decimal_precision():
+    from backend.agents.acceptance_performance import MAX_DURATION_SECONDS
+    from backend.agents.acceptance_performance_v2 import (
+        MAX_SPEEDUP_METRIC,
+        compare_performance_baselines_v2,
+        validate_performance_baseline_v2,
+    )
+
+    long_stages = {
+        "collectionSeconds": 0.0,
+        "fixturePreparationSeconds": 0.0,
+        "pytestExecutionSeconds": 0.0,
+        "aggregateSeconds": 0.0,
+        "totalWallSeconds": MAX_DURATION_SECONDS,
+    }
+    shortest_positive_stages = {
+        **long_stages,
+        "totalWallSeconds": 0.000001,
+    }
+    baseline = _v2(stages=long_stages)
+    candidate = _v2(baseline_role="parallel_candidate", stages=shortest_positive_stages)
+
+    comparison = compare_performance_baselines_v2(baseline, candidate)
+    expected_maximum = MAX_DURATION_SECONDS / 0.000001
+    assert MAX_SPEEDUP_METRIC >= expected_maximum
+    assert comparison["status"] == "not_compared"
+    assert comparison["reason"] == "speedup_metric_precision_lost"
+    assert "totalSpeedRatio" not in comparison
+    assert "totalSpeedupMultiple" not in comparison
+
+    compared_artifact = _v2(
+        baseline_role="parallel_candidate",
+        stages=shortest_positive_stages,
+        comparison=comparison,
+    )
+    validate_performance_baseline_v2(compared_artifact)
+
+
 @pytest.mark.parametrize(
     ("field", "reason"),
     [
@@ -145,6 +204,119 @@ def test_v2_artifact_is_versioned_bounded_and_diagnostic():
     assert value["authority"] == "diagnostic"
     assert value["fullGateRequired"] is True
     assert len(build_comparability_key(value)) == 64
+
+
+def test_execution_performance_preserves_selection_mode_lineage():
+    from backend.agents.acceptance_performance_v2 import (
+        build_execution_performance_v2,
+        validate_performance_baseline_v2,
+    )
+
+    lineage = {
+        "contractFingerprint": CONTRACT,
+        "manifestFingerprint": MANIFEST,
+        "testPopulationFingerprint": POPULATION,
+        "runnerFingerprint": RUNNER,
+        "environmentFingerprint": ENVIRONMENT,
+        "datasetSnapshotFingerprint": DATASET,
+        "selectionMode": "shard",
+    }
+
+    payload = build_execution_performance_v2(
+        role="parallel_candidate",
+        total_seconds=10.0,
+        result={"passed": 10, "failed": 0, "skipped": 0},
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        baseline_family_id="acceptance-full-2026-09",
+        lineage=lineage,
+    )
+
+    validate_performance_baseline_v2(payload)
+    assert {key: payload[key] for key in lineage} == lineage
+
+
+def test_v2_comparison_accepts_rounding_of_reciprocal_speedup_metrics():
+    from backend.agents.acceptance_performance_v2 import validate_performance_baseline_v2
+
+    value = _v2(
+        comparison={
+            "status": "compared",
+            "baselineFingerprint": "1" * 64,
+            "candidateFingerprint": "2" * 64,
+            "stageDeltasSeconds": {
+                "collectionSeconds": -1.0,
+                "fixturePreparationSeconds": -1.0,
+                "pytestExecutionSeconds": -1.0,
+                "aggregateSeconds": 0.0,
+                "totalWallSeconds": -2.0,
+            },
+            "totalSpeedRatio": 0.333333,
+            "totalSpeedupMultiple": 3.0,
+        }
+    )
+
+    validate_performance_baseline_v2(value)
+    assert value["comparison"]["totalSpeedRatio"] == 0.333333
+    assert value["comparison"]["totalSpeedupMultiple"] == 3.0
+
+
+def test_v2_comparison_suppresses_unrepresentable_extreme_reciprocal_metrics():
+    from backend.agents.acceptance_performance import MAX_DURATION_SECONDS
+    from backend.agents.acceptance_performance_v2 import (
+        compare_performance_baselines_v2,
+        validate_performance_baseline_v2,
+    )
+
+    baseline = _v2(stages={
+        "collectionSeconds": 0.001,
+        "fixturePreparationSeconds": 0.001,
+        "pytestExecutionSeconds": 0.001,
+        "aggregateSeconds": 0.001,
+        "totalWallSeconds": 0.001,
+    })
+    candidate = _v2(
+        baseline_role="parallel_candidate",
+        stages={
+            "collectionSeconds": 1.0,
+            "fixturePreparationSeconds": 1.0,
+            "pytestExecutionSeconds": 1.0,
+            "aggregateSeconds": 1.0,
+            "totalWallSeconds": float(MAX_DURATION_SECONDS),
+        },
+    )
+
+    comparison = compare_performance_baselines_v2(baseline, candidate)
+    assert comparison["status"] == "not_compared"
+    assert comparison["reason"] == "speedup_metric_precision_lost"
+    assert "totalSpeedRatio" not in comparison
+    assert "totalSpeedupMultiple" not in comparison
+    artifact = _v2(
+        baseline_role="parallel_candidate",
+        stages=candidate["stages"],
+        comparison=comparison,
+    )
+    validate_performance_baseline_v2(artifact)
+
+
+def test_v2_comparison_rejects_incompatible_rounded_reciprocal_metrics():
+    from backend.agents.acceptance_performance_v2 import validate_performance_baseline_v2
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        _v2(comparison={
+            "status": "compared",
+            "baselineFingerprint": "1" * 64,
+            "candidateFingerprint": "2" * 64,
+            "stageDeltasSeconds": {
+                "collectionSeconds": 0.0,
+                "fixturePreparationSeconds": 0.0,
+                "pytestExecutionSeconds": 0.0,
+                "aggregateSeconds": 0.0,
+                "totalWallSeconds": 0.0,
+            },
+            "totalSpeedRatio": 0.5,
+            "totalSpeedupMultiple": 1.9,
+        })
 
 
 def test_v2_non_qualified_reference_cannot_produce_ratio():

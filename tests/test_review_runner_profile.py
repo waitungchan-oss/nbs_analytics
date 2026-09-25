@@ -116,7 +116,7 @@ def _ready_profile(tmp_path, model="gpt-5.4"):
         "#!/bin/sh\n"
         "case \"$1\" in\n"
         "  --version) printf 'codex-cli 0.142.5\\n';;\n"
-        "  *) printf '{\"status\":\"ok\",\"model\":\"%s\"}\\n' \"$5\";;\n"
+        "  *) printf '{\"status\":\"ok\",\"model\":\"%s\"}\\n' \"$6\";;\n"
         "esac\n",
         encoding="utf-8",
     )
@@ -170,6 +170,8 @@ def test_live_probe_invokes_codex_exec_subcommand(tmp_path, monkeypatch):
     assert receipt.status == "turn_ready"
     probe_argv = next(argv for argv in observed if "--version" not in argv)
     assert probe_argv[1:3] == ["exec", "--ephemeral"]
+    assert probe_argv[3:5] == ["--color", "never"]
+    assert "--json" not in probe_argv
 
 
 def test_live_probe_decodes_codex_jsonl_agent_message(tmp_path, monkeypatch):

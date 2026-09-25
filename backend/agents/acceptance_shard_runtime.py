@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import errno
+import math
 import os
 import re
 import select
@@ -54,15 +55,6 @@ def _safe_run_id(run_id: str) -> str:
         raise ValueError("run_id must be a non-empty string")
     safe = "".join(character if character.isalnum() or character in "-_" else "-" for character in run_id)
     return safe.strip("-")[:48] or "run"
-
-
-def _check_port(port: int) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind(("127.0.0.1", port))
-        except OSError as exc:
-            raise ValueError(f"acceptance shard port {port} is unavailable") from exc
 
 
 def _windows_process_alive(process_id: int) -> bool:
@@ -151,6 +143,9 @@ class ShardRuntime:
             reservation = self._port_reservations[name]
             try:
                 address = reservation.getsockname()
+            except OSError as exc:
+                raise RuntimeError("reserved port ownership is unavailable") from exc
+            try:
                 accepting = reservation.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
             except OSError as exc:
                 if exc.errno in {errno.ENOPROTOOPT, errno.EINVAL, errno.ENOTSUP}:
@@ -174,12 +169,17 @@ class ShardRuntime:
         """
         if self._is_windows:
             raise RuntimeError("windows shard launcher is not qualified")
-        namespace_descriptor = _open_namespace_lock()
         process = None
         reservations = tuple(self._port_reservations.values())
-        readiness_reader, readiness_writer = os.pipe()
-        start_reader, start_writer = os.pipe()
+        namespace_descriptor = None
+        readiness_reader = None
+        readiness_writer = None
+        start_reader = None
+        start_writer = None
         try:
+            namespace_descriptor = _open_namespace_lock()
+            readiness_reader, readiness_writer = os.pipe()
+            start_reader, start_writer = os.pipe()
             pass_fds = tuple(reservation.fileno() for reservation in reservations) + (
                 readiness_writer, start_reader,
             )
@@ -201,11 +201,11 @@ class ShardRuntime:
                 start_new_session=True,
                 pass_fds=pass_fds,
             )
+            self.register_process_group(process.pid)
             process._nbs_readiness_reader = readiness_reader
             process._nbs_start_writer = start_writer
             readiness_reader = None
             start_writer = None
-            self.register_process_group(process.pid)
             return process
         except BaseException:
             if process is not None:
@@ -215,6 +215,17 @@ class ShardRuntime:
                     try:
                         process.kill()
                     except OSError:
+                        pass
+                try:
+                    process.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    try:
+                        process.communicate(timeout=1)
+                    except subprocess.TimeoutExpired:
                         pass
             raise
         finally:
@@ -230,25 +241,68 @@ class ShardRuntime:
                         os.close(descriptor)
                     except OSError:
                         pass
-            try:
-                os.close(namespace_descriptor)
-            except OSError:
-                pass
+            if namespace_descriptor is not None:
+                try:
+                    os.close(namespace_descriptor)
+                except OSError:
+                    pass
 
     def complete_port_handoff(
-        self, process: subprocess.Popen, *, timeout: float, readiness_callback: Callable[[], None] | None = None
+        self,
+        process: subprocess.Popen,
+        *,
+        timeout: float,
+        readiness_callback: Callable[[], None] | None = None,
+        start_callback: Callable[[], None] | None = None,
+        readiness_probe: Callable[[dict[str, int]], bool] | None = None,
     ) -> None:
-        """Read bounded child READY, invoke the barrier callback, then release START."""
+        """Read bounded child READY, then mark the boundary immediately before START."""
         readiness_reader = getattr(process, "_nbs_readiness_reader", None)
         start_writer = getattr(process, "_nbs_start_writer", None)
         if readiness_reader is None or start_writer is None:
             raise RuntimeError("child readiness descriptors are missing")
-        readable, _, _ = select.select([readiness_reader], [], [], max(float(timeout), 0.001))
-        if not readable or os.read(readiness_reader, 64) != b"READY\n":
-            raise RuntimeError("child readiness handshake failed")
-        if readiness_callback is not None:
-            readiness_callback()
-        os.write(start_writer, b"START\n")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(float(timeout)) or timeout <= 0:
+            raise ValueError("handoff timeout must be finite and strictly positive")
+        try:
+            expected_ready = "READY " + ",".join(
+                f"{name}={self._ports[name]}" for name in sorted(self._ports)
+            ) + "\n"
+            expected_bytes = expected_ready.encode("ascii")
+            deadline = time.monotonic() + float(timeout)
+            received = bytearray()
+            while b"\n" not in received:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("child readiness handshake timed out")
+                readable, _, _ = select.select([readiness_reader], [], [], remaining)
+                if not readable:
+                    raise RuntimeError("child readiness handshake timed out")
+                chunk = os.read(readiness_reader, 256 - len(received))
+                if not chunk:
+                    raise RuntimeError("child readiness handshake ended before newline")
+                received.extend(chunk)
+                if len(received) >= 256 and b"\n" not in received:
+                    raise RuntimeError("child readiness handshake exceeded size limit")
+            if bytes(received) != expected_bytes:
+                raise RuntimeError("child readiness handshake failed")
+            # Parent reservation handles are intentionally closed during launch;
+            # the child-owned endpoint identity is the readiness boundary.
+            if readiness_probe is not None and not readiness_probe(dict(self._ports)):
+                raise RuntimeError("child readiness probe failed")
+            if readiness_callback is not None:
+                readiness_callback()
+            if start_callback is not None:
+                start_callback()
+            os.write(start_writer, b"START\n")
+        finally:
+            for descriptor_name in ("_nbs_readiness_reader", "_nbs_start_writer"):
+                descriptor = getattr(process, descriptor_name, None)
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                    setattr(process, descriptor_name, None)
 
     def handoff_ports(self) -> None:
         """Release probes only through an explicit child bind/readiness protocol."""
@@ -257,21 +311,8 @@ class ShardRuntime:
     def handoff_ports_with_readiness(
         self, bind_and_probe: Callable[[dict[str, int]], bool]
     ) -> None:
-        """Run a lock-coordinated bind/readiness handoff for an external child."""
-        if not callable(bind_and_probe):
-            raise ValueError("bind_and_probe must be callable")
-        namespace_descriptor = _open_namespace_lock()
-        for reservation in self._port_reservations.values():
-            try:
-                reservation.close()
-            except OSError:
-                continue
-        self._port_reservations.clear()
-        try:
-            if not bind_and_probe(self.profile_ports()):
-                raise RuntimeError("child port readiness probe failed")
-        finally:
-            os.close(namespace_descriptor)
+        """Reject the legacy release-and-rebind handoff path."""
+        raise RuntimeError("legacy port handoff is disabled; use reserved-fd-v1")
 
     def register_process_group(self, process_id: int) -> None:
         if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
@@ -586,11 +627,6 @@ def _ports_for(run_id: str, shard_index: int) -> dict[str, int]:
     if max(ports.values()) >= 65536:
         offset = offset % (_PORT_SPAN - len(_PORT_NAMES))
         ports = {name: _PORT_BASE + offset + position for position, name in enumerate(_PORT_NAMES)}
-    try:
-        for port in ports.values():
-            _check_port(port)
-    except ValueError as exc:
-        raise RuntimeError("shard runtime port allocation failed") from exc
     return ports
 
 

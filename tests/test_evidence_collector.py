@@ -1,4 +1,6 @@
+import hashlib
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -286,6 +288,47 @@ def test_review_launch_fingerprint_uses_full_status_when_excerpt_is_truncated(tm
     ).hexdigest()
 
 
+def test_full_review_command_capture_bounds_excerpt_and_hashes_complete_output(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    for index in range(20):
+        (tmp_path / f"untracked-{index:02d}.md").write_text("content", encoding="utf-8")
+
+    argv = ["git", "status", "--porcelain", "--untracked-files=all"]
+    raw = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=True).stdout
+    streamed = []
+    result = EvidenceCollector(tmp_path)._run_full_stdout(
+        argv,
+        stdout_consumer=streamed.append,
+        max_stdout_bytes=32,
+    )
+
+    assert result.stdout_truncated is True
+    assert result.stdout_bytes == len(raw)
+    assert result.stdout_sha256 == hashlib.sha256(raw).hexdigest()
+    assert len(result.stdout_excerpt.encode("utf-8")) <= 32
+    assert "".join(streamed).encode("utf-8") == raw[:32]
+    assert len(result.stdout_sha256) == 64
+
+
+def test_review_collection_fails_closed_when_patch_capture_budget_is_exceeded(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    changed = tmp_path / "docs/changed.md"
+    brief.write_text("objective", encoding="utf-8")
+    changed.write_text("before", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    changed.write_text("after" * 100, encoding="utf-8")
+    collector = EvidenceCollector(tmp_path)
+    collector._MAX_REVIEW_EVIDENCE_BYTES = 48
+
+    with pytest.raises(RuntimeError, match="bounded capture budget"):
+        collector.collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+
 def test_review_file_lists_use_review_excerpt_budget_for_tracked_and_untracked_paths(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path, review_command_characters=1200)
@@ -320,6 +363,74 @@ def test_review_file_lists_use_review_excerpt_budget_for_tracked_and_untracked_p
     assert len(bundle.evidence) == 40
 
 
+def test_untracked_diff_inspection_is_recorded_as_successful_verification(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    (tmp_path / "docs/new-file.md").write_text("new evidence", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+    command = next(item for item in bundle.commands if item.label == "git-diff-untracked-file-0")
+    patch = next(item for item in bundle.evidence if item.source == "docs/new-file.md")
+    assert command.exit_code == 0
+    assert patch.metadata["untracked"] is True
+
+
+def test_review_collector_splits_large_patch_within_configured_excerpt_limit(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path, review_command_characters=24000)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    change = tmp_path / "docs/large.py"
+    content = "+review-line-0123456789\n" * 1800
+    change.write_text(content, encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+    patches = [item for item in bundle.evidence if item.source == "docs/large.py"]
+    full_diff = subprocess.run(
+        ["git", "diff", "--no-ext-diff", "--no-index", "--", "/dev/null", "docs/large.py"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    ).stdout
+    assert len(patches) > 1
+    assert "".join(item.content for item in patches) == full_diff
+    assert all(len(item.content) <= 24000 for item in patches)
+    assert all(item.metadata["truncated"] is False for item in patches)
+    assert all(item.metadata["segmentCount"] == len(patches) for item in patches)
+
+
+def test_review_collection_fails_closed_when_launch_worktree_probe_fails(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    collector = EvidenceCollector(tmp_path)
+    from backend.agents.evidence_collector import FullCommandOutput
+
+    collector._run_full_stdout = lambda argv, **kwargs: FullCommandOutput(
+        returncode=128,
+        stdout_excerpt="",
+        stderr_excerpt="simulated git status failure",
+        stdout_sha256="0" * 64,
+        stdout_bytes=0,
+        stdout_truncated=False,
+    )
+
+    with pytest.raises(RuntimeError, match="launch worktree probe failed"):
+        collector.collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
+
+
 def test_review_diff_falls_back_to_ordinary_excerpt_budget_when_config_omits_review_limit(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)
@@ -332,13 +443,20 @@ def test_review_diff_falls_back_to_ordinary_excerpt_budget_when_config_omits_rev
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
     changed.write_text("x" * 500, encoding="utf-8")
 
-    review = EvidenceCollector(tmp_path).collect_review(
+    policy = replace(EvidencePolicy.from_project(tmp_path), review_max_command_characters=None)
+    review = EvidenceCollector(tmp_path, policy=policy).collect_review(
         brief, base_ref="HEAD", head_ref="WORKTREE",
     )
 
-    patch = next(item for item in review.evidence if item.source == "docs/changed.md")
-    assert patch.metadata["truncated"] is True
-    assert len(patch.content) == 200
+    patches = [item for item in review.evidence if item.source == "docs/changed.md"]
+    patch_commands = [item for item in review.commands if item.label.startswith("git-diff-file-")]
+    assert len(patches) > 1
+    assert all(item.metadata["truncated"] is False for item in patches)
+    assert all(len(item.content) <= 200 for item in patches)
+    assert "x" * 500 in "".join(item.content for item in patches)
+    assert len(patch_commands) == 1
+    assert len(patch_commands[0].stdout) <= 200
+    assert patch_commands[0].truncated is True
 
 
 @pytest.mark.parametrize("head_ref", ["worktree", "working-tree", "working_tree", "WORKTREE"])

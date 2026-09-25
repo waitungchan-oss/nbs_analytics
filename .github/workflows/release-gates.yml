@@ -304,7 +304,10 @@ jobs:
     # gh workflow run release-gates.yml -f enable_acceptance_parallel_rollout=false
     if: github.event_name == 'workflow_dispatch' && inputs.enable_acceptance_parallel_rollout == true
     runs-on: macos-14
-    timeout-minutes: 120
+    # Three runs may each consume one serial and one parallel 1800s budget.
+    # Keep a bounded 240-minute controller budget so legal evidence is not
+    # truncated before the diagnostic artifact is emitted.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
@@ -318,23 +321,66 @@ jobs:
           .venv/bin/python -m pip install -r requirements.txt
       - name: Collect source-bound contract and manifest
         run: |
-          SOURCE_FINGERPRINT=$(git archive --format=tar "$GITHUB_SHA" | shasum -a 256 | awk '{print $1}')
+          ROLLOUT_ROOT="$RUNNER_TEMP/nbs-acceptance-parallel-rollout"
+          ROLLOUT_SESSIONS="$ROLLOUT_ROOT/verification_sessions"
+          mkdir -p "$ROLLOUT_SESSIONS"
+          BASE_SHA=$(git merge-base "$GITHUB_SHA" "origin/main")
+          test -n "$BASE_SHA"
+          SEAL_OUTPUT=$(.venv/bin/python scripts/verification_chain.py seal --project-root "$GITHUB_WORKSPACE" --runtime-root "$ROLLOUT_SESSIONS" --brief docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md --base "$BASE_SHA")
+          printf '%s\n' "$SEAL_OUTPUT" > "$ROLLOUT_ROOT/source-seal-result.json"
+          SESSION_ID=$(printf '%s' "$SEAL_OUTPUT" | .venv/bin/python -c 'import json, sys; print(json.load(sys.stdin)["sessionId"])')
+          SOURCE_FINGERPRINT=$(printf '%s' "$SEAL_OUTPUT" | .venv/bin/python -c 'import json, sys; print(json.load(sys.stdin)["sourceFingerprint"])')
+          SOURCE_SESSION_PATH="$ROLLOUT_SESSIONS/$SESSION_ID/session.json"
+          SOURCE_SEAL_PATH="$ROLLOUT_ROOT/source-seal.json"
+          test -s "$SOURCE_SESSION_PATH"
+          .venv/bin/python - "$SOURCE_SESSION_PATH" "$SOURCE_SEAL_PATH" "$SOURCE_FINGERPRINT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          from scripts.acceptance_parallel_rollout import (
+              _SOURCE_SESSION_FIELDS,
+              _normalized_source_session,
+              _valid_source_session,
+          )
+
+          session_path, seal_path = map(Path, sys.argv[1:3])
+          source_fingerprint = sys.argv[3]
+          expected_session = json.loads(session_path.read_text(encoding="utf-8"))
+          expected = _normalized_source_session(expected_session)
+          if expected["sourceFingerprint"] != source_fingerprint:
+              raise SystemExit("source fingerprint does not match the canonical verification session")
+          source_seal = {
+              "schemaVersion": "source-seal-v1",
+              **{field: expected[field] for field in _SOURCE_SESSION_FIELDS},
+          }
+          actual = _normalized_source_session(source_seal)
+          if not _valid_source_session(source_seal) or any(
+              actual.get(field) != expected.get(field) for field in _SOURCE_SESSION_FIELDS
+          ):
+              raise SystemExit("generated source seal does not match the canonical verification session")
+          seal_path.write_text(json.dumps(source_seal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          PY
+          test -s "$SOURCE_SEAL_PATH"
           SCOPE_FINGERPRINT=$(printf '%s' 'nbs-acceptance|formal-scope-v1|不含掛賬核銷與TT退款轉團款' | shasum -a 256 | awk '{print $1}')
           SEMANTIC_RULES_FINGERPRINT=$(printf '%s' 'acceptance-semantic-rules-v1' | shasum -a 256 | awk '{print $1}')
           DATASET_SNAPSHOT_FINGERPRINT=$(printf '%s' 'release-gate-ci-fixture|dataset-snapshot-v1' | shasum -a 256 | awk '{print $1}')
-          RUNNER_FINGERPRINT=$(python -c 'import hashlib, platform, sys; requirements = hashlib.sha256(open("requirements.txt", "rb").read()).hexdigest(); raw = f"{platform.system()}|{platform.machine()}|{sys.version_info[:3]}|{requirements}"; print(hashlib.sha256(raw.encode("utf-8")).hexdigest())')
-          ENVIRONMENT_FINGERPRINT=$(python -c 'import hashlib, platform, sys; raw = f"{platform.system()}|{platform.machine()}|{sys.version_info[:3]}|acceptance-parallel-rollout-v1"; print(hashlib.sha256(raw.encode("utf-8")).hexdigest())')
+          RUNNER_FINGERPRINTS=$(.venv/bin/python -c 'import hashlib,json,os,platform,subprocess,sys; packages=subprocess.check_output([sys.executable,"-m","pip","freeze","--all"],text=True); image={"imageOS":os.environ.get("ImageOS","unknown"),"imageVersion":os.environ.get("ImageVersion","unknown"),"osVersion":platform.mac_ver()[0] or platform.release()}; identity={"system":platform.system(),"machine":platform.machine(),"python":sys.version_info[:3],"requirementsSha256":hashlib.sha256(open("requirements.txt","rb").read()).hexdigest(),"installedPackages":packages.splitlines(),"runnerImage":image}; encoded=json.dumps(identity,sort_keys=True,separators=(",",":")).encode(); runner=hashlib.sha256(encoded).hexdigest(); environment=hashlib.sha256(json.dumps({"runnerFingerprint":runner,"profile":"acceptance-parallel-rollout-v1","runnerImage":image},sort_keys=True,separators=(",",":")).encode()).hexdigest(); print(runner); print(environment)')
+          RUNNER_FINGERPRINT=$(printf '%s\n' "$RUNNER_FINGERPRINTS" | sed -n '1p')
+          ENVIRONMENT_FINGERPRINT=$(printf '%s\n' "$RUNNER_FINGERPRINTS" | sed -n '2p')
           mkdir -p "$RUNNER_TEMP/nbs-acceptance-parallel-rollout"
           .venv/bin/python scripts/acceptance_baseline.py contract --contract-id nbs-acceptance --contract-version formal-scope-v1 --scope-fingerprint "$SCOPE_FINGERPRINT" --semantic-rules-fingerprint "$SEMANTIC_RULES_FINGERPRINT" --dataset-snapshot-fingerprint "$DATASET_SNAPSHOT_FINGERPRINT" --output "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/contract.json"
           .venv/bin/python scripts/pytest_manifest.py --project-root "$GITHUB_WORKSPACE" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --output "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/pytest-manifest.json"
           {
             echo "SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT"
+            echo "SOURCE_SESSION_PATH=$SOURCE_SESSION_PATH"
+            echo "SOURCE_SEAL_PATH=$SOURCE_SEAL_PATH"
             echo "RUNNER_FINGERPRINT=$RUNNER_FINGERPRINT"
             echo "ENVIRONMENT_FINGERPRINT=$ENVIRONMENT_FINGERPRINT"
           } >> "$GITHUB_ENV"
       - name: Run three-run parallel diagnostic rollout
         run: |
-          .venv/bin/python scripts/acceptance_parallel_rollout.py --project-root "$GITHUB_WORKSPACE" --manifest "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/pytest-manifest.json" --contract "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/contract.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --runner-fingerprint "$RUNNER_FINGERPRINT" --environment-fingerprint "$ENVIRONMENT_FINGERPRINT" --baseline-family-id acceptance-full-serial-ci-v1 --shard-count 4 --repeats 3 --timeout 1800 --output "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/acceptance-parallel-rollout.json"
+          SHARD_COUNT=$(.venv/bin/python -c 'import os; n=len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1); print(4 if n >= 4 else 2)')
+          .venv/bin/python scripts/acceptance_parallel_rollout.py --project-root "$GITHUB_WORKSPACE" --manifest "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/pytest-manifest.json" --contract "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/contract.json" --commit-sha "$GITHUB_SHA" --source-fingerprint "$SOURCE_FINGERPRINT" --runner-fingerprint "$RUNNER_FINGERPRINT" --environment-fingerprint "$ENVIRONMENT_FINGERPRINT" --baseline-family-id acceptance-full-serial-ci-v1 --shard-count "$SHARD_COUNT" --repeats 3 --timeout 1800 --source-seal "$SOURCE_SEAL_PATH" --source-session "$SOURCE_SESSION_PATH" --output "$RUNNER_TEMP/nbs-acceptance-parallel-rollout/acceptance-parallel-rollout.json"
       - if: always()
         uses: actions/upload-artifact@v4
         with:

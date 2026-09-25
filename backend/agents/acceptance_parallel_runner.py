@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
-import errno
 import os
 import socket
 import sys
 import tempfile
 import threading
 import time
+import weakref
 import uuid
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures.thread import _worker
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Mapping
@@ -22,6 +23,7 @@ from scripts.full_pytest_shard_aggregate import aggregate_pytest_shards, validat
 
 ALLOWED_SHARD_COUNTS = frozenset({2, 4, 8, 16})
 DEFAULT_TIMEOUT_SECONDS = 1800
+CHILD_FAILURE_CLEANUP_SECONDS = 5
 EXECUTION_LINEAGE_FIELDS = (
     "runnerFingerprint",
     "environmentFingerprint",
@@ -29,11 +31,47 @@ EXECUTION_LINEAGE_FIELDS = (
 )
 
 
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """Keep controller return bounded without interpreter-exit thread joins."""
+
+    def _adjust_thread_count(self):
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        if len(self._threads) < self._max_workers:
+            thread_name = "%s_%d" % (
+                self._thread_name_prefix or self,
+                len(self._threads),
+            )
+            thread = threading.Thread(
+                name=thread_name,
+                target=_worker,
+                args=(weakref.ref(self, weakref_cb), self._work_queue, self._initializer, self._initargs),
+                daemon=True,
+            )
+            thread.start()
+            self._threads.add(thread)
+
+
+def _join_executor_workers(executor, *, timeout_seconds=1.0):
+    """Join controller workers for a bounded interval after cancellation."""
+    deadline = time.perf_counter() + max(float(timeout_seconds), 0.0)
+    for thread in tuple(executor._threads):
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        thread.join(timeout=remaining)
+    return all(not thread.is_alive() for thread in tuple(executor._threads))
+
+
 def _timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _validate_output_root(project_root, output_root):
+def _validate_output_root(project_root, output_root, *, require_fresh=True):
     root = Path(output_root).expanduser()
     if root.is_symlink():
         raise ValueError("output root must not be a symlink")
@@ -43,13 +81,22 @@ def _validate_output_root(project_root, output_root):
     resolved = root.resolve()
     if resolved == project or project in resolved.parents:
         raise ValueError("output root must not be inside the project root")
-    root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink():
+        raise ValueError("output root must not be a symlink")
+    if root.exists() and require_fresh:
+        raise ValueError("output root must be fresh and not already exist")
+    if not root.exists():
+        try:
+            root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise ValueError("output root must be fresh and not already exist") from exc
     if root.is_symlink() or not root.is_dir():
         raise ValueError("output root is not a regular directory")
     return root.resolve()
 
 
 def _port_readiness(ports):
+    """Probe the ports after the child has adopted the inherited listeners."""
     if not isinstance(ports, Mapping) or not ports:
         return False
     values = list(ports.values())
@@ -57,25 +104,10 @@ def _port_readiness(ports):
         return False
     if len(values) != len(set(values)):
         return False
-    reservations = getattr(ports, "reserved_sockets", None)
-    if not isinstance(reservations, Mapping) or set(reservations) != set(ports):
-        return False
     for name, port in ports.items():
-        reservation = reservations.get(name)
-        if not isinstance(reservation, socket.socket) or reservation.fileno() < 0:
-            return False
         try:
-            if reservation.getsockname()[:2] != ("127.0.0.1", port):
-                return False
-            try:
-                accepting = reservation.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
-            except OSError as exc:
-                if exc.errno in {errno.ENOPROTOOPT, errno.EINVAL, errno.ENOTSUP}:
-                    accepting = None
-                else:
-                    return False
-            if accepting not in {None, 1}:
-                return False
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                pass
         except OSError:
             return False
     return True
@@ -91,6 +123,48 @@ def _validate_execution_lineage(lineage):
             raise ValueError(f"execution lineage {field} is invalid")
         result[field] = value
     return result
+
+
+def _live_worker_capacity():
+    affinity = getattr(os, "sched_getaffinity", None)
+    if callable(affinity):
+        try:
+            return max(1, len(affinity(0)))
+        except OSError:
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
+def build_runner_capability_receipt(runner_fingerprint):
+    if not isinstance(runner_fingerprint, str) or len(runner_fingerprint) != 64 or any(
+        char not in "0123456789abcdef" for char in runner_fingerprint
+    ):
+        raise ValueError("runner capability fingerprint is invalid")
+    unsigned = {
+        "schemaVersion": "acceptance-runner-capability-v1",
+        "runnerFingerprint": runner_fingerprint,
+        "maxWorkers": _live_worker_capacity(),
+    }
+    return {**unsigned, "capabilityFingerprint": canonical_fingerprint(unsigned)}
+
+
+def _validate_runner_capability(capability, runner_fingerprint):
+    if not isinstance(capability, Mapping):
+        raise ValueError("runner capability is required")
+    expected_keys = {"schemaVersion", "runnerFingerprint", "maxWorkers", "capabilityFingerprint"}
+    if set(capability) != expected_keys or capability.get("schemaVersion") != "acceptance-runner-capability-v1":
+        raise ValueError("runner capability receipt schema is invalid")
+    unsigned = {key: capability[key] for key in ("schemaVersion", "runnerFingerprint", "maxWorkers")}
+    if capability.get("capabilityFingerprint") != canonical_fingerprint(unsigned):
+        raise ValueError("runner capability receipt fingerprint is invalid")
+    if capability.get("runnerFingerprint") != runner_fingerprint:
+        raise ValueError("runner capability receipt fingerprint binding mismatch")
+    max_workers = capability.get("maxWorkers")
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers < 1:
+        raise ValueError("runner capability maxWorkers is invalid")
+    if max_workers > _live_worker_capacity():
+        raise ValueError("runner capability exceeds live worker capacity")
+    return max_workers
 
 
 def _child_lineage_matches(artifact, expected):
@@ -134,7 +208,12 @@ def _write_artifact(output_root, index, artifact):
     target = output_root / f"shard-{index}.json"
     if target.is_symlink() or target.exists():
         raise ValueError("shard artifact path must be new and non-symlink")
-    target.write_text(json.dumps(dict(artifact), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    payload = json.dumps(dict(artifact), ensure_ascii=False, indent=2) + "\n"
+    try:
+        with target.open("x", encoding="utf-8") as handle:
+            handle.write(payload)
+    except FileExistsError as exc:
+        raise ValueError("shard artifact path must be new and non-symlink") from exc
     return target
 
 
@@ -150,12 +229,18 @@ def _cleanup_ok(artifact):
 
 def run_parallel_shards(
     *, project_root, manifest, commit_sha, source_fingerprint, shard_count, output_root,
-    timeout_seconds=DEFAULT_TIMEOUT_SECONDS, execution_lineage=None,
+    timeout_seconds=DEFAULT_TIMEOUT_SECONDS, execution_lineage=None, runner_capability=None,
 ):
     if isinstance(shard_count, bool) or shard_count not in ALLOWED_SHARD_COUNTS:
         raise ValueError("shard count must be one of 2, 4, 8, or 16")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
         raise ValueError("timeout must be positive")
+    lineage = _validate_execution_lineage(execution_lineage)
+    max_workers = _validate_runner_capability(
+        runner_capability, lineage["runnerFingerprint"],
+    )
+    if shard_count > max_workers:
+        raise ValueError("shard count exceeds runner capability maxWorkers")
     try:
         manifest_commit, manifest_source, nodeids, manifest_fingerprint = _validate_manifest(manifest)
     except (TypeError, ValueError) as exc:
@@ -166,38 +251,34 @@ def run_parallel_shards(
     if not root.is_dir():
         raise ValueError("project root must be an existing directory")
     output = _validate_output_root(root, Path(output_root))
-    lineage = _validate_execution_lineage(execution_lineage) if execution_lineage is not None else None
-
     start_lock = threading.Lock()
-    launch_timestamp = []
-    first_child_monotonic = []
-    first_child_timestamp = []
+    coordinated_start_monotonic = []
+    coordinated_start_timestamp = []
     controller_started = time.perf_counter()
     controller_deadline = controller_started + float(timeout_seconds)
 
     def mark_coordinated_start():
         with start_lock:
-            launch_timestamp.append(_timestamp())
+            if not coordinated_start_monotonic:
+                coordinated_start_monotonic.append(time.perf_counter())
+                coordinated_start_timestamp.append(_timestamp())
 
-    def mark_first_child_launch():
-        with start_lock:
-            if not first_child_monotonic:
-                first_child_monotonic.append(time.perf_counter())
-                first_child_timestamp.append(_timestamp())
-
-    readiness_barrier = threading.Barrier(shard_count, action=mark_coordinated_start)
+    readiness_barrier = threading.Barrier(shard_count)
+    start_barrier = threading.Barrier(shard_count, action=mark_coordinated_start)
     runtime_lock = threading.Lock()
     active_runtimes = {}
     runtime_seen = set()
     cleanup_confirmed = {}
+    unregistration_observed = set()
     ready_indexes = set()
     cancel_requested = threading.Event()
 
     def abort_readiness_barrier():
-        try:
-            readiness_barrier.abort()
-        except (threading.BrokenBarrierError, RuntimeError):
-            pass
+        for barrier in (readiness_barrier, start_barrier):
+            try:
+                barrier.abort()
+            except (threading.BrokenBarrierError, RuntimeError):
+                pass
 
     def observe_runtime(index, event, runtime):
         with runtime_lock:
@@ -206,6 +287,7 @@ def run_parallel_shards(
                 runtime_seen.add(index)
             elif event == "unregistered":
                 active_runtimes.pop(index, None)
+                unregistration_observed.add(index)
                 report = getattr(runtime, "_cleanup", None)
                 cleanup_confirmed[index] = (
                     isinstance(report, Mapping)
@@ -213,15 +295,31 @@ def run_parallel_shards(
                     and report.get("allProcessGroupsTerminated") is True
                     and not report.get("leakedProcesses")
                 )
+        if event == "registered" and cancel_requested.is_set():
+            try:
+                runtime.terminate_process_groups(force=True)
+            finally:
+                raise TimeoutError("controller timeout during runtime registration")
 
-    def force_cleanup(index):
+    def force_cleanup(index, *, worker_stopped=False, owner_thread=False):
+        if not worker_stopped and not owner_thread:
+            return False
         with runtime_lock:
-            if cleanup_confirmed.get(index) is True:
+            confirmed = cleanup_confirmed.get(index)
+            if confirmed is True:
                 return True
             runtime = active_runtimes.get(index)
             was_seen = index in runtime_seen
         if runtime is None:
-            return not was_seen
+            # A shard canceled before runtime registration has no process group
+            # to terminate; only a previously observed runtime needs explicit
+            # cleanup confirmation.
+            safe_without_runtime = confirmed is True or not was_seen
+            if safe_without_runtime:
+                with runtime_lock:
+                    cleanup_confirmed[index] = True
+                    unregistration_observed.add(index)
+            return safe_without_runtime
         termination_ok = True
         try:
             runtime.terminate_process_groups(force=True)
@@ -241,20 +339,23 @@ def run_parallel_shards(
         with runtime_lock:
             active_runtimes.pop(index, None)
             cleanup_confirmed[index] = confirmed
+            if confirmed:
+                unregistration_observed.add(index)
         return confirmed
 
     def readiness_evidence():
         with runtime_lock:
             ready_count = len(ready_indexes)
         return {
-            "status": "PASS" if ready_count == shard_count and launch_timestamp else "BLOCKED",
+            "status": "PASS" if ready_count == shard_count and coordinated_start_timestamp else "BLOCKED",
             "expectedShardCount": shard_count,
             "readyShardCount": ready_count,
-            "releasedAt": launch_timestamp[0] if launch_timestamp else None,
+            "releasedAt": coordinated_start_timestamp[0] if coordinated_start_timestamp else None,
         }
 
     def one_shard(index, fixture_root):
         readiness_called = False
+        start_called = False
 
         def child_ready():
             nonlocal readiness_called
@@ -263,9 +364,17 @@ def run_parallel_shards(
                 ready_indexes.add(index)
             try:
                 remaining = controller_deadline - time.perf_counter()
-                readiness_barrier.wait(timeout=max(min(remaining, 60.0), 0.001))
+                readiness_barrier.wait(timeout=max(remaining, 0.001))
             except threading.BrokenBarrierError:
                 raise TimeoutError("readiness barrier aborted")
+
+        def child_start():
+            nonlocal start_called
+            start_called = True
+            remaining = controller_deadline - time.perf_counter()
+            if remaining <= 0:
+                raise TimeoutError("controller timeout before coordinated start")
+            start_barrier.wait(timeout=remaining)
 
         try:
             if cancel_requested.is_set():
@@ -279,7 +388,6 @@ def run_parallel_shards(
                     all_process_groups_terminated=True,
                 )
             else:
-                mark_first_child_launch()
                 artifact = run_pytest_shard(
                     project_root=root,
                     manifest=manifest,
@@ -292,16 +400,22 @@ def run_parallel_shards(
                     lineage=lineage,
                     runtime_observer=lambda event, runtime: observe_runtime(index, event, runtime),
                     readiness_callback=child_ready,
+                    start_callback=child_start,
                 )
-                if not readiness_called:
-                    raise RuntimeError("child readiness callback is required")
+                if artifact.get("status") == "PASS":
+                    if not readiness_called:
+                        raise RuntimeError("passing child must report readiness")
+                    if not start_called:
+                        raise RuntimeError("passing child must report coordinated start")
+                elif not readiness_called or not start_called:
+                    abort_readiness_barrier()
         except TimeoutError:
             abort_readiness_barrier()
             artifact = _blocked_shard(
                 index=index, shard_count=shard_count, commit_sha=commit_sha,
                 source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
                 fixture_root=fixture_root, failure_code="controller_timeout", lineage=lineage,
-                all_process_groups_terminated=force_cleanup(index),
+                all_process_groups_terminated=force_cleanup(index, owner_thread=True),
             )
         except threading.BrokenBarrierError:
             abort_readiness_barrier()
@@ -309,7 +423,7 @@ def run_parallel_shards(
                 index=index, shard_count=shard_count, commit_sha=commit_sha,
                 source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
                 fixture_root=fixture_root, failure_code="start_barrier_failed", lineage=lineage,
-                all_process_groups_terminated=force_cleanup(index),
+                all_process_groups_terminated=force_cleanup(index, owner_thread=True),
             )
         except BaseException as exc:
             abort_readiness_barrier()
@@ -322,7 +436,7 @@ def run_parallel_shards(
                 fixture_root=fixture_root,
                 failure_code="pytest_runner_error" if isinstance(exc, Exception) else "pytest_runner_interrupted",
                 lineage=lineage,
-                all_process_groups_terminated=force_cleanup(index),
+                all_process_groups_terminated=force_cleanup(index, owner_thread=True),
             )
         return index, artifact
 
@@ -337,43 +451,147 @@ def run_parallel_shards(
     timed_out_indexes = set()
     executor_shutdown = False
     termination_errors = []
-    executor = ThreadPoolExecutor(max_workers=shard_count, thread_name_prefix="acceptance-shard")
+
+    def terminate_active_runtimes():
+        cancel_requested.set()
+        abort_readiness_barrier()
+        with runtime_lock:
+            active = tuple(active_runtimes.items())
+        for index, runtime in active:
+            try:
+                runtime.terminate_process_groups(force=True)
+            except Exception as exc:
+                termination_errors.append(f"shard_{index}:{str(exc)[:220]}")
+
+    def resolve_future(index, future):
+        if future.cancelled():
+            return index, _blocked_shard(
+                index=index, shard_count=shard_count, commit_sha=commit_sha,
+                source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+                fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
+                all_process_groups_terminated=False,
+            )
+        try:
+            resolved_index, artifact = future.result()
+            if resolved_index != index:
+                raise RuntimeError("parallel shard future index mismatch")
+            if not _cleanup_ok(artifact):
+                force_cleanup(index, worker_stopped=True)
+            return resolved_index, artifact
+        except BaseException as exc:
+            cleaned = force_cleanup(index, worker_stopped=True)
+            return index, _blocked_shard(
+                index=index, shard_count=shard_count, commit_sha=commit_sha,
+                source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+                fixture_root=fixture_roots[index], failure_code="pytest_runner_error",
+                lineage=lineage, all_process_groups_terminated=cleaned,
+            )
+
+    def finish_result(failure_code, cleanup, **extra):
+        # Artifact serialization and aggregation are outside the execution clock.
+        finished = execution_finished[0] if execution_finished else time.perf_counter()
+        ordered = sorted(results, key=lambda item: item[0])
+        leaked_fixture_roots = sorted(
+            str(root) for root in fixture_roots.values()
+            if root.exists() or root.is_symlink()
+        )
+        fixture_cleanup_ok = not leaked_fixture_roots
+        with runtime_lock:
+            active_runtime_indexes = sorted(active_runtimes)
+            cleanup_confirmation_missing = sorted(
+                index for index in range(shard_count)
+                if index not in unregistration_observed
+                or cleanup_confirmed.get(index) is not True
+            )
+        runtime_cleanup_ok = not active_runtime_indexes and not cleanup_confirmation_missing
+        cleanup = {
+            **cleanup,
+            "allProcessGroupsTerminated": cleanup.get("allProcessGroupsTerminated") is True,
+            "runtimeCleanupConfirmed": runtime_cleanup_ok,
+            "activeRuntimeCount": len(active_runtime_indexes),
+            "cleanupConfirmationMissingShards": cleanup_confirmation_missing,
+            "fixtureRootsRemoved": fixture_cleanup_ok,
+            "leakedFixtureRoots": leaked_fixture_roots,
+        }
+        if failure_code is None and (not fixture_cleanup_ok or not runtime_cleanup_ok):
+            failure_code = "isolation_violation"
+        artifact_paths = []
+        artifact_write_error = None
+        for index, artifact in ordered:
+            try:
+                artifact_paths.append(str(_write_artifact(output, index, artifact)))
+            except (OSError, TypeError, ValueError) as exc:
+                artifact_write_error = str(exc)[:240]
+                break
+        if artifact_write_error is not None and failure_code is None:
+            failure_code = "artifact_write_failed"
+        result = {
+            "status": "BLOCKED" if failure_code else "PASS",
+            "failureCode": failure_code,
+            "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,
+            "manifestFingerprint": manifest_fingerprint, "shardCount": shard_count,
+            "shards": [item[1] for item in ordered],
+            "shardArtifactPaths": artifact_paths,
+            "parallelWallSeconds": max(round(finished - (
+                coordinated_start_monotonic[0] if coordinated_start_monotonic else controller_started), 6), .001),
+            "startedAt": coordinated_start_timestamp[0] if coordinated_start_timestamp else None,
+            "finishedAt": _timestamp(), "readiness": readiness_evidence(),
+            "cleanup": cleanup,
+        }
+        result.update(extra)
+        if artifact_write_error is not None:
+            for key in (
+                "aggregate", "coverage", "parity", "speedupMultiple", "speedRatio",
+                "comparison", "performance",
+            ):
+                result.pop(key, None)
+            result["artifactWrite"] = {
+                "status": "BLOCKED",
+                "expectedShardArtifacts": len(ordered),
+                "writtenShardArtifacts": len(artifact_paths),
+                "error": artifact_write_error,
+            }
+        return result
+
+    execution_finished = []
+    executor = _DaemonThreadPoolExecutor(max_workers=shard_count, thread_name_prefix="acceptance-shard")
     try:
         futures = {
             index: executor.submit(one_shard, index, fixture_roots[index])
             for index in range(shard_count)
         }
-        done, pending = wait(
-            tuple(futures.values()),
-            timeout=max(controller_deadline - time.perf_counter(), 0.0),
-        )
-        for index, future in futures.items():
-            if future in pending:
-                future.cancel()
-                results.append((
-                    index,
-                    _blocked_shard(
-                        index=index, shard_count=shard_count, commit_sha=commit_sha,
-                        source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
-                        fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
-                        all_process_groups_terminated=False,
-                    ),
-                ))
+        future_indexes = {future: index for index, future in futures.items()}
+        pending = set(futures.values())
+        child_failed = False
+        while pending and not child_failed:
+            remaining = controller_deadline - time.perf_counter()
+            if remaining <= 0:
                 timed_out = True
-                continue
-            try:
-                results.append(future.result())
-            except BaseException as exc:
-                cleaned = force_cleanup(index)
-                results.append((
-                    index,
-                    _blocked_shard(
-                        index=index, shard_count=shard_count, commit_sha=commit_sha,
-                        source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
-                        fixture_root=fixture_roots[index], failure_code="pytest_runner_error",
-                        lineage=lineage, all_process_groups_terminated=cleaned,
-                    ),
-                ))
+                break
+            done, pending = wait(
+                pending, timeout=remaining, return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                timed_out = True
+                break
+            for future in done:
+                index, artifact = resolve_future(future_indexes[future], future)
+                results.append((index, artifact))
+                if artifact.get("status") != "PASS" and not child_failed:
+                    child_failed = True
+                    terminate_active_runtimes()
+        if child_failed and pending:
+            done, pending = wait(
+                pending,
+                timeout=min(
+                    CHILD_FAILURE_CLEANUP_SECONDS,
+                    max(controller_deadline - time.perf_counter(), 0.0),
+                ),
+            )
+            for future in done:
+                results.append(resolve_future(future_indexes[future], future))
+            if pending:
+                timed_out = True
 
         if timed_out:
             timed_out_indexes = {index for index, future in futures.items() if future in pending}
@@ -386,12 +604,29 @@ def run_parallel_shards(
                     runtime.terminate_process_groups(force=True)
                 except Exception as exc:
                     termination_errors.append(str(exc)[:256])
-            executor.shutdown(wait=True, cancel_futures=True)
+            executor.shutdown(wait=False, cancel_futures=True)
             executor_shutdown = True
+            # Give workers a bounded termination barrier. A daemon executor keeps
+            # the controller from hanging forever, but unfinished workers must
+            # remain explicitly unconfirmed and cannot yield aggregate evidence.
+            _done_after_cleanup, pending_after_cleanup = wait(
+                tuple(futures.values()), timeout=1.0,
+            )
+            worker_termination_confirmed = (
+                not pending_after_cleanup
+                and _join_executor_workers(executor, timeout_seconds=1.0)
+            )
+            if not worker_termination_confirmed:
+                termination_errors.append("worker_termination_unconfirmed")
             futures_completed = all(future.done() for future in futures.values())
-            if not futures_completed: termination_errors += ["future_not_done"]
-            post_cleanup = {index: force_cleanup(index) for index in range(shard_count)}
-            timed_out_cleanup_ok = all(post_cleanup[index] for index in timed_out_indexes)
+            post_cleanup = {
+                index: force_cleanup(
+                    index,
+                    worker_stopped=(future.done() or future.cancelled()),
+                )
+                for index, future in futures.items()
+            }
+            timed_out_cleanup_ok = all(post_cleanup.values())
             if not timed_out_cleanup_ok: termination_errors += ["timed_out_shard_cleanup_unconfirmed"]
             results = []
             for index, future in futures.items():
@@ -405,55 +640,49 @@ def run_parallel_shards(
                             all_process_groups_terminated=post_cleanup[index],
                         ),
                     ))
+                elif not future.done():
+                    results.append((
+                        index,
+                        _blocked_shard(
+                            index=index, shard_count=shard_count, commit_sha=commit_sha,
+                            source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+                            fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
+                            all_process_groups_terminated=post_cleanup[index],
+                        ),
+                    ))
                 else:
-                    late_index, late_artifact = future.result()
+                    # A future can become done between the timeout snapshot and
+                    # this loop; resolve it through the same fail-closed path
+                    # so BaseException cannot escape the controller.
+                    late_index, late_artifact = resolve_future(index, future)
                     if late_index != index:
                         raise RuntimeError("parallel shard future index mismatch")
-                    if index in timed_out_indexes:
-                        results.append((
-                            index,
-                            _blocked_shard(
-                                index=index, shard_count=shard_count, commit_sha=commit_sha,
-                                source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
-                                fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
-                                all_process_groups_terminated=post_cleanup[index] and _cleanup_ok(late_artifact),
-                            ),
-                        ))
-                    else:
-                        results.append((index, late_artifact))
-            results.sort(key=lambda item: item[0])
-            artifacts = [item[1] for item in results]
-            artifact_paths = [str(_write_artifact(output, item[0], item[1])) for item in results]
-            return {
-                "status": "BLOCKED",
-                "failureCode": "controller_timeout",
-                "commitSha": commit_sha,
-                "sourceFingerprint": source_fingerprint,
-                "manifestFingerprint": manifest_fingerprint,
-                "shardCount": shard_count,
-                "shards": artifacts,
-                "shardArtifactPaths": artifact_paths,
-                "parallelWallSeconds": round(time.perf_counter() - (first_child_monotonic[0] if first_child_monotonic else controller_started), 6),
-                "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
-                "finishedAt": _timestamp(),
-                "readiness": readiness_evidence(),
-                "cleanup": {
-                    "allProcessGroupsTerminated": futures_completed and not termination_errors and all(_cleanup_ok(artifact) for artifact in artifacts),
-                    "controllerTimeout": True,
-                    "shardCount": shard_count,
-                    "futuresCompleted": futures_completed,
-                    "timedOutShardCleanupConfirmed": timed_out_cleanup_ok,
-                    "terminationErrors": termination_errors,
-                },
-            }
+                    results.append((
+                        index,
+                        _blocked_shard(
+                            index=index, shard_count=shard_count, commit_sha=commit_sha,
+                            source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+                            fixture_root=fixture_roots[index], failure_code="controller_timeout", lineage=lineage,
+                            all_process_groups_terminated=post_cleanup[index] and _cleanup_ok(late_artifact),
+                        ),
+                    ))
+            execution_finished.append(time.perf_counter())
+            return finish_result("controller_timeout", {
+                "allProcessGroupsTerminated": worker_termination_confirmed and not termination_errors
+                    and all(_cleanup_ok(item[1]) for item in results),
+                "controllerTimeout": True, "shardCount": shard_count,
+                "futuresCompleted": futures_completed,
+                "workerTerminationConfirmed": worker_termination_confirmed,
+                "timedOutShardCleanupConfirmed": timed_out_cleanup_ok,
+                "terminationErrors": termination_errors,
+            })
     finally:
         if not executor_shutdown:
-            executor.shutdown(wait=True, cancel_futures=False)
+            executor.shutdown(wait=False, cancel_futures=True)
+            _join_executor_workers(executor, timeout_seconds=1.0)
 
-    results.sort(key=lambda item: item[0])
-    artifacts = [item[1] for item in results]
-    artifact_paths = [str(_write_artifact(output, item[0], item[1])) for item in results]
-    wall_seconds = round(time.perf_counter() - (first_child_monotonic[0] if first_child_monotonic else controller_started), 6)
+    execution_finished.append(time.perf_counter())
+    artifacts = [item[1] for item in sorted(results)]
     cleanup_ok = all(_cleanup_ok(artifact) for artifact in artifacts)
     failed = [artifact for artifact in artifacts if artifact.get("status") != "PASS"]
     cleanup = {
@@ -462,74 +691,22 @@ def run_parallel_shards(
         "failedShardCount": len(failed),
     }
     if failed:
-        return {
-            "status": "BLOCKED",
-            "failureCode": "shard_failed",
-            "commitSha": commit_sha,
-            "sourceFingerprint": source_fingerprint,
-            "manifestFingerprint": manifest_fingerprint,
-            "shardCount": shard_count,
-            "shards": artifacts,
-            "shardArtifactPaths": artifact_paths,
-            "parallelWallSeconds": wall_seconds,
-            "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
-            "finishedAt": _timestamp(),
-            "readiness": readiness_evidence(),
-            "cleanup": cleanup,
-        }
+        return finish_result("shard_failed", cleanup)
+    with runtime_lock:
+        runtime_cleanup_ok = not active_runtimes and all(
+            index in unregistration_observed and cleanup_confirmed.get(index) is True
+            for index in range(shard_count)
+        )
+    fixture_cleanup_ok = all(not root.exists() and not root.is_symlink() for root in fixture_roots.values())
+    if not cleanup_ok or not runtime_cleanup_ok or not fixture_cleanup_ok:
+        return finish_result("isolation_violation", cleanup)
     if lineage is not None and any(not _child_lineage_matches(artifact, lineage) for artifact in artifacts):
-        return {
-            "status": "BLOCKED",
-            "failureCode": "shard_lineage_mismatch",
-            "commitSha": commit_sha,
-            "sourceFingerprint": source_fingerprint,
-            "manifestFingerprint": manifest_fingerprint,
-            "shardCount": shard_count,
-            "shards": artifacts,
-            "shardArtifactPaths": artifact_paths,
-            "parallelWallSeconds": wall_seconds,
-            "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
-            "finishedAt": _timestamp(),
-            "readiness": readiness_evidence(),
-            "cleanup": cleanup,
-        }
+        return finish_result("shard_lineage_mismatch", cleanup)
     validation = validate_shard_set(manifest, artifacts, commit_sha, source_fingerprint)
     if validation["status"] != "PASS":
-        return {
-            "status": "BLOCKED",
-            "failureCode": validation.get("failureCode", "nodeid_coverage_mismatch"),
-            "commitSha": commit_sha,
-            "sourceFingerprint": source_fingerprint,
-            "manifestFingerprint": manifest_fingerprint,
-            "shardCount": shard_count,
-            "shards": artifacts,
-            "shardArtifactPaths": artifact_paths,
-            "parallelWallSeconds": wall_seconds,
-            "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
-            "finishedAt": _timestamp(),
-            "cleanup": cleanup,
-            "coverage": validation,
-        }
+        return finish_result(validation.get("failureCode", "nodeid_coverage_mismatch"), cleanup, coverage=validation)
     aggregate = aggregate_pytest_shards(
-        manifest,
-        artifacts,
-        expected_commit_sha=commit_sha,
+        manifest, artifacts, expected_commit_sha=commit_sha,
         expected_source_fingerprint=source_fingerprint,
     )
-    return {
-        "status": "PASS" if cleanup_ok else "BLOCKED",
-        "failureCode": None if cleanup_ok else "isolation_violation",
-        "commitSha": commit_sha,
-        "sourceFingerprint": source_fingerprint,
-        "manifestFingerprint": manifest_fingerprint,
-        "shardCount": shard_count,
-        "shards": artifacts,
-        "shardArtifactPaths": artifact_paths,
-        "aggregate": aggregate,
-        "parallelWallSeconds": wall_seconds,
-        "startedAt": first_child_timestamp[0] if first_child_timestamp else None,
-        "finishedAt": _timestamp(),
-        "readiness": readiness_evidence(),
-        "cleanup": cleanup,
-        "nodeidCount": len(nodeids),
-    }
+    return finish_result(None, cleanup, aggregate=aggregate, nodeidCount=len(nodeids))

@@ -8,12 +8,57 @@ from pathlib import Path
 from typing import Mapping
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.services.cache_generation_service import GENERATION_SCHEMA_VERSION, GENERATION_SIGNATURE_SCOPE
+from backend.services.gmv_refund_models import canonical_payload_sha256
+from backend.services.revenue_generation_service import (
+    CORE_REVENUE_SIGNATURE_SCHEMA,
+    CORE_REVENUE_SOURCE_TABLES,
+    CORE_REVENUE_TOKEN_PREFIX,
+    REVENUE_SCOPE_CONTRACT_VERSION,
+)
+from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL
 from backend.services.verification_runtime_profile import VERIFICATION_PROFILE_SCHEMA, VerificationRuntimeProfile
 from backend.services.verification_runtime_snapshot import build_read_only_snapshot
 
 
 class VerificationRuntimeProfileBuildError(ValueError):
     """Raised when a disposable verification profile cannot be built."""
+
+
+def _validate_core_revenue_signature(value: object) -> None:
+    keys = {
+        "schemaVersion", "scopeLabel", "scopeContractVersion", "sourceTables",
+        "rowCounts", "rawTour", "rawOthers", "formalTour", "formalOthers",
+        "sha256", "token",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        raise VerificationRuntimeProfileBuildError("runtime core revenue signature keys are invalid")
+    if (
+        value["schemaVersion"] != CORE_REVENUE_SIGNATURE_SCHEMA
+        or value["scopeLabel"] != REVENUE_SCOPE_LABEL
+        or value["scopeContractVersion"] != REVENUE_SCOPE_CONTRACT_VERSION
+        or value["sourceTables"] != list(CORE_REVENUE_SOURCE_TABLES)
+    ):
+        raise VerificationRuntimeProfileBuildError("runtime core revenue signature identity is invalid")
+    row_counts = value["rowCounts"]
+    if (
+        not isinstance(row_counts, dict)
+        or set(row_counts) != set(CORE_REVENUE_SOURCE_TABLES)
+        or any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in row_counts.values())
+    ):
+        raise VerificationRuntimeProfileBuildError("runtime core revenue signature row counts are invalid")
+    digest_fields = ("rawTour", "rawOthers", "formalTour", "formalOthers")
+    if any(
+        not isinstance(value[field], str)
+        or len(value[field]) != 64
+        or any(character not in "0123456789abcdef" for character in value[field])
+        for field in digest_fields
+    ):
+        raise VerificationRuntimeProfileBuildError("runtime core revenue signature hashes are invalid")
+    unsigned = {key: value[key] for key in keys - {"sha256", "token"}}
+    digest = canonical_payload_sha256(unsigned)
+    if value["sha256"] != digest or value["token"] != f"{CORE_REVENUE_TOKEN_PREFIX}:{digest}":
+        raise VerificationRuntimeProfileBuildError("runtime core revenue signature digest is invalid")
 
 
 def _sha256(path: Path) -> str:
@@ -60,8 +105,17 @@ def _bounded_generation(path: Path) -> dict[str, object]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise VerificationRuntimeProfileBuildError("runtime generation metadata is invalid") from exc
-    if not isinstance(value, dict) or set(value) != {"generation", "operationId", "status", "updatedAt", "dbSignature"}:
+    legacy_keys = {"generation", "operationId", "status", "updatedAt", "dbSignature"}
+    v2_keys = legacy_keys | {"schemaVersion", "signatureScope", "coreRevenueSignature"}
+    if not isinstance(value, dict):
         raise VerificationRuntimeProfileBuildError("runtime generation metadata keys are invalid")
+    provided_keys = frozenset(value)
+    if provided_keys not in {frozenset(legacy_keys), frozenset(v2_keys)}:
+        raise VerificationRuntimeProfileBuildError("runtime generation metadata keys are invalid")
+    if provided_keys == frozenset(v2_keys):
+        if value["schemaVersion"] != GENERATION_SCHEMA_VERSION or value["signatureScope"] != GENERATION_SIGNATURE_SCOPE:
+            raise VerificationRuntimeProfileBuildError("runtime generation metadata schema is invalid")
+        _validate_core_revenue_signature(value["coreRevenueSignature"])
     if not isinstance(value["generation"], int) or isinstance(value["generation"], bool) or value["generation"] < 0:
         raise VerificationRuntimeProfileBuildError("runtime generation value is invalid")
     if value["operationId"] is not None and (not isinstance(value["operationId"], str) or len(value["operationId"]) > 128):
