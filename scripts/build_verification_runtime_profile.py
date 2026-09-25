@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -129,7 +130,7 @@ def _bounded_generation(path: Path) -> dict[str, object]:
         raise VerificationRuntimeProfileBuildError("runtime dbSignature is invalid")
     if not all(isinstance(signature[key], int) and not isinstance(signature[key], bool) and signature[key] >= 0 for key in ("sizeBytes", "modifiedNs")):
         raise VerificationRuntimeProfileBuildError("runtime dbSignature numbers are invalid")
-    if not isinstance(signature["sha256"], str) or len(signature["sha256"]) != 64:
+    if not isinstance(signature["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", signature["sha256"]) is None:
         raise VerificationRuntimeProfileBuildError("runtime dbSignature hash is invalid")
     return value
 

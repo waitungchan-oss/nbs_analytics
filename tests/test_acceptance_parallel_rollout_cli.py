@@ -224,10 +224,12 @@ def _passing_parallel_shards(*, shard_count: int, output_root, **kwargs):
     }
 
 
-def test_cli_executes_real_parallel_controller_with_fresh_run_roots(tmp_path, monkeypatch):
+def test_cli_executes_real_parallel_controller_with_fresh_run_roots(tmp_path, monkeypatch, request):
     from backend.agents import acceptance_parallel_runner as parallel_runner
+    from backend.agents import acceptance_shard_runtime
     from scripts import acceptance_parallel_rollout as subject
     from scripts import full_pytest_shard as shard_runner
+    import socket
 
     completed_shards = []
     fixture_roots = []
@@ -239,6 +241,43 @@ def test_cli_executes_real_parallel_controller_with_fresh_run_roots(tmp_path, mo
     real_run_parallel_shards = subject.run_parallel_shards
     real_run_pytest_shard = parallel_runner.run_pytest_shard
     real_run_pytest_command = shard_runner._run_pytest_command
+    held_sockets = []
+    for _ in range(12 * 3):
+        reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        reservation.bind(("127.0.0.1", 0))
+        reservation.listen(1)
+        held_sockets.append(reservation)
+    available_ports = [reservation.getsockname()[1] for reservation in held_sockets]
+    sockets_by_port = dict(zip(available_ports, held_sockets))
+    port_sets = [
+        {
+            name: available_ports[allocation * 3 + offset]
+            for offset, name in enumerate(("streamlit", "mcp", "health"))
+        }
+        for allocation in range(12)
+    ]
+    next_port_set = 0
+    allocation_lock = threading.Lock()
+
+    def deterministic_ports(run_id, shard_index):
+        nonlocal next_port_set
+        with allocation_lock:
+            ports = port_sets[next_port_set]
+            next_port_set += 1
+        return dict(ports)
+
+    def reserve_held_ports(ports, allocation_id):
+        return ({name: sockets_by_port[port] for name, port in ports.items()}, {}, {})
+
+    def close_held_sockets():
+        for reservation in held_sockets:
+            if reservation.fileno() >= 0:
+                reservation.close()
+
+    request.addfinalizer(close_held_sockets)
+    monkeypatch.setattr(acceptance_shard_runtime, "_ports_for", deterministic_ports)
+    monkeypatch.setattr(acceptance_shard_runtime, "_reserve_ports", reserve_held_ports)
     nodeids = [f"tests/test_parallel.py::test_case_{index}" for index in range(4)]
     test_root = tmp_path / "tests"
     test_root.mkdir()

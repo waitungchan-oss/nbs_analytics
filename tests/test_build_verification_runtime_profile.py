@@ -131,6 +131,22 @@ def test_builder_preserves_current_generation_v2_signature(tmp_path: Path) -> No
     assert copied == generation
 
 
+@pytest.mark.parametrize("invalid_hash", ["g" * 64, "A" * 64])
+def test_builder_rejects_noncanonical_database_signature_hash(tmp_path: Path, invalid_hash: str) -> None:
+    project, source_db, runtime = _generation_profile_project(tmp_path, {})
+    generation = _generation_v2_payload(source_db)
+    generation["dbSignature"]["sha256"] = invalid_hash
+    (runtime / "data_generation.json").write_text(json.dumps(generation), encoding="utf-8")
+
+    with pytest.raises(VerificationRuntimeProfileBuildError, match="dbSignature hash"):
+        build_verification_profile(
+            project_root=project, source_db=source_db, source_runtime=runtime,
+            output_root=project / ".nbs_agent_runtime" / "verification", git_head="c" * 40,
+            ports={"api": 18601, "streamlit": 18502, "vue": 15173},
+        )
+    assert not (project / ".nbs_agent_runtime" / "verification" / f"profile-{'c' * 12}").exists()
+
+
 def test_builder_rejects_unknown_generation_v2_fields(tmp_path: Path) -> None:
     project, source_db, runtime = _generation_profile_project(tmp_path, {})
     generation = _generation_v2_payload(source_db)
