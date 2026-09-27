@@ -32,7 +32,8 @@ from scripts.full_pytest_gate import _parse_summary
 from scripts.full_pytest_shard_aggregate import aggregate_pytest_shards, compare_serial_and_shard, validate_shard_set
 from scripts.full_pytest_shard import _validate_manifest, _run_pytest_command
 from backend.agents.acceptance_parallel_runner import (
-    _validate_output_root, build_runner_capability_receipt, run_parallel_shards,
+    MAX_TIMEOUT_SECONDS, _validate_output_root, _validate_runner_capability, build_runner_capability_receipt,
+    observe_runtime_fingerprints, run_parallel_shards,
 )
 
 
@@ -225,7 +226,7 @@ def _source_is_current(root, seal, expected, commit_sha, source_fingerprint):
         return False
 
 
-def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids, run_index, timeout_seconds, source_seal=None, expected_source_session=None, execution_lineage=None):
+def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids, run_index, timeout_seconds, source_seal=None, expected_source_session=None, execution_lineage=None, runner_capability=None):
     runtime = None
     started = time.perf_counter()
     execution_start = []
@@ -298,8 +299,18 @@ def run_serial_control(*, project_root, commit_sha, source_fingerprint, nodeids,
     expected_execution_fields = {
         "runnerFingerprint", "environmentFingerprint", "datasetSnapshotFingerprint",
     }
+    capability_observed = False
+    if isinstance(execution_lineage, Mapping):
+        try:
+            _validate_runner_capability(
+                runner_capability, execution_lineage.get("runnerFingerprint"),
+            )
+            capability_observed = True
+        except (TypeError, ValueError):
+            capability_observed = False
     execution_lineage_observed = (
         bool(execution_start)
+        and capability_observed
         and isinstance(execution_lineage, Mapping)
         and set(execution_lineage) == expected_execution_fields
         and all(isinstance(value, str) and _SHA64.fullmatch(value) for value in execution_lineage.values())
@@ -369,17 +380,23 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
     if repeats != 3 or isinstance(repeats, bool):
         raise ValueError("repeats must be exactly 3")
     if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
-            or not math.isfinite(float(timeout_seconds)) or not 0.0 < float(timeout_seconds) <= MAX_DURATION_SECONDS):
+            or not math.isfinite(float(timeout_seconds)) or not 0.0 < float(timeout_seconds) <= MAX_TIMEOUT_SECONDS):
         raise ValueError("timeout is invalid")
     if runner_max_workers is not None:
         raise ValueError("caller-supplied runner max workers are not trusted")
-    runner_capability = build_runner_capability_receipt(runner_fingerprint)
-    if shard_count > runner_capability["maxWorkers"]:
-        raise ValueError("shard count exceeds verified live runner capacity")
     if source_seal is None or expected_source_session is None:
         raise ValueError("source seal and expected source session are required")
     if not _valid_source_session(source_seal) or not _valid_source_session(expected_source_session):
         raise ValueError("source seal and expected source session are invalid")
+    observed_runtime = observe_runtime_fingerprints(project_root)
+    if (
+        runner_fingerprint != observed_runtime["runnerFingerprint"]
+        or environment_fingerprint != observed_runtime["environmentFingerprint"]
+    ):
+        raise ValueError("caller lineage fingerprints do not match live runtime identity")
+    runner_capability = build_runner_capability_receipt(observed_runtime["runnerFingerprint"])
+    if shard_count > runner_capability["maxWorkers"]:
+        raise ValueError("shard count exceeds verified live runner capacity")
     validate_acceptance_contract(contract)
     manifest_commit, manifest_source, nodeids, manifest_fingerprint = _validate_manifest(manifest)
     if manifest_commit != commit_sha or manifest_source != source_fingerprint:
@@ -392,8 +409,8 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
         "baselineFamilyId": baseline_family_id,
         "manifestFingerprint": manifest_fingerprint,
         "testPopulationFingerprint": population_fingerprint,
-        "runnerFingerprint": runner_fingerprint,
-        "environmentFingerprint": environment_fingerprint,
+        "runnerFingerprint": observed_runtime["runnerFingerprint"],
+        "environmentFingerprint": observed_runtime["environmentFingerprint"],
         "datasetSnapshotFingerprint": dataset_fp,
         "selectionMode": "full",
     }
@@ -416,10 +433,10 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
                                     run_index=run_index, timeout_seconds=timeout_seconds,
                                     source_seal=source_seal, expected_source_session=expected_source_session,
                                     execution_lineage={
-                                        "runnerFingerprint": runner_fingerprint,
-                                        "environmentFingerprint": environment_fingerprint,
+                                        "runnerFingerprint": observed_runtime["runnerFingerprint"],
+                                        "environmentFingerprint": observed_runtime["environmentFingerprint"],
                                         "datasetSnapshotFingerprint": dataset_fp,
-                                    })
+                                    }, runner_capability=runner_capability)
         if serial.get("status") != "PASS":
             parallel = _blocked_parallel_result(
                 **parallel_identity,
@@ -451,8 +468,8 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
                     output_root=run_root,
                     timeout_seconds=timeout_seconds,
                     execution_lineage={
-                        "runnerFingerprint": runner_fingerprint,
-                        "environmentFingerprint": environment_fingerprint,
+                        "runnerFingerprint": observed_runtime["runnerFingerprint"],
+                        "environmentFingerprint": observed_runtime["environmentFingerprint"],
                         "datasetSnapshotFingerprint": dataset_fp,
                     },
                     runner_capability=runner_capability,
@@ -524,8 +541,8 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
                 )
             ]
         expected_execution_lineage = {
-            "runnerFingerprint": runner_fingerprint,
-            "environmentFingerprint": environment_fingerprint,
+            "runnerFingerprint": observed_runtime["runnerFingerprint"],
+            "environmentFingerprint": observed_runtime["environmentFingerprint"],
             "datasetSnapshotFingerprint": dataset_fp,
         }
         parity = compare_serial_and_shard(serial, aggregate)
@@ -621,6 +638,27 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
                 commit_sha=commit_sha,
                 source_fingerprint=source_fingerprint,
             )
+        serial_cleanup = serial.get("cleanup") if isinstance(serial.get("cleanup"), Mapping) else {}
+        parallel_cleanup = parallel.get("cleanup") if isinstance(parallel.get("cleanup"), Mapping) else {}
+        serial_groups_terminated = serial_cleanup.get("allProcessGroupsTerminated") is True
+        parallel_cleanup_flags = {
+            field: parallel_cleanup.get(field) is True
+            for field in (
+                "allProcessGroupsTerminated",
+                "runtimeCleanupConfirmed",
+                "fixtureRootsRemoved",
+            )
+        }
+        cleanup_evidence = {
+            "serial": {
+                "status": "PASS" if serial_groups_terminated else "BLOCKED",
+                "allProcessGroupsTerminated": serial_groups_terminated,
+            },
+            "parallel": {
+                "status": "PASS" if all(parallel_cleanup_flags.values()) else "BLOCKED",
+                **parallel_cleanup_flags,
+            },
+        }
         measured_runs.append({
             "runIndex": run_index,
             "populationKind": "full-pytest-nodeid",
@@ -648,6 +686,7 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
             "parallelWallSeconds": parallel_total,
             "serialStatus": serial.get("status"),
             "parallelStatus": parallel.get("status") if isinstance(parallel, Mapping) else "BLOCKED",
+            "cleanupEvidence": cleanup_evidence,
             "parity": parity,
             "shardAggregate": aggregate,
             "serialArtifactFingerprint": serial_artifact_fingerprint,
@@ -663,8 +702,8 @@ def run_parallel_rollout(*, project_root, manifest, contract, commit_sha, source
         baseline_family_id=baseline_family_id,
         manifest_fingerprint=manifest_fingerprint,
         test_population_fingerprint=population_fingerprint,
-        runner_fingerprint=runner_fingerprint,
-        environment_fingerprint=environment_fingerprint,
+        runner_fingerprint=observed_runtime["runnerFingerprint"],
+        environment_fingerprint=observed_runtime["environmentFingerprint"],
         dataset_snapshot_fingerprint=dataset_fp,
         selection_mode="full",
         shard_count=shard_count,

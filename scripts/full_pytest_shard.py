@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -113,6 +114,16 @@ def _validate_shard_output_path(path: Path, project_root: Path) -> Path:
 
     resolved_target = target.resolve(strict=False)
     if is_temporary_path(resolved_target):
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        current = target.parent
+        while True:
+            if current.is_symlink():
+                resolved_component = current.resolve(strict=True)
+                if resolved_component not in temporary_root.parents:
+                    raise ValueError("shard output parent must not be a symlink")
+            if current.parent == current:
+                break
+            current = current.parent
         return resolved_target
 
     project = Path(project_root).expanduser().resolve()
@@ -637,7 +648,22 @@ def run_pytest_shard(
         )
         stdout, stderr = _as_text(completed.stdout), _as_text(completed.stderr)
         combined_output = f"{stdout}\n{stderr}"
-        execution_evidence = _read_child_execution_evidence(execution_evidence_path)
+        try:
+            execution_evidence = _read_child_execution_evidence(execution_evidence_path)
+        except (OSError, ValueError) as exc:
+            try:
+                execution_evidence_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return finish(
+                status="BLOCKED", failure_code="child_execution_evidence_invalid",
+                commit_sha=commit_sha, source_fingerprint=source_fingerprint,
+                manifest_fingerprint=manifest_fingerprint, shard_index=shard_index,
+                shard_count=shard_count, assigned=assigned, executed=[],
+                result={"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0},
+                started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
+                stdout=stdout, stderr=f"child execution evidence invalid: {type(exc).__name__}",
+            )
         execution_evidence_path.unlink()
         collected_nodeids = execution_evidence["collectedNodeids"]
         started_nodeids = execution_evidence["startedNodeids"]

@@ -541,6 +541,8 @@ def _lineage_error(run, expected, *, blocked=False, shard_count=None):
         return None
     if not isinstance(parallel_runtime, list) or not parallel_runtime:
         return "artifact_lineage_mismatch"
+    if blocked and run.get("parallelStatus") != "PASS" and len(parallel_runtime) > shard_count:
+        return "artifact_lineage_mismatch"
     for item in parallel_runtime:
         if (
             not isinstance(item, Mapping)
@@ -554,6 +556,52 @@ def _lineage_error(run, expected, *, blocked=False, shard_count=None):
         or any(dict(item) != execution_expected for item in parallel_runtime)
     ):
         return "artifact_lineage_mismatch"
+    return None
+
+
+def _run_is_blocked(run):
+    parity = run.get("parity")
+    aggregate = run.get("shardAggregate")
+    return (
+        _valid_failure_code(run.get("failureCode"))
+        or bool(run.get("blockers"))
+        or run.get("serialStatus") != "PASS"
+        or run.get("parallelStatus") != "PASS"
+        or not isinstance(parity, Mapping)
+        or parity.get("status") != "PASS"
+        or not isinstance(aggregate, Mapping)
+        or aggregate.get("status") != "PASS"
+    )
+
+
+def _cleanup_evidence_error(value):
+    if not isinstance(value, Mapping) or set(value) != {"serial", "parallel"}:
+        return "blocked_run_evidence_invalid"
+    serial = value.get("serial")
+    parallel = value.get("parallel")
+    if not isinstance(serial, Mapping) or set(serial) != {"status", "allProcessGroupsTerminated"}:
+        return "blocked_run_evidence_invalid"
+    if not isinstance(parallel, Mapping) or set(parallel) != {
+        "status", "allProcessGroupsTerminated", "runtimeCleanupConfirmed", "fixtureRootsRemoved",
+    }:
+        return "blocked_run_evidence_invalid"
+    if serial.get("status") not in {"PASS", "BLOCKED"} or not isinstance(
+        serial.get("allProcessGroupsTerminated"), bool
+    ):
+        return "blocked_run_evidence_invalid"
+    if parallel.get("status") not in {"PASS", "BLOCKED"} or any(
+        not isinstance(parallel.get(field), bool)
+        for field in ("allProcessGroupsTerminated", "runtimeCleanupConfirmed", "fixtureRootsRemoved")
+    ):
+        return "blocked_run_evidence_invalid"
+    if serial["status"] == "PASS" and not serial["allProcessGroupsTerminated"]:
+        return "blocked_run_evidence_invalid"
+    parallel_clean = all(
+        parallel[field]
+        for field in ("allProcessGroupsTerminated", "runtimeCleanupConfirmed", "fixtureRootsRemoved")
+    )
+    if (parallel["status"] == "PASS") != parallel_clean:
+        return "blocked_run_evidence_invalid"
     return None
 
 
@@ -668,10 +716,13 @@ def validate_parallel_run_for_artifact(
         _invalid_run("run_index_invalid")
     if run.get("commitSha") != commit_sha or run.get("sourceFingerprint") != source_fingerprint:
         _invalid_run("run_source_identity_mismatch")
-    if failure := _lineage_error(run, expected_lineage, blocked=blocked, shard_count=shard_count):
+    run_blocked = _run_is_blocked(run)
+    if not blocked and run_blocked:
+        _invalid_run("blocked_run_evidence_invalid")
+    if failure := _lineage_error(run, expected_lineage, blocked=run_blocked, shard_count=shard_count):
         _invalid_run(failure)
     if failure := _runner_capability_error(
-        run, expected_lineage, shard_count, blocked=blocked
+        run, expected_lineage, shard_count, blocked=run_blocked
     ):
         _invalid_run(failure)
     population_count = run.get("testPopulationCount")
@@ -686,7 +737,7 @@ def validate_parallel_run_for_artifact(
     ):
         _invalid_run("serial_counts_invalid")
     durations = (run.get("serialWallSeconds"), run.get("parallelWallSeconds"))
-    if blocked:
+    if run_blocked:
         if any(value is not None and not _is_duration(value) for value in durations):
             _invalid_run("duration_invalid")
     elif any(not _is_duration(value) for value in durations):
@@ -711,6 +762,11 @@ def validate_parallel_run_for_artifact(
         _invalid_run("shard_aggregate_manifest_mismatch")
     if aggregate.get("shardCount", shard_count) != shard_count:
         _invalid_run("shard_count_mismatch")
+    if run_blocked:
+        if not _valid_failure_code(run.get("failureCode")):
+            _invalid_run("blocked_run_evidence_invalid")
+        if failure := _cleanup_evidence_error(run.get("cleanupEvidence")):
+            _invalid_run(failure)
     failure = _coverage_error(
         population_nodeids, run.get("shardCoverage"), shard_count, strict=False,
         allow_empty=aggregate.get("status") == "BLOCKED",
@@ -752,9 +808,9 @@ def validate_parallel_run_for_artifact(
         or any(not isinstance(item, str) or not item for item in run["blockers"])
     ):
         _invalid_run("blockers_invalid")
-    if blocked and {"speedRatio", "speedupMultiple"} & run.keys():
+    if run_blocked and {"speedRatio", "speedupMultiple"} & run.keys():
         raise ValueError("blocked rollout cannot contain speedup values")
-    if not blocked:
+    if not run_blocked:
         failure = _validate_run_shape(
             run, expected_lineage, shard_count,
             expected_commit_sha=commit_sha, expected_source_fingerprint=source_fingerprint,

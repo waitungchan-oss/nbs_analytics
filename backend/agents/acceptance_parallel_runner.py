@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import platform
 import socket
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -23,6 +26,7 @@ from scripts.full_pytest_shard_aggregate import aggregate_pytest_shards, validat
 
 ALLOWED_SHARD_COUNTS = frozenset({2, 4, 8, 16})
 DEFAULT_TIMEOUT_SECONDS = 1800
+MAX_TIMEOUT_SECONDS = 1800
 CHILD_FAILURE_CLEANUP_SECONDS = 5
 EXECUTION_LINEAGE_FIELDS = (
     "runnerFingerprint",
@@ -77,6 +81,16 @@ def _validate_output_root(project_root, output_root, *, require_fresh=True):
         raise ValueError("output root must not be a symlink")
     if not is_temporary_path(root):
         raise ValueError("output root must be inside a temporary root")
+    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    current = root.parent
+    while True:
+        if current.is_symlink():
+            resolved_component = current.resolve(strict=False)
+            if resolved_component not in temporary_root.parents:
+                raise ValueError("output root parent must not be a symlink")
+        if current.parent == current:
+            break
+        current = current.parent
     project = Path(project_root).expanduser().resolve()
     resolved = root.resolve()
     if resolved == project or project in resolved.parents:
@@ -146,6 +160,53 @@ def build_runner_capability_receipt(runner_fingerprint):
         "maxWorkers": _live_worker_capacity(),
     }
     return {**unsigned, "capabilityFingerprint": canonical_fingerprint(unsigned)}
+
+
+def observe_runtime_fingerprints(project_root):
+    """Fingerprint the runtime actually executing this rollout, matching CI identity inputs."""
+    root = Path(project_root).expanduser().resolve()
+    requirements = root / "requirements.txt"
+    if not root.is_dir() or not requirements.is_file() or requirements.is_symlink():
+        raise ValueError("live runtime identity inputs are unavailable")
+    try:
+        packages = subprocess.check_output(
+            [sys.executable, "-m", "pip", "freeze", "--all"],
+            cwd=root,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("installed package identity could not be observed") from exc
+    runner_image = {
+        "imageOS": os.environ.get("ImageOS", "unknown"),
+        "imageVersion": os.environ.get("ImageVersion", "unknown"),
+        "osVersion": platform.mac_ver()[0] or platform.release(),
+    }
+    identity = {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "python": sys.version_info[:3],
+        "requirementsSha256": hashlib.sha256(requirements.read_bytes()).hexdigest(),
+        "installedPackages": packages.splitlines(),
+        "runnerImage": runner_image,
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    runner_fingerprint = hashlib.sha256(encoded).hexdigest()
+    environment_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "runnerFingerprint": runner_fingerprint,
+                "profile": "acceptance-parallel-rollout-v1",
+                "runnerImage": runner_image,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return {
+        "runnerFingerprint": runner_fingerprint,
+        "environmentFingerprint": environment_fingerprint,
+    }
 
 
 def _validate_runner_capability(capability, runner_fingerprint):
@@ -233,9 +294,21 @@ def run_parallel_shards(
 ):
     if isinstance(shard_count, bool) or shard_count not in ALLOWED_SHARD_COUNTS:
         raise ValueError("shard count must be one of 2, 4, 8, or 16")
-    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int)
+        or timeout_seconds <= 0
+    ):
         raise ValueError("timeout must be positive")
+    if timeout_seconds > MAX_TIMEOUT_SECONDS:
+        raise ValueError("timeout exceeds bounded maximum")
     lineage = _validate_execution_lineage(execution_lineage)
+    observed_runtime = observe_runtime_fingerprints(project_root)
+    if (
+        lineage["runnerFingerprint"] != observed_runtime["runnerFingerprint"]
+        or lineage["environmentFingerprint"] != observed_runtime["environmentFingerprint"]
+    ):
+        raise ValueError("execution lineage does not match live runtime identity")
     max_workers = _validate_runner_capability(
         runner_capability, lineage["runnerFingerprint"],
     )
@@ -270,6 +343,9 @@ def run_parallel_shards(
     runtime_seen = set()
     cleanup_confirmed = {}
     unregistration_observed = set()
+    registration_failures = set()
+    duplicate_runtimes = {}
+    duplicate_cleanup_confirmed = {}
     ready_indexes = set()
     cancel_requested = threading.Event()
 
@@ -281,20 +357,36 @@ def run_parallel_shards(
                 pass
 
     def observe_runtime(index, event, runtime):
+        duplicate_registration = False
         with runtime_lock:
             if event == "registered":
-                active_runtimes[index] = runtime
-                runtime_seen.add(index)
+                if index in runtime_seen:
+                    registration_failures.add(index)
+                    duplicate_runtimes.setdefault(index, []).append(runtime)
+                    duplicate_cleanup_confirmed[index] = False
+                    duplicate_registration = True
+                else:
+                    active_runtimes[index] = runtime
+                    runtime_seen.add(index)
             elif event == "unregistered":
-                active_runtimes.pop(index, None)
-                unregistration_observed.add(index)
                 report = getattr(runtime, "_cleanup", None)
-                cleanup_confirmed[index] = (
+                runtime_cleaned = (
                     isinstance(report, Mapping)
                     and report.get("status") == "PASS"
                     and report.get("allProcessGroupsTerminated") is True
                     and not report.get("leakedProcesses")
                 )
+                if any(runtime is duplicate for duplicate in duplicate_runtimes.get(index, ())):
+                    duplicate_cleanup_confirmed[index] = runtime_cleaned
+                elif active_runtimes.get(index) is runtime:
+                    active_runtimes.pop(index)
+                    unregistration_observed.add(index)
+                    cleanup_confirmed[index] = runtime_cleaned
+                else:
+                    cleanup_confirmed[index] = False
+                    unregistration_observed.discard(index)
+        if duplicate_registration:
+            raise RuntimeError("duplicate runtime registration for shard")
         if event == "registered" and cancel_requested.is_set():
             try:
                 runtime.terminate_process_groups(force=True)
@@ -437,6 +529,26 @@ def run_parallel_shards(
                 failure_code="pytest_runner_error" if isinstance(exc, Exception) else "pytest_runner_interrupted",
                 lineage=lineage,
                 all_process_groups_terminated=force_cleanup(index, owner_thread=True),
+            )
+        with runtime_lock:
+            duplicate_registration = index in registration_failures
+        if duplicate_registration:
+            abort_readiness_barrier()
+            primary_cleanup = force_cleanup(index, owner_thread=True)
+            with runtime_lock:
+                all_runtimes_cleaned = (
+                    primary_cleanup and duplicate_cleanup_confirmed.get(index) is True
+                )
+                cleanup_confirmed[index] = all_runtimes_cleaned
+                if all_runtimes_cleaned:
+                    unregistration_observed.add(index)
+                else:
+                    unregistration_observed.discard(index)
+            artifact = _blocked_shard(
+                index=index, shard_count=shard_count, commit_sha=commit_sha,
+                source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+                fixture_root=fixture_root, failure_code="process_registration_failure", lineage=lineage,
+                all_process_groups_terminated=all_runtimes_cleaned,
             )
         return index, artifact
 

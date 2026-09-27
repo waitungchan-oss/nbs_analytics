@@ -294,8 +294,9 @@ def test_parallel_rollout_is_manual_opt_in_and_not_a_formal_need():
     assert 'SOURCE_SEAL_PATH="$ROLLOUT_ROOT/source-seal.json"' in parallel
     assert '--source-seal "$SOURCE_SEAL_PATH"' in parallel
     assert 'git merge-base "$GITHUB_SHA" "origin/main"' in parallel
-    assert '"freeze","--all"' in parallel
-    assert "ImageOS" in parallel and "ImageVersion" in parallel
+    assert "observe_runtime_fingerprints" in parallel
+    runtime_identity = (Path(__file__).parents[1] / "backend/agents/acceptance_parallel_runner.py").read_text(encoding="utf-8")
+    assert '"ImageOS"' in runtime_identity and '"ImageVersion"' in runtime_identity
     assert "--runner-max-workers" not in parallel
     assert '--source-session "$SOURCE_SESSION_PATH"' in parallel
     assert "name: acceptance-parallel-rollout-${{ github.sha }}" in parallel

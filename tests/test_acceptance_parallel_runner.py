@@ -28,6 +28,20 @@ _RUNNER_CAPABILITY = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _runtime_identity(monkeypatch):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    monkeypatch.setattr(
+        subject,
+        "observe_runtime_fingerprints",
+        lambda project_root: {
+            "runnerFingerprint": _EXECUTION_LINEAGE["runnerFingerprint"],
+            "environmentFingerprint": _EXECUTION_LINEAGE["environmentFingerprint"],
+        },
+    )
+
+
 def _manifest(node_count: int) -> dict[str, object]:
     nodeids = [f"tests/test_parallel.py::test_case_{index:02d}" for index in range(node_count)]
     unsigned = {
@@ -432,6 +446,65 @@ def test_runner_requires_lineage_and_respects_capability_bound(tmp_path):
         )
 
 
+def test_runner_rejects_forged_live_runtime_lineage(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    monkeypatch.setattr(
+        subject,
+        "observe_runtime_fingerprints",
+        lambda project_root: {
+            "runnerFingerprint": "9" * 64,
+            "environmentFingerprint": "8" * 64,
+        },
+    )
+
+    with pytest.raises(ValueError, match="does not match live runtime identity"):
+        _run_parallel_shards(
+            subject,
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+        )
+
+
+def test_runner_rejects_timeout_above_bounded_cap(tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    with pytest.raises(ValueError, match="timeout exceeds bounded maximum"):
+        _run_parallel_shards(
+            subject,
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            timeout_seconds=subject.MAX_TIMEOUT_SECONDS + 1,
+        )
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_output_root_rejects_symlinked_parent_inside_temporary_root(tmp_path, dangling):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    actual_parent = tmp_path.parent / f"actual-parent-{tmp_path.name}"
+    if not dangling:
+        actual_parent.mkdir()
+    link_parent = tmp_path.parent / f"linked-parent-{tmp_path.name}"
+    link_parent.symlink_to(actual_parent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="parent.*symlink"):
+        subject._validate_output_root(
+            tmp_path,
+            link_parent / "runtime",
+        )
+
+    assert not actual_parent.joinpath("runtime").exists()
+
+
 def test_runner_capability_receipt_is_bound_to_live_runner_and_capacity(monkeypatch):
     from backend.agents import acceptance_parallel_runner as subject
 
@@ -571,6 +644,79 @@ def test_runner_blocks_when_runtime_cleanup_confirmation_is_missing(monkeypatch,
     assert "aggregate" not in result
     assert "coverage" not in result
     assert "nodeidCount" not in result
+
+
+def test_duplicate_runtime_registration_fails_closed_and_cleans_up_both_runtimes(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    runtimes = []
+
+    class Runtime:
+        def __init__(self):
+            self.terminated = False
+            self.cleaned = False
+            self._cleanup = None
+
+        def terminate_process_groups(self, *, force=False):
+            self.terminated = force
+
+        def cleanup(self):
+            self.terminated = True
+            self.cleaned = True
+            self._cleanup = {
+                "status": "PASS",
+                "allProcessGroupsTerminated": True,
+                "leakedProcesses": [],
+            }
+            return dict(self._cleanup)
+
+    def fake_run_shard(*, shard_index, fixture_root, runtime_observer, **kwargs):
+        runtime = Runtime()
+        runtimes.append(runtime)
+        runtime_observer("registered", runtime)
+        if shard_index == 0:
+            duplicate = Runtime()
+            runtimes.append(duplicate)
+            try:
+                runtime_observer("registered", duplicate)
+            except RuntimeError:
+                duplicate.cleanup()
+                runtime_observer("unregistered", duplicate)
+                return subject._blocked_shard(
+                    index=shard_index,
+                    shard_count=4,
+                    commit_sha=COMMIT,
+                    source_fingerprint=SOURCE,
+                    manifest_fingerprint=_manifest(16)["manifestFingerprint"],
+                    fixture_root=fixture_root,
+                    failure_code="runtime_allocation_failed",
+                    lineage=_EXECUTION_LINEAGE,
+                )
+        try:
+            _ready_and_start(kwargs)
+            return _passing_shard(shard_index, fixture_root)
+        finally:
+            runtime.cleanup()
+            runtime_observer("unregistered", runtime)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", fake_run_shard)
+    result = _run_parallel_shards(
+        subject,
+        project_root=tmp_path,
+        manifest=_manifest(16),
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        shard_count=4,
+        output_root=_output_root(tmp_path),
+    )
+
+    assert result["status"] == "BLOCKED"
+    shard_zero = next(shard for shard in result["shards"] if shard["shardIndex"] == 0)
+    assert shard_zero["metadata"]["failureCode"] == "process_registration_failure"
+    assert shard_zero["metadata"]["cleanup"]["allProcessGroupsTerminated"] is True
+    assert all(runtime.terminated and runtime.cleaned for runtime in runtimes)
+    assert result["cleanup"]["activeRuntimeCount"] == 0
+    assert result["cleanup"]["runtimeCleanupConfirmed"] is True
 
 
 def test_daemon_workers_are_not_registered_for_interpreter_exit_join(monkeypatch):

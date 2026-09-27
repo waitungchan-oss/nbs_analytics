@@ -176,6 +176,15 @@ def _passing_run(index: int, parallel: float = 75.0) -> dict[str, object]:
         "parallelWallSeconds": parallel,
         "serialStatus": "PASS",
         "parallelStatus": "PASS",
+        "cleanupEvidence": {
+            "serial": {"status": "PASS", "allProcessGroupsTerminated": True},
+            "parallel": {
+                "status": "PASS",
+                "allProcessGroupsTerminated": True,
+                "runtimeCleanupConfirmed": True,
+                "fixtureRootsRemoved": True,
+            },
+        },
         "parity": parity,
         "shardAggregate": aggregate,
         "serialArtifactFingerprint": "a" * 64,
@@ -223,6 +232,15 @@ def _blocked_run(run: dict[str, object], *, failure_code: str, max_workers: int 
         {key: value for key, value in aggregate.items() if key != "evidenceFingerprint"}
     )
     run["failureCode"] = failure_code
+    run["cleanupEvidence"] = {
+        "serial": {"status": "PASS", "allProcessGroupsTerminated": True},
+        "parallel": {
+            "status": "BLOCKED",
+            "allProcessGroupsTerminated": False,
+            "runtimeCleanupConfirmed": False,
+            "fixtureRootsRemoved": False,
+        },
+    }
     if max_workers is not None:
         capability = dict(run["runnerCapability"])
         capability["maxWorkers"] = max_workers
@@ -372,6 +390,16 @@ def test_blocked_artifact_validates_bounded_partial_metadata():
     run["shardAggregateFingerprint"] = canonical_fingerprint(
         {key: value for key, value in aggregate.items() if key != "evidenceFingerprint"}
     )
+    run["failureCode"] = "shard_set_incomplete"
+    run["cleanupEvidence"] = {
+        "serial": {"status": "PASS", "allProcessGroupsTerminated": True},
+        "parallel": {
+            "status": "BLOCKED",
+            "allProcessGroupsTerminated": False,
+            "runtimeCleanupConfirmed": False,
+            "fixtureRootsRemoved": False,
+        },
+    }
 
     payload = _payload(runs)
 
@@ -407,6 +435,49 @@ def test_blocked_artifact_accepts_explicit_source_bound_unobserved_parallel_line
     payload = _payload(runs)
 
     validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
+
+
+def test_blocked_artifact_rejects_parallel_runtime_lineage_above_shard_count():
+    from backend.agents.acceptance_parallel_rollout import validate_parallel_rollout_evidence
+
+    runs = [_passing_run(0), _passing_run(1), _passing_run(2)]
+    run = _blocked_run(runs[0], failure_code="parallel_runner_error")
+    runtime_lineage = run["parallelLineage"]["runtimeExecutionLineage"]
+    runtime_lineage.append(dict(runtime_lineage[0]))
+    payload = _payload(runs)
+
+    with pytest.raises(ValueError, match="artifact_lineage_mismatch"):
+        validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
+
+
+def test_overall_blocked_flag_does_not_skip_passing_run_speedup_validation():
+    from backend.agents.acceptance_performance_v2 import validate_parallel_run_for_artifact
+
+    run = _passing_run(0)
+    run["speedRatio"] = 0.123
+
+    with pytest.raises(ValueError, match="measured run speedup is inconsistent"):
+        validate_parallel_run_for_artifact(
+            run,
+            expected_lineage=_LINEAGE,
+            commit_sha=_SOURCE_LINEAGE["commitSha"],
+            source_fingerprint=_SOURCE_LINEAGE["sourceFingerprint"],
+            shard_count=4,
+            blocked=True,
+        )
+
+
+@pytest.mark.parametrize("field", ["failureCode", "cleanupEvidence"])
+def test_blocked_run_requires_failure_and_cleanup_evidence(field):
+    from backend.agents.acceptance_parallel_rollout import validate_parallel_rollout_evidence
+
+    runs = [_passing_run(0), _passing_run(1), _passing_run(2)]
+    run = _blocked_run(runs[0], failure_code="parallel_runner_error")
+    run.pop(field)
+    payload = _payload(runs)
+
+    with pytest.raises(ValueError, match="blocked_run_evidence_invalid"):
+        validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
 
 
 def test_blocked_artifact_rejects_unobserved_lineage_from_another_source():
@@ -549,6 +620,7 @@ def test_blocked_artifact_rejects_contradictory_partial_metadata():
     run = runs[0]
     run["parallelStatus"] = "BLOCKED"
     run["parity"] = _blocked_parity()
+    run["failureCode"] = "shard_set_incomplete"
     run["shardAggregate"] = _blocked_aggregate(covered=0, result={"passed": 1, "failed": 0, "skipped": 0})
     run["shardAggregateFingerprint"] = canonical_fingerprint(
         {key: value for key, value in run["shardAggregate"].items() if key != "evidenceFingerprint"}
@@ -651,9 +723,15 @@ def test_blocked_payload_cannot_carry_usable_speedup():
 
     runs = [_passing_run(0), _passing_run(1), _passing_run(2)]
     runs[1]["parity"] = _blocked_parity()
+    runs[1]["failureCode"] = "serial_or_shard_status_invalid"
     payload = _payload(runs)
     assert payload["status"] == "BLOCKED"
     assert payload["speedup"] is None
+    assert all(
+        {"speedRatio", "speedupMultiple"}.issubset(run)
+        for run in (payload["measuredRuns"][0], payload["measuredRuns"][2])
+    )
+    assert not ({"speedRatio", "speedupMultiple"} & payload["measuredRuns"][1].keys())
     validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
 
 
@@ -668,7 +746,11 @@ def test_builder_recomputes_eligibility_when_run_failure_code_is_present():
     assert payload["speedup"] is None
     assert payload["stability"]["status"] == "BLOCKED"
     assert "serial_or_shard_status_invalid" in payload["blockers"]
-    assert all("speedRatio" not in run and "speedupMultiple" not in run for run in payload["measuredRuns"])
+    assert not ({"speedRatio", "speedupMultiple"} & payload["measuredRuns"][1].keys())
+    assert all(
+        {"speedRatio", "speedupMultiple"}.issubset(run)
+        for run in (payload["measuredRuns"][0], payload["measuredRuns"][2])
+    )
 
 
 def test_blocked_payload_still_requires_common_run_identity_and_durations():
@@ -680,6 +762,7 @@ def test_blocked_payload_still_requires_common_run_identity_and_durations():
 
     runs = [_passing_run(0), _passing_run(1), _passing_run(2)]
     runs[1]["parity"] = _blocked_parity()
+    runs[1]["failureCode"] = "serial_or_shard_status_invalid"
     payload = _payload(runs)
     del payload["measuredRuns"][1]["serialArtifactFingerprint"]
     payload["evidenceFingerprint"] = canonical_fingerprint(
@@ -725,7 +808,7 @@ def test_blocked_payload_must_recompute_to_a_real_failure():
         {key: value for key, value in payload.items() if key != "evidenceFingerprint"}
     )
 
-    with pytest.raises(ValueError, match="blocked rollout failure is inconsistent"):
+    with pytest.raises(ValueError, match="measured run speedup is inconsistent"):
         validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
 
 

@@ -166,10 +166,24 @@ def build_parallel_rollout_evidence(*, commit_sha, source_fingerprint, contract_
     if discovered_blockers and eligibility["status"] == "PASS":
         eligibility = _failure(discovered_blockers[0], run_count=len(normalized_runs))
     for item in normalized_runs:
-        if eligibility["status"] == "PASS":
-            index = int(item["runIndex"])
-            item["speedRatio"] = eligibility["speedup"]["speedRatio"][index]
-            item["speedupMultiple"] = eligibility["speedup"]["speedupMultiple"][index]
+        run_is_individually_valid = (
+            isinstance(item, Mapping)
+            and item.get("serialStatus") == "PASS"
+            and item.get("parallelStatus") == "PASS"
+            and _validate_run_shape(
+                item,
+                lineage,
+                shard_count,
+                expected_commit_sha=commit_sha,
+                expected_source_fingerprint=source_fingerprint,
+            ) is None
+        )
+        if run_is_individually_valid:
+            metrics = compute_speedup_metrics(
+                [item["serialWallSeconds"]], [item["parallelWallSeconds"]],
+            )
+            item["speedRatio"] = metrics["speedRatio"][0]
+            item["speedupMultiple"] = metrics["speedupMultiple"][0]
         else:
             item.pop("speedRatio", None)
             item.pop("speedupMultiple", None)

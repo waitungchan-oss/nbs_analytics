@@ -22,6 +22,29 @@ ENVIRONMENT = "0" * 64
 DATASET = "1" * 64
 
 
+@pytest.fixture(autouse=True)
+def _live_runtime_identity(monkeypatch):
+    from backend.agents import acceptance_parallel_runner as runner
+    from scripts import acceptance_parallel_rollout as subject
+
+    observed = {
+        "runnerFingerprint": RUNNER,
+        "environmentFingerprint": ENVIRONMENT,
+    }
+    monkeypatch.setattr(
+        subject,
+        "observe_runtime_fingerprints",
+        lambda project_root: dict(observed),
+    )
+    monkeypatch.setattr(runner, "observe_runtime_fingerprints", lambda project_root: dict(observed))
+
+
+def _capability():
+    from scripts import acceptance_parallel_rollout as subject
+
+    return subject.build_runner_capability_receipt(RUNNER)
+
+
 def test_canonical_session_file_needs_no_invented_source_fingerprint():
     from backend.agents.verification_session import VerificationSession
     from scripts import acceptance_parallel_rollout as subject
@@ -48,6 +71,34 @@ def test_source_change_after_serial_suppresses_parallel(tmp_path, monkeypatch):
     result = json.loads((tmp_path.parent / f"{tmp_path.name}-rollout.json").read_text())
     assert result["speedup"] is None
     assert all(run["failureCode"] == "parallel_source_identity_mismatch" for run in result["measuredRuns"])
+
+
+def test_rollout_rejects_caller_lineage_that_differs_from_live_runtime(tmp_path, monkeypatch):
+    from scripts import acceptance_parallel_rollout as subject
+
+    monkeypatch.setattr(
+        subject,
+        "observe_runtime_fingerprints",
+        lambda project_root: {
+            "runnerFingerprint": "a" * 64,
+            "environmentFingerprint": "b" * 64,
+        },
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="do not match live runtime identity"):
+        subject.run_parallel_rollout(
+            project_root=tmp_path,
+            manifest={},
+            contract={},
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            runner_fingerprint=RUNNER,
+            environment_fingerprint=ENVIRONMENT,
+            baseline_family_id="acceptance-full-serial-ci-v1",
+            source_seal=_source_session(),
+            expected_source_session=_source_session(),
+        )
 
 
 def _source_session(**overrides):
@@ -755,6 +806,7 @@ def test_serial_control_accepts_only_an_exact_source_seal_for_dirty_worktree(tmp
             "environmentFingerprint": ENVIRONMENT,
             "datasetSnapshotFingerprint": DATASET,
         },
+        runner_capability=_capability(),
     )
 
     assert result["status"] == "PASS"
@@ -812,6 +864,7 @@ def test_serial_control_allocates_three_fresh_fixture_roots(tmp_path, monkeypatc
                 "environmentFingerprint": ENVIRONMENT,
                 "datasetSnapshotFingerprint": DATASET,
             },
+            runner_capability=_capability(),
         )
         for run_index in range(3)
     ]
@@ -862,6 +915,7 @@ def test_serial_control_rejects_summary_that_does_not_cover_manifest_population(
             "environmentFingerprint": ENVIRONMENT,
             "datasetSnapshotFingerprint": DATASET,
         },
+        runner_capability=_capability(),
     )
 
     assert result["status"] == "FAIL"
@@ -990,6 +1044,7 @@ def test_real_source_seal_uses_canonical_worktree_fingerprint_for_serial_control
             "environmentFingerprint": ENVIRONMENT,
             "datasetSnapshotFingerprint": DATASET,
         },
+        runner_capability=_capability(),
     )
     assert result["status"] == ("BLOCKED" if drift else "PASS")
     assert len(calls) == (0 if drift else 1)

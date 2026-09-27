@@ -55,12 +55,17 @@ parallel wall-clock 從所有 pytest worker 完成 READY、readiness barrier
 結果序列化不計入此執行時間。失敗時不自動 retry、改變
 population 或改寫 threshold。
 
-每次 measured parallel run 必須同時提供完整 execution lineage
-（runner/environment/dataset fingerprints）與由 live worker capacity probe 產生的
-`acceptance-runner-capability-v1` receipt。Receipt 綁定 `runnerFingerprint`，並以
-canonical fingerprint 封存 `maxWorkers`；執行時重新以 OS CPU affinity／CPU count 上限驗證，
-不接受 caller 自報 worker 數。`shardCount` 超過 live capacity 或缺少／錯綁 receipt 時立即
-BLOCKED，不能產生可比較的 speedup evidence。
+每次 measured run 都要先由 rollout process 即時觀測 Python/runtime package set、requirements
+hash、OS/architecture 與 runner image，再比對 CLI 傳入的 runner/environment fingerprints；
+CLI 值只是預期值，不是觀測證據。Dataset fingerprint 必須直接來自已驗證的 acceptance
+contract。只有 lineage 相符後才可由觀測到的 runner fingerprint 與 live worker capacity probe
+建立 `acceptance-runner-capability-v1` receipt。Receipt 綁定該 fingerprint，並以 canonical
+fingerprint 封存 `maxWorkers`；執行時重新以 OS CPU affinity／CPU count 上限驗證，不接受
+caller 自報 worker 數。Serial control 與每個 shard 共用這份 runtime-observed lineage 與
+capability receipt。缺少／錯綁 receipt、呼叫端指紋與即時觀測不符，或 `shardCount` 超過
+live capacity 時立即 BLOCKED，不能產生可比較的 speedup evidence。`run_parallel_shards()` 會在
+產生 child process 前再自行觀測並比對 runtime fingerprint；controller timeout 固定受限於
+1800 秒，超界即拒絕。
 
 ### Platform qualification
 

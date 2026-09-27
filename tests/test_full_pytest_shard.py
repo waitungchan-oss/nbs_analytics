@@ -113,6 +113,30 @@ def test_shard_cli_rejects_dangling_symlink_before_running_shard(monkeypatch, tm
     assert not target_path.exists()
 
 
+def test_shard_cli_rejects_temporary_output_with_symlinked_parent(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    project_root = _project_root(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest([])), encoding="utf-8")
+    actual_parent = tmp_path / "actual-parent"
+    actual_parent.mkdir()
+    symlink_parent = tmp_path / "linked-parent"
+    symlink_parent.symlink_to(actual_parent, target_is_directory=True)
+    output_path = symlink_parent / "shard.json"
+    calls = []
+    monkeypatch.setattr(
+        subject, "run_pytest_shard",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"status": "PASS"},
+    )
+
+    exit_code = subject.main(_shard_cli_args(project_root, manifest_path, output_path))
+
+    assert exit_code == 2
+    assert calls == []
+    assert not (actual_parent / "shard.json").exists()
+
+
 def test_shard_cli_writes_a_new_temporary_output(monkeypatch, tmp_path):
     from scripts import full_pytest_shard as subject
 
@@ -253,6 +277,27 @@ def test_run_pytest_shard_does_not_claim_nodeids_that_child_did_not_start(monkey
     assert result["status"] == "FAIL"
     assert result["metadata"]["failureCode"] == "collection_mismatch"
     assert result["executedNodeids"] == []
+
+
+def test_run_pytest_shard_returns_blocked_artifact_for_malformed_child_evidence(monkeypatch, tmp_path):
+    manifest = _manifest(["tests/test_a.py::test_one"])
+
+    def malformed_evidence(argv, **kwargs):
+        Path(kwargs["env"]["NBS_ACCEPTANCE_EXECUTION_EVIDENCE"]).write_text(
+            "{malformed", encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
+
+    monkeypatch.setattr("scripts.full_pytest_shard._run_pytest_command", malformed_evidence)
+    result = run_pytest_shard(
+        _project_root(tmp_path), manifest, shard_index=0, shard_count=1,
+        fixture_root=tmp_path / "shard-0", port_readiness_probe=lambda ports: True,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["metadata"]["failureCode"] == "child_execution_evidence_invalid"
+    assert "JSONDecodeError" in result["metadata"]["stderrTail"]
+    assert result["metadata"]["cleanup"]["status"] == "PASS"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="reserved-fd child handoff is POSIX-only")
