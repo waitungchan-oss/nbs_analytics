@@ -27,5 +27,65 @@
   "protectedText": {
     "revenueScope": "不含掛賬核銷與TT退款轉團款",
     "mayBaseline": "HKD 12,057,968"
+  },
+  "targetCatalogV2": {
+    "schemaVersion": "documentation-target-policy-v2",
+    "targets": [
+      {
+        "schemaVersion": "documentation-target-v2",
+        "targetId": "handoff.current-conclusion",
+        "targetKind": "handoff",
+        "repoPath": "NBS_ANALYTICS_HANDOFF.md",
+        "sectionHeading": "## 1. 本輪交接結論",
+        "operation": "replace_section",
+        "riskTier": "high",
+        "requiredApprovalId": "handoff.current-conclusion",
+        "mustExist": true
+      },
+      {
+        "schemaVersion": "documentation-target-v2",
+        "targetId": "handoff.verification-snapshot",
+        "targetKind": "handoff",
+        "repoPath": "NBS_ANALYTICS_HANDOFF.md",
+        "sectionHeading": "### 5.3 最近驗證快照",
+        "operation": "replace_section",
+        "riskTier": "high",
+        "requiredApprovalId": "handoff.verification-snapshot",
+        "mustExist": true
+      },
+      {
+        "schemaVersion": "documentation-target-v2",
+        "targetId": "runbook.pipeline-rollout-gate",
+        "targetKind": "runbook",
+        "repoPath": "docs/agents/ACCEPTANCE_PIPELINE_HARDENING_RUNBOOK.md",
+        "sectionHeading": "## Rollout handoff gate（Task 6）",
+        "operation": "replace_section",
+        "riskTier": "high",
+        "requiredApprovalId": "runbook.pipeline-rollout-gate",
+        "mustExist": true
+      },
+      {
+        "schemaVersion": "documentation-target-v2",
+        "targetId": "runbook.shard-boundary",
+        "targetKind": "runbook",
+        "repoPath": "docs/agents/ACCEPTANCE_SHARD_ROLLOUT_RUNBOOK.md",
+        "sectionHeading": "## Boundary",
+        "operation": "replace_section",
+        "riskTier": "high",
+        "requiredApprovalId": "runbook.shard-boundary",
+        "mustExist": true
+      },
+      {
+        "schemaVersion": "documentation-target-v2",
+        "targetId": "runbook.parallel-rollout-boundary",
+        "targetKind": "runbook",
+        "repoPath": "docs/agents/ACCEPTANCE_PARALLEL_ROLLOUT_RUNBOOK.md",
+        "sectionHeading": "## Boundary",
+        "operation": "replace_section",
+        "riskTier": "high",
+        "requiredApprovalId": "runbook.parallel-rollout-boundary",
+        "mustExist": true
+      }
+    ]
   }
 }
