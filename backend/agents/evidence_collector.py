@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import fnmatch
+import codecs
 import hashlib
 import json
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from backend.agents.evidence_models import (
     CommandEvidence,
@@ -26,6 +29,73 @@ def normalize_review_head_ref(head_ref: str) -> str:
         return head_ref
     normalized = head_ref.strip().upper().replace("_", "-")
     return "WORKTREE" if normalized in _WORKTREE_HEAD_ALIASES else head_ref
+
+
+def _split_text_with_limit(text: str, limit: int) -> list[str]:
+    if limit <= 0:
+        raise ValueError("Review patch limit must be positive")
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if current and len(current) + len(line) > limit:
+            chunks.append(current)
+            current = ""
+        current += line
+    if current or not chunks:
+        chunks.append(current)
+    return chunks
+
+
+@dataclass(frozen=True)
+class FullCommandOutput:
+    returncode: int
+    stdout_excerpt: str
+    stderr_excerpt: str
+    stdout_sha256: str
+    stdout_bytes: int
+    stdout_truncated: bool
+
+
+class _PatchStreamCapture:
+    def __init__(self, *, segment_chars: int, excerpt_chars: int) -> None:
+        self.segment_chars = segment_chars
+        self.excerpt_chars = excerpt_chars
+        self.segments: list[str] = []
+        self.pending = ""
+        self.excerpt_parts: list[str] = []
+        self.excerpt_length = 0
+        self.total_chars = 0
+
+    def feed(self, text: str) -> None:
+        self.total_chars += len(text)
+        excerpt_remaining = self.excerpt_chars - self.excerpt_length
+        if excerpt_remaining > 0:
+            excerpt = text[:excerpt_remaining]
+            if excerpt:
+                self.excerpt_parts.append(excerpt)
+                self.excerpt_length += len(excerpt)
+        self.pending += text
+        while len(self.pending) > self.segment_chars:
+            split_at = self.pending.rfind("\n", 0, self.segment_chars + 1)
+            if split_at <= 0:
+                split_at = self.segment_chars
+            self.segments.append(self.pending[:split_at])
+            self.pending = self.pending[split_at:]
+
+    def finish(self) -> tuple[list[str], str, bool]:
+        if self.pending or not self.segments:
+            self.segments.append(self.pending)
+        return (
+            self.segments,
+            "".join(self.excerpt_parts),
+            self.total_chars > self.excerpt_chars,
+        )
 
 
 @dataclass(frozen=True)
@@ -67,9 +137,7 @@ class EvidencePolicy:
             context_input_tokens=int(context["inputTokens"]),
             review_input_tokens=int(review["inputTokens"]),
             review_output_tokens=int(review["outputTokens"]),
-            review_max_command_characters=int(
-                review.get("maxCommandCharacters", command_limit)
-            ),
+            review_max_command_characters=int(review.get("maxCommandCharacters", command_limit)),
         )
 
     def resolve_read_path(self, path: Path) -> Path:
@@ -148,6 +216,11 @@ class EvidenceCollector:
     _COMMAND_EXECUTABLES = frozenset({"git", "rg"})
     _QUERY_MAX_FILES_PER_BATCH = 64
     _QUERY_MAX_ARGUMENT_CHARACTERS = 6000
+    _MAX_REVIEW_PATCH_CHARACTERS = 24000
+    _MAX_REVIEW_STATUS_BYTES = 2 * 1024 * 1024
+    _MAX_REVIEW_EVIDENCE_BYTES = 16 * 1024 * 1024
+    _MAX_FULL_COMMAND_EXCERPT_BYTES = 4096
+    _MAX_FULL_COMMAND_DIAGNOSTIC_BYTES = 4096
 
     def __init__(self, project_root: Path, *, policy: EvidencePolicy | None = None) -> None:
         self.project_root = project_root.resolve()
@@ -199,23 +272,124 @@ class EvidenceCollector:
             truncated=len(completed.stdout) > limit or len(completed.stderr) > limit,
         )
 
-    def _run_full_stdout(self, argv: list[str]) -> tuple[int, str]:
-        """Run an allowlisted command and retain full stdout for hashing only."""
+    def _run_full_stdout(
+        self,
+        argv: list[str],
+        *,
+        stdout_consumer: Callable[[str], None] | None = None,
+        max_stdout_bytes: int | None = None,
+    ) -> FullCommandOutput:
+        """Stream allowlisted output, hashing all stdout and retaining bounded excerpts."""
         if not argv or argv[0] not in self._COMMAND_EXECUTABLES:
             raise PermissionError(f"Command is not allowlisted: {argv[0] if argv else '<empty>'}")
+        output_limit = (
+            self._MAX_REVIEW_EVIDENCE_BYTES
+            if max_stdout_bytes is None else max_stdout_bytes
+        )
+        if isinstance(output_limit, bool) or not isinstance(output_limit, int) or output_limit <= 0:
+            raise ValueError("Full command output bound must be a positive integer")
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 argv,
                 cwd=self.project_root,
-                text=True,
-                capture_output=True,
-                timeout=60,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 shell=False,
             )
         except FileNotFoundError:
-            return 127, ""
-        return completed.returncode, completed.stdout
+            return FullCommandOutput(
+                returncode=127,
+                stdout_excerpt="",
+                stderr_excerpt=f"executable not found: {argv[0]}",
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stdout_bytes=0,
+                stdout_truncated=False,
+            )
+
+        digest = hashlib.sha256()
+        stdout_state = {
+            "bytes": 0,
+            "captured_bytes": 0,
+            "truncated": False,
+            "excerpt": bytearray(),
+        }
+        stderr_state = {"excerpt": bytearray()}
+        reader_errors: list[BaseException] = []
+
+        def read_stdout() -> None:
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            try:
+                assert process.stdout is not None
+                while block := process.stdout.read(65536):
+                    digest.update(block)
+                    stdout_state["bytes"] += len(block)
+                    remaining = output_limit - stdout_state["captured_bytes"]
+                    accepted = block[:max(remaining, 0)]
+                    if len(accepted) < len(block):
+                        stdout_state["truncated"] = True
+                    if accepted:
+                        stdout_state["captured_bytes"] += len(accepted)
+                        text = decoder.decode(accepted)
+                        if stdout_consumer is not None and text:
+                            stdout_consumer(text)
+                        excerpt_room = max(
+                            min(self._MAX_FULL_COMMAND_EXCERPT_BYTES, output_limit)
+                            - len(stdout_state["excerpt"]),
+                            0,
+                        )
+                        if excerpt_room:
+                            stdout_state["excerpt"].extend(accepted[:excerpt_room])
+                tail = decoder.decode(b"", final=True)
+                if tail and stdout_consumer is not None:
+                    stdout_consumer(tail)
+            except BaseException as exc:
+                reader_errors.append(exc)
+                # Keep draining the pipe so a command cannot deadlock behind a
+                # stopped consumer; the error is re-raised after the process exits.
+                try:
+                    assert process.stdout is not None
+                    while process.stdout.read(65536):
+                        pass
+                except OSError:
+                    pass
+
+        def read_stderr() -> None:
+            try:
+                assert process.stderr is not None
+                while block := process.stderr.read(65536):
+                    room = self._MAX_FULL_COMMAND_DIAGNOSTIC_BYTES - len(stderr_state["excerpt"])
+                    if room > 0:
+                        stderr_state["excerpt"].extend(block[:room])
+            except BaseException as exc:
+                reader_errors.append(exc)
+
+        stdout_thread = threading.Thread(target=read_stdout, name="review-stdout-reader", daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, name="review-stderr-reader", daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            returncode = process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+            raise
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        if stdout_thread.is_alive() or stderr_thread.is_alive():
+            process.kill()
+            raise RuntimeError("Review command output reader did not terminate")
+        if reader_errors:
+            raise RuntimeError(f"Review command output capture failed: {reader_errors[0]}")
+        return FullCommandOutput(
+            returncode=returncode,
+            stdout_excerpt=bytes(stdout_state["excerpt"]).decode("utf-8", errors="replace"),
+            stderr_excerpt=bytes(stderr_state["excerpt"]).decode("utf-8", errors="replace"),
+            stdout_sha256=digest.hexdigest(),
+            stdout_bytes=stdout_state["bytes"],
+            stdout_truncated=stdout_state["truncated"],
+        )
 
     def _rg_fallback_command(
         self, label: str, argv: list[str], limit: int
@@ -458,10 +632,17 @@ class EvidenceCollector:
             launch_worktree_argv,
             command_character_limit=self.policy.review_max_command_characters,
         )
-        launch_exit_code, launch_full_stdout = self._run_full_stdout(launch_worktree_argv)
-        launch_worktree_fingerprint = hashlib.sha256(
-            launch_full_stdout.encode()
-        ).hexdigest()
+        launch_output = self._run_full_stdout(
+            launch_worktree_argv,
+            max_stdout_bytes=self._MAX_REVIEW_STATUS_BYTES,
+        )
+        if launch_output.stdout_truncated:
+            raise RuntimeError("Review worktree status exceeded its bounded output budget")
+        if launch_output.returncode != 0:
+            raise RuntimeError(
+                f"Review launch worktree probe failed: {launch_output.stderr_excerpt[:400]}"
+            )
+        launch_worktree_fingerprint = launch_output.stdout_sha256
         base_sha, base_command = self._resolve_ref("git-base", base_ref)
         head_command = None
         head_sha = None
@@ -535,6 +716,7 @@ class EvidenceCollector:
         untracked_set = set(untracked_paths)
         patches: list[EvidenceItem] = []
         patch_commands: list[CommandEvidence] = []
+        captured_patch_bytes = 0
         for index, relative in enumerate(selected_paths[:50]):
             if not relative or relative.startswith("/") or ".." in Path(relative).parts:
                 raise PermissionError(f"Unsafe changed path: {relative}")
@@ -547,27 +729,63 @@ class EvidenceCollector:
                 if relative.startswith(".superpowers/") and relative not in preserved_dirty_paths:
                     preserved_dirty_paths.append(relative)
                 continue
-            if relative in untracked_set:
-                patch = self._run(
-                    f"git-diff-untracked-file-{index}",
-                    ["git", "diff", *diff_options, "--no-index", "--", "/dev/null", relative],
-                    command_character_limit=self.policy.review_max_command_characters,
-                )
-            else:
-                patch = self._run(
-                    f"git-diff-file-{index}",
-                    ["git", "diff", *diff_options, diff_range, "--", relative],
-                    command_character_limit=self.policy.review_max_command_characters,
-                )
-            patch_commands.append(patch)
-            patches.append(
-                EvidenceItem(
-                    kind="diff",
-                    source=relative,
-                    content=patch.stdout,
-                    metadata={"truncated": patch.truncated, "untracked": relative in untracked_set},
-                )
+            patch_label = (
+                f"git-diff-untracked-file-{index}"
+                if relative in untracked_set else f"git-diff-file-{index}"
             )
+            patch_argv = (
+                ["git", "diff", *diff_options, "--no-index", "--", "/dev/null", relative]
+                if relative in untracked_set
+                else ["git", "diff", *diff_options, diff_range, "--", relative]
+            )
+            patch_limit = min(
+                self.policy.review_max_command_characters or self.policy.max_command_characters,
+                self._MAX_REVIEW_PATCH_CHARACTERS,
+            )
+            remaining_budget = self._MAX_REVIEW_EVIDENCE_BYTES - captured_patch_bytes
+            if remaining_budget <= 0:
+                raise RuntimeError("Review patch evidence exceeded its bounded capture budget")
+            patch_capture = _PatchStreamCapture(
+                segment_chars=patch_limit,
+                excerpt_chars=patch_limit,
+            )
+            patch_output = self._run_full_stdout(
+                patch_argv,
+                stdout_consumer=patch_capture.feed,
+                max_stdout_bytes=remaining_budget,
+            )
+            if patch_output.stdout_truncated:
+                raise RuntimeError("Review patch evidence exceeded its bounded capture budget")
+            captured_patch_bytes += patch_output.stdout_bytes
+            expected_untracked_exit = relative in untracked_set and patch_output.returncode == 1
+            if patch_output.returncode != 0 and not expected_untracked_exit:
+                raise RuntimeError(
+                    f"Review patch command failed for {relative}: {patch_output.stderr_excerpt[:400]}"
+                )
+            patch_chunks, patch_excerpt, patch_truncated = patch_capture.finish()
+            patch = CommandEvidence(
+                label=patch_label,
+                argv=tuple(patch_argv),
+                exit_code=0 if expected_untracked_exit else patch_output.returncode,
+                stdout=patch_excerpt,
+                stderr="",
+                truncated=patch_truncated,
+            )
+            patch_commands.append(patch)
+            for segment_index, patch_content in enumerate(patch_chunks):
+                patches.append(
+                    EvidenceItem(
+                        kind="diff",
+                        source=relative,
+                        content=patch_content,
+                        metadata={
+                            "truncated": False,
+                            "untracked": relative in untracked_set,
+                            "segmentIndex": segment_index,
+                            "segmentCount": len(patch_chunks),
+                        },
+                    )
+                )
         return EvidenceBundle(
             schema_version="review-evidence-v1",
             task={
@@ -584,7 +802,7 @@ class EvidenceCollector:
                 "headSha": head_sha,
                 "preservedDirtyFiles": sorted(preserved_dirty_paths),
                 "reviewLaunchWorktreeFingerprint": launch_worktree_fingerprint,
-                "reviewLaunchWorktreeProbeExitCode": launch_exit_code,
+                "reviewLaunchWorktreeProbeExitCode": launch_output.returncode,
                 "diffFileLimitExceeded": changed.truncated
                 or bool(untracked_command and untracked_command.truncated)
                 or len(selected_paths) > 50,

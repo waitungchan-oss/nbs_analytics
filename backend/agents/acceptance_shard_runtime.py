@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import errno
+import math
 import os
 import re
+import select
 import signal
 import shutil
 import socket
@@ -26,8 +29,8 @@ from backend.agents import acceptance_windows_job
 from backend.agents.acceptance_paths import canonical_path, is_temporary_path
 
 
-_PORT_BASE = 45_000
-_PORT_SPAN = 10_000
+_PORT_BASE = 30_000
+_PORT_SPAN = 2_765
 _PORT_NAMES = ("streamlit", "mcp", "health")
 _PORT_LOCK_ROOT = _PORT_LOCK_ROOT_PATH
 _ALLOWED_ROOT_ENTRIES = {"shard.db", "coordination.db", "cache", "runtime-profile.json"}
@@ -39,20 +42,19 @@ _PRODUCTION_PATH_NAMES = {
 }
 
 
+class _PortReadinessView(dict[str, int]):
+    """Mapping-compatible port view carrying the reserved socket handles."""
+
+    def __init__(self, ports: dict[str, int], reservations: dict[str, socket.socket]) -> None:
+        super().__init__(ports)
+        self.reserved_sockets = dict(reservations)
+
+
 def _safe_run_id(run_id: str) -> str:
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError("run_id must be a non-empty string")
     safe = "".join(character if character.isalnum() or character in "-_" else "-" for character in run_id)
     return safe.strip("-")[:48] or "run"
-
-
-def _check_port(port: int) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind(("127.0.0.1", port))
-        except OSError as exc:
-            raise ValueError(f"acceptance shard port {port} is unavailable") from exc
 
 
 def _windows_process_alive(process_id: int) -> bool:
@@ -131,6 +133,197 @@ class ShardRuntime:
     def profile_ports(self) -> dict[str, int]:
         return dict(self._ports)
 
+    def validate_reserved_ports(self, probe: Callable[[dict[str, int]], bool]) -> None:
+        """Validate the already-held port namespace without releasing it."""
+        if not callable(probe):
+            raise ValueError("probe must be callable")
+        if set(self._port_reservations) != set(self._ports):
+            raise RuntimeError("reserved port ownership is incomplete")
+        for name, expected_port in self._ports.items():
+            reservation = self._port_reservations[name]
+            try:
+                address = reservation.getsockname()
+            except OSError as exc:
+                raise RuntimeError("reserved port ownership is unavailable") from exc
+            try:
+                accepting = reservation.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            except OSError as exc:
+                if exc.errno in {errno.ENOPROTOOPT, errno.EINVAL, errno.ENOTSUP}:
+                    accepting = None
+                else:
+                    raise RuntimeError("reserved port ownership is unavailable") from exc
+            if reservation.fileno() < 0 or address[:2] != ("127.0.0.1", expected_port) or accepting not in {None, 1}:
+                raise RuntimeError("reserved port endpoint is not ready")
+        if not probe(_PortReadinessView(self._ports, self._port_reservations)):
+            raise RuntimeError("reserved port readiness probe failed")
+
+    def launch_process_with_port_handoff(
+        self, argv: list[str], *, cwd: Path, env: dict[str, str]
+    ) -> subprocess.Popen:
+        """Launch a child that inherits the reserved sockets before release.
+
+        The parent keeps the namespace lock while Popen and process-group
+        registration complete.  The child receives the listening descriptors
+        through ``pass_fds``; the parent then closes its copies, so ownership
+        does not pass through an unbound interval.
+        """
+        if self._is_windows:
+            raise RuntimeError("windows shard launcher is not qualified")
+        process = None
+        reservations = tuple(self._port_reservations.values())
+        namespace_descriptor = None
+        readiness_reader = None
+        readiness_writer = None
+        start_reader = None
+        start_writer = None
+        try:
+            namespace_descriptor = _open_namespace_lock()
+            readiness_reader, readiness_writer = os.pipe()
+            start_reader, start_writer = os.pipe()
+            inherited_fds = tuple(reservation.fileno() for reservation in reservations)
+            evidence_fd_value = env.get("NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD")
+            evidence_binding = env.get("NBS_ACCEPTANCE_EXECUTION_BINDING")
+            if (evidence_fd_value is None) != (evidence_binding is None):
+                raise RuntimeError("child execution evidence channel is incomplete")
+            evidence_fd = None
+            if evidence_fd_value is not None:
+                if not evidence_fd_value.isdecimal():
+                    raise RuntimeError("child execution evidence descriptor is invalid")
+                evidence_fd = int(evidence_fd_value)
+                try:
+                    os.fstat(evidence_fd)
+                except OSError as exc:
+                    raise RuntimeError("child execution evidence descriptor is unavailable") from exc
+                if evidence_fd in inherited_fds:
+                    raise RuntimeError("child execution evidence descriptor conflicts with a reserved socket")
+            pass_fds = inherited_fds + (readiness_writer, start_reader) + (
+                () if evidence_fd is None else (evidence_fd,)
+            )
+            if len(pass_fds) != len(set(pass_fds)):
+                raise RuntimeError("child inherited descriptor set is ambiguous")
+            child_env = dict(env)
+            child_env["NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL"] = "reserved-fd-v1"
+            child_env["NBS_ACCEPTANCE_RESERVED_PORT_FDS"] = ",".join(
+                f"{name}={self._port_reservations[name].fileno()}:{self._ports[name]}"
+                for name in sorted(self._ports)
+            )
+            child_env["NBS_ACCEPTANCE_CHILD_READY_FD"] = str(readiness_writer)
+            child_env["NBS_ACCEPTANCE_CHILD_START_FD"] = str(start_reader)
+            process = subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                pass_fds=pass_fds,
+            )
+            self.register_process_group(process.pid)
+            process._nbs_readiness_reader = readiness_reader
+            process._nbs_start_writer = start_writer
+            readiness_reader = None
+            start_writer = None
+            return process
+        except BaseException:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                try:
+                    process.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    try:
+                        process.communicate(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+            raise
+        finally:
+            for reservation in reservations:
+                try:
+                    reservation.close()
+                except OSError:
+                    pass
+            self._port_reservations.clear()
+            for descriptor in (readiness_reader, readiness_writer, start_reader, start_writer):
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+            if namespace_descriptor is not None:
+                try:
+                    os.close(namespace_descriptor)
+                except OSError:
+                    pass
+
+    def complete_port_handoff(
+        self,
+        process: subprocess.Popen,
+        *,
+        timeout: float,
+        readiness_callback: Callable[[], None] | None = None,
+        start_callback: Callable[[], None] | None = None,
+        readiness_probe: Callable[[dict[str, int]], bool] | None = None,
+    ) -> None:
+        """Read bounded child READY, then mark the boundary immediately before START."""
+        readiness_reader = getattr(process, "_nbs_readiness_reader", None)
+        start_writer = getattr(process, "_nbs_start_writer", None)
+        if readiness_reader is None or start_writer is None:
+            raise RuntimeError("child readiness descriptors are missing")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(float(timeout)) or timeout <= 0:
+            raise ValueError("handoff timeout must be finite and strictly positive")
+        try:
+            if not callable(readiness_probe):
+                raise ValueError("readiness_probe is required")
+            expected_ready = "READY " + ",".join(
+                f"{name}={self._ports[name]}" for name in sorted(self._ports)
+            ) + "\n"
+            expected_bytes = expected_ready.encode("ascii")
+            deadline = time.monotonic() + float(timeout)
+            received = bytearray()
+            while b"\n" not in received:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("child readiness handshake timed out")
+                readable, _, _ = select.select([readiness_reader], [], [], remaining)
+                if not readable:
+                    raise RuntimeError("child readiness handshake timed out")
+                chunk = os.read(readiness_reader, 256 - len(received))
+                if not chunk:
+                    raise RuntimeError("child readiness handshake ended before newline")
+                received.extend(chunk)
+                if len(received) >= 256 and b"\n" not in received:
+                    raise RuntimeError("child readiness handshake exceeded size limit")
+            if bytes(received) != expected_bytes:
+                raise RuntimeError("child readiness handshake failed")
+            # Parent reservation handles are intentionally closed during launch;
+            # the child-owned endpoint identity is the readiness boundary.
+            if not readiness_probe(dict(self._ports)):
+                raise RuntimeError("child readiness probe failed")
+            if readiness_callback is not None:
+                readiness_callback()
+            if start_callback is not None:
+                start_callback()
+            os.write(start_writer, b"START\n")
+        finally:
+            for descriptor_name in ("_nbs_readiness_reader", "_nbs_start_writer"):
+                descriptor = getattr(process, descriptor_name, None)
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                    setattr(process, descriptor_name, None)
+
     def handoff_ports(self) -> None:
         """Release probes only through an explicit child bind/readiness protocol."""
         raise RuntimeError("port handoff requires an explicit bind/readiness protocol")
@@ -138,21 +331,8 @@ class ShardRuntime:
     def handoff_ports_with_readiness(
         self, bind_and_probe: Callable[[dict[str, int]], bool]
     ) -> None:
-        """Run a lock-coordinated bind/readiness handoff for an external child."""
-        if not callable(bind_and_probe):
-            raise ValueError("bind_and_probe must be callable")
-        namespace_descriptor = _open_namespace_lock()
-        for reservation in self._port_reservations.values():
-            try:
-                reservation.close()
-            except OSError:
-                continue
-        self._port_reservations.clear()
-        try:
-            if not bind_and_probe(self.profile_ports()):
-                raise RuntimeError("child port readiness probe failed")
-        finally:
-            os.close(namespace_descriptor)
+        """Reject the legacy release-and-rebind handoff path."""
+        raise RuntimeError("legacy port handoff is disabled; use reserved-fd-v1")
 
     def register_process_group(self, process_id: int) -> None:
         if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
@@ -350,6 +530,7 @@ class ShardRuntime:
 
     def cleanup_report(self) -> dict[str, Any]:
         self._cleanup = self._leak_report()
+        self._cleanup["allProcessGroupsTerminated"] = not self._cleanup["leakedProcesses"]
         return {
             **self._cleanup,
             "leakedFiles": list(self._cleanup["leakedFiles"]),
@@ -449,6 +630,7 @@ class ShardRuntime:
             final["failureCode"] = "isolation_violation"
             if "cleanup_failed" not in final["leakedFiles"]:
                 final["leakedFiles"].append("cleanup_failed")
+        final["allProcessGroupsTerminated"] = not final["leakedProcesses"]
         self._cleanup = final
         return {
             **final,
@@ -465,11 +647,6 @@ def _ports_for(run_id: str, shard_index: int) -> dict[str, int]:
     if max(ports.values()) >= 65536:
         offset = offset % (_PORT_SPAN - len(_PORT_NAMES))
         ports = {name: _PORT_BASE + offset + position for position, name in enumerate(_PORT_NAMES)}
-    try:
-        for port in ports.values():
-            _check_port(port)
-    except ValueError as exc:
-        raise RuntimeError("shard runtime port allocation failed") from exc
     return ports
 
 
@@ -510,9 +687,7 @@ def allocate_shard_runtime(
             raise ValueError("shard fixture root must be unique and not already exist")
         if not is_temporary_path(candidate):
             raise ValueError("shard fixture root must be inside a temporary root")
-        if (
-            project == canonical_path(candidate).parent or project in canonical_path(candidate).parents
-        ) and not is_temporary_path(project):
+        if project == canonical_path(candidate).parent or project in canonical_path(candidate).parents:
             raise ValueError("shard fixture root must not be inside the project root")
         candidate.parent.mkdir(parents=True, exist_ok=True)
         candidate.mkdir()

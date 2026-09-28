@@ -1,4 +1,10 @@
+import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
+
+from backend.agents.verification_session import VerificationSession
 
 
 WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "release-gates.yml"
@@ -128,6 +134,74 @@ def test_release_workflow_has_opt_in_v2_diagnostics_outside_formal_aggregate():
     assert "--ui-acceptance artifacts/ui-acceptance/ui-acceptance.json" in aggregate
 
 
+def test_parallel_rollout_workflow_seals_and_passes_canonical_source_session():
+    source = _workflow_text()
+    rollout = source.split("  acceptance-parallel-rollout:\n", 1)[1].split("  aggregate:\n", 1)[0]
+
+    assert "scripts/verification_chain.py seal" in rollout
+    assert "--brief docs/agents/ACCEPTANCE_PARALLEL_ROLLOUT_RUNBOOK.md" in rollout
+    assert "docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md" not in rollout
+    assert 'BASE_SHA=$(git merge-base "$GITHUB_SHA" "origin/main")' in rollout
+    assert '--base "$BASE_SHA"' in rollout
+    assert "SOURCE_SESSION_PATH=\"$ROLLOUT_SESSIONS/$SESSION_ID/session.json\"" in rollout
+    assert "SOURCE_SEAL_PATH=\"$ROLLOUT_ROOT/source-seal.json\"" in rollout
+    assert '"schemaVersion": "source-seal-v1"' in rollout
+    assert "--source-seal \"$SOURCE_SEAL_PATH\"" in rollout
+    assert "--source-session \"$SOURCE_SESSION_PATH\"" in rollout
+    assert "git archive --format=tar" not in rollout
+
+
+def test_parallel_rollout_workflow_writes_source_seal_with_exact_schema(tmp_path):
+    source = _workflow_text()
+    marker = '.venv/bin/python - "$SOURCE_SESSION_PATH" "$SOURCE_SEAL_PATH" "$SOURCE_FINGERPRINT" <<\'PY\'\n'
+    script = textwrap.dedent(source.split(marker, 1)[1].split("\n          PY\n", 1)[0])
+    session = VerificationSession.create(
+        project_id="nbs_analytics",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        brief_path="docs/superpowers/specs/example.md",
+        brief_fingerprint="c" * 64,
+        worktree_fingerprint="d" * 64,
+        diff_fingerprint="e" * 64,
+        contract_fingerprint="f" * 64,
+        policy_fingerprint="0" * 64,
+    )
+    session_path = tmp_path / "session.json"
+    seal_path = tmp_path / "source-seal.json"
+    session_path.write_text(json.dumps(session.to_dict()), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-", str(session_path), str(seal_path), session.source_fingerprint],
+        input=script,
+        text=True,
+        capture_output=True,
+        cwd=WORKFLOW.parents[2],
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    seal = json.loads(seal_path.read_text(encoding="utf-8"))
+    assert set(seal) == {
+        "schemaVersion", "baseSha", "briefPath", "briefFingerprint",
+        "contractFingerprint", "diffFingerprint", "policyFingerprint",
+        "headSha", "sourceFingerprint", "worktreeFingerprint",
+    }
+    assert seal["schemaVersion"] == "source-seal-v1"
+    assert seal["sourceFingerprint"] == session.source_fingerprint
+    mismatched_seal_path = tmp_path / "mismatched-source-seal.json"
+    mismatched = subprocess.run(
+        [sys.executable, "-", str(session_path), str(mismatched_seal_path), "1" * 64],
+        input=script,
+        text=True,
+        capture_output=True,
+        cwd=WORKFLOW.parents[2],
+        check=False,
+    )
+    assert mismatched.returncode != 0
+    assert "does not match the canonical verification session" in mismatched.stderr
+    assert not mismatched_seal_path.exists()
+
+
 def test_release_workflow_cancels_superseded_pr_runs_but_not_release_tags():
     text = _workflow_text()
     assert "concurrency:" in text
@@ -206,3 +280,46 @@ def test_shard_jobs_are_advisory_and_do_not_replace_serial_authority():
     assert "acceptance-shard-aggregate" in shard_block
     assert "needs: [full-pytest, hermes, ui-acceptance]" in formal_aggregate
     assert "acceptance-shard" not in formal_aggregate
+
+
+def test_parallel_rollout_is_manual_opt_in_and_not_a_formal_need():
+    source = _workflow_text()
+    assert "enable_acceptance_parallel_rollout" in source
+    assert "default: false" in source
+    parallel = source.split("  acceptance-parallel-rollout:\n", 1)[1].split("  aggregate:\n", 1)[0]
+    assert "github.event_name == 'workflow_dispatch'" in parallel
+    assert "inputs.enable_acceptance_parallel_rollout == true" in parallel
+    assert ".venv/bin/python scripts/acceptance_parallel_rollout.py" in parallel
+    assert "--repeats 3" in parallel
+    assert "SHARD_COUNT=$(.venv/bin/python -c" in parallel
+    assert '--shard-count "$SHARD_COUNT"' in parallel
+    assert 'SOURCE_SEAL_PATH="$ROLLOUT_ROOT/source-seal.json"' in parallel
+    assert '--source-seal "$SOURCE_SEAL_PATH"' in parallel
+    assert 'git merge-base "$GITHUB_SHA" "origin/main"' in parallel
+    assert "observe_runtime_fingerprints" in parallel
+    runtime_identity = (Path(__file__).parents[1] / "backend/agents/acceptance_parallel_runner.py").read_text(encoding="utf-8")
+    assert '"ImageOS"' in runtime_identity and '"ImageVersion"' in runtime_identity
+    assert "--runner-max-workers" not in parallel
+    assert '--source-session "$SOURCE_SESSION_PATH"' in parallel
+    assert "name: acceptance-parallel-rollout-${{ github.sha }}" in parallel
+    assert "needs: [full-pytest, hermes, ui-acceptance]" in source
+
+
+def test_parallel_rollout_timeout_covers_three_serial_parallel_cycles():
+    source = _workflow_text()
+    parallel = source.split("  acceptance-parallel-rollout:\n", 1)[1].split("  aggregate:\n", 1)[0]
+    assert "timeout-minutes: 240" in parallel
+
+
+def test_parallel_artifacts_are_not_downloaded_by_formal_aggregate():
+    source = _workflow_text()
+    aggregate = source[source.index("  aggregate:"):]
+    formal_downloads = aggregate.split("      - name: Aggregate fresh release evidence", 1)[0]
+    assert "acceptance-parallel" not in formal_downloads
+    assert "acceptance-parallel" not in aggregate.split("      - name: Aggregate fresh release evidence", 1)[1]
+
+
+def test_parallel_rollout_failure_does_not_turn_into_formal_release_pass():
+    source = _workflow_text()
+    assert "formalReleaseEnabled=false" in source or "formalReleaseEnabled: false" in source
+    assert "enable_acceptance_parallel_rollout=false" in source

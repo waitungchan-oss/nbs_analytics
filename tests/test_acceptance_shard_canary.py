@@ -123,12 +123,13 @@ def test_canary_reports_parity_failure_code():
     assert result["failureCode"] == "serial_parity_failed"
 
 
-def test_port_readiness_uses_a_real_child_tcp_binder():
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+def test_port_readiness_probes_an_existing_tcp_listener_without_rebinding():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
 
-    assert _port_readiness({"shard": port}) is True
+        assert _port_readiness({"shard": port}) is True
 
 
 def test_run_canary_preserves_manifest_blocker(monkeypatch, tmp_path):

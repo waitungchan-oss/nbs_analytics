@@ -194,13 +194,16 @@ def test_compact_review_payload_removes_unbounded_metadata_and_rebinds_fingerpri
         review_bundle(), context_summary=context_summary(), verification=verification(),
     )
     payload["gitDiff"]["patches"][0]["metadata"] = {
-        "truncated": False, "secret": "do-not-send",
+        "truncated": False, "segmentIndex": 1, "segmentCount": 3, "secret": "do-not-send",
     }
     payload["verification"]["commands"][0]["stdoutTail"] = "x" * 5000
 
     compact = compact_review_evidence_payload(payload)
 
     assert "secret" not in json.dumps(compact, ensure_ascii=False)
+    assert compact["gitDiff"]["patches"][0]["metadata"] == {
+        "truncated": False, "segmentIndex": 1, "segmentCount": 3,
+    }
     assert len(compact["verification"]["commands"][0]["stdoutTail"]) == 4000
     assert compact["bundleFingerprint"] == payload["bundleFingerprint"]
 
@@ -779,6 +782,46 @@ def test_plan_review_batches_splits_deterministically_by_budget():
     ]
 
 
+def test_plan_review_batches_preserves_complete_large_single_file_patch():
+    from backend.agents.review_agent_service import plan_review_batches
+
+    session = _session()
+    content = "diff --git a/large.py b/large.py\n" + ("+complete-line-0123456789\n" * 1800)
+    bundle = EvidenceBundle(
+        schema_version="review-evidence-v1",
+        task={"id": "x", "objective": "approved", "scope": [], "forbidden": []},
+        repository={"branch": "feature", "head": "abc", "dirtyFiles": []},
+        guardrails={"mayBaseline": "HKD 12,057,968"},
+        evidence=(EvidenceItem(kind="diff", source="large.py", content=content),),
+    )
+
+    batches = plan_review_batches(session, bundle)
+    segments = [
+        item for batch in batches for item in batch.bundle.evidence
+        if item.source == "large.py"
+    ]
+
+    assert len(segments) > 1
+    assert "".join(item.content for item in segments) == content
+    assert all(len(item.content) <= 24000 for item in segments)
+    assert all(item.metadata["segmentCount"] == len(segments) for item in segments)
+    assert all(item.metadata["segmentIndex"] == index for index, item in enumerate(segments))
+    payload = build_review_evidence_payload(
+        EvidenceBundle(
+            schema_version="review-evidence-v1",
+            task={"id": "x", "objective": "approved", "scope": [], "forbidden": []},
+            repository={"branch": "feature", "head": "abc", "dirtyFiles": []},
+            guardrails={"mayBaseline": "HKD 12,057,968"},
+            evidence=tuple(segments),
+        ),
+        context_summary=context_summary(), verification=verification(),
+    )
+    compact = compact_review_evidence_payload(payload)
+    compact_segments = compact["gitDiff"]["patches"]
+    assert [item["metadata"]["segmentIndex"] for item in compact_segments] == list(range(len(segments)))
+    assert all(item["metadata"]["segmentCount"] == len(segments) for item in compact_segments)
+
+
 def test_batch_identity_does_not_embed_patch_content():
     from backend.agents.review_agent_service import plan_review_batches
 
@@ -992,6 +1035,27 @@ def test_run_review_batch_binds_session_identity(tmp_path):
         "baselineRisk", "residualRisk", "hermesRequiredChecks", "reviewFingerprint",
         "sessionId", "batchId", "batchFingerprint", "sessionFingerprint", "resultFingerprint",
     }
+
+
+def test_run_review_batch_binds_fingerprint_from_request_not_model_echo(tmp_path):
+    from backend.agents.review_agent_service import plan_review_batches, run_review_batch
+
+    class WrongFingerprintRunner(BatchRunner):
+        def run(self, payload):
+            self.payload = payload
+            report = super().run(payload)
+            report["reviewFingerprint"] = "model-copied-the-long-fingerprint-incorrectly"
+            return report
+
+    session = _session()
+    batch = plan_review_batches(session, review_bundle())[0]
+    runner = WrongFingerprintRunner()
+
+    report = run_review_batch(batch, runner, runtime_root=tmp_path)
+
+    assert report["verdict"] == "pass"
+    assert report["reviewFingerprint"] == runner.payload["bundleFingerprint"]
+    assert report["reviewFingerprint"] != "model-copied-the-long-fingerprint-incorrectly"
 
 
 def test_reuse_is_scoped_to_session(tmp_path):

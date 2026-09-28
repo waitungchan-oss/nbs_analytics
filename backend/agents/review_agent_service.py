@@ -68,8 +68,37 @@ _BATCH_REPORT_KEYS = _REPORT_KEYS | {
 # Keep one changed source file intact when it is only slightly larger than the
 # old bound.  Batch planning still controls total prompt size; this bound only
 # prevents a syntactically valid patch from being cut mid-statement.
-_MAX_PATCH_CHARS = 30000
+_MAX_PATCH_CHARS = 24000
 _DEFAULT_BATCH_PATCH_BUDGET = 12000
+
+
+def _split_patch_item(patch: EvidenceItem) -> list[EvidenceItem]:
+    if len(patch.content) <= _MAX_PATCH_CHARS:
+        return [patch]
+    chunks: list[str] = []
+    current = ""
+    for line in patch.content.splitlines(keepends=True):
+        while len(line) > _MAX_PATCH_CHARS:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:_MAX_PATCH_CHARS])
+            line = line[_MAX_PATCH_CHARS:]
+        if current and len(current) + len(line) > _MAX_PATCH_CHARS:
+            chunks.append(current)
+            current = ""
+        current += line
+    if current or not chunks:
+        chunks.append(current)
+    return [
+        EvidenceItem(
+            kind=patch.kind,
+            source=patch.source,
+            content=content,
+            metadata={**(patch.metadata or {}), "segmentIndex": index, "segmentCount": len(chunks)},
+        )
+        for index, content in enumerate(chunks)
+    ]
 
 
 def compact_review_evidence_payload(
@@ -100,11 +129,27 @@ def compact_review_evidence_payload(
         if len(content) > max_patch_chars:
             content = content[:max_patch_chars]
             truncated = True
+        metadata = patch.get("metadata", {})
+        segment_index = metadata.get("segmentIndex")
+        segment_count = metadata.get("segmentCount")
+        if (segment_index is None) != (segment_count is None):
+            raise ValueError("Review patch segment metadata is incomplete")
+        if segment_count is not None and (
+            isinstance(segment_index, bool) or not isinstance(segment_index, int)
+            or isinstance(segment_count, bool) or not isinstance(segment_count, int)
+            or segment_count < 1 or not 0 <= segment_index < segment_count
+        ):
+            raise ValueError("Review patch segment metadata is invalid")
+        bounded_metadata = {"truncated": truncated}
+        if segment_count is not None:
+            bounded_metadata.update({"segmentIndex": segment_index, "segmentCount": segment_count})
+        if isinstance(metadata.get("untracked"), bool):
+            bounded_metadata["untracked"] = metadata["untracked"]
         bounded_patches.append({
             "kind": patch.get("kind", "diff"),
             "source": patch["source"],
             "content": content,
-            "metadata": {"truncated": truncated},
+            "metadata": bounded_metadata,
         })
         git_diff["truncated"] = bool(git_diff["truncated"] or truncated)
     git_diff["patches"] = bounded_patches
@@ -195,6 +240,10 @@ def _runtime_instructions(instructions: str, *, strict: bool) -> str:
         "batchId, batchCount, files, sessionId, and sessionFingerprint to bind the "
         "batch, and do not report files omitted from this batch as missing evidence; "
         "the deterministic final aggregator validates complete batch coverage. "
+        "A patch with metadata.segmentCount greater than one is only one ordered "
+        "fragment of a larger file diff; inspect only visible changes and do not "
+        "infer whole-file properties from that fragment. The final aggregator must "
+        "receive every planned batch before reporting a session verdict. "
         "verificationSession is the sealed source manifest and runnerCapability is "
         "the capability receipt; use them as the authoritative session boundary. "
         "gitDiff.sourceFingerprint is the complete canonical session identity; "
@@ -623,10 +672,11 @@ def plan_review_batches(
         raise ValueError("Unexpected Review evidence schema")
     if patch_token_budget <= 0:
         raise ValueError("Review batch patch token budget must be positive")
-    patches = sorted(
+    source_patches = sorted(
         (item for item in bundle.evidence if item.kind == "diff"),
         key=lambda item: item.source,
     )
+    patches = [segment for item in source_patches for segment in _split_patch_item(item)]
     groups: list[list[EvidenceItem]] = []
     current: list[EvidenceItem] = []
     current_tokens = 0
@@ -643,12 +693,13 @@ def plan_review_batches(
 
     batches: list[ReviewBatch] = []
     for index, group in enumerate(groups):
-        files = tuple(sorted(patch.source for patch in group))
+        files = tuple(sorted({patch.source for patch in group}))
         bounded_patches = [
             {
                 "kind": patch.kind,
                 "source": patch.source,
                 "content": patch.content[:_MAX_PATCH_CHARS],
+                "metadata": dict(patch.metadata) if patch.metadata else {},
             }
             for patch in group
         ]
@@ -806,9 +857,10 @@ def run_review_batch(
         if memory_hub_evidence is not None else None
     )
     finish = lambda report: _attach_memory_observation(report, memory_observation)
+    runtime_instructions = _runtime_instructions(instructions, strict=strict)
     review_fingerprint = agent_request_fingerprint(
         batch.bundle,
-        instructions=instructions,
+        instructions=runtime_instructions,
         output_schema=REVIEW_REPORT_SCHEMA,
         evidence_payload=evidence_payload,
     )
@@ -871,7 +923,7 @@ def run_review_batch(
         return bound
 
     request_text = json.dumps(
-        {"instructions": instructions, "evidence": evidence_payload},
+        {"instructions": runtime_instructions, "evidence": evidence_payload},
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -971,7 +1023,7 @@ def run_review_batch(
         started_at = _now()
         try:
             result = runner.run({
-                "instructions": instructions,
+                "instructions": runtime_instructions,
                 "evidence": evidence_payload,
                 "bundleFingerprint": review_fingerprint,
             })
@@ -1011,6 +1063,12 @@ def run_review_batch(
                 started_at=started_at,
                 attempt_number=transport_attempts + 1,
             )
+    if isinstance(result, dict):
+        # The fingerprint is request metadata, not a model judgment. Bind it
+        # from the exact request sent to the runner so a long hash echo cannot
+        # block an otherwise schema-valid batch or enter the cache under a
+        # mismatched identity.
+        result = {**result, "reviewFingerprint": review_fingerprint}
     validated = _validate_report(result, review_fingerprint, strict=strict)
     if estimate_tokens(json.dumps(validated, ensure_ascii=False)) > output_token_limit:
         raise ValueError("Review batch output token budget exceeded")

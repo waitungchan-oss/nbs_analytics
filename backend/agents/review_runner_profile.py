@@ -168,7 +168,11 @@ ALLOWED_RECEIPT_STATUSES = {
 _PROBE_TIMEOUT_SECONDS = 30
 _PROBE_MAX_OUTPUT_BYTES = 8 * 1024
 # Fixed, short, read-only probe command shape (model and prompt are filled in).
-_PROBE_ARGV_TEMPLATE = ("exec", "--ephemeral", "--json", "--model", "<model>", "<prompt>")
+# Plain final-message output avoids retaining the verbose Codex JSONL event
+# envelope; the response itself remains a small, strictly validated JSON object.
+_PROBE_ARGV_TEMPLATE = (
+    "exec", "--ephemeral", "--color", "never", "--model", "<model>", "<prompt>",
+)
 _PROBE_PROMPT = (
     'Reply with only the JSON object {"status":"ok","model":"<your-model-name>"}.'
 )
