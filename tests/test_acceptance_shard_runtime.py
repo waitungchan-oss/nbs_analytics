@@ -18,6 +18,17 @@ def _project_root(tmp_path):
     return project
 
 
+def test_parallel_listener_port_pool_stays_outside_default_ephemeral_range():
+    ports_by_shard = [
+        acceptance_shard_runtime._ports_for("stable-port-pool-test", shard_index)
+        for shard_index in range(16)
+    ]
+
+    assert all(set(ports) == {"streamlit", "mcp", "health"} for ports in ports_by_shard)
+    assert all(30_000 <= port <= 32_767 for ports in ports_by_shard for port in ports.values())
+    assert len({port for ports in ports_by_shard for port in ports.values()}) == 16 * 3
+
+
 def test_two_shards_get_distinct_canonical_roots_and_databases(tmp_path):
     first = allocate_shard_runtime(
         project_root=_project_root(tmp_path), run_id="run-1", shard_index=0, platform_name="darwin"
@@ -132,26 +143,34 @@ def test_process_handoff_transfers_reserved_socket_fds_to_child(monkeypatch, tmp
 
     monkeypatch.setattr(acceptance_shard_runtime.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(runtime, "register_process_group", lambda process_id: None)
+    evidence_reader, evidence_writer = os.pipe()
+    try:
+        process = runtime.launch_process_with_port_handoff(
+            ["pytest"], cwd=tmp_path, env={
+                "NBS_ACCEPTANCE_PROFILE_PORTS": "",
+                "NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD": str(evidence_writer),
+                "NBS_ACCEPTANCE_EXECUTION_BINDING": "{}",
+            }
+        )
 
-    process = runtime.launch_process_with_port_handoff(
-        ["pytest"], cwd=tmp_path, env={"NBS_ACCEPTANCE_PROFILE_PORTS": ""}
-    )
-
-    assert process.pid == 456
-    assert captured["env"]["NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL"] == "reserved-fd-v1"
-    readiness_fd = int(captured["env"]["NBS_ACCEPTANCE_CHILD_READY_FD"])
-    start_fd = int(captured["env"]["NBS_ACCEPTANCE_CHILD_START_FD"])
-    assert set(captured["pass_fds"]) == reserved_fds | {readiness_fd, start_fd}
-    metadata = {}
-    for item in captured["env"]["NBS_ACCEPTANCE_RESERVED_PORT_FDS"].split(","):
-        name, descriptor_spec = item.split("=", 1)
-        descriptor, port = descriptor_spec.split(":", 1)
-        metadata[name] = (int(descriptor), int(port))
-    assert set(metadata) == set(runtime.profile_ports())
-    assert {descriptor for descriptor, _ in metadata.values()} == reserved_fds
-    assert {name: port for name, (_, port) in metadata.items()} == runtime.profile_ports()
-    assert runtime._port_reservations == {}
-    assert runtime.cleanup()["status"] == "PASS"
+        assert process.pid == 456
+        assert captured["env"]["NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL"] == "reserved-fd-v1"
+        readiness_fd = int(captured["env"]["NBS_ACCEPTANCE_CHILD_READY_FD"])
+        start_fd = int(captured["env"]["NBS_ACCEPTANCE_CHILD_START_FD"])
+        assert set(captured["pass_fds"]) == reserved_fds | {readiness_fd, start_fd, evidence_writer}
+        metadata = {}
+        for item in captured["env"]["NBS_ACCEPTANCE_RESERVED_PORT_FDS"].split(","):
+            name, descriptor_spec = item.split("=", 1)
+            descriptor, port = descriptor_spec.split(":", 1)
+            metadata[name] = (int(descriptor), int(port))
+        assert set(metadata) == set(runtime.profile_ports())
+        assert {descriptor for descriptor, _ in metadata.values()} == reserved_fds
+        assert {name: port for name, (_, port) in metadata.items()} == runtime.profile_ports()
+        assert runtime._port_reservations == {}
+        assert runtime.cleanup()["status"] == "PASS"
+    finally:
+        os.close(evidence_reader)
+        os.close(evidence_writer)
 
 
 def test_runtime_completes_bounded_ready_start_handoff(tmp_path):
@@ -221,9 +240,39 @@ def test_runtime_reads_fragmented_ready_handshake_until_newline(monkeypatch, tmp
         )
         os.write(readiness_writer, f"READY {identity}\n".encode("ascii"))
 
-        runtime.complete_port_handoff(Process(), timeout=1)
+        runtime.complete_port_handoff(
+            Process(), timeout=1, readiness_probe=lambda ports: bool(ports),
+        )
 
         assert real_read(start_reader, 6) == b"START\n"
+    finally:
+        for descriptor in (readiness_reader, readiness_writer, start_reader, start_writer):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        runtime.cleanup()
+
+
+def test_runtime_rejects_missing_readiness_probe_before_starting_child(tmp_path):
+    runtime = allocate_shard_runtime(
+        project_root=_project_root(tmp_path), run_id="run-missing-readiness-probe", shard_index=0
+    )
+    readiness_reader, readiness_writer = os.pipe()
+    start_reader, start_writer = os.pipe()
+
+    class Process:
+        _nbs_readiness_reader = readiness_reader
+        _nbs_start_writer = start_writer
+
+    callbacks = []
+    try:
+        with pytest.raises(ValueError, match="readiness_probe is required"):
+            runtime.complete_port_handoff(
+                Process(), timeout=1, start_callback=lambda: callbacks.append("start"),
+            )
+        assert callbacks == []
+        assert os.read(start_reader, 6) == b""
     finally:
         for descriptor in (readiness_reader, readiness_writer, start_reader, start_writer):
             try:
@@ -389,23 +438,27 @@ def test_runtime_rejects_non_positive_handoff_timeout(tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX reserved-fd integration contract")
 def test_real_child_wrapper_adopts_reserved_fds_and_exposes_socket_identity(tmp_path):
-    from scripts.full_pytest_shard import _read_child_execution_evidence, _run_pytest_command
+    from scripts.full_pytest_shard import (
+        _ExecutionEvidenceChannel,
+        _build_execution_binding,
+        _run_pytest_command,
+    )
 
     project_root = Path(__file__).resolve().parents[1]
     child_test = tmp_path / f"test_reserved_fd_child_{uuid.uuid4().hex}.py"
     assert child_test.is_relative_to(tmp_path)
     nodeid = f"{child_test}::test_child_sees_reserved_socket_identity"
     child_test.write_text(
-        "import socket\n"
         "from scripts import full_pytest_shard as wrapper\n\n"
+        "import os\n\n"
         "def test_child_sees_reserved_socket_identity():\n"
+        "    assert 'NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD' not in os.environ\n"
+        "    assert 'NBS_ACCEPTANCE_EXECUTION_BINDING' not in os.environ\n"
         "    ports = dict(wrapper.activated_ports())\n"
         "    assert set(ports) == {'health', 'mcp', 'streamlit'}\n"
         "    for name, port in ports.items():\n"
         "        service_socket = wrapper.activated_socket(name)\n"
-        "        assert service_socket.getsockname()[:2] == ('127.0.0.1', port)\n"
-        "        with socket.create_connection(('127.0.0.1', port), timeout=1):\n"
-        "            pass\n",
+        "        assert service_socket.getsockname()[:2] == ('127.0.0.1', port)\n",
         encoding="utf-8",
     )
     runtime = allocate_shard_runtime(
@@ -415,10 +468,30 @@ def test_real_child_wrapper_adopts_reserved_fds_and_exposes_socket_identity(tmp_
         fixture_root=tmp_path / "child-fixture",
     )
     events = []
+    probed_ports = []
     env = os.environ.copy()
     env.update(runtime.environment())
-    execution_evidence_path = runtime.root / "direct-child-execution-evidence.json"
-    env["NBS_ACCEPTANCE_EXECUTION_EVIDENCE"] = str(execution_evidence_path)
+    binding = _build_execution_binding(
+        commit_sha="a" * 40,
+        source_fingerprint="b" * 64,
+        manifest_fingerprint="c" * 64,
+        shard_index=0,
+        shard_count=1,
+        assigned_nodeids=[nodeid],
+    )
+    evidence_channel = _ExecutionEvidenceChannel()
+    evidence_channel.configure(env, binding)
+
+    def child_owned_readiness(ports):
+        for port in ports.values():
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    pass
+            except OSError:
+                return False
+            probed_ports.append(port)
+        return True
+
     try:
         runtime.validate_reserved_ports(lambda ports: True)
         completed = _run_pytest_command(
@@ -429,15 +502,17 @@ def test_real_child_wrapper_adopts_reserved_fds_and_exposes_socket_identity(tmp_
             runtime=runtime,
             readiness_callback=lambda: events.append("ready"),
             start_callback=lambda: events.append("start"),
+            readiness_probe=child_owned_readiness,
         )
         assert completed.returncode == 0, f"stdout={completed.stdout}\nstderr={completed.stderr}"
         assert events == ["ready", "start"]
-        evidence = _read_child_execution_evidence(execution_evidence_path)
+        assert set(probed_ports) == set(runtime.profile_ports().values())
+        evidence = evidence_channel.read(binding)
         child_nodeid = f"{child_test.name}::test_child_sees_reserved_socket_identity"
         assert evidence["collectedNodeids"] == [child_nodeid]
         assert evidence["startedNodeids"] == [child_nodeid]
-        execution_evidence_path.unlink()
     finally:
+        evidence_channel.close()
         runtime.cleanup()
         try:
             child_test.unlink()
@@ -479,6 +554,33 @@ def test_reserved_port_validation_proves_socket_ownership_and_listening(tmp_path
     assert observed["ports"] == runtime.profile_ports()
     assert observed["has_reservations"] is True
     assert runtime.cleanup()["status"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    ("readiness_results", "expected"),
+    [([True, True, True], True), ([True, False, True], False)],
+)
+def test_canary_readiness_probes_handed_off_endpoints_without_starting_binder(
+    monkeypatch, readiness_results, expected,
+):
+    from scripts import acceptance_shard_canary
+
+    ports = {"health": 45101, "mcp": 45102, "streamlit": 45103}
+    observed = []
+
+    def tcp_ready(port):
+        observed.append(port)
+        return readiness_results[len(observed) - 1]
+
+    monkeypatch.setattr(acceptance_shard_canary, "_tcp_ready", tcp_ready)
+    monkeypatch.setattr(
+        acceptance_shard_canary.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("readiness must not start a port binder"),
+    )
+
+    assert acceptance_shard_canary._port_readiness(ports) is expected
+    assert observed == ([45101, 45102, 45103] if expected else [45101, 45102])
 
 
 def test_getsockname_failure_is_bounded_not_unboundlocalerror():

@@ -261,6 +261,31 @@ def test_v2_comparison_accepts_rounding_of_reciprocal_speedup_metrics():
     assert value["comparison"]["totalSpeedupMultiple"] == 3.0
 
 
+def test_v2_compared_artifact_requires_both_reciprocal_speedup_metrics():
+    from backend.agents.evidence_models import canonical_fingerprint
+    from backend.agents.acceptance_performance_v2 import validate_performance_baseline_v2
+
+    value = _v2()
+    unsigned = {key: item for key, item in value.items() if key != "evidenceFingerprint"}
+    unsigned["comparison"] = {
+        "status": "compared",
+        "baselineFingerprint": "1" * 64,
+        "candidateFingerprint": "2" * 64,
+        "stageDeltasSeconds": {
+            "collectionSeconds": -1.0,
+            "fixturePreparationSeconds": -1.0,
+            "pytestExecutionSeconds": -1.0,
+            "aggregateSeconds": 0.0,
+            "totalWallSeconds": -2.0,
+        },
+        "totalSpeedRatio": 0.5,
+    }
+    value = {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
+
+    with pytest.raises(ValueError, match="comparison fields are incomplete"):
+        validate_performance_baseline_v2(value)
+
+
 def test_v2_comparison_suppresses_unrepresentable_extreme_reciprocal_metrics():
     from backend.agents.acceptance_performance import MAX_DURATION_SECONDS
     from backend.agents.acceptance_performance_v2 import (

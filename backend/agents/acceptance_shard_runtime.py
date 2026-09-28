@@ -29,8 +29,8 @@ from backend.agents import acceptance_windows_job
 from backend.agents.acceptance_paths import canonical_path, is_temporary_path
 
 
-_PORT_BASE = 45_000
-_PORT_SPAN = 10_000
+_PORT_BASE = 30_000
+_PORT_SPAN = 2_765
 _PORT_NAMES = ("streamlit", "mcp", "health")
 _PORT_LOCK_ROOT = _PORT_LOCK_ROOT_PATH
 _ALLOWED_ROOT_ENTRIES = {"shard.db", "coordination.db", "cache", "runtime-profile.json"}
@@ -180,9 +180,27 @@ class ShardRuntime:
             namespace_descriptor = _open_namespace_lock()
             readiness_reader, readiness_writer = os.pipe()
             start_reader, start_writer = os.pipe()
-            pass_fds = tuple(reservation.fileno() for reservation in reservations) + (
-                readiness_writer, start_reader,
+            inherited_fds = tuple(reservation.fileno() for reservation in reservations)
+            evidence_fd_value = env.get("NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD")
+            evidence_binding = env.get("NBS_ACCEPTANCE_EXECUTION_BINDING")
+            if (evidence_fd_value is None) != (evidence_binding is None):
+                raise RuntimeError("child execution evidence channel is incomplete")
+            evidence_fd = None
+            if evidence_fd_value is not None:
+                if not evidence_fd_value.isdecimal():
+                    raise RuntimeError("child execution evidence descriptor is invalid")
+                evidence_fd = int(evidence_fd_value)
+                try:
+                    os.fstat(evidence_fd)
+                except OSError as exc:
+                    raise RuntimeError("child execution evidence descriptor is unavailable") from exc
+                if evidence_fd in inherited_fds:
+                    raise RuntimeError("child execution evidence descriptor conflicts with a reserved socket")
+            pass_fds = inherited_fds + (readiness_writer, start_reader) + (
+                () if evidence_fd is None else (evidence_fd,)
             )
+            if len(pass_fds) != len(set(pass_fds)):
+                raise RuntimeError("child inherited descriptor set is ambiguous")
             child_env = dict(env)
             child_env["NBS_ACCEPTANCE_PORT_HANDOFF_PROTOCOL"] = "reserved-fd-v1"
             child_env["NBS_ACCEPTANCE_RESERVED_PORT_FDS"] = ",".join(
@@ -264,6 +282,8 @@ class ShardRuntime:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(float(timeout)) or timeout <= 0:
             raise ValueError("handoff timeout must be finite and strictly positive")
         try:
+            if not callable(readiness_probe):
+                raise ValueError("readiness_probe is required")
             expected_ready = "READY " + ",".join(
                 f"{name}={self._ports[name]}" for name in sorted(self._ports)
             ) + "\n"
@@ -287,7 +307,7 @@ class ShardRuntime:
                 raise RuntimeError("child readiness handshake failed")
             # Parent reservation handles are intentionally closed during launch;
             # the child-owned endpoint identity is the readiness boundary.
-            if readiness_probe is not None and not readiness_probe(dict(self._ports)):
+            if not readiness_probe(dict(self._ports)):
                 raise RuntimeError("child readiness probe failed")
             if readiness_callback is not None:
                 readiness_callback()

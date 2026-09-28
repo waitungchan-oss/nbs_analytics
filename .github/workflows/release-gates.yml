@@ -326,7 +326,7 @@ jobs:
           mkdir -p "$ROLLOUT_SESSIONS"
           BASE_SHA=$(git merge-base "$GITHUB_SHA" "origin/main")
           test -n "$BASE_SHA"
-          SEAL_OUTPUT=$(.venv/bin/python scripts/verification_chain.py seal --project-root "$GITHUB_WORKSPACE" --runtime-root "$ROLLOUT_SESSIONS" --brief docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md --base "$BASE_SHA")
+          SEAL_OUTPUT=$(.venv/bin/python scripts/verification_chain.py seal --project-root "$GITHUB_WORKSPACE" --runtime-root "$ROLLOUT_SESSIONS" --brief docs/agents/ACCEPTANCE_PARALLEL_ROLLOUT_RUNBOOK.md --base "$BASE_SHA")
           printf '%s\n' "$SEAL_OUTPUT" > "$ROLLOUT_ROOT/source-seal-result.json"
           SESSION_ID=$(printf '%s' "$SEAL_OUTPUT" | .venv/bin/python -c 'import json, sys; print(json.load(sys.stdin)["sessionId"])')
           SOURCE_FINGERPRINT=$(printf '%s' "$SEAL_OUTPUT" | .venv/bin/python -c 'import json, sys; print(json.load(sys.stdin)["sourceFingerprint"])')

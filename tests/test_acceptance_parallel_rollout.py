@@ -406,6 +406,22 @@ def test_blocked_artifact_validates_bounded_partial_metadata():
     validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
 
 
+def test_blocked_artifact_with_null_durations_suppresses_speedup_without_arithmetic_error():
+    from backend.agents.acceptance_parallel_rollout import validate_parallel_rollout_evidence
+
+    runs = [_passing_run(index) for index in range(3)]
+    blocked = _blocked_run(runs[0], failure_code="parallel_runner_error")
+    blocked["serialStatus"] = "BLOCKED"
+    blocked["serialWallSeconds"] = None
+    blocked["parallelWallSeconds"] = None
+
+    payload = _payload([blocked, runs[1], runs[2]])
+
+    assert payload["status"] == "BLOCKED"
+    assert payload["speedup"] is None
+    validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
+
+
 def test_blocked_artifact_rejects_empty_runtime_execution_lineage():
     from backend.agents.acceptance_parallel_rollout import validate_parallel_rollout_evidence
 
@@ -457,6 +473,32 @@ def test_overall_blocked_flag_does_not_skip_passing_run_speedup_validation():
     run["speedRatio"] = 0.123
 
     with pytest.raises(ValueError, match="measured run speedup is inconsistent"):
+        validate_parallel_run_for_artifact(
+            run,
+            expected_lineage=_LINEAGE,
+            commit_sha=_SOURCE_LINEAGE["commitSha"],
+            source_fingerprint=_SOURCE_LINEAGE["sourceFingerprint"],
+            shard_count=4,
+            blocked=True,
+        )
+
+
+def test_blocked_rollout_can_omit_only_unrepresentable_run_speedup():
+    from backend.agents.acceptance_performance_v2 import validate_parallel_run_for_artifact
+
+    run = _passing_run(0, parallel=1e-20)
+
+    validate_parallel_run_for_artifact(
+        run,
+        expected_lineage=_LINEAGE,
+        commit_sha=_SOURCE_LINEAGE["commitSha"],
+        source_fingerprint=_SOURCE_LINEAGE["sourceFingerprint"],
+        shard_count=4,
+        blocked=True,
+    )
+
+    run["speedRatio"] = 1e-22
+    with pytest.raises(ValueError, match="measured run speedup is invalid"):
         validate_parallel_run_for_artifact(
             run,
             expected_lineage=_LINEAGE,
@@ -732,6 +774,23 @@ def test_blocked_payload_cannot_carry_usable_speedup():
         for run in (payload["measuredRuns"][0], payload["measuredRuns"][2])
     )
     assert not ({"speedRatio", "speedupMultiple"} & payload["measuredRuns"][1].keys())
+    validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
+
+
+def test_builder_blocks_invalid_per_run_speedup_without_losing_artifact():
+    from backend.agents.acceptance_parallel_rollout import validate_parallel_rollout_evidence
+
+    payload = _payload([
+        _passing_run(0, parallel=1e-20),
+        _passing_run(1),
+        _passing_run(2),
+    ])
+
+    assert payload["status"] == "BLOCKED"
+    assert payload["speedup"] is None
+    assert "speedup_metric_invalid" in payload["blockers"]
+    assert not ({"speedRatio", "speedupMultiple"} & payload["measuredRuns"][0].keys())
+    assert payload["measuredRuns"][1]["speedupMultiple"] == 1.333333
     validate_parallel_rollout_evidence(payload, expected_source_lineage=_SOURCE_LINEAGE)
 
 

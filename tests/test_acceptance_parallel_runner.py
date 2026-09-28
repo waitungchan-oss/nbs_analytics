@@ -32,6 +32,7 @@ _RUNNER_CAPABILITY = {
 def _runtime_identity(monkeypatch):
     from backend.agents import acceptance_parallel_runner as subject
 
+    monkeypatch.setattr(subject, "_live_worker_capacity", lambda: 4)
     monkeypatch.setattr(
         subject,
         "observe_runtime_fingerprints",
@@ -42,15 +43,17 @@ def _runtime_identity(monkeypatch):
     )
 
 
-def _manifest(node_count: int) -> dict[str, object]:
+def _manifest(
+    node_count: int, *, commit_sha: str = COMMIT, source_fingerprint: str = SOURCE,
+) -> dict[str, object]:
     nodeids = [f"tests/test_parallel.py::test_case_{index:02d}" for index in range(node_count)]
     unsigned = {
         "schemaVersion": "pytest-test-manifest-v1",
         "status": "PASS",
-        "commitSha": COMMIT,
-        "sourceFingerprint": SOURCE,
+        "commitSha": commit_sha,
+        "sourceFingerprint": source_fingerprint,
         "nodeids": nodeids,
-        "manifestFingerprint": _manifest_fingerprint(COMMIT, SOURCE, nodeids),
+        "manifestFingerprint": _manifest_fingerprint(commit_sha, source_fingerprint, nodeids),
     }
     return unsigned
 
@@ -107,10 +110,184 @@ def _ready_and_start(kwargs):
     kwargs["start_callback"]()
 
 
-def _run_parallel_shards(subject, **kwargs):
+def _run_parallel_shards(subject, *, source_session=None, **kwargs):
     kwargs.setdefault("execution_lineage", dict(_EXECUTION_LINEAGE))
+    kwargs.setdefault(
+        "validated_dataset_snapshot_fingerprint",
+        _EXECUTION_LINEAGE["datasetSnapshotFingerprint"],
+    )
     kwargs.setdefault("runner_capability", dict(_RUNNER_CAPABILITY))
-    return subject.run_parallel_shards(**kwargs)
+    if source_session is not None:
+        return subject.run_parallel_shards(source_session=source_session, **kwargs)
+    from unittest.mock import patch
+
+    # These legacy cases exercise shard mechanics with synthetic, non-Git roots.
+    # Live source binding is covered by the dedicated temporary-Git tests below.
+    with patch.object(subject, "_validate_source_session", lambda *args: None):
+        return subject.run_parallel_shards(source_session={"testOnly": True}, **kwargs)
+
+
+def test_runner_rejects_missing_source_session_before_starting_any_shard(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    started = []
+
+    def passing_run(*, shard_index, fixture_root, **kwargs):
+        started.append(shard_index)
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
+        return _passing_shard(shard_index, fixture_root)
+
+    monkeypatch.setattr(subject, "run_pytest_shard", passing_run)
+    with pytest.raises(ValueError, match="source session is required"):
+        subject.run_parallel_shards(
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            execution_lineage=dict(_EXECUTION_LINEAGE),
+            validated_dataset_snapshot_fingerprint=_EXECUTION_LINEAGE["datasetSnapshotFingerprint"],
+            runner_capability=dict(_RUNNER_CAPABILITY),
+        )
+
+    assert started == []
+
+
+def _create_git_source_session(project_root: Path):
+    from backend.agents.verification_chain import git_source_probe
+    from backend.agents.verification_session import VerificationSession
+
+    (project_root / "docs" / "agents").mkdir(parents=True)
+    (project_root / "agent_config").mkdir()
+    (project_root / "README.md").write_text("base source\n", encoding="utf-8")
+    (project_root / "docs/agents/REVIEW_AGENT_CONTRACT.md").write_text(
+        "review contract\n", encoding="utf-8",
+    )
+    (project_root / "agent_config/token_budgets.json").write_text(
+        '{"budget": 1}\n', encoding="utf-8",
+    )
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "acceptance-test@example.invalid"],
+        ["git", "config", "user.name", "Acceptance Test"],
+        ["git", "add", "README.md", "docs/agents/REVIEW_AGENT_CONTRACT.md", "agent_config/token_budgets.json"],
+        ["git", "commit", "-q", "-m", "sealed-source-base"],
+    ):
+        subprocess.run(command, cwd=project_root, check=True, capture_output=True, text=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=project_root, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    (project_root / "README.md").write_text("sealed dirty source\n", encoding="utf-8")
+    probe = git_source_probe(
+        project_root,
+        brief_path="README.md",
+        base_sha=base_sha,
+        contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+        policy_path="agent_config/token_budgets.json",
+    )
+    session = VerificationSession.create(
+        project_id="acceptance-parallel-runner-test",
+        base_sha=base_sha,
+        brief_path="README.md",
+        **{key: value for key, value in probe.items() if key != "source_probe_version"},
+    )
+    return session
+
+
+def test_runner_accepts_exact_dirty_seal_and_rejects_later_source_drift(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+    from backend.agents.evidence_models import canonical_fingerprint
+
+    project = tmp_path / "source-project"
+    project.mkdir()
+    session = _create_git_source_session(project)
+    commit_sha = session.head_sha
+    source_fingerprint = session.source_fingerprint
+    manifest = _manifest(
+        16, commit_sha=commit_sha, source_fingerprint=source_fingerprint,
+    )
+    started = []
+
+    def passing_run(*, shard_index, fixture_root, **kwargs):
+        started.append(shard_index)
+        _mark_runtime_cleanup(kwargs)
+        _ready_and_start(kwargs)
+        artifact = _passing_shard(shard_index, fixture_root)
+        artifact.update({
+            "commitSha": commit_sha,
+            "sourceFingerprint": source_fingerprint,
+            "manifestFingerprint": manifest["manifestFingerprint"],
+        })
+        unsigned = {key: value for key, value in artifact.items() if key != "evidenceFingerprint"}
+        return {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
+
+    monkeypatch.setattr(subject, "run_pytest_shard", passing_run)
+    matching = _run_parallel_shards(
+        subject,
+        project_root=project,
+        manifest=manifest,
+        commit_sha=commit_sha,
+        source_fingerprint=source_fingerprint,
+        shard_count=4,
+        output_root=tmp_path / "matching-runtime",
+        source_session=session.to_dict(),
+    )
+    assert matching["status"] == "PASS"
+    assert len(started) == 4
+
+    (project / "README.md").write_text("source drift after seal\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="source session is stale"):
+        _run_parallel_shards(
+            subject,
+            project_root=project,
+            manifest=manifest,
+            commit_sha=commit_sha,
+            source_fingerprint=source_fingerprint,
+            shard_count=4,
+            output_root=tmp_path / "stale-runtime",
+            source_session=session.to_dict(),
+        )
+
+    assert len(started) == 4
+    assert not (tmp_path / "stale-runtime").exists()
+
+
+def test_runner_returns_source_bound_blocked_result_on_unsupported_platform(monkeypatch, tmp_path):
+    from backend.agents import acceptance_parallel_runner as subject
+
+    started = []
+    monkeypatch.setattr(
+        subject,
+        "run_pytest_shard",
+        lambda **kwargs: started.append(kwargs) or pytest.fail("unsupported platform started a shard"),
+    )
+    output_root = _output_root(tmp_path)
+    with monkeypatch.context() as unsupported_platform:
+        unsupported_platform.setattr(subject.sys, "platform", "win32")
+        result = _run_parallel_shards(
+            subject,
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=output_root,
+        )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "unsupported_platform"
+    assert result["commitSha"] == COMMIT
+    assert result["sourceFingerprint"] == SOURCE
+    assert result["manifestFingerprint"] == _manifest(16)["manifestFingerprint"]
+    assert result["parallelWallSeconds"] is None
+    assert result["cleanup"]["allProcessGroupsTerminated"] is True
+    assert result["cleanup"]["runtimeCleanupConfirmed"] is True
+    assert result["cleanup"]["fixtureRootsRemoved"] is True
+    assert started == []
+    assert not output_root.exists()
 
 
 def test_shard_artifact_writer_rejects_dangling_symlink(tmp_path):
@@ -415,6 +592,7 @@ def test_runner_requires_lineage_and_respects_capability_bound(tmp_path):
             source_fingerprint=SOURCE,
             shard_count=4,
             output_root=_output_root(tmp_path),
+            validated_dataset_snapshot_fingerprint=_EXECUTION_LINEAGE["datasetSnapshotFingerprint"],
             runner_capability=_RUNNER_CAPABILITY,
         )
 
@@ -427,6 +605,7 @@ def test_runner_requires_lineage_and_respects_capability_bound(tmp_path):
             shard_count=4,
             output_root=_output_root(tmp_path),
             execution_lineage=_EXECUTION_LINEAGE,
+            validated_dataset_snapshot_fingerprint=_EXECUTION_LINEAGE["datasetSnapshotFingerprint"],
         )
 
     with pytest.raises(ValueError, match="exceeds runner capability"):
@@ -439,6 +618,7 @@ def test_runner_requires_lineage_and_respects_capability_bound(tmp_path):
             shard_count=4,
             output_root=_output_root(tmp_path),
             execution_lineage=_EXECUTION_LINEAGE,
+            validated_dataset_snapshot_fingerprint=_EXECUTION_LINEAGE["datasetSnapshotFingerprint"],
             runner_capability={
                 **restricted,
                 "capabilityFingerprint": canonical_fingerprint(restricted),
@@ -501,8 +681,25 @@ def test_output_root_rejects_symlinked_parent_inside_temporary_root(tmp_path, da
             tmp_path,
             link_parent / "runtime",
         )
-
     assert not actual_parent.joinpath("runtime").exists()
+
+
+def test_output_root_accepts_symlink_to_temporary_root(tmp_path):
+    import tempfile
+    from backend.agents import acceptance_parallel_runner as subject
+
+    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    linked_root = tmp_path / "temporary-root-link"
+    linked_root.symlink_to(temporary_root, target_is_directory=True)
+    output_root = linked_root / f"parallel-output-{uuid.uuid4().hex}"
+
+    try:
+        resolved = subject._validate_output_root(tmp_path / "project", output_root)
+        assert resolved == output_root.resolve()
+        assert output_root.is_dir()
+    finally:
+        if output_root.exists() and not output_root.is_symlink():
+            output_root.rmdir()
 
 
 def test_runner_capability_receipt_is_bound_to_live_runner_and_capacity(monkeypatch):
@@ -619,6 +816,32 @@ def test_runner_passes_and_requires_execution_lineage(monkeypatch, tmp_path):
     assert observed == [lineage] * 4
 
 
+def test_runner_rejects_dataset_lineage_not_bound_to_validated_contract(monkeypatch, tmp_path):
+    import inspect
+    from backend.agents import acceptance_parallel_runner as subject
+
+    assert "validated_dataset_snapshot_fingerprint" in inspect.signature(
+        subject.run_parallel_shards
+    ).parameters
+    monkeypatch.setattr(
+        subject,
+        "run_pytest_shard",
+        lambda **kwargs: pytest.fail("mismatched dataset lineage must be rejected before workers start"),
+    )
+    with pytest.raises(ValueError, match="does not match validated acceptance contract"):
+        _run_parallel_shards(
+            subject,
+            project_root=tmp_path,
+            manifest=_manifest(16),
+            commit_sha=COMMIT,
+            source_fingerprint=SOURCE,
+            shard_count=4,
+            output_root=_output_root(tmp_path),
+            execution_lineage={**_EXECUTION_LINEAGE, "datasetSnapshotFingerprint": "f" * 64},
+            validated_dataset_snapshot_fingerprint="e" * 64,
+        )
+
+
 def test_runner_blocks_when_runtime_cleanup_confirmation_is_missing(monkeypatch, tmp_path):
     from backend.agents import acceptance_parallel_runner as subject
 
@@ -677,21 +900,7 @@ def test_duplicate_runtime_registration_fails_closed_and_cleans_up_both_runtimes
         if shard_index == 0:
             duplicate = Runtime()
             runtimes.append(duplicate)
-            try:
-                runtime_observer("registered", duplicate)
-            except RuntimeError:
-                duplicate.cleanup()
-                runtime_observer("unregistered", duplicate)
-                return subject._blocked_shard(
-                    index=shard_index,
-                    shard_count=4,
-                    commit_sha=COMMIT,
-                    source_fingerprint=SOURCE,
-                    manifest_fingerprint=_manifest(16)["manifestFingerprint"],
-                    fixture_root=fixture_root,
-                    failure_code="runtime_allocation_failed",
-                    lineage=_EXECUTION_LINEAGE,
-                )
+            runtime_observer("registered", duplicate)
         try:
             _ready_and_start(kwargs)
             return _passing_shard(shard_index, fixture_root)

@@ -47,15 +47,15 @@ def _manifest(nodeids):
 
 
 def _write_execution_evidence(env, *, collected, started):
-    report_path = Path(env["NBS_ACCEPTANCE_EXECUTION_EVIDENCE"])
-    unsigned = {
-        "schemaVersion": "pytest-shard-execution-v1",
-        "collectedNodeids": list(collected),
-        "startedNodeids": list(started),
-    }
-    report_path.write_text(
-        json.dumps({**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}),
-        encoding="utf-8",
+    from scripts import full_pytest_shard
+
+    recorder = full_pytest_shard._PytestExecutionRecorder()
+    recorder.collected_nodeids = list(collected)
+    recorder.started_nodeids = list(started)
+    full_pytest_shard._write_child_execution_evidence(
+        int(env[full_pytest_shard._EXECUTION_EVIDENCE_FD_ENV]),
+        recorder,
+        json.loads(env[full_pytest_shard._EXECUTION_BINDING_ENV]),
     )
 
 
@@ -283,9 +283,7 @@ def test_run_pytest_shard_returns_blocked_artifact_for_malformed_child_evidence(
     manifest = _manifest(["tests/test_a.py::test_one"])
 
     def malformed_evidence(argv, **kwargs):
-        Path(kwargs["env"]["NBS_ACCEPTANCE_EXECUTION_EVIDENCE"]).write_text(
-            "{malformed", encoding="utf-8",
-        )
+        os.write(int(kwargs["env"]["NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD"]), b"{malformed")
         return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
 
     monkeypatch.setattr("scripts.full_pytest_shard._run_pytest_command", malformed_evidence)
@@ -298,6 +296,48 @@ def test_run_pytest_shard_returns_blocked_artifact_for_malformed_child_evidence(
     assert result["metadata"]["failureCode"] == "child_execution_evidence_invalid"
     assert "JSONDecodeError" in result["metadata"]["stderrTail"]
     assert result["metadata"]["cleanup"]["status"] == "PASS"
+
+
+def test_run_pytest_shard_rejects_self_fingerprinted_evidence_with_wrong_parent_binding(monkeypatch, tmp_path):
+    import json
+    from scripts import full_pytest_shard as subject
+
+    manifest = _manifest(["tests/test_a.py::test_one"])
+
+    def forged_child(argv, **kwargs):
+        env = kwargs["env"]
+        assert "NBS_ACCEPTANCE_EXECUTION_EVIDENCE" not in env
+        binding = json.loads(env["NBS_ACCEPTANCE_EXECUTION_BINDING"])
+        unsigned_binding = {key: value for key, value in binding.items() if key != "bindingFingerprint"}
+        unsigned_binding["sourceFingerprint"] = "f" * 64
+        tampered_binding = {
+            **unsigned_binding,
+            "bindingFingerprint": canonical_fingerprint(unsigned_binding),
+        }
+        unsigned = {
+            "schemaVersion": "pytest-shard-execution-v2",
+            "binding": tampered_binding,
+            "collectedNodeids": list(manifest["nodeids"]),
+            "startedNodeids": list(manifest["nodeids"]),
+        }
+        os.write(
+            int(env["NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD"]),
+            json.dumps({**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}).encode(),
+        )
+        kwargs["readiness_callback"]()
+        kwargs["start_callback"]()
+        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
+
+    monkeypatch.setattr(subject, "_run_pytest_command", forged_child)
+    result = run_pytest_shard(
+        _project_root(tmp_path), manifest, shard_index=0, shard_count=1,
+        fixture_root=tmp_path / "shard-0", port_readiness_probe=lambda ports: True,
+        readiness_callback=lambda: None, start_callback=lambda: None,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["metadata"]["failureCode"] == "child_execution_evidence_invalid"
+    assert result["executedNodeids"] == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="reserved-fd child handoff is POSIX-only")
@@ -321,7 +361,8 @@ def test_real_child_reports_exact_execution_after_reserved_fd_handoff(monkeypatc
         "    assert full_pytest_shard._ACTIVATED_PORTS\n"
         "    assert full_pytest_shard is sys.modules['__main__']\n"
         "def test_child_second():\n"
-        "    assert os.environ['NBS_ACCEPTANCE_EXECUTION_EVIDENCE']\n",
+        "    assert 'NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD' not in os.environ\n"
+        "    assert 'NBS_ACCEPTANCE_EXECUTION_BINDING' not in os.environ\n",
         encoding="utf-8",
     )
     existing_pythonpath = os.environ.get("PYTHONPATH", "")
@@ -364,6 +405,69 @@ def test_run_pytest_shard_rejects_existing_fixture_root(tmp_path):
             shard_count=1,
             fixture_root=fixture_root,
         )
+
+
+def test_run_pytest_shard_rejects_timeout_above_contract_limit_before_runtime(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    monkeypatch.setattr(
+        subject, "allocate_shard_runtime",
+        lambda **kwargs: pytest.fail("out-of-range timeout must be rejected before allocation"),
+    )
+    with pytest.raises(ValueError, match="between 1 and 1800"):
+        run_pytest_shard(
+            _project_root(tmp_path),
+            _manifest([]),
+            shard_index=0,
+            shard_count=1,
+            timeout_seconds=1801,
+        )
+
+
+def test_shard_cli_rejects_timeout_above_contract_limit_before_running(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    project_root = _project_root(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest([])), encoding="utf-8")
+    output_path = tmp_path / "shard-output.json"
+    calls = []
+    monkeypatch.setattr(
+        subject, "run_pytest_shard",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"status": "PASS"},
+    )
+
+    with pytest.raises(SystemExit) as error:
+        subject.main([
+            *_shard_cli_args(project_root, manifest_path, output_path),
+            "--timeout", "1801",
+        ])
+
+    assert error.value.code == 2
+    assert calls == []
+    assert not output_path.exists()
+
+
+def test_shard_cli_emits_explicit_unsupported_platform_artifact(monkeypatch, tmp_path):
+    from scripts import full_pytest_shard as subject
+
+    project_root = _project_root(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest([])), encoding="utf-8")
+    output_path = tmp_path / "unsupported-platform.json"
+    monkeypatch.setattr(subject, "_is_supported_shard_platform", lambda: False, raising=False)
+    monkeypatch.setattr(
+        subject, "allocate_shard_runtime",
+        lambda **kwargs: pytest.fail("unsupported platform must not allocate a runtime"),
+    )
+
+    exit_code = subject.main(_shard_cli_args(project_root, manifest_path, output_path))
+
+    artifact = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 2
+    assert artifact["status"] == "BLOCKED"
+    assert artifact["metadata"]["failureCode"] == "unsupported_platform"
+    assert artifact["metadata"]["cleanup"]["allProcessGroupsTerminated"] is True
 
 
 def test_run_pytest_shard_records_distinct_finish_timestamp(monkeypatch, tmp_path):
@@ -511,6 +615,63 @@ def test_run_pytest_shard_returns_bounded_artifact_on_unexpected_error(monkeypat
     assert result["metadata"]["failureCode"] == "runner_unexpected_error"
     assert result["metadata"]["stderrTail"] == "unexpected runner state"
     assert calls == ["cleanup"]
+
+
+def test_run_pytest_shard_emits_one_blocker_when_cleanup_raises(monkeypatch, tmp_path):
+    manifest = _manifest(["tests/test_a.py::test_one"])
+    cleanup_calls = []
+
+    class FailingCleanupRuntime:
+        root = tmp_path / "runtime"
+        db_path = root / "shard.db"
+        cache_dir = root / "cache"
+        coordination_db_path = root / "coordination.db"
+
+        def environment(self):
+            return {}
+
+        def validate_isolation(self):
+            return None
+
+        def cleanup(self):
+            cleanup_calls.append("cleanup")
+            raise OSError("cleanup must not leak into artifact details")
+
+    def successful_child(argv, **kwargs):
+        _write_execution_evidence(
+            kwargs["env"], collected=manifest["nodeids"], started=manifest["nodeids"]
+        )
+        kwargs["readiness_callback"]()
+        kwargs["start_callback"]()
+        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
+
+    monkeypatch.setattr("scripts.full_pytest_shard.allocate_shard_runtime", lambda **kwargs: FailingCleanupRuntime())
+    monkeypatch.setattr("scripts.full_pytest_shard._run_pytest_command", successful_child)
+
+    result = run_pytest_shard(
+        _project_root(tmp_path),
+        manifest,
+        shard_index=0,
+        shard_count=1,
+        run_id="cleanup-failure",
+        port_readiness_probe=lambda ports: True,
+        readiness_callback=lambda: None,
+        start_callback=lambda: None,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["metadata"]["failureCode"] == "isolation_violation"
+    assert result["metadata"]["cleanup"] == {
+        "status": "BLOCKED",
+        "failureCode": "cleanup_exception",
+        "leakedFiles": ["cleanup_state_unknown"],
+        "leakedLocks": ["cleanup_state_unknown"],
+        "leakedProcesses": ["cleanup_state_unknown"],
+        "allProcessGroupsTerminated": False,
+    }
+    assert "cleanup failed (OSError)" in result["metadata"]["stderrTail"]
+    assert "cleanup must not leak into artifact details" not in result["metadata"]["stderrTail"]
+    assert cleanup_calls == ["cleanup"]
 
 
 def test_run_pytest_command_reaps_process_when_communicate_is_interrupted(monkeypatch, tmp_path):

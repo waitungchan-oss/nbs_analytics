@@ -185,6 +185,7 @@ def _normalize_comparison(value: Any) -> dict[str, Any]:
             "candidateFingerprint",
             "stageDeltasSeconds",
             "totalSpeedRatio",
+            "totalSpeedupMultiple",
         }
         if not required <= set(result) or "reason" in result:
             raise ValueError("compared comparison fields are incomplete")
@@ -819,11 +820,14 @@ def validate_parallel_run_for_artifact(
             _invalid_run(failure)
         expected_ratio = round(float(run["parallelWallSeconds"]) / float(run["serialWallSeconds"]), 6)
         expected_multiple = round(float(run["serialWallSeconds"]) / float(run["parallelWallSeconds"]), 6)
+        if not _is_speedup_metric(expected_ratio) or not _is_speedup_metric(expected_multiple):
+            if blocked and not ({"speedRatio", "speedupMultiple"} & run.keys()):
+                return
+            raise ValueError("measured run speedup is invalid")
         if run.get("speedRatio") != expected_ratio or run.get("speedupMultiple") != expected_multiple:
             raise ValueError("measured run speedup is inconsistent")
-        for field in ("speedRatio", "speedupMultiple"):
-            if not _is_speedup_metric(run.get(field)):
-                raise ValueError("measured run speedup is invalid")
+        if not _is_speedup_metric(run.get("speedRatio")) or not _is_speedup_metric(run.get("speedupMultiple")):
+            raise ValueError("measured run speedup is invalid")
 
 
 def build_execution_performance_v2(*, role, total_seconds, result, commit_sha, source_fingerprint, baseline_family_id, lineage):

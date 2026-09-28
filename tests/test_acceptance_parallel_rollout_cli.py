@@ -37,12 +37,25 @@ def _live_runtime_identity(monkeypatch):
         lambda project_root: dict(observed),
     )
     monkeypatch.setattr(runner, "observe_runtime_fingerprints", lambda project_root: dict(observed))
+    monkeypatch.setattr(runner, "_live_worker_capacity", lambda: 4)
 
 
 def _capability():
     from scripts import acceptance_parallel_rollout as subject
 
     return subject.build_runner_capability_receipt(RUNNER)
+
+
+def _record_child_execution(env, nodeids):
+    from scripts import full_pytest_shard
+
+    recorder = full_pytest_shard._PytestExecutionRecorder()
+    recorder.collected_nodeids = list(nodeids)
+    recorder.started_nodeids = list(nodeids)
+    full_pytest_shard._write_child_execution_evidence(
+        int(env[full_pytest_shard._EXECUTION_EVIDENCE_FD_ENV]), recorder,
+        json.loads(env[full_pytest_shard._EXECUTION_BINDING_ENV]),
+    )
 
 
 def test_canonical_session_file_needs_no_invented_source_fingerprint():
@@ -105,7 +118,7 @@ def _source_session(**overrides):
     value = {
         "schemaVersion": "source-seal-v1",
         "baseSha": COMMIT,
-        "briefPath": "docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md",
+        "briefPath": "docs/agents/ACCEPTANCE_PARALLEL_ROLLOUT_RUNBOOK.md",
         "briefFingerprint": "2" * 64,
         "contractFingerprint": "3" * 64,
         "diffFingerprint": "4" * 64,
@@ -289,6 +302,7 @@ def test_cli_executes_real_parallel_controller_with_fresh_run_roots(tmp_path, mo
     nodeids_by_run = {}
     runtime_namespaces = []
     process_group_ids = []
+    validated_source_sessions = []
     real_run_parallel_shards = subject.run_parallel_shards
     real_run_pytest_shard = parallel_runner.run_pytest_shard
     real_run_pytest_command = shard_runner._run_pytest_command
@@ -413,12 +427,20 @@ def test_cli_executes_real_parallel_controller_with_fresh_run_roots(tmp_path, mo
         finally:
             current_barriers.pop()
 
+    def validate_forwarded_source_session(project_root, source_session, commit_sha, source_fingerprint):
+        expected = _source_session()
+        assert source_session == expected
+        assert source_session["headSha"] == commit_sha == COMMIT
+        assert source_session["sourceFingerprint"] == source_fingerprint == SOURCE
+        validated_source_sessions.append(dict(source_session))
+
     monkeypatch.setattr(subject, "_source_is_current", lambda *args, **kwargs: True)
     monkeypatch.setattr(subject, "run_serial_control", serial_control)
     monkeypatch.setattr(subject, "run_parallel_shards", track_parallel_run)
     monkeypatch.setattr(parallel_runner, "run_pytest_shard", track_shard)
     monkeypatch.setattr(shard_runner, "_run_pytest_command", capture_real_child_command)
     monkeypatch.setattr(parallel_runner, "_live_worker_capacity", lambda: 4)
+    monkeypatch.setattr(parallel_runner, "_validate_source_session", validate_forwarded_source_session)
 
     arguments = _argv(tmp_path, shard_count=4, repeats=3)
     manifest_path = Path(arguments[arguments.index("--manifest") + 1])
@@ -437,6 +459,7 @@ def test_cli_executes_real_parallel_controller_with_fresh_run_roots(tmp_path, mo
     assert rollout["status"] == "PASS"
     assert len(rollout["measuredRuns"]) == 3
     assert len(completed_shards) == 12
+    assert validated_source_sessions == [_source_session()] * 3
     assert len(run_roots) == len(set(run_roots)) == 3
     assert len(fixture_roots) == len(set(fixture_roots)) == 12
     assert all(not root.exists() and not root.is_symlink() for root in fixture_roots)
@@ -509,6 +532,117 @@ def test_cli_runs_three_fresh_measurements_and_writes_rollout_artifact(tmp_path,
         and run["parallelRuntimeArtifactFingerprint"] == run["parallelLineage"]["runtimeArtifactFingerprint"]
         for run in rollout["measuredRuns"]
     )
+
+
+def test_rollout_reobserves_runtime_for_each_measurement_and_rejects_drift(tmp_path, monkeypatch):
+    from scripts import acceptance_parallel_rollout as subject
+
+    baseline = {"runnerFingerprint": RUNNER, "environmentFingerprint": ENVIRONMENT}
+    changed = {"runnerFingerprint": "a" * 64, "environmentFingerprint": "b" * 64}
+    observations = [baseline, baseline, changed, baseline]
+    calls = []
+    serial_lineages = []
+    parallel_lineages = []
+    serial_run_indexes = []
+    parallel_run_indexes = []
+
+    def observe_runtime(project_root):
+        calls.append(project_root)
+        return dict(observations[min(len(calls) - 1, len(observations) - 1)])
+
+    def serial_control(**kwargs):
+        serial_lineages.append(kwargs["execution_lineage"])
+        serial_run_indexes.append(kwargs["run_index"])
+        return _passing_serial_control(**kwargs)
+
+    def parallel_shards(**kwargs):
+        parallel_lineages.append(kwargs["execution_lineage"])
+        parallel_run_indexes.append(int(Path(kwargs["output_root"]).name.rsplit("-", 1)[1]))
+        return _passing_parallel_shards(**kwargs)
+
+    monkeypatch.setattr(subject, "observe_runtime_fingerprints", observe_runtime)
+    monkeypatch.setattr(subject, "_source_is_current", lambda *args, **kwargs: True)
+    monkeypatch.setattr(subject, "run_serial_control", serial_control)
+    monkeypatch.setattr(subject, "run_parallel_shards", parallel_shards)
+
+    rollout = subject.run_parallel_rollout(
+        project_root=tmp_path,
+        manifest=_manifest_payload(),
+        contract=_contract_payload(),
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        runner_fingerprint=RUNNER,
+        environment_fingerprint=ENVIRONMENT,
+        baseline_family_id="acceptance-full-serial-ci-v1",
+        source_seal=_source_session(),
+        expected_source_session=_source_session(),
+        output_root=tmp_path.parent / f"{tmp_path.name}-diagnostics",
+    )
+
+    assert rollout["status"] == "BLOCKED"
+    assert rollout["speedup"] is None
+    assert "runtime_lineage_mismatch" in rollout["blockers"]
+    drifted_run = rollout["measuredRuns"][1]
+    assert drifted_run["failureCode"] == "runtime_lineage_mismatch"
+    assert drifted_run["serialStatus"] == "BLOCKED"
+    assert drifted_run["parallelStatus"] == "BLOCKED"
+    assert not ({"speedRatio", "speedupMultiple"} & drifted_run.keys())
+    assert len(calls) == 4
+    assert serial_run_indexes == parallel_run_indexes == [0, 2]
+    assert all(item["runnerFingerprint"] == RUNNER for item in serial_lineages + parallel_lineages)
+    assert all(item["environmentFingerprint"] == ENVIRONMENT for item in serial_lineages + parallel_lineages)
+
+
+def test_rollout_final_repeat_drift_emits_blocked_artifact_with_canonical_lineage(tmp_path, monkeypatch):
+    from scripts import acceptance_parallel_rollout as subject
+
+    baseline = {"runnerFingerprint": RUNNER, "environmentFingerprint": ENVIRONMENT}
+    changed = {"runnerFingerprint": "a" * 64, "environmentFingerprint": "b" * 64}
+    observations = [baseline, baseline, baseline, changed]
+    calls = []
+    serial_run_indexes = []
+    parallel_run_indexes = []
+
+    def observe_runtime(project_root):
+        calls.append(project_root)
+        return dict(observations[min(len(calls) - 1, len(observations) - 1)])
+
+    def serial_control(**kwargs):
+        serial_run_indexes.append(kwargs["run_index"])
+        return _passing_serial_control(**kwargs)
+
+    def parallel_shards(**kwargs):
+        parallel_run_indexes.append(int(Path(kwargs["output_root"]).name.rsplit("-", 1)[1]))
+        return _passing_parallel_shards(**kwargs)
+
+    monkeypatch.setattr(subject, "observe_runtime_fingerprints", observe_runtime)
+    monkeypatch.setattr(subject, "_source_is_current", lambda *args, **kwargs: True)
+    monkeypatch.setattr(subject, "run_serial_control", serial_control)
+    monkeypatch.setattr(subject, "run_parallel_shards", parallel_shards)
+
+    rollout = subject.run_parallel_rollout(
+        project_root=tmp_path,
+        manifest=_manifest_payload(),
+        contract=_contract_payload(),
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        runner_fingerprint=RUNNER,
+        environment_fingerprint=ENVIRONMENT,
+        baseline_family_id="acceptance-full-serial-ci-v1",
+        source_seal=_source_session(),
+        expected_source_session=_source_session(),
+        output_root=tmp_path.parent / f"{tmp_path.name}-final-drift-diagnostics",
+    )
+
+    assert rollout["status"] == "BLOCKED"
+    assert rollout["speedup"] is None
+    assert rollout["runnerFingerprint"] == RUNNER
+    assert rollout["environmentFingerprint"] == ENVIRONMENT
+    assert rollout["measuredRuns"][2]["failureCode"] == "runtime_lineage_mismatch"
+    assert rollout["measuredRuns"][2]["serialStatus"] == "BLOCKED"
+    assert rollout["measuredRuns"][2]["parallelStatus"] == "BLOCKED"
+    assert serial_run_indexes == parallel_run_indexes == [0, 1]
+    assert len(calls) == 4
 
 
 def test_cli_refuses_to_overwrite_existing_output(tmp_path):
@@ -774,19 +908,28 @@ def test_serial_control_accepts_only_an_exact_source_seal_for_dirty_worktree(tmp
     from scripts import acceptance_parallel_rollout as subject
 
     class Runtime:
+        def __init__(self, root):
+            self.root = Path(root)
+            self.root.mkdir()
+
         def environment(self):
             return {}
 
         def cleanup(self):
+            self.root.rmdir()
             return {"status": "PASS", "allProcessGroupsTerminated": True}
 
     monkeypatch.setattr(subject, "_current_source_identity", lambda project_root: (COMMIT, SOURCE, " M approved.py\n"))
     monkeypatch.setattr(subject, "git_source_probe", lambda *a, **kw: _probe_payload())
-    monkeypatch.setattr(subject, "allocate_shard_runtime", lambda **kwargs: Runtime())
+    monkeypatch.setattr(
+        subject, "allocate_shard_runtime",
+        lambda **kwargs: Runtime(kwargs["fixture_root"]),
+    )
     commands = []
 
     def run_pytest(argv, **kwargs):
         commands.append(argv)
+        _record_child_execution(kwargs["env"], ["tests/test_parallel.py::test_one"])
         kwargs["readiness_callback"]()
         return subject.subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
 
@@ -806,11 +949,126 @@ def test_serial_control_accepts_only_an_exact_source_seal_for_dirty_worktree(tmp
             "environmentFingerprint": ENVIRONMENT,
             "datasetSnapshotFingerprint": DATASET,
         },
+        acceptance_contract=_contract_payload(),
         runner_capability=_capability(),
     )
 
-    assert result["status"] == "PASS"
+    assert result["status"] == "PASS", result["failureCode"]
     assert commands[0][-2:] == ["--", "tests/test_parallel.py::test_one"]
+
+
+@pytest.mark.parametrize(
+    "execution_lineage",
+    [
+        {
+            "runnerFingerprint": RUNNER,
+            "environmentFingerprint": "9" * 64,
+            "datasetSnapshotFingerprint": DATASET,
+        },
+        {
+            "runnerFingerprint": RUNNER,
+            "environmentFingerprint": ENVIRONMENT,
+            "datasetSnapshotFingerprint": "2" * 64,
+        },
+    ],
+    ids=("environment-drift", "dataset-contract-mismatch"),
+)
+def test_serial_control_blocks_unverified_runtime_or_dataset_lineage_before_launch(
+    tmp_path, monkeypatch, execution_lineage,
+):
+    from scripts import acceptance_parallel_rollout as subject
+
+    child_calls = []
+    monkeypatch.setattr(
+        subject, "_current_source_identity",
+        lambda project_root: (COMMIT, SOURCE, " M approved.py\n"),
+    )
+    monkeypatch.setattr(subject, "_source_is_current", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        subject, "allocate_shard_runtime",
+        lambda **kwargs: pytest.fail("invalid execution lineage must block before allocation"),
+    )
+    monkeypatch.setattr(
+        subject, "_run_pytest_command",
+        lambda *args, **kwargs: child_calls.append(args),
+    )
+
+    result = subject.run_serial_control(
+        project_root=tmp_path,
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        nodeids=["tests/test_parallel.py::test_one"],
+        run_index=0,
+        timeout_seconds=1,
+        source_seal=_source_session(),
+        expected_source_session=_source_session(),
+        execution_lineage=execution_lineage,
+        acceptance_contract=_contract_payload(),
+        runner_capability=_capability(),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["failureCode"] == "serial_execution_lineage_mismatch"
+    assert result["executionLineage"]["observation"] == "unobserved"
+    assert child_calls == []
+
+
+def test_serial_control_binds_child_execution_evidence_to_manifest(tmp_path, monkeypatch):
+    from scripts import acceptance_parallel_rollout as subject
+    from scripts import full_pytest_shard
+
+    nodeids = ["tests/test_parallel.py::test_one"]
+
+    class Runtime:
+        root = tmp_path / "serial-runtime"
+
+        def __init__(self):
+            self.root.mkdir()
+
+        def environment(self):
+            return {}
+
+        def cleanup(self):
+            return {"status": "PASS", "allProcessGroupsTerminated": True}
+
+    monkeypatch.setattr(subject, "_current_source_identity", lambda project_root: (COMMIT, SOURCE, ""))
+    monkeypatch.setattr(subject, "_source_is_current", lambda *args, **kwargs: True)
+    monkeypatch.setattr(subject, "allocate_shard_runtime", lambda **kwargs: Runtime())
+
+    def run_pytest(argv, *, env, **kwargs):
+        recorder = full_pytest_shard._PytestExecutionRecorder()
+        recorder.collected_nodeids = list(nodeids)
+        recorder.started_nodeids = list(nodeids)
+        full_pytest_shard._write_child_execution_evidence(
+            int(env[full_pytest_shard._EXECUTION_EVIDENCE_FD_ENV]),
+            recorder,
+            json.loads(env[full_pytest_shard._EXECUTION_BINDING_ENV]),
+        )
+        assert callable(kwargs["readiness_probe"])
+        kwargs["readiness_callback"]()
+        return subject.subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
+
+    monkeypatch.setattr(subject, "_run_pytest_command", run_pytest)
+    result = subject.run_serial_control(
+        project_root=tmp_path,
+        commit_sha=COMMIT,
+        source_fingerprint=SOURCE,
+        nodeids=nodeids,
+        run_index=0,
+        timeout_seconds=1,
+        source_seal=_source_session(),
+        expected_source_session=_source_session(),
+        execution_lineage={
+            "runnerFingerprint": RUNNER,
+            "environmentFingerprint": ENVIRONMENT,
+            "datasetSnapshotFingerprint": DATASET,
+        },
+        acceptance_contract=_contract_payload(),
+        runner_capability=_capability(),
+    )
+
+    assert result["status"] == "PASS", result["failureCode"]
+    assert not (Runtime.root / "pytest-serial-execution-evidence.json").exists()
 
 
 def test_serial_control_allocates_three_fresh_fixture_roots(tmp_path, monkeypatch):
@@ -819,17 +1077,22 @@ def test_serial_control_allocates_three_fresh_fixture_roots(tmp_path, monkeypatc
     fixture_roots = []
 
     class Runtime:
+        def __init__(self, root):
+            self.root = Path(root)
+            self.root.mkdir()
+
         def environment(self):
             return {}
 
         def cleanup(self):
+            self.root.rmdir()
             return {"status": "PASS", "allProcessGroupsTerminated": True}
 
     def allocate(**kwargs):
         fixture_root = Path(kwargs["fixture_root"])
         assert not fixture_root.exists() and not fixture_root.is_symlink()
         fixture_roots.append(fixture_root)
-        return Runtime()
+        return Runtime(fixture_root)
 
     monkeypatch.setattr(subject, "_source_is_current", lambda *args, **kwargs: True)
     monkeypatch.setattr(
@@ -840,6 +1103,7 @@ def test_serial_control_allocates_three_fresh_fixture_roots(tmp_path, monkeypatc
     monkeypatch.setattr(subject, "allocate_shard_runtime", allocate)
 
     def run_pytest(argv, **kwargs):
+        _record_child_execution(kwargs["env"], ["tests/test_parallel.py::test_one"])
         kwargs["readiness_callback"]()
         return subject.subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
 
@@ -864,6 +1128,7 @@ def test_serial_control_allocates_three_fresh_fixture_roots(tmp_path, monkeypatc
                 "environmentFingerprint": ENVIRONMENT,
                 "datasetSnapshotFingerprint": DATASET,
             },
+            acceptance_contract=_contract_payload(),
             runner_capability=_capability(),
         )
         for run_index in range(3)
@@ -881,17 +1146,29 @@ def test_serial_control_rejects_summary_that_does_not_cover_manifest_population(
     from scripts import acceptance_parallel_rollout as subject
 
     class Runtime:
+        def __init__(self, root):
+            self.root = Path(root)
+            self.root.mkdir()
+
         def environment(self):
             return {}
 
         def cleanup(self):
+            self.root.rmdir()
             return {"status": "PASS", "allProcessGroupsTerminated": True}
 
     monkeypatch.setattr(subject, "_current_source_identity", lambda project_root: (COMMIT, SOURCE, " M approved.py\n"))
     monkeypatch.setattr(subject, "git_source_probe", lambda *a, **kw: _probe_payload())
-    monkeypatch.setattr(subject, "allocate_shard_runtime", lambda **kwargs: Runtime())
+    monkeypatch.setattr(
+        subject, "allocate_shard_runtime",
+        lambda **kwargs: Runtime(kwargs["fixture_root"]),
+    )
 
     def run_pytest(argv, **kwargs):
+        _record_child_execution(
+            kwargs["env"],
+            ["tests/test_parallel.py::test_one", "tests/test_parallel.py::test_two"],
+        )
         kwargs["readiness_callback"]()
         return subject.subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
 
@@ -915,6 +1192,7 @@ def test_serial_control_rejects_summary_that_does_not_cover_manifest_population(
             "environmentFingerprint": ENVIRONMENT,
             "datasetSnapshotFingerprint": DATASET,
         },
+        acceptance_contract=_contract_payload(),
         runner_capability=_capability(),
     )
 
@@ -1001,7 +1279,7 @@ def test_serial_control_rejects_mismatched_source_session_lineage(tmp_path, monk
 
 
 @pytest.mark.parametrize("drift", [None, "brief_fingerprint", "diff_fingerprint", "policy_fingerprint"])
-def test_real_source_seal_uses_canonical_worktree_fingerprint_for_serial_control(monkeypatch, drift):
+def test_real_source_seal_uses_canonical_worktree_fingerprint_for_serial_control(tmp_path, monkeypatch, drift):
     from backend.agents.verification_chain import git_source_probe
     from backend.agents.verification_session import VerificationSession
     from scripts import acceptance_parallel_rollout as subject
@@ -1009,7 +1287,7 @@ def test_real_source_seal_uses_canonical_worktree_fingerprint_for_serial_control
 
     project_root = Path(__file__).resolve().parents[1]
     commit_sha, _, _ = subject._current_source_identity(project_root)
-    brief = "docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md"
+    brief = "docs/agents/ACCEPTANCE_PARALLEL_ROLLOUT_RUNBOOK.md"
     probe = git_source_probe(
         project_root, brief_path=brief, base_sha=commit_sha,
         contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
@@ -1020,17 +1298,29 @@ def test_real_source_seal_uses_canonical_worktree_fingerprint_for_serial_control
         **{key: value for key, value in probe.items() if key != "source_probe_version"},
     )
     calls = []
+    fixture_root = tmp_path / "serial-runtime"
 
     def execution(argv, **kwargs):
         calls.append(argv)
+        _record_child_execution(kwargs["env"], ["tests/test_parallel.py::test_one"])
         kwargs["readiness_callback"]()
         return subject.subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\\n", "")
 
-    runtime = SimpleNamespace(
-        environment=lambda: {},
-        cleanup=lambda: {"status": "PASS", "allProcessGroupsTerminated": True},
-    )
-    monkeypatch.setattr(subject, "allocate_shard_runtime", lambda **kw: runtime)
+    def allocate(**kwargs):
+        fixture_root.mkdir()
+
+        def cleanup():
+            fixture_root.rmdir()
+            return {"status": "PASS", "allProcessGroupsTerminated": True}
+
+        return SimpleNamespace(
+            root=fixture_root,
+            environment=lambda: {},
+            cleanup=cleanup,
+        )
+
+    monkeypatch.setattr(subject, "_serial_fixture_root", lambda: fixture_root)
+    monkeypatch.setattr(subject, "allocate_shard_runtime", allocate)
     monkeypatch.setattr(subject, "_run_pytest_command", execution)
     if drift:
         monkeypatch.setattr(subject, "git_source_probe", lambda *a, **kw: {**probe, drift: "9" * 64})
@@ -1044,6 +1334,7 @@ def test_real_source_seal_uses_canonical_worktree_fingerprint_for_serial_control
             "environmentFingerprint": ENVIRONMENT,
             "datasetSnapshotFingerprint": DATASET,
         },
+        acceptance_contract=_contract_payload(),
         runner_capability=_capability(),
     )
     assert result["status"] == ("BLOCKED" if drift else "PASS")
@@ -1054,6 +1345,10 @@ def test_serial_control_converts_cleanup_exception_to_blocked_evidence(tmp_path,
     from scripts import acceptance_parallel_rollout as subject
 
     class Runtime:
+        def __init__(self, root):
+            self.root = Path(root)
+            self.root.mkdir()
+
         def environment(self):
             return {}
 
@@ -1062,7 +1357,17 @@ def test_serial_control_converts_cleanup_exception_to_blocked_evidence(tmp_path,
 
     monkeypatch.setattr(subject, "_current_source_identity", lambda project_root: (COMMIT, SOURCE, ""))
     monkeypatch.setattr(subject, "git_source_probe", lambda *a, **kw: _probe_payload())
-    monkeypatch.setattr(subject, "allocate_shard_runtime", lambda **kwargs: Runtime())
+    monkeypatch.setattr(
+        subject, "allocate_shard_runtime",
+        lambda **kwargs: Runtime(kwargs["fixture_root"]),
+    )
+
+    def run_pytest(argv, **kwargs):
+        _record_child_execution(kwargs["env"], ["tests/test_parallel.py::test_one"])
+        kwargs["readiness_callback"]()
+        return subject.subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s\n", "")
+
+    monkeypatch.setattr(subject, "_run_pytest_command", run_pytest)
 
     result = subject.run_serial_control(
         project_root=tmp_path,
@@ -1073,6 +1378,13 @@ def test_serial_control_converts_cleanup_exception_to_blocked_evidence(tmp_path,
         timeout_seconds=1,
         source_seal=_source_session(schemaVersion="source-seal-v1"),
         expected_source_session=_source_session(schemaVersion="source-seal-v1"),
+        execution_lineage={
+            "runnerFingerprint": RUNNER,
+            "environmentFingerprint": ENVIRONMENT,
+            "datasetSnapshotFingerprint": DATASET,
+        },
+        acceptance_contract=_contract_payload(),
+        runner_capability=_capability(),
     )
 
     assert result["status"] == "BLOCKED"

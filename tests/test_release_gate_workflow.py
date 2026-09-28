@@ -139,6 +139,8 @@ def test_parallel_rollout_workflow_seals_and_passes_canonical_source_session():
     rollout = source.split("  acceptance-parallel-rollout:\n", 1)[1].split("  aggregate:\n", 1)[0]
 
     assert "scripts/verification_chain.py seal" in rollout
+    assert "--brief docs/agents/ACCEPTANCE_PARALLEL_ROLLOUT_RUNBOOK.md" in rollout
+    assert "docs/superpowers/specs/2026-09-15-acceptance-parallel-rollout-and-speedup-design.md" not in rollout
     assert 'BASE_SHA=$(git merge-base "$GITHUB_SHA" "origin/main")' in rollout
     assert '--base "$BASE_SHA"' in rollout
     assert "SOURCE_SESSION_PATH=\"$ROLLOUT_SESSIONS/$SESSION_ID/session.json\"" in rollout

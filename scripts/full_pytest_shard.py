@@ -6,12 +6,14 @@ import argparse
 import json
 import math
 import os
+import re
 import select
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -31,12 +33,18 @@ from scripts.pytest_manifest import _identity, _manifest_fingerprint, _parse_nod
 
 
 _TAIL = 4000
-_EXECUTION_EVIDENCE_ENV = "NBS_ACCEPTANCE_EXECUTION_EVIDENCE"
+MAX_SHARD_TIMEOUT_SECONDS = 1800
+_EXECUTION_EVIDENCE_FD_ENV = "NBS_ACCEPTANCE_EXECUTION_EVIDENCE_FD"
+_EXECUTION_BINDING_ENV = "NBS_ACCEPTANCE_EXECUTION_BINDING"
 _EXECUTION_EVIDENCE_LIMIT = 4 * 1024 * 1024
 _CHILD_START_TIMEOUT_ENV = "NBS_ACCEPTANCE_CHILD_START_TIMEOUT_SECONDS"
 SOCKET_ACTIVATION_PROTOCOL = "reserved-fd-v1"
 _ADOPTED_RESERVED_PORTS: dict[str, socket.socket] = {}
 _ACTIVATED_PORTS: dict[str, int] = {}
+
+
+def _is_supported_shard_platform() -> bool:
+    return sys.platform in {"darwin", "linux"}
 
 
 class _PytestExecutionRecorder:
@@ -53,39 +61,110 @@ class _PytestExecutionRecorder:
         self.started_nodeids.append(nodeid)
 
 
-def _write_child_execution_evidence(
-    path: Path, recorder: _PytestExecutionRecorder
-) -> None:
+def _build_execution_binding(
+    *,
+    commit_sha: str,
+    source_fingerprint: str,
+    manifest_fingerprint: str,
+    shard_index: int,
+    shard_count: int,
+    assigned_nodeids: Sequence[str],
+) -> dict[str, Any]:
+    if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+        raise ValueError("execution binding commit identity is invalid")
+    for value in (source_fingerprint, manifest_fingerprint):
+        if not _valid_fingerprint(value):
+            raise ValueError("execution binding fingerprint is invalid")
+    if (
+        isinstance(shard_index, bool) or not isinstance(shard_index, int)
+        or isinstance(shard_count, bool) or not isinstance(shard_count, int)
+        or shard_count <= 0 or shard_index < 0 or shard_index >= shard_count
+    ):
+        raise ValueError("execution binding shard identity is invalid")
+    if (
+        not isinstance(assigned_nodeids, Sequence)
+        or isinstance(assigned_nodeids, (str, bytes))
+        or any(not isinstance(nodeid, str) or not nodeid for nodeid in assigned_nodeids)
+        or len(assigned_nodeids) != len(set(assigned_nodeids))
+    ):
+        raise ValueError("execution binding nodeids are invalid")
     unsigned = {
-        "schemaVersion": "pytest-shard-execution-v1",
+        "schemaVersion": "pytest-shard-execution-binding-v1",
+        "commitSha": commit_sha,
+        "sourceFingerprint": source_fingerprint,
+        "manifestFingerprint": manifest_fingerprint,
+        "shardIndex": shard_index,
+        "shardCount": shard_count,
+        "assignedNodeidsFingerprint": canonical_fingerprint(sorted(assigned_nodeids)),
+    }
+    return {**unsigned, "bindingFingerprint": canonical_fingerprint(unsigned)}
+
+
+def _validate_execution_binding(binding: Any) -> dict[str, Any]:
+    required = {
+        "schemaVersion", "commitSha", "sourceFingerprint", "manifestFingerprint",
+        "shardIndex", "shardCount", "assignedNodeidsFingerprint", "bindingFingerprint",
+    }
+    if not isinstance(binding, dict) or set(binding) != required:
+        raise ValueError("child execution binding schema is invalid")
+    unsigned = {key: value for key, value in binding.items() if key != "bindingFingerprint"}
+    if (
+        binding["schemaVersion"] != "pytest-shard-execution-binding-v1"
+        or not isinstance(binding["commitSha"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", binding["commitSha"]) is None
+        or not all(_valid_fingerprint(binding[field]) for field in (
+            "sourceFingerprint", "manifestFingerprint", "assignedNodeidsFingerprint", "bindingFingerprint",
+        ))
+        or isinstance(binding["shardIndex"], bool) or not isinstance(binding["shardIndex"], int)
+        or isinstance(binding["shardCount"], bool) or not isinstance(binding["shardCount"], int)
+        or binding["shardCount"] <= 0
+        or not 0 <= binding["shardIndex"] < binding["shardCount"]
+        or canonical_fingerprint(unsigned) != binding["bindingFingerprint"]
+    ):
+        raise ValueError("child execution binding identity is invalid")
+    return dict(binding)
+
+
+def _write_child_execution_evidence(
+    descriptor: int,
+    recorder: _PytestExecutionRecorder,
+    binding: Mapping[str, Any],
+) -> None:
+    validated_binding = _validate_execution_binding(dict(binding))
+    unsigned = {
+        "schemaVersion": "pytest-shard-execution-v2",
+        "binding": validated_binding,
         "collectedNodeids": recorder.collected_nodeids,
         "startedNodeids": recorder.started_nodeids,
     }
-    payload = {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)}
-    encoded = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    encoded = json.dumps(
+        {**unsigned, "evidenceFingerprint": canonical_fingerprint(unsigned)},
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
     if len(encoded) > _EXECUTION_EVIDENCE_LIMIT:
         raise ValueError("child execution evidence exceeds the size limit")
-    if path.is_symlink() or path.exists() or not is_temporary_path(path):
-        raise ValueError("child execution evidence path is not a fresh temporary file")
-    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(encoded)
-        stream.flush()
-        os.fsync(stream.fileno())
+    view = memoryview(encoded)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("child execution evidence pipe closed during write")
+        view = view[written:]
 
 
-def _read_child_execution_evidence(path: Path) -> dict[str, list[str]]:
-    if path.is_symlink() or not path.is_file() or not is_temporary_path(path):
-        raise ValueError("child execution evidence is missing or unsafe")
-    if path.stat().st_size > _EXECUTION_EVIDENCE_LIMIT:
+def _read_child_execution_evidence(
+    raw_evidence: bytes, expected_binding: Mapping[str, Any]
+) -> dict[str, list[str]]:
+    if not isinstance(raw_evidence, bytes) or len(raw_evidence) > _EXECUTION_EVIDENCE_LIMIT:
         raise ValueError("child execution evidence exceeds the size limit")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    required = {"schemaVersion", "collectedNodeids", "startedNodeids", "evidenceFingerprint"}
+    payload = json.loads(raw_evidence.decode("utf-8"))
+    required = {"schemaVersion", "binding", "collectedNodeids", "startedNodeids", "evidenceFingerprint"}
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("child execution evidence schema is invalid")
     unsigned = {key: payload[key] for key in required if key != "evidenceFingerprint"}
+    validated_expected_binding = _validate_execution_binding(dict(expected_binding))
     if (
-        payload["schemaVersion"] != "pytest-shard-execution-v1"
+        payload["schemaVersion"] != "pytest-shard-execution-v2"
+        or payload["binding"] != validated_expected_binding
         or not _valid_fingerprint(payload["evidenceFingerprint"])
         or canonical_fingerprint(unsigned) != payload["evidenceFingerprint"]
     ):
@@ -97,6 +176,76 @@ def _read_child_execution_evidence(path: Path) -> dict[str, list[str]]:
             raise ValueError("child execution nodeids are invalid")
         result[field] = values
     return result
+
+
+class _ExecutionEvidenceChannel:
+    """Parent-owned bounded pipe that drains child evidence while it is written."""
+
+    def __init__(self) -> None:
+        self._read_fd, self._write_fd = os.pipe()
+        self._chunks: list[bytes] = []
+        self._size = 0
+        self._overflow = False
+        self._reader_error: BaseException | None = None
+        self._reader = threading.Thread(target=self._drain, daemon=True)
+        self._reader.start()
+
+    def configure(self, env: dict[str, str], binding: Mapping[str, Any]) -> None:
+        validated = _validate_execution_binding(dict(binding))
+        env[_EXECUTION_EVIDENCE_FD_ENV] = str(self._write_fd)
+        env[_EXECUTION_BINDING_ENV] = json.dumps(validated, separators=(",", ":"))
+
+    def close_parent_writer(self) -> None:
+        if self._write_fd is None:
+            return
+        try:
+            os.close(self._write_fd)
+        except OSError:
+            pass
+        self._write_fd = None
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                chunk = os.read(self._read_fd, 65536)
+                if not chunk:
+                    break
+                remaining = _EXECUTION_EVIDENCE_LIMIT - self._size
+                if remaining > 0:
+                    self._chunks.append(chunk[:remaining])
+                    self._size += min(len(chunk), remaining)
+                if len(chunk) > remaining:
+                    self._overflow = True
+        except BaseException as exc:
+            self._reader_error = exc
+        finally:
+            try:
+                os.close(self._read_fd)
+            except OSError:
+                pass
+            self._read_fd = None
+
+    def read(self, expected_binding: Mapping[str, Any]) -> dict[str, list[str]]:
+        self.close_parent_writer()
+        self._reader.join(timeout=5)
+        if self._reader.is_alive():
+            raise ValueError("child execution evidence pipe did not close")
+        if self._reader_error is not None:
+            raise ValueError("child execution evidence pipe read failed") from self._reader_error
+        if self._overflow:
+            raise ValueError("child execution evidence exceeds the size limit")
+        return _read_child_execution_evidence(b"".join(self._chunks), expected_binding)
+
+    def close(self) -> None:
+        self.close_parent_writer()
+        if self._reader.is_alive():
+            self._reader.join(timeout=5)
+        if self._reader.is_alive() and self._read_fd is not None:
+            try:
+                os.close(self._read_fd)
+            except OSError:
+                pass
+            self._read_fd = None
 
 
 def _valid_fingerprint(value: Any) -> bool:
@@ -306,6 +455,21 @@ def _as_text(value: str | bytes | None) -> str:
     return value or ""
 
 
+def _execution_evidence_fd(env: Mapping[str, str]) -> int | None:
+    raw_descriptor = env.get(_EXECUTION_EVIDENCE_FD_ENV)
+    raw_binding = env.get(_EXECUTION_BINDING_ENV)
+    if raw_descriptor is None and raw_binding is None:
+        return None
+    if raw_descriptor is None or raw_binding is None or not raw_descriptor.isdecimal():
+        raise ValueError("child execution evidence channel is incomplete")
+    descriptor = int(raw_descriptor)
+    os.fstat(descriptor)
+    binding = _validate_execution_binding(json.loads(raw_binding))
+    if not binding:
+        raise ValueError("child execution evidence binding is invalid")
+    return descriptor
+
+
 def _run_pytest_command(
     argv: Sequence[str],
     *,
@@ -338,6 +502,7 @@ def _run_pytest_command(
     if callable(launcher):
         process = launcher(launch_argv, cwd=cwd, env=child_env)
     else:
+        evidence_fd = _execution_evidence_fd(child_env)
         process = subprocess.Popen(
             launch_argv,
             cwd=cwd,
@@ -346,6 +511,7 @@ def _run_pytest_command(
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=os.name != "nt",
+            pass_fds=() if evidence_fd is None else (evidence_fd,),
         )
         try:
             runtime.register_process_group(process.pid)
@@ -531,8 +697,12 @@ def run_pytest_shard(
     start_callback: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     commit_sha, source_fingerprint, nodeids, manifest_fingerprint = _validate_manifest(manifest)
-    if timeout_seconds <= 0:
-        raise ValueError("timeout must be positive")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int)
+        or not 1 <= timeout_seconds <= MAX_SHARD_TIMEOUT_SECONDS
+    ):
+        raise ValueError(f"timeout must be between 1 and {MAX_SHARD_TIMEOUT_SECONDS} seconds")
     if fixture_root is not None:
         legacy_fixture = Path(fixture_root).expanduser()
         if legacy_fixture.is_symlink() or legacy_fixture.exists():
@@ -543,6 +713,22 @@ def run_pytest_shard(
     assigned = select_shard_nodeids(nodeids, shard_index, shard_count)
     started_at = _timestamp()
     monotonic_started = time.perf_counter()
+
+    if not _is_supported_shard_platform():
+        return _artifact(
+            status="BLOCKED", failure_code="unsupported_platform", commit_sha=commit_sha,
+            source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
+            shard_index=shard_index, shard_count=shard_count, assigned=assigned, executed=[],
+            result={"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0},
+            started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
+            stdout="", stderr="pytest shard runner is unsupported on this platform",
+            cleanup_report={
+                "status": "PASS", "failureCode": None,
+                "leakedFiles": [], "leakedLocks": [], "leakedProcesses": [],
+                "allProcessGroupsTerminated": True,
+            },
+            lineage=lineage,
+        )
 
     runtime: ShardRuntime | None = None
     try:
@@ -586,12 +772,49 @@ def run_pytest_shard(
             lineage=lineage,
         )
 
-    cleanup_finished = False
+    cleanup_attempted = False
+    cleanup_report: dict[str, Any] | None = None
+    cleanup_exception_type: str | None = None
+    execution_channel: _ExecutionEvidenceChannel | None = None
+
+    def cleanup_once() -> dict[str, Any]:
+        nonlocal cleanup_attempted, cleanup_report, cleanup_exception_type
+        if cleanup_attempted:
+            return cleanup_report or {
+                "status": "BLOCKED",
+                "failureCode": "cleanup_exception",
+                "leakedFiles": ["cleanup_state_unknown"],
+                "leakedLocks": ["cleanup_state_unknown"],
+                "leakedProcesses": ["cleanup_state_unknown"],
+                "allProcessGroupsTerminated": False,
+            }
+        cleanup_attempted = True
+        try:
+            cleanup = runtime.cleanup()
+            if not isinstance(cleanup, Mapping):
+                raise ValueError("runtime cleanup returned invalid evidence")
+            cleanup_report = dict(cleanup)
+        except Exception as exc:
+            cleanup_exception_type = type(exc).__name__
+            cleanup_report = {
+                "status": "BLOCKED",
+                "failureCode": "cleanup_exception",
+                "leakedFiles": ["cleanup_state_unknown"],
+                "leakedLocks": ["cleanup_state_unknown"],
+                "leakedProcesses": ["cleanup_state_unknown"],
+                "allProcessGroupsTerminated": False,
+            }
+        return cleanup_report
 
     def finish(**kwargs: Any) -> dict[str, Any]:
-        nonlocal cleanup_finished
-        cleanup_finished = True
-        cleanup = runtime.cleanup()
+        cleanup = cleanup_once()
+        if cleanup_exception_type is not None:
+            kwargs["status"] = "BLOCKED"
+            kwargs["failure_code"] = "isolation_violation"
+            kwargs["stderr"] = (
+                f"{_as_text(kwargs.get('stderr', '')).rstrip()}\n"
+                f"cleanup failed ({cleanup_exception_type})"
+            ).strip()
         if cleanup["status"] != "PASS":
             kwargs["status"] = "BLOCKED"
             kwargs["failure_code"] = "isolation_violation"
@@ -622,20 +845,19 @@ def run_pytest_shard(
         )
     env = os.environ.copy()
     env.update(runtime.environment())
-    execution_evidence_path = Path(runtime.root) / "pytest-shard-execution-evidence.json"
-    if execution_evidence_path.exists() or execution_evidence_path.is_symlink():
-        return finish(
-            status="BLOCKED", failure_code="runner_unexpected_error", commit_sha=commit_sha,
-            source_fingerprint=source_fingerprint, manifest_fingerprint=manifest_fingerprint,
-            shard_index=shard_index, shard_count=shard_count, assigned=assigned, executed=[],
-            result={"passed": 0, "failed": 0, "skipped": 0, "durationSeconds": 0.0},
-            started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
-            stdout="", stderr="child execution evidence path is not fresh",
-        )
-    env[_EXECUTION_EVIDENCE_ENV] = str(execution_evidence_path)
+    execution_binding = _build_execution_binding(
+        commit_sha=commit_sha,
+        source_fingerprint=source_fingerprint,
+        manifest_fingerprint=manifest_fingerprint,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        assigned_nodeids=assigned,
+    )
     run_argv = [sys.executable, "-m", "pytest", "-q", "--sandbox-preflight", "required", "--", *assigned]
     stdout = stderr = ""
     try:
+        execution_channel = _ExecutionEvidenceChannel()
+        execution_channel.configure(env, execution_binding)
         completed = _run_pytest_command(
             run_argv,
             cwd=Path(project_root).resolve(),
@@ -649,12 +871,8 @@ def run_pytest_shard(
         stdout, stderr = _as_text(completed.stdout), _as_text(completed.stderr)
         combined_output = f"{stdout}\n{stderr}"
         try:
-            execution_evidence = _read_child_execution_evidence(execution_evidence_path)
-        except (OSError, ValueError) as exc:
-            try:
-                execution_evidence_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            execution_evidence = execution_channel.read(execution_binding)
+        except (OSError, ValueError, TypeError) as exc:
             return finish(
                 status="BLOCKED", failure_code="child_execution_evidence_invalid",
                 commit_sha=commit_sha, source_fingerprint=source_fingerprint,
@@ -664,7 +882,6 @@ def run_pytest_shard(
                 started_at=started_at, finished_at=None, monotonic_started=monotonic_started,
                 stdout=stdout, stderr=f"child execution evidence invalid: {type(exc).__name__}",
             )
-        execution_evidence_path.unlink()
         collected_nodeids = execution_evidence["collectedNodeids"]
         started_nodeids = execution_evidence["startedNodeids"]
         if sorted(collected_nodeids) != assigned or sorted(started_nodeids) != assigned:
@@ -740,9 +957,13 @@ def run_pytest_shard(
         runtime.terminate_process_groups(force=True)
         raise
     finally:
-        if not cleanup_finished:
+        if execution_channel is not None:
+            execution_channel.close()
+        if not cleanup_attempted:
             try:
-                runtime.cleanup()
+                cleanup_once()
+            except Exception:
+                pass
             finally:
                 if runtime_observer is not None:
                     runtime_observer("unregistered", runtime)
@@ -753,6 +974,7 @@ def run_pytest_shard(
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "--child-adopt-reserved-fds":
+        evidence_descriptor = None
         try:
             _adopt_reserved_port_fds()
             _signal_child_ready_and_wait()
@@ -763,17 +985,26 @@ def main(argv: list[str] | None = None) -> int:
         import pytest
 
         try:
-            raw_evidence_path = os.environ.get(_EXECUTION_EVIDENCE_ENV)
-            if not raw_evidence_path:
-                raise RuntimeError("child execution evidence path is missing")
+            raw_descriptor = os.environ.pop(_EXECUTION_EVIDENCE_FD_ENV, None)
+            raw_binding = os.environ.pop(_EXECUTION_BINDING_ENV, None)
+            if raw_descriptor is None or raw_binding is None or not raw_descriptor.isdecimal():
+                raise RuntimeError("child execution evidence channel is missing")
+            evidence_descriptor = int(raw_descriptor)
+            os.fstat(evidence_descriptor)
+            binding = _validate_execution_binding(json.loads(raw_binding))
             recorder = _PytestExecutionRecorder()
             exit_code = int(pytest.main(arguments[1:], plugins=[recorder]))
-            _write_child_execution_evidence(Path(raw_evidence_path), recorder)
+            _write_child_execution_evidence(evidence_descriptor, recorder, binding)
             return exit_code
         except Exception as exc:
             print(f"child execution evidence failed: {type(exc).__name__}", file=sys.stderr)
             return 2
         finally:
+            if evidence_descriptor is not None:
+                try:
+                    os.close(evidence_descriptor)
+                except OSError:
+                    pass
             close_activated_sockets()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -790,6 +1021,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(arguments)
+    if not 1 <= args.timeout <= MAX_SHARD_TIMEOUT_SECONDS:
+        parser.error(f"--timeout must be between 1 and {MAX_SHARD_TIMEOUT_SECONDS} seconds")
     try:
         output_path = _validate_shard_output_path(args.output, args.project_root)
     except (OSError, ValueError) as exc:

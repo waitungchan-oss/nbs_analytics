@@ -86,7 +86,10 @@ def _validate_output_root(project_root, output_root, *, require_fresh=True):
     while True:
         if current.is_symlink():
             resolved_component = current.resolve(strict=False)
-            if resolved_component not in temporary_root.parents:
+            if (
+                resolved_component != temporary_root
+                and resolved_component not in temporary_root.parents
+            ):
                 raise ValueError("output root parent must not be a symlink")
         if current.parent == current:
             break
@@ -288,9 +291,42 @@ def _cleanup_ok(artifact):
     )
 
 
+def _validate_source_session(project_root, source_session, commit_sha, source_fingerprint):
+    if not isinstance(source_session, Mapping):
+        raise ValueError("source session is required")
+    try:
+        from backend.agents.verification_chain import git_source_probe
+        from backend.agents.verification_session import VerificationSession
+
+        session = VerificationSession.from_dict(dict(source_session))
+        if session.head_sha != commit_sha or session.source_fingerprint != source_fingerprint:
+            raise ValueError("source session identity mismatch")
+        probe = git_source_probe(
+            project_root,
+            brief_path=session.brief_path,
+            base_sha=session.base_sha,
+            head_ref="WORKTREE",
+            contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+            policy_path="agent_config/token_budgets.json",
+        )
+        session.assert_fresh(
+            head_sha=probe["head_sha"],
+            brief_fingerprint=probe["brief_fingerprint"],
+            worktree_fingerprint=probe["worktree_fingerprint"],
+            diff_fingerprint=probe["diff_fingerprint"],
+            contract_fingerprint=probe["contract_fingerprint"],
+            policy_fingerprint=probe["policy_fingerprint"],
+            source_probe_version=probe["source_probe_version"],
+        )
+    except Exception as exc:
+        raise ValueError(f"source session is stale or invalid: {exc}") from exc
+
+
 def run_parallel_shards(
     *, project_root, manifest, commit_sha, source_fingerprint, shard_count, output_root,
+    validated_dataset_snapshot_fingerprint,
     timeout_seconds=DEFAULT_TIMEOUT_SECONDS, execution_lineage=None, runner_capability=None,
+    source_session=None,
 ):
     if isinstance(shard_count, bool) or shard_count not in ALLOWED_SHARD_COUNTS:
         raise ValueError("shard count must be one of 2, 4, 8, or 16")
@@ -303,6 +339,16 @@ def run_parallel_shards(
     if timeout_seconds > MAX_TIMEOUT_SECONDS:
         raise ValueError("timeout exceeds bounded maximum")
     lineage = _validate_execution_lineage(execution_lineage)
+    if (
+        not isinstance(validated_dataset_snapshot_fingerprint, str)
+        or len(validated_dataset_snapshot_fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in validated_dataset_snapshot_fingerprint)
+    ):
+        raise ValueError("validated acceptance contract dataset fingerprint is invalid")
+    if lineage["datasetSnapshotFingerprint"] != validated_dataset_snapshot_fingerprint:
+        raise ValueError(
+            "execution lineage dataset fingerprint does not match validated acceptance contract"
+        )
     observed_runtime = observe_runtime_fingerprints(project_root)
     if (
         lineage["runnerFingerprint"] != observed_runtime["runnerFingerprint"]
@@ -323,6 +369,36 @@ def run_parallel_shards(
     root = Path(project_root).expanduser().resolve()
     if not root.is_dir():
         raise ValueError("project root must be an existing directory")
+    _validate_source_session(root, source_session, commit_sha, source_fingerprint)
+    if sys.platform not in {"darwin", "linux"}:
+        return {
+            "status": "BLOCKED",
+            "failureCode": "unsupported_platform",
+            "commitSha": commit_sha,
+            "sourceFingerprint": source_fingerprint,
+            "manifestFingerprint": manifest_fingerprint,
+            "shardCount": shard_count,
+            "shards": [],
+            "shardArtifactPaths": [],
+            "parallelWallSeconds": None,
+            "startedAt": None,
+            "finishedAt": _timestamp(),
+            "readiness": {
+                "status": "BLOCKED",
+                "failureCode": "unsupported_platform",
+                "expectedShardCount": shard_count,
+                "readyShardCount": 0,
+                "releasedAt": None,
+            },
+            "cleanup": {
+                "allProcessGroupsTerminated": True,
+                "runtimeCleanupConfirmed": True,
+                "activeRuntimeCount": 0,
+                "cleanupConfirmationMissingShards": [],
+                "fixtureRootsRemoved": True,
+                "leakedFixtureRoots": [],
+            },
+        }
     output = _validate_output_root(root, Path(output_root))
     start_lock = threading.Lock()
     coordinated_start_monotonic = []
@@ -363,7 +439,9 @@ def run_parallel_shards(
                 if index in runtime_seen:
                     registration_failures.add(index)
                     duplicate_runtimes.setdefault(index, []).append(runtime)
-                    duplicate_cleanup_confirmed[index] = False
+                    duplicate_cleanup_confirmed.setdefault(index, {})[id(runtime)] = False
+                    cleanup_confirmed[index] = False
+                    unregistration_observed.discard(index)
                     duplicate_registration = True
                 else:
                     active_runtimes[index] = runtime
@@ -377,11 +455,18 @@ def run_parallel_shards(
                     and not report.get("leakedProcesses")
                 )
                 if any(runtime is duplicate for duplicate in duplicate_runtimes.get(index, ())):
-                    duplicate_cleanup_confirmed[index] = runtime_cleaned
+                    duplicate_cleanup_confirmed.setdefault(index, {})[id(runtime)] = runtime_cleaned
+                    if not runtime_cleaned:
+                        cleanup_confirmed[index] = False
+                        unregistration_observed.discard(index)
                 elif active_runtimes.get(index) is runtime:
                     active_runtimes.pop(index)
-                    unregistration_observed.add(index)
-                    cleanup_confirmed[index] = runtime_cleaned
+                    duplicate_status = duplicate_cleanup_confirmed.get(index, {})
+                    cleanup_confirmed[index] = runtime_cleaned and all(duplicate_status.values())
+                    if cleanup_confirmed[index]:
+                        unregistration_observed.add(index)
+                    else:
+                        unregistration_observed.discard(index)
                 else:
                     cleanup_confirmed[index] = False
                     unregistration_observed.discard(index)
@@ -401,8 +486,10 @@ def run_parallel_shards(
             if confirmed is True:
                 return True
             runtime = active_runtimes.get(index)
+            duplicates = tuple(duplicate_runtimes.get(index, ()))
+            duplicate_status = duplicate_cleanup_confirmed.setdefault(index, {})
             was_seen = index in runtime_seen
-        if runtime is None:
+        if runtime is None and not duplicates:
             # A shard canceled before runtime registration has no process group
             # to terminate; only a previously observed runtime needs explicit
             # cleanup confirmation.
@@ -412,22 +499,37 @@ def run_parallel_shards(
                     cleanup_confirmed[index] = True
                     unregistration_observed.add(index)
             return safe_without_runtime
-        termination_ok = True
-        try:
-            runtime.terminate_process_groups(force=True)
-        except Exception:
-            termination_ok = False
-        try:
-            report = runtime.cleanup()
-        except Exception:
-            return False
-        confirmed = (
-            termination_ok
-            and isinstance(report, Mapping)
-            and report.get("status") == "PASS"
-            and report.get("allProcessGroupsTerminated") is True
-            and not report.get("leakedProcesses")
-        )
+
+        def cleanup_runtime(target):
+            termination_ok = True
+            try:
+                target.terminate_process_groups(force=True)
+            except Exception:
+                termination_ok = False
+            try:
+                report = target.cleanup()
+            except Exception:
+                return False
+            return (
+                termination_ok
+                and isinstance(report, Mapping)
+                and report.get("status") == "PASS"
+                and report.get("allProcessGroupsTerminated") is True
+                and not report.get("leakedProcesses")
+            )
+
+        primary_confirmed = True if runtime is None else cleanup_runtime(runtime)
+        duplicate_confirmed = []
+        for duplicate in duplicates:
+            identity = id(duplicate)
+            if duplicate_status.get(identity) is True:
+                duplicate_confirmed.append(True)
+                continue
+            confirmed_duplicate = cleanup_runtime(duplicate)
+            duplicate_confirmed.append(confirmed_duplicate)
+            with runtime_lock:
+                duplicate_cleanup_confirmed.setdefault(index, {})[identity] = confirmed_duplicate
+        confirmed = primary_confirmed and all(duplicate_confirmed)
         with runtime_lock:
             active_runtimes.pop(index, None)
             cleanup_confirmed[index] = confirmed
@@ -537,7 +639,9 @@ def run_parallel_shards(
             primary_cleanup = force_cleanup(index, owner_thread=True)
             with runtime_lock:
                 all_runtimes_cleaned = (
-                    primary_cleanup and duplicate_cleanup_confirmed.get(index) is True
+                    primary_cleanup
+                    and bool(duplicate_runtimes.get(index))
+                    and all(duplicate_cleanup_confirmed.get(index, {}).values())
                 )
                 cleanup_confirmed[index] = all_runtimes_cleaned
                 if all_runtimes_cleaned:
@@ -568,8 +672,17 @@ def run_parallel_shards(
         cancel_requested.set()
         abort_readiness_barrier()
         with runtime_lock:
-            active = tuple(active_runtimes.items())
+            active = [*active_runtimes.items()]
+            active.extend(
+                (index, runtime)
+                for index, runtimes in duplicate_runtimes.items()
+                for runtime in runtimes
+            )
+        terminated = set()
         for index, runtime in active:
+            if id(runtime) in terminated:
+                continue
+            terminated.add(id(runtime))
             try:
                 runtime.terminate_process_groups(force=True)
             except Exception as exc:

@@ -179,11 +179,16 @@ def build_parallel_rollout_evidence(*, commit_sha, source_fingerprint, contract_
             ) is None
         )
         if run_is_individually_valid:
-            metrics = compute_speedup_metrics(
-                [item["serialWallSeconds"]], [item["parallelWallSeconds"]],
-            )
-            item["speedRatio"] = metrics["speedRatio"][0]
-            item["speedupMultiple"] = metrics["speedupMultiple"][0]
+            try:
+                metrics = compute_speedup_metrics(
+                    [item["serialWallSeconds"]], [item["parallelWallSeconds"]],
+                )
+            except ValueError:
+                item.pop("speedRatio", None)
+                item.pop("speedupMultiple", None)
+            else:
+                item["speedRatio"] = metrics["speedRatio"][0]
+                item["speedupMultiple"] = metrics["speedupMultiple"][0]
         else:
             item.pop("speedRatio", None)
             item.pop("speedupMultiple", None)

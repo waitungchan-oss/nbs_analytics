@@ -174,36 +174,14 @@ def _serial_control(project_root: Path, timeout_seconds: int = 1800) -> dict[str
 
 
 def _port_readiness(ports: Mapping[str, int]) -> bool:
-    child_code = (
-        "import socket,sys,time; "
-        "s=[]; "
-        "[s.append(socket.create_server(('127.0.0.1', int(p)), reuse_port=False)) for p in sys.argv[1:]]; "
-        "print('READY', flush=True); "
-        "time.sleep(300)"
-    )
-    child = subprocess.Popen(
-        [sys.executable, "-c", child_code, *(str(port) for port in ports.values())],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
-    )
-    try:
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if child.poll() is not None:
-                return False
-            if all(
-                _tcp_ready(int(port)) for port in ports.values()
-            ):
-                return True
-            time.sleep(0.02)
+    port_values = tuple(ports.values())
+    if (
+        not port_values
+        or any(type(port) is not int or not 1 <= port <= 65535 for port in port_values)
+        or len(port_values) != len(set(port_values))
+    ):
         return False
-    finally:
-        if child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=1)
+    return all(_tcp_ready(port) for port in port_values)
 
 
 def _tcp_ready(port: int) -> bool:
