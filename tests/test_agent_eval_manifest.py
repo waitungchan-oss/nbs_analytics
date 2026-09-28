@@ -12,6 +12,8 @@ CASE_IDS = [f"case-{index:02}" for index in range(12)]
 
 
 def _manifest() -> dict:
+    created_at = datetime.now(timezone.utc) - timedelta(days=1)
+    expires_at = created_at + timedelta(days=12)
     identity = {
         "projectId": "nbs_analytics", "consumerId": "context-agent", "provider": "local",
         "model": "fixture-v1", "settingsFingerprint": "a" * 64, "sourceCommit": "b" * 40,
@@ -24,7 +26,7 @@ def _manifest() -> dict:
         "schemaVersion": "agent-eval-manifest-v1", "experimentId": "exp-1", "identity": identity,
         "caseIds": CASE_IDS, "splits": {"dev": 4, "holdout": 8}, "repeatCount": 3,
         "plannedSlots": 72, "orderPolicy": "alternating-v1", "isolationPolicy": "fresh-session-v1",
-        "createdAt": "2026-09-08T00:00:00+00:00", "expiresAt": "2026-09-20T00:00:00+00:00",
+        "createdAt": created_at.isoformat(), "expiresAt": expires_at.isoformat(),
         "artifactBudgetBytes": 33_554_432,
         "producerRegistry": {"fixture-v1": {"sourceSchema": "fixture-v1", "producerFingerprint": "4" * 64}},
         "authorization": {
@@ -36,6 +38,17 @@ def _manifest() -> dict:
     }
     manifest["manifestFingerprint"] = canonical_fingerprint(manifest)
     return manifest
+
+
+def test_default_manifest_fixture_remains_live():
+    manifest = _manifest()
+    now = datetime.now(timezone.utc)
+    created = datetime.fromisoformat(manifest["createdAt"])
+    expires = datetime.fromisoformat(manifest["expiresAt"])
+
+    assert created <= now < expires
+    assert expires - now >= timedelta(days=1)
+    assert expires - created <= timedelta(days=30)
 
 
 def test_every_expected_slot_is_retained():
@@ -63,7 +76,8 @@ def test_manifest_drift_and_overlong_ttl_are_rejected():
     with pytest.raises(ValueError, match="manifest_fingerprint_mismatch"):
         validate_manifest(manifest)
     manifest = _manifest()
-    manifest["expiresAt"] = "2026-10-10T00:00:00+00:00"
+    created = datetime.fromisoformat(manifest["createdAt"])
+    manifest["expiresAt"] = (created + timedelta(days=31)).isoformat()
     manifest["manifestFingerprint"] = canonical_fingerprint({k: v for k, v in manifest.items() if k != "manifestFingerprint"})
     with pytest.raises(ValueError, match="invalid_expiry"):
         validate_manifest(manifest)
@@ -124,7 +138,7 @@ def test_live_preflight_rejects_non_boolean_fresh_session():
 
 def test_live_preflight_rejects_expired_manifest():
     manifest = _manifest()
-    manifest["expiresAt"] = "2026-09-09T00:00:00+00:00"
+    manifest["expiresAt"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     manifest["manifestFingerprint"] = canonical_fingerprint(
         {key: value for key, value in manifest.items() if key != "manifestFingerprint"}
     )
