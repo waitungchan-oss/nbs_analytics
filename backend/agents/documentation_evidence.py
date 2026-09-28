@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -11,6 +13,8 @@ from typing import Any
 from .workflow_models import canonical_sha256
 from .workflow_store import WorkflowStore
 from .memory_hub_integration_models import MemoryHubIntegrationEvidence
+from .documentation_models import DocumentationEvidenceV2, DocumentationSchemaError
+from .documentation_policy import load_documentation_target
 
 
 REQUIRED_ARTIFACTS = (
@@ -87,7 +91,108 @@ class DocumentationEvidence:
 
 class DocumentationEvidenceCollector:
     def __init__(self, project_root: Path, *, store: WorkflowStore | None = None) -> None:
-        self.store = store or WorkflowStore(Path(project_root))
+        self.project_root = Path(project_root).resolve()
+        self.store = store or WorkflowStore(self.project_root)
+
+    def collect_target(self, run_id: str, target_id: str) -> DocumentationEvidenceV2:
+        """Collect source-bound gate evidence for exactly one fixed documentation target."""
+        try:
+            target = load_documentation_target(target_id)
+        except DocumentationSchemaError as exc:
+            raise DocumentationEvidenceError("target ID is not in the fixed documentation catalog") from exc
+
+        try:
+            manifest = self.store.load_manifest(run_id).to_dict()
+            status = self.store.load_status(run_id).to_dict()
+            approval = self.store.read_artifact(run_id, "approval.json")
+        except (OSError, PermissionError, TypeError, ValueError) as exc:
+            raise DocumentationEvidenceError("run manifest, status, or approval is unavailable") from exc
+        if status.get("status") != "completed":
+            raise DocumentationEvidenceError("run must be completed")
+        if manifest.get("runId") != run_id or status.get("runId") != run_id or approval.get("runId") != run_id:
+            raise DocumentationEvidenceError("run identity does not match its approval evidence")
+        if approval.get("authorizationStatus") != "approved":
+            raise DocumentationEvidenceError("approval gate must PASS")
+        if approval.get("approvedBaseSha") != manifest.get("gitHead"):
+            raise DocumentationEvidenceError("approval base does not match the run source commit")
+
+        gate_names = ("review", "full-verification", "hermes")
+        artifacts: dict[str, dict[str, Any]] = {}
+        gate_source_fingerprints: dict[str, str] = {}
+        for name in gate_names:
+            artifact_name = f"{name}.json"
+            try:
+                artifact = self.store.read_artifact(run_id, artifact_name)
+            except (OSError, PermissionError, TypeError, ValueError) as exc:
+                raise DocumentationEvidenceError(f"{name} gate artifact is unavailable") from exc
+            if not _gate_passes(name, artifact):
+                raise DocumentationEvidenceError(f"{name} gate must PASS")
+            source_fingerprint = artifact.get("sourceFingerprint")
+            if not isinstance(source_fingerprint, str) or len(source_fingerprint) != 64 or any(
+                char not in "0123456789abcdef" for char in source_fingerprint
+            ):
+                raise DocumentationEvidenceError(f"{name} gate is missing a valid source fingerprint")
+            gate_commit = artifact.get("commitSha")
+            if gate_commit != manifest.get("gitHead"):
+                raise DocumentationEvidenceError(f"{name} gate commit does not match the run source")
+            artifacts[name] = artifact
+            gate_source_fingerprints[name] = source_fingerprint
+        distinct_sources = set(gate_source_fingerprints.values())
+        if len(distinct_sources) != 1:
+            raise DocumentationEvidenceError("gate source fingerprint mismatch")
+
+        try:
+            _, target_text, section, _, _ = _read_target_section(self.project_root, target)
+        except (OSError, UnicodeError, ValueError, PermissionError) as exc:
+            raise DocumentationEvidenceError("selected documentation target is missing or unsafe") from exc
+        try:
+            committed_target = subprocess.run(
+                ["git", "show", f"{manifest['gitHead']}:{target.repo_path}"],
+                cwd=self.project_root, capture_output=True, check=False, timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DocumentationEvidenceError("accepted target source could not be read from Git") from exc
+        if committed_target.returncode != 0 or committed_target.stdout != target_text.encode("utf-8"):
+            raise DocumentationEvidenceError("selected target differs from the accepted source commit")
+
+        source_records = []
+        for path, payload in (
+            ("manifest.json", manifest), ("status.json", status),
+            ("approval.json", approval),
+            *((f"{name}.json", artifacts[name]) for name in gate_names),
+        ):
+            source_records.append({"path": f".nbs_agent_runtime/runs/{run_id}/{path}", "sha256": _payload_sha256(payload)})
+        source_records.append({
+            "path": target.repo_path,
+            "sha256": sha256(target_text.encode("utf-8")).hexdigest(),
+        })
+        gate_results = tuple({
+            "gate": name,
+            "status": "pass",
+            "sourceFingerprint": gate_source_fingerprints[name],
+            "evidenceFingerprint": _payload_sha256(artifacts[name]),
+        } for name in gate_names)
+        unsigned = {
+            "schemaVersion": "documentation-evidence-v2",
+            "taskId": run_id,
+            "generatedAt": status.get("completedAt") or status.get("updatedAt"),
+            "runId": run_id,
+            "commitSha": manifest["gitHead"],
+            "sourceFingerprint": next(iter(distinct_sources)),
+            "selectedTargetId": target.target_id,
+            "sources": source_records,
+            "gateResults": list(gate_results),
+            "guardrails": {
+                "revenueScope": "不含掛賬核銷與TT退款轉團款",
+                "mayBaseline": "HKD 12,057,968",
+            },
+            "expectedSectionSha256": sha256(section.encode("utf-8")).hexdigest(),
+        }
+        payload = {**unsigned, "evidenceFingerprint": canonical_sha256(unsigned)}
+        try:
+            return DocumentationEvidenceV2.from_dict(payload)
+        except DocumentationSchemaError as exc:
+            raise DocumentationEvidenceError("collected target evidence is invalid") from exc
 
     def collect(self, run_id: str) -> DocumentationEvidence:
         manifest = self.store.load_manifest(run_id).to_dict()
@@ -167,6 +272,84 @@ def _read_memory_summary(store: WorkflowStore, run_id: str) -> dict[str, Any] | 
         "evidenceFingerprint": evidence.evidence_fingerprint,
         "hintCount": evidence.hint_count,
     }
+
+
+def _payload_sha256(payload: dict[str, Any]) -> str:
+    return sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _gate_passes(name: str, payload: dict[str, Any]) -> bool:
+    if _status(payload) in {"pass", "passed", "success", "ok"}:
+        return True
+    if name == "full-verification":
+        full_pytest = payload.get("fullPytest")
+        acceptance = payload.get("acceptance")
+        return (
+            isinstance(full_pytest, dict) and full_pytest.get("exitCode") == 0
+            and isinstance(acceptance, dict)
+            and str(acceptance.get("status", "")).lower() in {"pass", "passed"}
+        )
+    return False
+
+
+def _read_target_section(project_root: Path, target) -> tuple[Path, str, str, int, int]:
+    relative = PurePosixPath(target.repo_path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("target path is not repo-relative")
+    path = project_root.joinpath(*relative.parts)
+    path.relative_to(project_root)
+    current = project_root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise PermissionError("documentation target must not traverse symlinks")
+    if not path.is_file():
+        raise FileNotFoundError(target.repo_path)
+    raw = path.read_bytes()
+    text = raw.decode("utf-8")
+    lines = text.splitlines(keepends=True)
+    offsets = []
+    cursor = 0
+    for line in lines:
+        offsets.append((cursor, cursor + len(line)))
+        cursor += len(line)
+    wanted_level = len(target.section_heading) - len(target.section_heading.lstrip("#"))
+    wanted_title = target.section_heading[wanted_level:].strip()
+    matches = []
+    headings = []
+    fence = None
+    fence_re = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+    heading_re = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*(?:\r?\n)?$")
+    for index, line in enumerate(lines):
+        bare = line.rstrip("\r\n")
+        fence_match = fence_re.match(bare)
+        if fence is not None:
+            if fence_match and fence_match.group(1)[0] == fence[0] and len(fence_match.group(1)) >= len(fence):
+                fence = None
+            continue
+        if fence_match:
+            fence = fence_match.group(1)
+            continue
+        match = heading_re.match(line)
+        if not match:
+            continue
+        heading = (len(match.group(1)), match.group(2).strip())
+        headings.append((index, *heading))
+        if heading == (wanted_level, wanted_title):
+            matches.append(index)
+    if len(matches) != 1:
+        raise ValueError("target section heading is missing or duplicated")
+    start_index = matches[0]
+    end_index = len(lines)
+    for index, level, _ in headings:
+        if index > start_index and level <= wanted_level:
+            end_index = index
+            break
+    start = offsets[start_index][0]
+    end = offsets[end_index][0] if end_index < len(offsets) else len(text)
+    return path, text, text[start:end], start, end
 
 
 def _collect_paths(artifacts: dict[str, dict[str, Any]]) -> tuple[str, ...]:
