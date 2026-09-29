@@ -1,7 +1,7 @@
 # Documentation Agent Contract
 
-版本：v1
-模式：read-only documentation proposal
+版本：v1，附加 v2 target-bound workflow
+模式：read-only documentation proposal；寫入只能由 trusted Controller 在獨立明確批准後執行
 
 本契約對應已批准的 documentation-agent design spec：
 `docs/superpowers/specs/2026-07-18-documentation-agent-contract-design.md`。
@@ -85,4 +85,46 @@ The policy is tracked in `agent_config/documentation_policies.json`. The formal 
 
 ## Controller Apply
 
-The Controller re-validates the proposal, checks the evidence and proposal fingerprints against the current files, resolves the target policy, and records a `documentation-application-v1` result. High-risk `system_map` and `adr` targets require explicit target approval. A preview or proposal is not an application authorization.
+The Controller re-validates the proposal, checks the evidence and proposal fingerprints against the current files, resolves the target policy, and records a `documentation-application-v1` result. High-risk system map 與 ADR targets require explicit target approval. A preview or proposal is not an application authorization.
+
+## v2 Fixed Handoff / Runbook Targets
+
+v2 是新增的 target-bound contract，不取代或重寫上述 v1 schema、artifact 或歷史 run。v2 只允許下表五個 catalog ID；path、heading、operation、risk 與 required approval 都由本地固定 catalog 派生，CLI 不接受任意檔案路徑，也沒有 `--target-path` 選項。
+
+| Target ID | 固定 repo path | 固定 section |
+| --- | --- | --- |
+| `handoff.current-conclusion` | `NBS_ANALYTICS_HANDOFF.md` | `## 1. 本輪交接結論` |
+| `handoff.verification-snapshot` | `NBS_ANALYTICS_HANDOFF.md` | `### 5.3 最近驗證快照` |
+| `runbook.pipeline-rollout-gate` | `docs/agents/ACCEPTANCE_PIPELINE_HARDENING_RUNBOOK.md` | `## Rollout handoff gate（Task 6）` |
+| `runbook.shard-boundary` | `docs/agents/ACCEPTANCE_SHARD_ROLLOUT_RUNBOOK.md` | `## Boundary` |
+| `runbook.parallel-rollout-boundary` | `docs/agents/ACCEPTANCE_PARALLEL_ROLLOUT_RUNBOOK.md` | `## Boundary` |
+
+### Two-step CLI and approval
+
+第一次呼叫只產生 target-bound evidence、proposal、preview，不寫入目標文件：
+
+```bash
+.venv/bin/python scripts/documentation_agent.py \
+  --run-id <completed-run-id> \
+  --target-id handoff.current-conclusion \
+  --agent-command "codex"
+```
+
+檢查 preview 後，只有明確批准同一 target 才可 apply：
+
+```bash
+.venv/bin/python scripts/documentation_agent.py \
+  --run-id <same-run-id> \
+  --target-id handoff.current-conclusion \
+  --approve-target-id handoff.current-conclusion
+```
+
+Apply 呼叫會重新收集 target evidence，核對 saved preview、proposal、commit、run ID、source fingerprint 與 section hash；不一致就 `blocked`，不會重新呼叫 runner 或改寫文件。`--approve-target-id` 必須與 `--target-id` 完全相同；批准一個 target 不會批准其他 target。Preview 本身不是批准。
+
+### Artifact lineage and fail-closed outcomes
+
+v2 artifacts 固定寫在 `.nbs_agent_runtime/runs/<run-id>/documentation/targets/<target-id>/`，檔名只允許 `documentation-evidence-v2.json`、`documentation-proposal-v2.json`、`documentation-preview-v2.json`、`documentation-application-v2.json`。Evidence 綁定 `runId`、`commitSha`、`sourceFingerprint`、source hashes、target ID、gate evidence 與原 section hash；proposal/preview/application 依序綁定前一層 fingerprint。Hermes 只唯讀檢查固定目錄與 artifact allowlist、schema/status/fingerprint、lineage、5 MiB cap 及 symlink/path permissions；回報 invalid/stale/over-cap，不 dispatch runner、不 preview/apply、不批准 target，也不寫 release-gate state。`documentation-hermes-report-v1` 不屬於正式 release gate。
+
+Missing approved runner、unknown target、approval mismatch、source/section drift、missing or invalid saved preview、malformed schema/fingerprint、symlink/path violation 或 artifact over cap 都必須 blocked/fail closed。不得把 `blocked` 或 Hermes 的文件檢查結果解讀為 apply 成功。
+
+Catalog 只提供可治理的 target identity；此契約更新不代表 handoff 或 runbook 內容已回填、已 Review 或已驗收。實際回填須逐 target 通過既有 Review、Full verification、Hermes 與 target approval 流程。

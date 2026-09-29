@@ -16,7 +16,7 @@
 - `status` / `list` 只讀 artifact；`run` 後 best-effort retention housekeeping 與明確 `prune --apply` 都可依 policy compact 合資格的舊 completed run，`prune --dry-run` 只產生計畫。Hermes 只 read-only 報告 orchestrator artifacts / retention，不執行 prune，也不與 Review 重複。
 - Streamlit Agent Operations 是 Phase 2 read-only work；不得成為 approval、dispatch、retention 或任何正式狀態寫入入口。
 - Documentation dispatch 只在 Review PASS、full verification PASS、Hermes PASS 後由 Codex 呼叫 `agent_workflow.py document`；deterministic no-doc changes skip，不得由主 Codex LLM 靜默代寫。
-- Documentation Agent 只消費 `documentation-evidence-v1` 並輸出 `documentation-proposal-v1`；system map 與 ADR 必須明確 target approval，缺少 approved runner 時回傳 `blocked_missing_runner`。
+- Documentation v1 contract 繼續支援 `documentation-evidence-v1` → `documentation-proposal-v1`。v2 handoff/runbook 只接受 `handoff.current-conclusion`、`handoff.verification-snapshot`、`runbook.pipeline-rollout-gate`、`runbook.shard-boundary`、`runbook.parallel-rollout-boundary` 五個固定 target ID；不得提供任意檔案路徑。先用 `--target-id <id>` 產生 preview，再用相同 `--target-id <id> --approve-target-id <id>` 明確批准 apply；source lineage 或 preview 過期、target 不符、artifact malformed/超限/權限不安全時必須 blocked。Hermes 只唯讀檢查 v1/v2 artifacts，不代表 handoff/runbook 已完成回填或正式 release gate PASS。
 - Documentation sidecar 與 Agent Operations 永遠 read-only；不得 auto-apply、批准 targets、改變 Hermes/terminal state、修改 SQLite、baseline、runtime 或 Git。
 
 ## Codex 額度使用固定規範（2026-08-28 起強制）

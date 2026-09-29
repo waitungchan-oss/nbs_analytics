@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from backend.agents.release_gate_models import GATES
+
 
 ROOT = Path(__file__).parents[1]
 
@@ -21,3 +23,11 @@ def test_hermes_and_dispatch_preserve_read_only_authority_boundaries():
         assert "UI acceptance" in source
     assert all(token in hermes for token in ("FAIL", "BLOCKED", "MISSING", "stale", "阻擋 release"))
     assert "aggregate" in dispatch.lower()
+
+
+def test_documentation_v2_hermes_report_is_not_a_release_gate():
+    dispatch = (ROOT / "docs/agents/CODEX_AGENT_DISPATCH.md").read_text(encoding="utf-8")
+
+    assert GATES == ("full_pytest", "hermes", "ui_acceptance")
+    assert "documentation-hermes-report-v1" in dispatch
+    assert "不屬於正式 release gate" in dispatch
