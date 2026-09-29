@@ -175,3 +175,106 @@ def test_document_workflow_incomplete_run_is_blocked(tmp_path):
     from backend.agents.documentation_workflow import DocumentationWorkflow
     result = DocumentationWorkflow(tmp_path).run(run_id, agent_command=None)
     assert result["status"] == "blocked"
+
+
+def test_v2_workflow_separates_preview_from_target_approved_apply(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import backend.agents.documentation_workflow as module
+    from backend.agents.documentation_workflow import DocumentationWorkflow
+
+    calls = {"draft": 0, "apply": 0}
+    artifacts = {}
+    evidence_payload = {"schemaVersion": "documentation-evidence-v2", "evidenceFingerprint": "e" * 64}
+    evidence = SimpleNamespace(
+        run_id="run-v2", selected_target_id="handoff.current-conclusion",
+        commit_sha="c" * 40, source_fingerprint="b" * 64,
+        expected_section_sha256="d" * 64,
+        evidence_fingerprint="e" * 64, to_dict=lambda: evidence_payload,
+    )
+    proposal = SimpleNamespace(
+        status="ready", evidence=evidence, target_id="handoff.current-conclusion",
+        to_dict=lambda: {"schemaVersion": "documentation-proposal-v2"},
+    )
+    preview = SimpleNamespace(
+        proposal=proposal, run_id="run-v2", target_id="handoff.current-conclusion",
+        to_dict=lambda: {"schemaVersion": "documentation-preview-v2"},
+    )
+
+    class FakeStore:
+        def load_status(self, _run_id):
+            return SimpleNamespace(status="completed")
+
+        def write_artifact(self, *_args):
+            pass
+
+    class FakeController:
+        def __init__(self, _project_root):
+            pass
+
+        def write_target_artifact(self, run_id, target_id, name, payload):
+            artifacts[(run_id, target_id, name)] = payload
+
+        def read_target_artifact(self, run_id, target_id, name):
+            return artifacts[(run_id, target_id, name)]
+
+        def apply_target(self, received_preview, *, approved_target_ids):
+            calls["apply"] += 1
+            assert received_preview is preview
+            assert approved_target_ids == frozenset({"handoff.current-conclusion"})
+            return SimpleNamespace(to_dict=lambda: {"status": "applied"})
+
+    workflow = DocumentationWorkflow(tmp_path, runner=FakeRunner(), store=FakeStore())
+    monkeypatch.setattr(workflow.collector, "collect_target", lambda *_args: evidence)
+
+    def draft_target(_evidence, *, agent_command):
+        assert agent_command == FakeRunner.command
+        calls["draft"] += 1
+        return proposal
+
+    monkeypatch.setattr(workflow.service, "draft_target", draft_target)
+    monkeypatch.setattr(workflow.validator, "build_target_preview", lambda _proposal: preview)
+    monkeypatch.setattr(module, "DocumentationController", FakeController)
+    monkeypatch.setattr(
+        module.DocumentationPreviewV2, "from_dict",
+        classmethod(lambda _cls, _payload: preview),
+    )
+
+    shown = workflow.run(
+        "run-v2", agent_command=FakeRunner.command,
+        target_id="handoff.current-conclusion",
+    )
+    stale_evidence_payload = {
+        "schemaVersion": "documentation-evidence-v2", "evidenceFingerprint": "f" * 64,
+    }
+    stale_evidence = SimpleNamespace(
+        run_id=evidence.run_id, selected_target_id=evidence.selected_target_id,
+        commit_sha=evidence.commit_sha, source_fingerprint=evidence.source_fingerprint,
+        expected_section_sha256=evidence.expected_section_sha256,
+        evidence_fingerprint="f" * 64, to_dict=lambda: stale_evidence_payload,
+    )
+    monkeypatch.setattr(workflow.collector, "collect_target", lambda *_args: stale_evidence)
+    blocked = workflow.run(
+        "run-v2", agent_command=None, target_id="handoff.current-conclusion",
+        approve_target_id="handoff.current-conclusion",
+    )
+    monkeypatch.setattr(workflow.collector, "collect_target", lambda *_args: evidence)
+    applied = workflow.run(
+        "run-v2", agent_command=None, target_id="handoff.current-conclusion",
+        approve_target_id="handoff.current-conclusion",
+    )
+    reapplied = workflow.run(
+        "run-v2", agent_command=None, target_id="handoff.current-conclusion",
+        approve_target_id="handoff.current-conclusion",
+    )
+
+    assert shown["status"] == "preview_ready"
+    assert blocked["status"] == "blocked"
+    assert applied["status"] == reapplied["status"] == "applied"
+    assert calls == {"draft": 1, "apply": 2}
+    assert set(artifacts) == {
+        ("run-v2", "handoff.current-conclusion", "documentation-evidence-v2.json"),
+        ("run-v2", "handoff.current-conclusion", "documentation-proposal-v2.json"),
+        ("run-v2", "handoff.current-conclusion", "documentation-preview-v2.json"),
+        ("run-v2", "handoff.current-conclusion", "documentation-application-v2.json"),
+    }

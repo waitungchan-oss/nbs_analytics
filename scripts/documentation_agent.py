@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.agents.documentation_workflow import DocumentationWorkflow
+from backend.agents.documentation_models import DOCUMENTATION_TARGETS_V2
 
 
 DOCUMENTATION_EXIT_CODES = {
@@ -30,6 +31,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--obsidian-vault")
     parser.add_argument("--apply-brief", action="store_true")
     parser.add_argument("--approve-target", action="append", default=[], choices=("system_map", "adr"))
+    target_ids = tuple(item["targetId"] for item in DOCUMENTATION_TARGETS_V2)
+    parser.add_argument("--target-id", choices=target_ids)
+    parser.add_argument("--approve-target-id", choices=target_ids)
     return parser
 
 
@@ -78,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
             obsidian_vault=Path(args.obsidian_vault) if args.obsidian_vault else None,
             apply_brief=args.apply_brief,
             approved_targets=frozenset(args.approve_target),
+            target_id=args.target_id,
+            approve_target_id=args.approve_target_id,
         )
         _render(result)
         return _exit_code(result.get("status", "runtime_error"))
