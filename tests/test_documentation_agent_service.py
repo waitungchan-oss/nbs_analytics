@@ -11,6 +11,7 @@ import pytest
 from backend.agents.documentation_agent_service import (
     DocumentationAgentService,
     DocumentationRunnerResult,
+    DocumentationValidationError,
     _SubprocessDocumentationRunner,
     _safe_source_identity,
 )
@@ -18,6 +19,7 @@ from backend.agents.documentation_evidence import DocumentationEvidence
 from backend.agents.documentation_models import (
     DOCUMENTATION_EVIDENCE_SCHEMA,
     DOCUMENTATION_DRAFT_SCHEMA,
+    DocumentationEvidenceV2,
     DocumentationProposal,
 )
 from backend.agents.workflow_models import canonical_sha256
@@ -81,6 +83,31 @@ class FakeRunner:
         return DocumentationRunnerResult(0, json.dumps(proposal), "", 1)
 
 
+class FakeV2Runner:
+    def __init__(self, *, target_id=None, content="A concise verified handoff update.", proposals=None):
+        self.target_id = target_id
+        self.content = content
+        self.proposals = proposals
+        self.stdin_text = ""
+        self.calls = 0
+
+    def run(self, argv, *, input_text, timeout_seconds, max_output_bytes):
+        self.calls += 1
+        self.stdin_text = input_text
+        evidence = json.loads(input_text)
+        unsigned = {
+            "schemaVersion": "documentation-draft-v2",
+            "evidenceFingerprint": evidence["evidenceFingerprint"],
+            "status": "ready",
+            "proposals": self.proposals or [{
+                "targetId": self.target_id or evidence["selectedTargetId"],
+                "content": self.content,
+            }],
+        }
+        payload = {**unsigned, "draftFingerprint": canonical_sha256(unsigned)}
+        return DocumentationRunnerResult(0, json.dumps(payload, ensure_ascii=False), "", 1)
+
+
 @pytest.fixture
 def service(tmp_path: Path):
     system_map = tmp_path / "NBS_ANALYTICS_SYSTEM_MAP.md"
@@ -89,6 +116,37 @@ def service(tmp_path: Path):
         encoding="utf-8",
     )
     return lambda runner=None: DocumentationAgentService(tmp_path, runner=runner)
+
+
+def _v2_evidence(tmp_path: Path) -> DocumentationEvidenceV2:
+    section = "## 1. 本輪交接結論\n\nCurrent conclusion.\n\n"
+    (tmp_path / "NBS_ANALYTICS_HANDOFF.md").write_text(
+        "# Handoff\n\n" + section + "## 2. Next\n\nNext section.\n",
+        encoding="utf-8",
+    )
+    unsigned = {
+        "schemaVersion": "documentation-evidence-v2",
+        "taskId": "run-task-v2",
+        "generatedAt": "2026-09-28T10:00:00+00:00",
+        "runId": "run-task-v2",
+        "commitSha": "b" * 40,
+        "sourceFingerprint": "c" * 64,
+        "selectedTargetId": "handoff.current-conclusion",
+        "sources": [{"path": "NBS_ANALYTICS_HANDOFF.md", "sha256": "d" * 64}],
+        "gateResults": [
+            {"gate": name, "status": "pass", "sourceFingerprint": "c" * 64,
+             "evidenceFingerprint": chr(54 + index) * 64}
+            for index, name in enumerate(("review", "full-verification", "hermes"))
+        ],
+        "guardrails": {
+            "revenueScope": "不含掛賬核銷與TT退款轉團款",
+            "mayBaseline": "HKD 12,057,968",
+        },
+        "expectedSectionSha256": sha256(section.encode("utf-8")).hexdigest(),
+    }
+    return DocumentationEvidenceV2.from_dict({
+        **unsigned, "evidenceFingerprint": canonical_sha256(unsigned),
+    })
 
 
 def test_missing_runner_is_blocked_without_main_llm_fallback(evidence, service):
@@ -257,6 +315,80 @@ def test_documentation_fingerprint_only_runner_payload_is_rejected(evidence, ser
 
     assert proposal.status == "invalid_agent_output"
     assert proposal.warnings == ("fingerprint_mismatch",)
+
+
+def test_service_v2_requires_exact_single_target_coverage(tmp_path):
+    evidence = _v2_evidence(tmp_path)
+    runner = FakeV2Runner(proposals=[
+        {"targetId": evidence.selected_target_id, "content": "first update"},
+        {"targetId": evidence.selected_target_id, "content": "second update"},
+    ])
+
+    with pytest.raises(DocumentationValidationError, match="exactly one proposal"):
+        DocumentationAgentService(tmp_path, runner=runner).draft_target(evidence, agent_command="codex")
+
+
+def test_service_v2_blocks_target_id_mismatch_and_over_budget(tmp_path):
+    evidence = _v2_evidence(tmp_path)
+    mismatch = DocumentationAgentService(
+        tmp_path, runner=FakeV2Runner(target_id="runbook.shard-boundary"),
+    )
+    with pytest.raises(DocumentationValidationError, match="target"):
+        mismatch.draft_target(evidence, agent_command="codex")
+
+    over_budget = DocumentationAgentService(
+        tmp_path, runner=FakeV2Runner(content="verified " * 900),
+    )
+    with pytest.raises(DocumentationValidationError, match="budget"):
+        over_budget.draft_target(evidence, agent_command="codex")
+
+
+def test_service_v2_blocks_input_over_budget_before_runner(tmp_path):
+    evidence = _v2_evidence(tmp_path)
+    payload = evidence.to_dict()
+    payload.pop("evidenceFingerprint")
+    payload["sources"] = [
+        {"path": f"docs/evidence/source-{index}.md", "sha256": "d" * 64}
+        for index in range(600)
+    ]
+    payload["evidenceFingerprint"] = canonical_sha256(payload)
+    large_evidence = DocumentationEvidenceV2.from_dict(payload)
+    runner = FakeV2Runner()
+
+    with pytest.raises(DocumentationValidationError, match="input budget"):
+        DocumentationAgentService(tmp_path, runner=runner).draft_target(
+            large_evidence, agent_command="codex",
+        )
+    assert runner.calls == 0
+
+
+def test_service_v2_rejects_stale_live_section_hash(tmp_path):
+    evidence = _v2_evidence(tmp_path)
+    document = tmp_path / "NBS_ANALYTICS_HANDOFF.md"
+    document.write_text(document.read_text(encoding="utf-8").replace(
+        "Current conclusion.", "Changed after evidence."), encoding="utf-8",
+    )
+    runner = FakeV2Runner()
+
+    with pytest.raises(DocumentationValidationError, match="stale"):
+        DocumentationAgentService(tmp_path, runner=runner).draft_target(
+            evidence, agent_command="codex",
+        )
+    assert runner.calls == 0
+
+
+@pytest.mark.parametrize("content", [
+    "Use runbook.shard-boundary for the next step.",
+    "Update docs/agents/ACCEPTANCE_SHARD_ROLLOUT_RUNBOOK.md next.",
+    "Set requiredApprovalId before writing.",
+    "Use --approve-target-id to apply this section.",
+])
+def test_service_v2_rejects_cross_target_paths_and_approval_markers(tmp_path, content):
+    evidence = _v2_evidence(tmp_path)
+    with pytest.raises(DocumentationValidationError):
+        DocumentationAgentService(
+            tmp_path, runner=FakeV2Runner(content=content),
+        ).draft_target(evidence, agent_command="codex")
 
 
 def test_ready_draft_must_cover_exact_required_targets(evidence, service):
