@@ -1,4 +1,141 @@
+import json
+from hashlib import sha256
+
 from scripts import hermes_post_change_check as post_check
+
+
+def _write_v2_documentation_artifacts(root, *, run_id="run-1", target_id="handoff.current-conclusion"):
+    from backend.agents.documentation_models import DocumentationProposalV2
+    from backend.agents.documentation_policy import load_documentation_target
+    from backend.agents.documentation_validator import DocumentationProposalValidator
+    from backend.agents.workflow_models import canonical_sha256
+
+    target = load_documentation_target(target_id)
+    target_path = root / target.repo_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    before_text = (
+        f"# Handoff\n\n{target.section_heading}\nOld handoff text.\n\n"
+        "## 2. Following section\nLeave this section alone.\n"
+    )
+    target_path.write_text(before_text, encoding="utf-8")
+    section = before_text[before_text.index(target.section_heading):before_text.index("\n## 2. Following section") + 1]
+    commit_sha = "a" * 40
+    source_fingerprint = "b" * 64
+    run_root = root / ".nbs_agent_runtime" / "runs" / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+    source_payloads = {
+        "manifest.json": {"runId": run_id, "gitHead": commit_sha},
+        "status.json": {"runId": run_id, "status": "completed"},
+        "approval.json": {
+            "runId": run_id, "authorizationStatus": "approved", "approvedBaseSha": commit_sha,
+        },
+        "review.json": {
+            "overallStatus": "PASS", "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,
+        },
+        "full-verification.json": {
+            "overallStatus": "PASS", "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,
+        },
+        "hermes.json": {
+            "overallStatus": "PASS", "commitSha": commit_sha, "sourceFingerprint": source_fingerprint,
+        },
+    }
+    for name, payload in source_payloads.items():
+        (run_root / name).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def payload_sha256(payload):
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return sha256(canonical.encode("utf-8")).hexdigest()
+
+    evidence_unsigned = {
+        "schemaVersion": "documentation-evidence-v2",
+        "taskId": "task-hermes-test",
+        "generatedAt": "2026-09-29T09:00:00+08:00",
+        "runId": run_id,
+        "commitSha": commit_sha,
+        "sourceFingerprint": source_fingerprint,
+        "selectedTargetId": target_id,
+        "sources": [
+            {
+                "path": f".nbs_agent_runtime/runs/{run_id}/{name}",
+                "sha256": payload_sha256(payload),
+            }
+            for name, payload in source_payloads.items()
+        ] + [{"path": target.repo_path, "sha256": sha256(target_path.read_bytes()).hexdigest()}],
+        "gateResults": [
+            {
+                "gate": gate, "status": "pass",
+                "sourceFingerprint": source_fingerprint,
+                "evidenceFingerprint": payload_sha256(source_payloads[f"{gate}.json"]),
+            }
+            for gate in ("review", "full-verification", "hermes")
+        ],
+        "guardrails": {
+            "revenueScope": "不含掛賬核銷與TT退款轉團款",
+            "mayBaseline": "HKD 12,057,968",
+        },
+        "expectedSectionSha256": sha256(section.encode("utf-8")).hexdigest(),
+    }
+    evidence = {
+        **evidence_unsigned,
+        "evidenceFingerprint": canonical_sha256(evidence_unsigned),
+    }
+    content = f"{target.section_heading}\nUpdated handoff text.\n"
+    proposal_unsigned = {
+        "schemaVersion": "documentation-proposal-v2",
+        "taskId": evidence["taskId"],
+        "generatedAt": "2026-09-29T09:01:00+08:00",
+        "evidence": evidence,
+        "evidenceFingerprint": evidence["evidenceFingerprint"],
+        "status": "ready",
+        "targetId": target_id,
+        "targetKind": target.target_kind,
+        "repoPath": target.repo_path,
+        "sectionHeading": target.section_heading,
+        "operation": target.operation,
+        "expectedSectionSha256": evidence["expectedSectionSha256"],
+        "content": content,
+        "contentSha256": sha256(content.encode("utf-8")).hexdigest(),
+    }
+    proposal = {
+        **proposal_unsigned,
+        "proposalFingerprint": canonical_sha256(proposal_unsigned),
+    }
+    preview = DocumentationProposalValidator(root).build_target_preview(
+        DocumentationProposalV2.from_dict(proposal)
+    ).to_dict()
+    application_unsigned = {
+        "schemaVersion": "documentation-application-v2",
+        "taskId": proposal["taskId"],
+        "generatedAt": "2026-09-29T09:02:00+08:00",
+        "runId": run_id,
+        "sourceFingerprint": source_fingerprint,
+        "proposalFingerprint": proposal["proposalFingerprint"],
+        "status": "awaiting_target_approval",
+        "targetId": target_id,
+        "repoPath": target.repo_path,
+        "approvalId": target.required_approval_id,
+        "beforeSectionSha256": preview["beforeSectionSha256"],
+        "afterSectionSha256": preview["afterSectionSha256"],
+        "result": "preview",
+    }
+    application = {
+        **application_unsigned,
+        "applicationFingerprint": canonical_sha256(application_unsigned),
+    }
+    artifact_dir = (
+        root / ".nbs_agent_runtime" / "runs" / run_id / "documentation"
+        / "targets" / target_id
+    )
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        "documentation-evidence-v2.json": evidence,
+        "documentation-proposal-v2.json": proposal,
+        "documentation-preview-v2.json": preview,
+        "documentation-application-v2.json": application,
+    }
+    for name, payload in artifacts.items():
+        (artifact_dir / name).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return artifact_dir, artifacts
 
 
 def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
@@ -142,6 +279,154 @@ def test_documentation_artifact_report_validates_schema_caps_and_writes_nothing(
     assert report["policy"] == "read-only"
     assert report["invocations"] == 0
     assert report["writes"] == 0
+
+    unsafe_project = tmp_path / "unsafe-project"
+    unsafe_project.mkdir()
+    external_runtime = tmp_path / "external-runtime"
+    (external_runtime / "runs").mkdir(parents=True)
+    (unsafe_project / ".nbs_agent_runtime").symlink_to(external_runtime, target_is_directory=True)
+    unsafe_report = post_check.documentation_artifact_report(unsafe_project)
+    assert unsafe_report["invalidTargets"] == [{
+        "runId": "*", "targetId": "*", "reason": "unsafe_runtime_directory",
+    }]
+
+
+def test_hermes_validates_documentation_v2_artifacts_read_only(tmp_path):
+    artifact_dir, artifacts = _write_v2_documentation_artifacts(tmp_path)
+    before = {name: (artifact_dir / name).read_bytes() for name in artifacts}
+
+    report = post_check.documentation_artifact_report(tmp_path)
+
+    assert report["schemaVersion"] == "documentation-hermes-report-v1"
+    assert report["v2TargetCount"] == 1
+    assert report["v2ArtifactCounts"]["documentation-evidence-v2.json"] == 1
+    assert report["v2ArtifactCounts"]["documentation-preview-v2.json"] == 1
+    assert report["invalidTargets"] == []
+    assert report["invalidRuns"] == []
+    assert report["policy"] == "read-only"
+    assert report["invocations"] == 0
+    assert report["writes"] == 0
+    assert {name: (artifact_dir / name).read_bytes() for name in artifacts} == before
+
+
+def test_hermes_blocks_malformed_stale_and_over_cap_v2_artifacts(tmp_path):
+    from backend.agents.workflow_models import canonical_sha256
+
+    malformed_dir, _ = _write_v2_documentation_artifacts(tmp_path, run_id="run-malformed")
+    malformed_path = malformed_dir / "documentation-proposal-v2.json"
+    malformed = json.loads(malformed_path.read_text(encoding="utf-8"))
+    malformed["proposalFingerprint"] = "0" * 64
+    malformed_path.write_text(json.dumps(malformed), encoding="utf-8")
+
+    stale_dir, _ = _write_v2_documentation_artifacts(tmp_path, run_id="run-stale")
+    stale_path = stale_dir / "documentation-application-v2.json"
+    stale = json.loads(stale_path.read_text(encoding="utf-8"))
+    stale["taskId"] = "different-task"
+    stale_unsigned = {key: value for key, value in stale.items() if key != "applicationFingerprint"}
+    stale["applicationFingerprint"] = canonical_sha256(stale_unsigned)
+    stale_path.write_text(json.dumps(stale), encoding="utf-8")
+
+    bad_status_dir, _ = _write_v2_documentation_artifacts(tmp_path, run_id="run-bad-status")
+    for name in (
+        "documentation-proposal-v2.json",
+        "documentation-preview-v2.json",
+        "documentation-application-v2.json",
+    ):
+        (bad_status_dir / name).unlink()
+    bad_status_path = bad_status_dir / "documentation-evidence-v2.json"
+    bad_status = json.loads(bad_status_path.read_text(encoding="utf-8"))
+    bad_status["gateResults"][0]["status"] = "failed"
+    bad_status_unsigned = {key: value for key, value in bad_status.items() if key != "evidenceFingerprint"}
+    bad_status["evidenceFingerprint"] = canonical_sha256(bad_status_unsigned)
+    bad_status_path.write_text(json.dumps(bad_status), encoding="utf-8")
+
+    unlisted_dir, _ = _write_v2_documentation_artifacts(tmp_path, run_id="run-unlisted-file")
+    (unlisted_dir / "unlisted.json").write_text("{}", encoding="utf-8")
+
+    unsafe_mode_dir, _ = _write_v2_documentation_artifacts(tmp_path, run_id="run-unsafe-mode")
+    (unsafe_mode_dir / "documentation-application-v2.json").chmod(0o666)
+
+    over_cap_dir, _ = _write_v2_documentation_artifacts(tmp_path, run_id="run-over-cap")
+    over_cap_path = over_cap_dir / "documentation-application-v2.json"
+    over_cap_path.write_text(" " * (5 * 1024 * 1024 + 1), encoding="utf-8")
+
+    symlink_run = tmp_path / ".nbs_agent_runtime/runs/run-symlink/documentation/targets"
+    symlink_run.mkdir(parents=True)
+    outside = tmp_path / "outside-target"
+    outside.mkdir()
+    (symlink_run / "handoff.current-conclusion").symlink_to(outside, target_is_directory=True)
+    linked_run = tmp_path / ".nbs_agent_runtime/runs/run-linked"
+    linked_run.symlink_to(malformed_dir.parents[2], target_is_directory=True)
+
+    report = post_check.documentation_artifact_report(tmp_path)
+
+    invalid_targets = {
+        (item["runId"], item["targetId"])
+        for item in report["invalidTargets"]
+    }
+    assert {("run-malformed", "handoff.current-conclusion"),
+            ("run-stale", "handoff.current-conclusion"),
+            ("run-bad-status", "handoff.current-conclusion"),
+            ("run-unlisted-file", "handoff.current-conclusion"),
+            ("run-unsafe-mode", "handoff.current-conclusion"),
+            ("run-over-cap", "handoff.current-conclusion"),
+            ("run-symlink", "handoff.current-conclusion")} <= invalid_targets
+    assert {
+        "run-malformed", "run-stale", "run-bad-status",
+        "run-unlisted-file", "run-unsafe-mode", "run-over-cap", "run-symlink", "run-linked",
+    } <= set(report["invalidRuns"])
+    assert any(item["runId"] == "run-over-cap" for item in report["capWarnings"])
+    assert report["policy"] == "read-only"
+    assert report["invocations"] == 0
+    assert report["writes"] == 0
+
+
+def test_hermes_blocks_v2_artifacts_when_current_source_or_target_drifts(tmp_path):
+    target_root = tmp_path / "target-drift"
+    _write_v2_documentation_artifacts(target_root)
+    target_path = target_root / "NBS_ANALYTICS_HANDOFF.md"
+    target_path.write_text(
+        target_path.read_text(encoding="utf-8").replace("Old handoff text.", "Changed after preview."),
+        encoding="utf-8",
+    )
+
+    gate_root = tmp_path / "gate-drift"
+    _write_v2_documentation_artifacts(gate_root, run_id="run-gate-drift")
+    gate_path = gate_root / ".nbs_agent_runtime/runs/run-gate-drift/review.json"
+    gate_path.write_text('{"overallStatus":"FAIL"}', encoding="utf-8")
+
+    target_report = post_check.documentation_artifact_report(target_root)
+    gate_report = post_check.documentation_artifact_report(gate_root)
+
+    assert [(item["runId"], item["targetId"]) for item in target_report["invalidTargets"]] == [
+        ("run-1", "handoff.current-conclusion"),
+    ]
+    assert [(item["runId"], item["targetId"]) for item in gate_report["invalidTargets"]] == [
+        ("run-gate-drift", "handoff.current-conclusion"),
+    ]
+
+
+def test_documentation_v2_hermes_never_changes_release_authority(tmp_path, monkeypatch):
+    from backend.agents.documentation_controller import DocumentationController
+
+    _write_v2_documentation_artifacts(tmp_path)
+    release_result = tmp_path / ".nbs_agent_runtime/release-gates/release-gate-result.json"
+    release_result.parent.mkdir(parents=True)
+    release_result.write_text('{"Final-Acceptance":"pending"}\n', encoding="utf-8")
+    before = release_result.read_bytes()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Hermes documentation inspection must never apply or dispatch")
+
+    monkeypatch.setattr(DocumentationController, "apply_target", forbidden)
+    monkeypatch.setattr(post_check.subprocess, "run", forbidden)
+
+    report = post_check.documentation_artifact_report(tmp_path)
+
+    assert report["policy"] == "read-only"
+    assert report["invocations"] == 0
+    assert report["writes"] == 0
+    assert release_result.read_bytes() == before
 
 
 def test_memory_sidecar_hermes_check_is_read_only_and_does_not_start_gateway():

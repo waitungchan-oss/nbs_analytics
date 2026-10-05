@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import time
 from collections import deque
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -16,14 +17,20 @@ from .agent_runtime import AgentRuntime
 from .documentation_codex_runner import CodexDocumentationRunner, DocumentationRunnerResult
 from .documentation_models import (
     DOCUMENTATION_DRAFT_SCHEMA,
+    DOCUMENTATION_TARGETS_V2,
+    DocumentationDraftV2,
+    DocumentationEvidenceV2,
     DOCUMENTATION_PROPOSAL_SCHEMA,
     DocumentationEvidence as ContractDocumentationEvidence,
     DocumentationDraft,
     DocumentationProposal,
+    DocumentationProposalV2,
     DocumentationSchemaError,
 )
 from .documentation_evidence import DocumentationEvidence as CollectorDocumentationEvidence
+from .documentation_evidence import _read_target_section
 from .documentation_policy import DocumentationImpactClassifier
+from .documentation_policy import load_documentation_target
 from .documentation_validator import DocumentationProposalValidator, DocumentationValidationError
 from .workflow_models import canonical_sha256
 
@@ -136,6 +143,133 @@ class DocumentationAgentService:
         self.classifier = DocumentationImpactClassifier()
         self.cache_root = self.project_root / ".nbs_agent_runtime" / "documentation"
         self.telemetry_path = self.project_root / ".nbs_agent_runtime" / "telemetry" / "documentation.jsonl"
+
+    def draft_target(
+        self,
+        evidence: DocumentationEvidenceV2,
+        *,
+        agent_command: str | None,
+    ) -> DocumentationProposalV2:
+        """Draft an update for one catalogued section without writing the target file."""
+        if not isinstance(evidence, DocumentationEvidenceV2):
+            raise TypeError("documentation evidence must be DocumentationEvidenceV2")
+        try:
+            evidence = DocumentationEvidenceV2.from_dict(evidence.to_dict())
+            target = load_documentation_target(evidence.selected_target_id)
+        except DocumentationSchemaError as exc:
+            raise DocumentationValidationError("invalid or non-catalogued v2 evidence") from exc
+        required_gates = {"review", "full-verification", "hermes"}
+        if (
+            {item["gate"] for item in evidence.gate_results} != required_gates
+            or any(item["status"] not in {"pass", "passed", "success", "ok"}
+                   or item["sourceFingerprint"] != evidence.source_fingerprint
+                   for item in evidence.gate_results)
+        ):
+            raise DocumentationValidationError("v2 evidence gates are incomplete or stale")
+        try:
+            _, current_text, current_section, section_start, section_end = _read_target_section(
+                self.project_root, target,
+            )
+        except (OSError, UnicodeError, ValueError, PermissionError) as exc:
+            raise DocumentationValidationError("selected target is missing or unsafe") from exc
+        current_section_hash = sha256(current_section.encode("utf-8")).hexdigest()
+        if current_section_hash != evidence.expected_section_sha256:
+            raise DocumentationValidationError("stale evidence: target section changed")
+        if not agent_command or not agent_command.strip():
+            raise DocumentationValidationError("blocked_missing_runner")
+        try:
+            argv = self._approved_argv(agent_command)
+        except (ValueError, PermissionError) as exc:
+            raise DocumentationValidationError("blocked_unapproved_runner") from exc
+
+        input_text = json.dumps(evidence.to_dict(), ensure_ascii=False, sort_keys=True)
+        input_limit, output_limit = self._budget()
+        if self._estimate(input_text) > input_limit:
+            raise DocumentationValidationError("v2 evidence exceeds input budget")
+        result = self.runner.run(
+            argv, input_text=input_text, timeout_seconds=_TIMEOUT_SECONDS,
+            max_output_bytes=_OUTPUT_MAX_BYTES,
+        )
+        if result.exit_code == -1 or result.duration_ms >= _TIMEOUT_SECONDS * 1000:
+            raise DocumentationValidationError("documentation runner timed out")
+        if result.exit_code != 0:
+            raise DocumentationValidationError("documentation runner did not return a valid draft")
+        if not result.stdout or len(result.stdout.encode("utf-8")) > _OUTPUT_MAX_BYTES:
+            raise DocumentationValidationError("documentation runner output exceeds byte limit")
+        if self._estimate(result.stdout) > output_limit:
+            raise DocumentationValidationError("documentation draft exceeds output budget")
+        try:
+            draft = DocumentationDraftV2.from_dict(json.loads(result.stdout))
+        except (TypeError, ValueError, json.JSONDecodeError, DocumentationSchemaError) as exc:
+            detail = str(exc) if isinstance(exc, DocumentationSchemaError) else "invalid schema or JSON"
+            raise DocumentationValidationError(
+                f"documentation runner returned an invalid v2 draft: {detail}"
+            ) from exc
+        if draft.evidence_fingerprint != evidence.evidence_fingerprint:
+            raise DocumentationValidationError("documentation draft evidence fingerprint mismatch")
+        if len(draft.proposals) != 1 or draft.proposals[0]["targetId"] != target.target_id:
+            raise DocumentationValidationError("documentation draft target does not match selected target")
+        if draft.status != "ready":
+            raise DocumentationValidationError("documentation draft is not ready")
+
+        fragment = draft.proposals[0]["content"].strip()
+        try:
+            fragment = self._validate_draft_fragment(fragment)
+        except (ValueError, DocumentationValidationError) as exc:
+            raise DocumentationValidationError("documentation draft content is unsafe") from exc
+        if re.search(r"(?m)^ {0,3}#{1,6}[ \t]+", fragment):
+            raise DocumentationValidationError("documentation draft may not add section headings")
+        self._reject_v2_cross_target_references(fragment)
+        content = f"{target.section_heading}\n\n{fragment}\n"
+        updated_text = (
+            current_text[:section_start] + content
+            + current_text[section_end:]
+        )
+        try:
+            DocumentationProposalValidator._check_protected(current_text, updated_text)
+        except DocumentationValidationError as exc:
+            raise DocumentationValidationError("documentation draft changes protected governance facts") from exc
+
+        generated_at = datetime.now(timezone.utc)
+        evidence_time = datetime.fromisoformat(evidence.generated_at)
+        if generated_at < evidence_time:
+            generated_at = evidence_time
+        timestamp = generated_at.isoformat()
+        unsigned = {
+            "schemaVersion": "documentation-proposal-v2",
+            "taskId": evidence.task_id,
+            "generatedAt": timestamp,
+            "evidence": evidence.to_dict(),
+            "evidenceFingerprint": evidence.evidence_fingerprint,
+            "status": "ready",
+            "targetId": target.target_id,
+            "targetKind": target.target_kind,
+            "repoPath": target.repo_path,
+            "sectionHeading": target.section_heading,
+            "operation": target.operation,
+            "expectedSectionSha256": evidence.expected_section_sha256,
+            "content": content,
+            "contentSha256": sha256(content.encode("utf-8")).hexdigest(),
+        }
+        proposal = {**unsigned, "proposalFingerprint": canonical_sha256(unsigned)}
+        try:
+            return DocumentationProposalV2.from_dict(proposal)
+        except DocumentationSchemaError as exc:
+            raise DocumentationValidationError("normalized v2 proposal is invalid") from exc
+
+    @staticmethod
+    def _reject_v2_cross_target_references(content: str) -> None:
+        for target in DOCUMENTATION_TARGETS_V2:
+            for reference in (target["targetId"], target["repoPath"]):
+                if reference in content or reference.replace("/", "\\") in content:
+                    raise DocumentationValidationError(
+                        "documentation draft contains a catalogued target reference",
+                    )
+        if re.search(
+            r"(?i)(?:requiredApprovalId|approvalId|--approve-[a-z0-9-]+|\"approval\"\s*:)" ,
+            content,
+        ):
+            raise DocumentationValidationError("documentation draft contains an approval marker")
 
     def draft(
         self,

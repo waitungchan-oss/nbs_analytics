@@ -14,6 +14,7 @@ from backend.services.receipt_exclusion_matcher import match_receipt_exclusions
 from backend.services.receipt_exclusion_models import ReceiptExclusionRule, canonical_json_hash
 from backend.services.receipt_exclusion_proposal_service import build_receipt_exclusion_proposal
 from backend.services.receipt_exclusion_registry_service import load_active_registry_snapshot
+from backend.services.beta_only_exception_service import build_beta_only_exception_frames
 from pipeline import process_raw_files, read_excel_source
 
 # Backward-compatible dependency hook used by profiling and tests.
@@ -179,6 +180,17 @@ def run_upload_preflight(
         )
         _record_stage(stage_timings, "清洗與 Entity Resolution", stage_started)
         stage_started = time.perf_counter()
+        beta_exception_tour, beta_exception_others = build_beta_only_exception_frames(
+            main_input,
+            tour_file,
+            other_files or [],
+            branch_mapping,
+            exclude_prefixes,
+            sales_reps,
+            process_runner=process_raw_files,
+        )
+        _record_stage(stage_timings, "Beta-only exception frame", stage_started)
+        stage_started = time.perf_counter()
         upsert_summary = database.upsert_to_db(new_t_df, new_o_df, db_path=temp_db_path)
         _record_stage(stage_timings, "臨時 SQLite upsert", stage_started)
         stage_started = time.perf_counter()
@@ -262,6 +274,8 @@ def run_upload_preflight(
         "prepared": {
             "tour": new_t_df,
             "others": new_o_df,
+            "beta_exception_tour": beta_exception_tour,
+            "beta_exception_others": beta_exception_others,
             "anm": anm_df,
             "entity_audit": entity_audit,
             "receipt_exclusion_evidence": receipt_exclusion_evidence,

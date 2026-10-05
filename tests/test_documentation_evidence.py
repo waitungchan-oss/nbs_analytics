@@ -1,4 +1,6 @@
 import json
+import subprocess
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -23,10 +25,10 @@ from backend.agents.workflow_models import (
 from backend.agents.workflow_store import WorkflowStore
 
 
-def _manifest(run_id: str) -> WorkflowManifest:
+def _manifest(run_id: str, commit_sha: str) -> WorkflowManifest:
     return WorkflowManifest(
         MANIFEST_SCHEMA, run_id, "docs/briefs/task.md", "a" * 64,
-        "codex/task-2", "b" * 40, (), "2026-07-18T10:00:00+00:00", "c" * 64,
+        "codex/task-2", commit_sha, (), "2026-07-18T10:00:00+00:00", "c" * 64,
     )
 
 
@@ -41,21 +43,40 @@ def _status(run_id: str, value: str) -> WorkflowStatus:
 
 @pytest.fixture
 def completed_run_fixture(tmp_path: Path):
+    handoff = tmp_path / "NBS_ANALYTICS_HANDOFF.md"
+    handoff.write_text(
+        "# Handoff\n\n## 1. 本輪交接結論\n\nCurrent conclusion.\n\n## 2. Next\n\nNext section.\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Documentation Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "docs-test@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "NBS_ANALYTICS_HANDOFF.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "accepted target source"], cwd=tmp_path, check=True)
+    commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
     store = WorkflowStore(tmp_path)
     run_id = "run-task-2"
-    store.create_run(_manifest(run_id), _status(run_id, "completed"))
+    store.create_run(_manifest(run_id, commit_sha), _status(run_id, "completed"))
     store.write_approval(run_id, WorkflowApproval(
-        APPROVAL_SCHEMA, run_id, "contract.json", "d" * 64, "e" * 40,
+        APPROVAL_SCHEMA, run_id, "contract.json", "d" * 64, commit_sha,
         "2026-07-18T10:00:30+00:00", "approved",
     ))
-    payload = {"status": "pass", "commands": [{"command": "pytest", "exitCode": 0}],
+    payload = {"status": "pass", "sourceFingerprint": "f" * 64,
+               "commitSha": commit_sha,
+               "commands": [{"command": "pytest", "exitCode": 0}],
                "changedPaths": ["backend/agents/documentation_evidence.py"],
                "stdoutTail": "runner command transactionRows"}
     for name in ("implementation.json", "targeted-verification.json", "full-verification.json"):
         store.write_artifact(run_id, name, payload)
     store.write_artifact(run_id, "review.json", {**payload, "verdict": "pass"})
-    store.write_artifact(run_id, "hermes.json", {"overallStatus": "pass", "summary": "ok"})
-    return type("Fixture", (), {"project_root": tmp_path, "run_id": run_id, "store": store})
+    store.write_artifact(run_id, "hermes.json", {
+        "overallStatus": "pass", "sourceFingerprint": "f" * 64,
+        "commitSha": commit_sha, "summary": "ok",
+    })
+    return type("Fixture", (), {
+        "project_root": tmp_path, "run_id": run_id, "store": store,
+        "commit_sha": commit_sha,
+    })
 
 
 def test_collector_requires_all_verified_gates(completed_run_fixture):
@@ -161,6 +182,70 @@ def test_collector_exposes_manifest_brief_as_safe_source(completed_run_fixture):
     ).collect(completed_run_fixture.run_id).to_dict()
 
     assert {item["path"]: item["sha256"] for item in evidence["sources"]}["docs/briefs/task.md"] == "a" * 64
+
+
+def test_collector_emits_target_bound_v2_evidence_and_section_sha(completed_run_fixture):
+    section = "## 1. 本輪交接結論\n\nCurrent conclusion.\n\n"
+    evidence = DocumentationEvidenceCollector(
+        completed_run_fixture.project_root, store=completed_run_fixture.store,
+    ).collect_target(completed_run_fixture.run_id, "handoff.current-conclusion")
+
+    payload = evidence.to_dict()
+    assert payload["schemaVersion"] == "documentation-evidence-v2"
+    assert payload["selectedTargetId"] == "handoff.current-conclusion"
+    assert payload["commitSha"] == completed_run_fixture.commit_sha
+    assert payload["sourceFingerprint"] == "f" * 64
+    assert payload["expectedSectionSha256"] == sha256(section.encode("utf-8")).hexdigest()
+    assert {item["gate"] for item in payload["gateResults"]} == {
+        "review", "full-verification", "hermes",
+    }
+
+
+def test_collector_v2_blocks_stale_source_and_missing_gate(completed_run_fixture):
+    collector = DocumentationEvidenceCollector(
+        completed_run_fixture.project_root, store=completed_run_fixture.store,
+    )
+    completed_run_fixture.store.write_artifact(
+        completed_run_fixture.run_id, "hermes.json",
+        {"overallStatus": "pass", "sourceFingerprint": "e" * 64,
+         "commitSha": completed_run_fixture.commit_sha},
+    )
+    with pytest.raises(DocumentationEvidenceError, match="source fingerprint"):
+        collector.collect_target(completed_run_fixture.run_id, "handoff.current-conclusion")
+
+    completed_run_fixture.store.write_artifact(
+        completed_run_fixture.run_id, "hermes.json",
+        {"overallStatus": "pass", "sourceFingerprint": "f" * 64,
+         "commitSha": completed_run_fixture.commit_sha},
+    )
+    completed_run_fixture.store._run_file(
+        completed_run_fixture.run_id, "full-verification.json",
+    ).unlink()
+    with pytest.raises(DocumentationEvidenceError, match="full-verification"):
+        collector.collect_target(completed_run_fixture.run_id, "handoff.current-conclusion")
+
+
+def test_collector_v2_requires_each_gate_commit_to_match_manifest(completed_run_fixture):
+    completed_run_fixture.store.write_artifact(
+        completed_run_fixture.run_id, "review.json",
+        {"status": "pass", "sourceFingerprint": "f" * 64},
+    )
+    with pytest.raises(DocumentationEvidenceError, match="commit"):
+        DocumentationEvidenceCollector(
+            completed_run_fixture.project_root, store=completed_run_fixture.store,
+        ).collect_target(completed_run_fixture.run_id, "handoff.current-conclusion")
+
+
+def test_collector_v2_requires_target_bytes_from_accepted_commit(completed_run_fixture):
+    handoff = completed_run_fixture.project_root / "NBS_ANALYTICS_HANDOFF.md"
+    handoff.write_text(
+        handoff.read_text(encoding="utf-8").replace("Current conclusion.", "Changed after gate."),
+        encoding="utf-8",
+    )
+    with pytest.raises(DocumentationEvidenceError, match="accepted source commit"):
+        DocumentationEvidenceCollector(
+            completed_run_fixture.project_root, store=completed_run_fixture.store,
+        ).collect_target(completed_run_fixture.run_id, "handoff.current-conclusion")
 
 
 def test_bounded_text_truncates_long_strings():

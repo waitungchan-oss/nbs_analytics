@@ -25,6 +25,16 @@ def test_documentation_cli_accepts_explicit_codex_command_without_vault_in_runne
     assert args.obsidian_vault is None
 
 
+def test_documentation_parser_exposes_single_v2_target_and_exact_approval():
+    from scripts.documentation_agent import _parser
+
+    args = _parser().parse_args([
+        "--run-id", "run-1", "--target-id", "handoff.current-conclusion",
+        "--approve-target-id", "handoff.current-conclusion",
+    ])
+    assert args.target_id == args.approve_target_id == "handoff.current-conclusion"
+
+
 def test_agent_workflow_parser_exposes_document_sidecar():
     from scripts.agent_workflow import _parser
 
@@ -52,6 +62,30 @@ def test_documentation_cli_emits_one_json_document_on_success(capsys, monkeypatc
     assert captured.err == ""
     assert json.loads(captured.out) == {"runId": "run-1", "status": "preview_ready"}
     assert captured.out.count("\n") == 1
+
+
+def test_documentation_cli_forwards_v2_target_approval(capsys, monkeypatch):
+    import scripts.documentation_agent as cli
+
+    received = {}
+
+    class FakeWorkflow:
+        def __init__(self, _project_root):
+            pass
+
+        def run(self, run_id, **kwargs):
+            received.update(run_id=run_id, **kwargs)
+            return {"status": "applied"}
+
+    monkeypatch.setattr(cli, "DocumentationWorkflow", FakeWorkflow)
+    result = cli.main([
+        "--run-id", "run-1", "--target-id", "handoff.current-conclusion",
+        "--approve-target-id", "handoff.current-conclusion",
+    ])
+
+    assert result == 0
+    assert received["target_id"] == received["approve_target_id"] == "handoff.current-conclusion"
+    assert json.loads(capsys.readouterr().out)["status"] == "applied"
 
 
 def test_documentation_cli_redacts_external_paths_in_errors(capsys, monkeypatch):

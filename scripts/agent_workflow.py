@@ -19,6 +19,7 @@ from backend.agents.workflow_orchestrator import WorkflowOrchestrator
 from backend.agents.workflow_retention import WorkflowRetention
 from backend.agents.workflow_store import WorkflowStore
 from backend.agents.documentation_workflow import DocumentationWorkflow
+from backend.agents.documentation_models import DOCUMENTATION_TARGETS_V2
 
 
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?:[^\s'\"<>]+)")
@@ -65,6 +66,9 @@ def _parser() -> argparse.ArgumentParser:
     document.add_argument("--obsidian-vault")
     document.add_argument("--apply-brief", action="store_true")
     document.add_argument("--approve-target", action="append", default=[], choices=("system_map", "adr"))
+    target_ids = tuple(item["targetId"] for item in DOCUMENTATION_TARGETS_V2)
+    document.add_argument("--target-id", choices=target_ids)
+    document.add_argument("--approve-target-id", choices=target_ids)
     return parser
 
 
@@ -180,6 +184,8 @@ def _run(args: argparse.Namespace) -> tuple[dict, int]:
             obsidian_vault=Path(args.obsidian_vault) if args.obsidian_vault else None,
             apply_brief=args.apply_brief,
             approved_targets=frozenset(args.approve_target),
+            target_id=args.target_id,
+            approve_target_id=args.approve_target_id,
         )
         documentation_exit_codes = {
             "applied": 0, "preview_ready": 0, "no_documentation_needed": 0,

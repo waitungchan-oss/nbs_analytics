@@ -297,3 +297,159 @@ def test_proposal_rejects_fingerprint_different_from_evidence(valid_proposal_pay
     valid_proposal_payload["evidenceFingerprint"] = "c" * 64
     with pytest.raises(DocumentationSchemaError, match="evidence fingerprint"):
         DocumentationProposal.from_dict(valid_proposal_payload)
+
+
+def test_documentation_v2_models_round_trip_and_reject_mixed_version(
+    valid_evidence_payload: dict,
+) -> None:
+    from backend.agents.documentation_models import (
+        DOCUMENTATION_APPLICATION_V2_SCHEMA,
+        DOCUMENTATION_DRAFT_V2_SCHEMA,
+        DOCUMENTATION_EVIDENCE_V2_SCHEMA,
+        DOCUMENTATION_PROPOSAL_V2_SCHEMA,
+        DocumentationApplicationV2,
+        DocumentationDraftV2,
+        DocumentationEvidenceV2,
+        DocumentationProposalV2,
+    )
+
+    evidence = {
+        "schemaVersion": DOCUMENTATION_EVIDENCE_V2_SCHEMA,
+        "taskId": "task-1",
+        "generatedAt": TIMESTAMP,
+        "runId": "run-123",
+        "commitSha": "b" * 40,
+        "sourceFingerprint": "c" * 64,
+        "selectedTargetId": "handoff.current-conclusion",
+        "sources": [{"path": "NBS_ANALYTICS_HANDOFF.md", "sha256": "d" * 64}],
+        "gateResults": [{
+            "gate": "strict_review",
+            "status": "pass",
+            "sourceFingerprint": "c" * 64,
+            "evidenceFingerprint": "e" * 64,
+        }],
+        "guardrails": {
+            "revenueScope": "不含掛賬核銷與TT退款轉團款",
+            "mayBaseline": "HKD 12,057,968",
+        },
+        "expectedSectionSha256": "f" * 64,
+        "evidenceFingerprint": "0" * 64,
+    }
+    evidence["evidenceFingerprint"] = canonical_sha256(
+        {key: value for key, value in evidence.items() if key != "evidenceFingerprint"}
+    )
+    evidence_model = DocumentationEvidenceV2.from_dict(evidence)
+    assert evidence_model.to_dict() == evidence
+    assert evidence_model.canonical_fingerprint == evidence["evidenceFingerprint"]
+
+    draft = {
+        "schemaVersion": DOCUMENTATION_DRAFT_V2_SCHEMA,
+        "evidenceFingerprint": evidence["evidenceFingerprint"],
+        "status": "ready",
+        "proposals": [{"targetId": "handoff.current-conclusion", "content": "Verified conclusion.\n"}],
+        "draftFingerprint": "0" * 64,
+    }
+    draft["draftFingerprint"] = canonical_sha256(
+        {key: value for key, value in draft.items() if key != "draftFingerprint"}
+    )
+    assert DocumentationDraftV2.from_dict(draft).to_dict() == draft
+
+    proposal = {
+        "schemaVersion": DOCUMENTATION_PROPOSAL_V2_SCHEMA,
+        "taskId": "task-1",
+        "generatedAt": TIMESTAMP,
+        "evidence": evidence,
+        "evidenceFingerprint": evidence["evidenceFingerprint"],
+        "status": "ready",
+        "targetId": "handoff.current-conclusion",
+        "targetKind": "handoff",
+        "repoPath": "NBS_ANALYTICS_HANDOFF.md",
+        "sectionHeading": "## 1. 本輪交接結論",
+        "operation": "replace_section",
+        "expectedSectionSha256": "f" * 64,
+        "content": "Verified conclusion.\n",
+        "contentSha256": sha256("Verified conclusion.\n".encode("utf-8")).hexdigest(),
+        "proposalFingerprint": "0" * 64,
+    }
+    proposal["proposalFingerprint"] = canonical_sha256(
+        {key: value for key, value in proposal.items() if key != "proposalFingerprint"}
+    )
+    proposal_model = DocumentationProposalV2.from_dict(proposal)
+    assert proposal_model.to_dict() == proposal
+    assert proposal_model.canonical_fingerprint == proposal["proposalFingerprint"]
+
+    utc_z_proposal = deepcopy(proposal)
+    utc_z_proposal["generatedAt"] = "2026-07-18T04:00:00Z"
+    canonical_utc_proposal = deepcopy(utc_z_proposal)
+    canonical_utc_proposal["generatedAt"] = "2026-07-18T04:00:00+00:00"
+    utc_z_proposal["proposalFingerprint"] = canonical_sha256(
+        {key: value for key, value in canonical_utc_proposal.items() if key != "proposalFingerprint"}
+    )
+    normalized_proposal = DocumentationProposalV2.from_dict(utc_z_proposal)
+    assert normalized_proposal.to_dict()["generatedAt"] == "2026-07-18T04:00:00+00:00"
+    assert normalized_proposal.canonical_fingerprint == utc_z_proposal["proposalFingerprint"]
+
+    application = {
+        "schemaVersion": DOCUMENTATION_APPLICATION_V2_SCHEMA,
+        "taskId": "task-1",
+        "generatedAt": TIMESTAMP,
+        "runId": "run-123",
+        "sourceFingerprint": "c" * 64,
+        "proposalFingerprint": proposal["proposalFingerprint"],
+        "status": "applied",
+        "targetId": "handoff.current-conclusion",
+        "repoPath": "NBS_ANALYTICS_HANDOFF.md",
+        "approvalId": "handoff.current-conclusion",
+        "beforeSectionSha256": "f" * 64,
+        "afterSectionSha256": sha256("Verified conclusion.\n".encode("utf-8")).hexdigest(),
+        "result": "applied",
+        "applicationFingerprint": "0" * 64,
+    }
+    application["applicationFingerprint"] = canonical_sha256(
+        {key: value for key, value in application.items() if key != "applicationFingerprint"}
+    )
+    assert DocumentationApplicationV2.from_dict(application).to_dict() == application
+
+    with pytest.raises(DocumentationSchemaError, match="schemaVersion"):
+        DocumentationEvidenceV2.from_dict(valid_evidence_payload)
+
+    mixed_proposal = deepcopy(proposal)
+    mixed_proposal["evidence"] = valid_evidence_payload
+    with pytest.raises(DocumentationSchemaError, match="schemaVersion"):
+        DocumentationProposalV2.from_dict(mixed_proposal)
+
+    invalid_draft = deepcopy(draft)
+    invalid_draft["proposals"].append(deepcopy(invalid_draft["proposals"][0]))
+    with pytest.raises(DocumentationSchemaError, match="exactly one"):
+        DocumentationDraftV2.from_dict(invalid_draft)
+    empty_blocked_draft = deepcopy(draft)
+    empty_blocked_draft["status"] = "blocked"
+    empty_blocked_draft["proposals"] = []
+    with pytest.raises(DocumentationSchemaError, match="exactly one"):
+        DocumentationDraftV2.from_dict(empty_blocked_draft)
+
+    invalid_draft_fingerprint = deepcopy(draft)
+    invalid_draft_fingerprint["draftFingerprint"] = "9" * 64
+    with pytest.raises(DocumentationSchemaError, match="draft fingerprint"):
+        DocumentationDraftV2.from_dict(invalid_draft_fingerprint)
+
+    wrong_task_proposal = deepcopy(proposal)
+    wrong_task_proposal["taskId"] = "task-other"
+    wrong_task_proposal["proposalFingerprint"] = canonical_sha256(
+        {key: value for key, value in wrong_task_proposal.items() if key != "proposalFingerprint"}
+    )
+    with pytest.raises(DocumentationSchemaError, match="taskId"):
+        DocumentationProposalV2.from_dict(wrong_task_proposal)
+
+    stale_time_proposal = deepcopy(proposal)
+    stale_time_proposal["generatedAt"] = "2026-07-18T11:59:59+08:00"
+    stale_time_proposal["proposalFingerprint"] = canonical_sha256(
+        {key: value for key, value in stale_time_proposal.items() if key != "proposalFingerprint"}
+    )
+    with pytest.raises(DocumentationSchemaError, match="predates"):
+        DocumentationProposalV2.from_dict(stale_time_proposal)
+
+    invalid_evidence = deepcopy(evidence)
+    invalid_evidence["absolutePath"] = "/Users/private/vault"
+    with pytest.raises(DocumentationSchemaError, match="unknown fields"):
+        DocumentationEvidenceV2.from_dict(invalid_evidence)

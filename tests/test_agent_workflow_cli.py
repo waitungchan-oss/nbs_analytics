@@ -26,6 +26,36 @@ def test_parser_exposes_required_workflow_commands_and_flags():
     assert parser.parse_args(["list"]).command == "list"
     assert parser.parse_args(["prune", "--dry-run"]).dry_run is True
     assert parser.parse_args(["prune", "--apply"]).apply is True
+    document = parser.parse_args([
+        "document", "--run-id", "run-1", "--target-id", "handoff.current-conclusion",
+        "--approve-target-id", "handoff.current-conclusion",
+    ])
+    assert document.target_id == document.approve_target_id == "handoff.current-conclusion"
+
+
+def test_document_command_forwards_v2_target_approval(capsys, monkeypatch):
+    import scripts.agent_workflow as cli
+
+    received = {}
+
+    class FakeWorkflow:
+        def __init__(self, _project_root):
+            pass
+
+        def run(self, run_id, **kwargs):
+            received.update(run_id=run_id, **kwargs)
+            return {"status": "applied"}
+
+    monkeypatch.setattr(cli, "DocumentationWorkflow", FakeWorkflow)
+
+    result = cli.main([
+        "document", "--run-id", "run-1", "--target-id", "handoff.current-conclusion",
+        "--approve-target-id", "handoff.current-conclusion",
+    ])
+
+    assert result == 0
+    assert received["target_id"] == received["approve_target_id"] == "handoff.current-conclusion"
+    assert json.loads(capsys.readouterr().out)["status"] == "applied"
 
 
 def test_cli_parse_errors_and_runtime_errors_emit_one_redacted_json_document(capsys, monkeypatch):

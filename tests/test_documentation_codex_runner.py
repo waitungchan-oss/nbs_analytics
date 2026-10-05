@@ -5,8 +5,10 @@ from pathlib import Path
 
 from backend.agents.documentation_codex_runner import (
     CODEX_DOCUMENTATION_INSTRUCTION,
+    CODEX_DOCUMENTATION_V2_INSTRUCTION,
     CodexDocumentationRunner,
 )
+from backend.agents.workflow_models import canonical_sha256
 
 
 class FakeProcess:
@@ -60,6 +62,46 @@ def _draft(*, evidence_fingerprint="a" * 64):
     })
 
 
+def _v2_evidence(**updates):
+    payload = {
+        "schemaVersion": "documentation-evidence-v2",
+        "taskId": "run-task-v2",
+        "generatedAt": "2026-09-28T10:00:00+00:00",
+        "runId": "run-task-v2",
+        "commitSha": "b" * 40,
+        "sourceFingerprint": "c" * 64,
+        "selectedTargetId": "handoff.current-conclusion",
+        "sources": [{"path": "NBS_ANALYTICS_HANDOFF.md", "sha256": "d" * 64}],
+        "gateResults": [
+            {"gate": name, "status": "pass", "sourceFingerprint": "c" * 64,
+             "evidenceFingerprint": chr(54 + index) * 64}
+            for index, name in enumerate(("review", "full-verification", "hermes"))
+        ],
+        "guardrails": {
+            "revenueScope": "不含掛賬核銷與TT退款轉團款",
+            "mayBaseline": "HKD 12,057,968",
+        },
+        "expectedSectionSha256": "a" * 64,
+    }
+    payload.update(updates)
+    payload["evidenceFingerprint"] = canonical_sha256(payload)
+    return payload
+
+
+def _v2_draft(evidence, *, target_id=None, schema="documentation-draft-v2", content="Bounded summary."):
+    payload = {
+        "schemaVersion": schema,
+        "evidenceFingerprint": evidence["evidenceFingerprint"],
+        "status": "ready",
+        "proposals": [{
+            "targetId": target_id or evidence["selectedTargetId"],
+            "content": content,
+        }],
+    }
+    payload["draftFingerprint"] = canonical_sha256(payload)
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def test_runner_passes_evidence_only_and_rejects_non_json(tmp_path):
     process = FakeProcess(stdout=b"not-json")
     fake_subprocess = FakeSubprocess(process)
@@ -87,6 +129,30 @@ def test_runner_accepts_exact_draft_with_matching_evidence_fingerprint():
     assert result.exit_code == 0
     assert fake_subprocess.kwargs["env"]["CODEX_HOME"].endswith(".nbs_agent_runtime/codex_home")
     assert json.loads(result.stdout) == json.loads(_draft())
+
+
+def test_runner_v2_accepts_only_matching_target_id_and_schema():
+    evidence = _v2_evidence()
+    fake = FakeSubprocess(FakeProcess(stdout=_v2_draft(evidence).encode()))
+    result = CodexDocumentationRunner(fake).run(
+        ("codex",), input_text=json.dumps(evidence), timeout_seconds=120,
+        max_output_bytes=65536,
+    )
+
+    assert result.exit_code == 0
+    assert fake.argv[-1] == CODEX_DOCUMENTATION_V2_INSTRUCTION
+
+    mismatch = CodexDocumentationRunner(FakeSubprocess(
+        FakeProcess(stdout=_v2_draft(evidence, target_id="runbook.shard-boundary").encode()),
+    )).run(("codex",), input_text=json.dumps(evidence), timeout_seconds=120,
+            max_output_bytes=65536)
+    assert mismatch.exit_code == -2
+
+    wrong_schema = CodexDocumentationRunner(FakeSubprocess(
+        FakeProcess(stdout=_v2_draft(evidence, schema="documentation-draft-v1").encode()),
+    )).run(("codex",), input_text=json.dumps(evidence), timeout_seconds=120,
+            max_output_bytes=65536)
+    assert wrong_schema.exit_code == -2
 
 
 def test_runner_uses_explicit_local_auth_home_without_serializing_it(tmp_path, monkeypatch):

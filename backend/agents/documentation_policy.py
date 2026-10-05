@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import json
 from typing import Any
+from pathlib import Path
+
+from .documentation_models import (
+    DOCUMENTATION_TARGETS_V2,
+    DOCUMENTATION_TARGET_POLICY_V2_SCHEMA,
+    DocumentationSchemaError,
+    DocumentationTargetV2,
+)
 
 
 _PROTECTED = frozenset({"baseline", "revenue_scope", "permission", "security", "retention", "state_machine"})
@@ -48,3 +57,46 @@ class DocumentationImpactClassifier:
             or "migration" in parts
             or "migrations" in parts
         )
+
+
+def _parse_documentation_target_catalog(payload: Any) -> dict[str, DocumentationTargetV2]:
+    if not isinstance(payload, dict) or set(payload) != {"schemaVersion", "targets"}:
+        raise DocumentationSchemaError("target catalog keys are invalid")
+    if payload["schemaVersion"] != DOCUMENTATION_TARGET_POLICY_V2_SCHEMA:
+        raise DocumentationSchemaError("target catalog schemaVersion is invalid")
+    entries = payload["targets"]
+    if not isinstance(entries, list):
+        raise DocumentationSchemaError("target catalog targets must be a list")
+    ids = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("targetId"), str):
+            raise DocumentationSchemaError("target catalog entry must include a string targetId")
+        ids.append(entry["targetId"])
+    if len(ids) != len(set(ids)):
+        raise DocumentationSchemaError("duplicate targetId in documentation target catalog")
+    expected_ids = {entry["targetId"] for entry in DOCUMENTATION_TARGETS_V2}
+    if set(ids) != expected_ids or len(ids) != len(expected_ids):
+        raise DocumentationSchemaError("target catalog must contain exactly the five fixed target IDs")
+    targets = {}
+    for entry in entries:
+        target = DocumentationTargetV2.from_dict(entry)
+        targets[target.target_id] = target
+    return targets
+
+
+def load_documentation_target(target_id: str) -> DocumentationTargetV2:
+    """Resolve one immutable v2 target ID from the repository policy catalog."""
+    if not isinstance(target_id, str) or not target_id.strip():
+        raise DocumentationSchemaError("targetId must be a non-empty string")
+    config_path = Path(__file__).resolve().parents[2] / "agent_config" / "documentation_policies.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DocumentationSchemaError("documentation policy catalog cannot be loaded") from exc
+    if not isinstance(config, dict) or "targetCatalogV2" not in config:
+        raise DocumentationSchemaError("documentation policy is missing targetCatalogV2")
+    catalog = _parse_documentation_target_catalog(config["targetCatalogV2"])
+    try:
+        return catalog[target_id]
+    except KeyError as exc:
+        raise DocumentationSchemaError("targetId is not in the fixed documentation target catalog") from exc

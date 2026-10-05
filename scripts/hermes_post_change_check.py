@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
 import json
 import os
+import stat
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -90,7 +92,19 @@ def python_bin(project_root: Path = PROJECT_ROOT) -> str:
 
 def documentation_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
     """Inspect documentation sidecars without invoking or writing anything."""
-    runs_root = Path(project_root) / ".nbs_agent_runtime" / "runs"
+    from backend.agents.documentation_models import (
+        DOCUMENTATION_TARGETS_V2,
+        DocumentationApplicationV2,
+        DocumentationEvidenceV2,
+        DocumentationProposalV2,
+    )
+    from backend.agents.documentation_evidence import _gate_passes, _read_target_section
+    from backend.agents.documentation_policy import load_documentation_target
+    from backend.agents.documentation_validator import DocumentationPreviewV2
+    from backend.agents.workflow_models import canonical_sha256
+
+    runtime_root = Path(project_root) / ".nbs_agent_runtime"
+    runs_root = runtime_root / "runs"
     artifact_names = (
         "documentation-evidence.json",
         "documentation-proposal.json",
@@ -98,30 +112,195 @@ def documentation_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
         "documentation-application.json",
         "documentation-telemetry.json",
     )
+    v2_artifact_names = (
+        "documentation-evidence-v2.json",
+        "documentation-proposal-v2.json",
+        "documentation-preview-v2.json",
+        "documentation-application-v2.json",
+    )
+    allowed_target_ids = {item["targetId"] for item in DOCUMENTATION_TARGETS_V2}
     max_bytes = 5 * 1024 * 1024
     report = {
         "schemaVersion": "documentation-hermes-report-v1",
         "runCount": 0,
         "artifactCounts": {name: 0 for name in artifact_names},
+        "v2TargetCount": 0,
+        "v2ArtifactCounts": {name: 0 for name in v2_artifact_names},
         "invalidRuns": [],
+        "invalidTargets": [],
         "capWarnings": [],
         "policy": "read-only",
         "invocations": 0,
         "writes": 0,
     }
-    if not runs_root.is_dir() or runs_root.is_symlink():
+
+    def unsafe_permissions(path: Path) -> bool:
+        try:
+            return bool(path.lstat().st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        except OSError:
+            return True
+
+    if runtime_root.is_symlink() or (runtime_root.exists() and not runtime_root.is_dir()):
+        report["invalidRuns"].append("*")
+        report["invalidTargets"].append({
+            "runId": "*", "targetId": "*", "reason": "unsafe_runtime_directory",
+        })
         return report
+    if runtime_root.exists() and unsafe_permissions(runtime_root):
+        report["invalidRuns"].append("*")
+        report["invalidTargets"].append({
+            "runId": "*", "targetId": "*", "reason": "unsafe_permissions",
+        })
+        return report
+    if runs_root.is_symlink():
+        report["invalidRuns"].append("*")
+        report["invalidTargets"].append({
+            "runId": "*", "targetId": "*", "reason": "unsafe_runs_directory",
+        })
+        return report
+    if not runs_root.is_dir():
+        return report
+    if unsafe_permissions(runs_root):
+        report["invalidRuns"].append("*")
+        report["invalidTargets"].append({
+            "runId": "*", "targetId": "*", "reason": "unsafe_permissions",
+        })
+        return report
+
+    def invalidate_target(run_id: str, target_id: str, reason: str) -> None:
+        if len(report["invalidTargets"]) < 100:
+            report["invalidTargets"].append({
+                "runId": run_id,
+                "targetId": target_id,
+                "reason": reason,
+            })
+
+    def live_source_problem(run_id: str, target_id: str, evidence, application) -> str | None:
+        expected_runtime_paths = {
+            f".nbs_agent_runtime/runs/{run_id}/{name}"
+            for name in (
+                "manifest.json", "status.json", "approval.json",
+                "review.json", "full-verification.json", "hermes.json",
+            )
+        }
+        target = load_documentation_target(target_id)
+        source_by_path = {item["path"]: item["sha256"] for item in evidence.sources}
+        if set(source_by_path) != expected_runtime_paths | {target.repo_path}:
+            return "source_lineage_mismatch"
+
+        source_payloads = {}
+        source_root = runs_root / run_id
+        for name in (
+            "manifest.json", "status.json", "approval.json",
+            "review.json", "full-verification.json", "hermes.json",
+        ):
+            path = source_root / name
+            if path.is_symlink() or not path.is_file():
+                return "source_lineage_unreadable"
+            if unsafe_permissions(path):
+                return "unsafe_permissions"
+            try:
+                if path.stat().st_size > max_bytes:
+                    report["capWarnings"].append({
+                        "runId": run_id, "targetId": target_id, "artifact": name,
+                    })
+                    return "source_artifact_over_cap"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return "source_lineage_unreadable"
+            if not isinstance(payload, dict):
+                return "source_lineage_mismatch"
+            relative_path = f".nbs_agent_runtime/runs/{run_id}/{name}"
+            if canonical_sha256(payload) != source_by_path[relative_path]:
+                return "source_lineage_mismatch"
+            source_payloads[name] = payload
+
+        manifest = source_payloads["manifest.json"]
+        status_payload = source_payloads["status.json"]
+        approval = source_payloads["approval.json"]
+        if (
+            manifest.get("runId") != run_id
+            or manifest.get("gitHead") != evidence.commit_sha
+            or status_payload.get("runId") != run_id
+            or status_payload.get("status") != "completed"
+            or approval.get("runId") != run_id
+            or approval.get("authorizationStatus") != "approved"
+            or approval.get("approvedBaseSha") != evidence.commit_sha
+        ):
+            return "source_lineage_mismatch"
+
+        gate_by_name = {item["gate"]: item for item in evidence.gate_results}
+        required_gates = ("review", "full-verification", "hermes")
+        if set(gate_by_name) != set(required_gates):
+            return "source_lineage_mismatch"
+        for gate in required_gates:
+            payload = source_payloads[f"{gate}.json"]
+            record = gate_by_name[gate]
+            if (
+                not _gate_passes(gate, payload)
+                or payload.get("commitSha") != evidence.commit_sha
+                or payload.get("sourceFingerprint") != evidence.source_fingerprint
+                or record["sourceFingerprint"] != evidence.source_fingerprint
+                or record["evidenceFingerprint"] != canonical_sha256(payload)
+            ):
+                return "source_lineage_mismatch"
+
+        target_path = Path(project_root).resolve() / target.repo_path
+        try:
+            relative_target = target_path.relative_to(Path(project_root).resolve())
+            current = Path(project_root).resolve()
+            if unsafe_permissions(current):
+                return "unsafe_permissions"
+            for part in relative_target.parts[:-1]:
+                current = current / part
+                if current.is_symlink():
+                    return "unsafe_target_path"
+                if unsafe_permissions(current):
+                    return "unsafe_permissions"
+            if target_path.is_symlink() or not target_path.is_file():
+                return "unsafe_target_path"
+            if unsafe_permissions(target_path):
+                return "unsafe_permissions"
+            if target_path.stat().st_size > max_bytes:
+                report["capWarnings"].append({
+                    "runId": run_id, "targetId": target_id, "artifact": "repo_target",
+                })
+                return "target_over_cap"
+            _, target_text, section, _, _ = _read_target_section(Path(project_root).resolve(), target)
+            current_target_sha = sha256(target_text.encode("utf-8")).hexdigest()
+            current_section_sha = sha256(section.encode("utf-8")).hexdigest()
+        except (OSError, UnicodeError, ValueError, PermissionError):
+            return "unsafe_target_path"
+
+        applied = application is not None and application.result == "applied"
+        if not applied and current_target_sha != source_by_path[target.repo_path]:
+            return "source_lineage_mismatch"
+        expected_section_sha = (
+            application.after_section_sha256 if applied else evidence.expected_section_sha256
+        )
+        if current_section_sha != expected_section_sha:
+            return "target_section_drift"
+        return None
+
+    report["invalidRuns"] = sorted(path.name for path in runs_root.iterdir() if path.is_symlink())[:100]
     for run_dir in sorted(runs_root.iterdir(), key=lambda path: path.name):
         if run_dir.is_symlink() or not run_dir.is_dir():
             continue
         report["runCount"] += 1
-        invalid = False
+        invalid = unsafe_permissions(run_dir)
+        if invalid:
+            invalidate_target(run_dir.name, "*", "unsafe_permissions")
         for name in artifact_names:
             path = run_dir / name
             if not path.exists():
                 continue
             if path.is_symlink() or not path.is_file():
                 invalid = True
+                invalidate_target(run_dir.name, "*", "unsafe_artifact_path")
+                continue
+            if unsafe_permissions(path):
+                invalid = True
+                invalidate_target(run_dir.name, "*", "unsafe_permissions")
                 continue
             report["artifactCounts"][name] += 1
             if path.stat().st_size > max_bytes:
@@ -140,6 +319,141 @@ def documentation_artifact_report(project_root: Path = PROJECT_ROOT) -> dict:
             }.get(name)
             if expected and (not isinstance(payload, dict) or payload.get("schemaVersion") != expected):
                 invalid = True
+
+        documentation_root = run_dir / "documentation"
+        targets_root = documentation_root / "targets"
+        if documentation_root.exists() or documentation_root.is_symlink():
+            if documentation_root.is_symlink() or not documentation_root.is_dir():
+                invalid = True
+                invalidate_target(run_dir.name, "*", "unsafe_documentation_directory")
+            elif unsafe_permissions(documentation_root):
+                invalid = True
+                invalidate_target(run_dir.name, "*", "unsafe_permissions")
+            elif targets_root.exists() or targets_root.is_symlink():
+                if targets_root.is_symlink() or not targets_root.is_dir():
+                    invalid = True
+                    invalidate_target(run_dir.name, "*", "unsafe_targets_directory")
+                elif unsafe_permissions(targets_root):
+                    invalid = True
+                    invalidate_target(run_dir.name, "*", "unsafe_permissions")
+                else:
+                    for target_dir in sorted(targets_root.iterdir(), key=lambda path: path.name):
+                        target_id = target_dir.name
+                        if (
+                            target_id not in allowed_target_ids
+                            or target_dir.is_symlink()
+                            or not target_dir.is_dir()
+                        ):
+                            invalid = True
+                            invalidate_target(run_dir.name, target_id, "target_directory_not_allowlisted")
+                            continue
+                        report["v2TargetCount"] += 1
+                        payloads = {}
+                        target_invalid = unsafe_permissions(target_dir)
+                        if target_invalid:
+                            invalidate_target(run_dir.name, target_id, "unsafe_permissions")
+                        try:
+                            if any(child.name not in v2_artifact_names for child in target_dir.iterdir()):
+                                target_invalid = True
+                                invalidate_target(run_dir.name, target_id, "artifact_allowlist_violation")
+                        except OSError:
+                            target_invalid = True
+                            invalidate_target(run_dir.name, target_id, "artifact_directory_unreadable")
+                        for name in v2_artifact_names:
+                            path = target_dir / name
+                            if not path.exists() and not path.is_symlink():
+                                continue
+                            report["v2ArtifactCounts"][name] += 1
+                            if path.is_symlink() or not path.is_file():
+                                target_invalid = True
+                                continue
+                            if unsafe_permissions(path):
+                                target_invalid = True
+                                invalidate_target(run_dir.name, target_id, "unsafe_permissions")
+                                continue
+                            if path.stat().st_size > max_bytes:
+                                report["capWarnings"].append({
+                                    "runId": run_dir.name,
+                                    "targetId": target_id,
+                                    "artifact": name,
+                                })
+                                target_invalid = True
+                                continue
+                            try:
+                                payload = json.loads(path.read_text(encoding="utf-8"))
+                                if name == "documentation-evidence-v2.json":
+                                    parsed = DocumentationEvidenceV2.from_dict(payload)
+                                    if parsed.run_id != run_dir.name or parsed.selected_target_id != target_id:
+                                        raise ValueError("evidence lineage differs from artifact path")
+                                    required_gates = {"review", "full-verification", "hermes"}
+                                    if (
+                                        {item["gate"] for item in parsed.gate_results} != required_gates
+                                        or any(
+                                            item["status"] not in {"pass", "passed", "success", "ok"}
+                                            for item in parsed.gate_results
+                                        )
+                                    ):
+                                        raise ValueError("documentation evidence gate statuses are invalid")
+                                elif name == "documentation-proposal-v2.json":
+                                    parsed = DocumentationProposalV2.from_dict(payload)
+                                    if parsed.evidence.run_id != run_dir.name or parsed.target_id != target_id:
+                                        raise ValueError("proposal lineage differs from artifact path")
+                                elif name == "documentation-preview-v2.json":
+                                    parsed = DocumentationPreviewV2.from_dict(payload)
+                                    if parsed.run_id != run_dir.name or parsed.target_id != target_id:
+                                        raise ValueError("preview lineage differs from artifact path")
+                                else:
+                                    parsed = DocumentationApplicationV2.from_dict(payload)
+                                    if parsed.run_id != run_dir.name or parsed.target_id != target_id:
+                                        raise ValueError("application lineage differs from artifact path")
+                            except (AttributeError, KeyError, OSError, TypeError, UnicodeError, ValueError):
+                                target_invalid = True
+                                continue
+                            payloads[name] = parsed
+
+                        evidence = payloads.get("documentation-evidence-v2.json")
+                        proposal = payloads.get("documentation-proposal-v2.json")
+                        preview = payloads.get("documentation-preview-v2.json")
+                        application = payloads.get("documentation-application-v2.json")
+                        if proposal and evidence and proposal.evidence.to_dict() != evidence.to_dict():
+                            target_invalid = True
+                        if preview and proposal and (
+                            preview.proposal_fingerprint != proposal.proposal_fingerprint
+                            or preview.source_fingerprint != proposal.evidence.source_fingerprint
+                            or preview.before_section_sha256 != proposal.evidence.expected_section_sha256
+                        ):
+                            target_invalid = True
+                        if application and proposal and (
+                            application.task_id != proposal.task_id
+                            or application.proposal_fingerprint != proposal.proposal_fingerprint
+                            or application.source_fingerprint != proposal.evidence.source_fingerprint
+                        ):
+                            target_invalid = True
+                        if application and preview and (
+                            application.proposal_fingerprint != preview.proposal_fingerprint
+                            or application.source_fingerprint != preview.source_fingerprint
+                            or application.before_section_sha256 != preview.before_section_sha256
+                            or application.after_section_sha256 != preview.after_section_sha256
+                        ):
+                            target_invalid = True
+                        source_evidence = evidence or (proposal.evidence if proposal else None)
+                        if source_evidence:
+                            source_problem = live_source_problem(
+                                run_dir.name, target_id, source_evidence, application,
+                            )
+                            if source_problem:
+                                target_invalid = True
+                                invalidate_target(run_dir.name, target_id, source_problem)
+                        elif payloads:
+                            target_invalid = True
+                            invalidate_target(run_dir.name, target_id, "missing_evidence")
+                        if target_invalid:
+                            invalid = True
+                            if not any(
+                                item["runId"] == run_dir.name and item["targetId"] == target_id
+                                for item in report["invalidTargets"]
+                            ):
+                                invalidate_target(run_dir.name, target_id, "artifact_schema_or_lineage_invalid")
         if invalid and len(report["invalidRuns"]) < 100:
             report["invalidRuns"].append(run_dir.name)
     return report

@@ -9,6 +9,7 @@ import pandas as pd
 
 import database
 from backend.services.cache_generation_service import advance_cache_generation, refresh_cache_generation_signature
+from backend.services.beta_only_exception_service import persist_beta_only_exception_frames
 from backend.services.monthly_baseline_service import build_governed_stability_gate
 from backend.services.receipt_exclusion_governance_service import verify_receipt_exclusion_confirmation
 from backend.services.receipt_exclusion_models import ReceiptExclusionIdentity, ReceiptExclusionRule
@@ -161,6 +162,24 @@ def _commit_matched_upload(
             cache_error = f"{type(exc).__name__}: {exc}"
             cache_state = "refresh_required"
     cache_build = dict(base["cacheBuild"])
+    beta_exception_cache = {
+        "status": "not_run",
+        "tourRows": 0,
+        "othersRows": 0,
+    }
+    beta_exception_tour = prepared.get("beta_exception_tour")
+    beta_exception_others = prepared.get("beta_exception_others")
+    if final_status == "accepted" and (
+        isinstance(beta_exception_tour, pd.DataFrame) and not beta_exception_tour.empty
+        or isinstance(beta_exception_others, pd.DataFrame) and not beta_exception_others.empty
+    ):
+        try:
+            beta_exception_cache = persist_beta_only_exception_frames(
+                beta_exception_tour if isinstance(beta_exception_tour, pd.DataFrame) else pd.DataFrame(),
+                beta_exception_others if isinstance(beta_exception_others, pd.DataFrame) else pd.DataFrame(),
+            )
+        except Exception as exc:
+            beta_exception_cache = {"status": "error", "tourRows": 0, "othersRows": 0, "error": str(exc)}
     if final_status == "accepted" and cache_error is None and accepted_cache_rebuilder is not None:
         try:
             cache_result = accepted_cache_rebuilder()
@@ -193,6 +212,8 @@ def _commit_matched_upload(
         public_status, message = "error", "偵測到 blocking drift，但 rollback 未完成驗證。"
     elif cache_error:
         public_status, message = "degraded", "資料已寫入，但 cache generation 更新失敗；下次載入必須以 DB signature 強制刷新。"
+    elif beta_exception_cache.get("status") == "error":
+        public_status, message = "degraded", "資料已寫入，但 Beta-only exception cache 保存失敗；正式資料未受影響。"
 
     final_gate = rollback.get("postRollbackGate") or gate
     all_timings = list(preflight.get("stageTimings") or []) + timings
@@ -209,6 +230,7 @@ def _commit_matched_upload(
         "rollback_error": rollback.get("rollbackError"), "stage_timings": all_timings,
         "cache_state": cache_state, "cache_error": cache_error, "data_generation": generation,
         "cache_build": cache_build,
+        "beta_exception_cache": beta_exception_cache,
         "receipt_exclusion_revision": receipt_exclusion_revision,
         "receipt_exclusion_rule_ids": receipt_exclusion_rule_ids,
         "receipt_exclusion_match_count": len(receipt_exclusion.get("matchedRules") or []),
@@ -236,6 +258,7 @@ def _commit_matched_upload(
         "writeCommitted": final_status == "accepted", "cacheState": cache_state,
         "cacheError": cache_error, "dataGeneration": generation, "stageTimings": all_timings,
         "cacheBuild": cache_build,
+        "betaExceptionCache": beta_exception_cache,
         "receiptExclusion": {
             **(preflight.get("receiptExclusion") or {}),
             "registryRevision": receipt_exclusion_revision,

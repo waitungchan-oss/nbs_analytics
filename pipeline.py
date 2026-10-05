@@ -8,6 +8,7 @@ import io
 import itertools
 import re
 from dataclasses import dataclass
+from collections.abc import Iterable
 from typing import Any
 
 import pandas as pd
@@ -34,6 +35,7 @@ from config import (
     MONEY_COLS_1,
     MONEY_COLS_2,
     BRANCH_REASSIGNMENT_OVERRIDES,
+    BETA_COMPARISON_SALES_POINT_LABEL,
     BETA_ONLY_SALES_POINTS,
     TARGET_DEPT_FOR_REP,
 )
@@ -523,14 +525,15 @@ def _select_sales_point_frames(
     tour: pd.DataFrame,
     others: pd.DataFrame,
     *,
-    sales_point: str,
+    sales_point: str | Iterable[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Select one sales point and normalize its salesperson display values."""
-    target = str(sales_point).strip()
+    """Select one or more sales points and normalize salesperson display values."""
+    values = [sales_point] if isinstance(sales_point, str) else sales_point
+    targets = {str(value).strip() for value in values if str(value).strip()}
     selected = []
     for frame in (tour, others):
         work = normalize_runtime_columns(frame.copy(deep=True))
-        work = work.loc[work[COL_BRANCH].astype(str).str.strip().eq(target)].copy()
+        work = work.loc[work[COL_BRANCH].astype(str).str.strip().isin(targets)].copy()
         work[COL_SALESPERSON] = (
             work[COL_SALESPERSON]
             .fillna("")
@@ -778,7 +781,7 @@ def build_dashboard_data(
     return_facts: bool = False,
     _already_normalized: bool = False,
     *,
-    beta_sales_point: str | None = None,
+    beta_sales_point: str | Iterable[str] | None = None,
 ):
     if not _already_normalized:
         df_tour_matched = normalize_runtime_columns(df_tour_matched)
@@ -792,12 +795,21 @@ def build_dashboard_data(
         for c, n in branch_mapping.items()
         if n != TARGET_DEPT_FOR_REP and n not in BETA_ONLY_SALES_POINTS
     ]
-    beta_enabled = bool(str(beta_sales_point or "").strip())
+    beta_sales_points = (
+        {str(beta_sales_point).strip()}
+        if isinstance(beta_sales_point, str) and str(beta_sales_point).strip()
+        else {
+            str(value).strip()
+            for value in (beta_sales_point or ())
+            if str(value).strip()
+        }
+    )
+    beta_enabled = bool(beta_sales_points)
     if beta_enabled:
         specialist_tour, specialist_others = _select_sales_point_frames(
             df_tour_matched,
             df_others_matched,
-            sales_point=str(beta_sales_point),
+            sales_point=beta_sales_points,
         )
         specialist_salespeople = sorted(
             {
@@ -806,21 +818,22 @@ def build_dashboard_data(
                 for value in frame.get(COL_SALESPERSON, pd.Series(dtype=object)).tolist()
             }
         )
-        specialist_branch = str(beta_sales_point).strip()
-        specialist_sheet_prefix = f"{specialist_branch}_"
+        specialist_branch = BETA_COMPARISON_SALES_POINT_LABEL
+        specialist_sheet_prefix = f"{BETA_COMPARISON_SALES_POINT_LABEL}_"
     else:
         specialist_tour = df_tour_matched[df_tour_matched[COL_BRANCH] == TARGET_DEPT_FOR_REP]
         specialist_others = df_others_matched[df_others_matched[COL_BRANCH] == TARGET_DEPT_FOR_REP]
         specialist_salespeople = list(sales_rep_list)
         specialist_branch = TARGET_DEPT_FOR_REP
         specialist_sheet_prefix = ""
+    specialist_branch_values = beta_sales_points if beta_enabled else {specialist_branch}
 
     def build_summary(df_t, df_o, text_list, text_col, is_branch=True):
         grid = pd.DataFrame(list(itertools.product(text_list, all_days)), columns=["文本", "日期"])
         grid["種類/單選"] = (
             grid["文本"].apply(get_branch_type)
             if is_branch
-            else ("市場電商" if beta_enabled else "專職銷售")
+            else (BETA_COMPARISON_SALES_POINT_LABEL if beta_enabled else "專職銷售")
         )
         grid["MapKey"] = grid["文本"].apply(lambda x: str(x)[2:]) if is_branch else grid["文本"]
 
@@ -993,7 +1006,7 @@ def build_dashboard_data(
     df_tour_dedup["交易人數"] = pd.to_numeric(df_tour_dedup[COL_QTY], errors="coerce").fillna(0)
     df_tour_dedup["月份"] = pd.to_datetime(df_tour_dedup["日期"], errors="coerce").dt.strftime("%Y-%m")
     if beta_enabled:
-        beta_mask = df_tour_dedup[COL_BRANCH].astype(str).str.strip().eq(specialist_branch)
+        beta_mask = df_tour_dedup[COL_BRANCH].astype(str).str.strip().isin(beta_sales_points)
         df_tour_dedup.loc[beta_mask, COL_SALESPERSON] = (
             df_tour_dedup.loc[beta_mask, COL_SALESPERSON]
             .fillna("")
@@ -1011,7 +1024,7 @@ def build_dashboard_data(
         return s[s["交易人數"] > 0].sort_values(["文本", "日期", "天數_num"])[["文本", "天數", "日期", "月份", "交易人數"]]
 
     result_s3 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)])
-    result_s4 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH] == specialist_branch])
+    result_s4 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)])
 
     df_ticket = df_others_matched.copy()
     df_ticket["日期"] = (
@@ -1032,7 +1045,7 @@ def build_dashboard_data(
         return s[s["交易數量"] > 0].sort_values(["文本", "日期"])[["文本", "日期", "月份", "交易數量"]]
 
     result_s5 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)])
-    result_s6 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH] == specialist_branch])
+    result_s6 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)])
     result_s7 = gen_tk_stats(df_ticket)
 
     def gen_d_tour(df_sub, grp_col, t_name):
@@ -1045,7 +1058,7 @@ def build_dashboard_data(
         return res[(res[t_name] > 0) | (res["郵輪交易人數"] > 0)].rename(columns={grp_col: "文本"}).sort_values(["文本", "日期"])
 
     result_s8 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH, "交易人數")
-    result_s9 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH] == specialist_branch], COL_SALESPERSON, "旅行團交易人數")
+    result_s9 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)], COL_SALESPERSON, "旅行團交易人數")
 
     def gen_d_tkt(df_sub, grp_col):
         if df_sub.empty:
@@ -1056,7 +1069,7 @@ def build_dashboard_data(
         return s.sort_values(["文本", "種類", "日期"])
 
     result_s10 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH)
-    result_s11 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH] == specialist_branch], COL_SALESPERSON)
+    result_s11 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)], COL_SALESPERSON)
 
     def gen_mny(df_sub, grp_col, type_col):
         if df_sub.empty:
@@ -1106,7 +1119,7 @@ def build_dashboard_data(
     df_tour_amount["月份"] = pd.to_datetime(df_tour_amount["日期"], errors="coerce").dt.strftime("%Y-%m")
     df_tour_amount[COL_MONEY] = pd.to_numeric(df_tour_amount[COL_MONEY], errors="coerce").fillna(0)
     if beta_enabled:
-        beta_mask = df_tour_amount[COL_BRANCH].astype(str).str.strip().eq(specialist_branch)
+        beta_mask = df_tour_amount[COL_BRANCH].astype(str).str.strip().isin(beta_sales_points)
         df_tour_amount.loc[beta_mask, COL_SALESPERSON] = (
             df_tour_amount.loc[beta_mask, COL_SALESPERSON]
             .fillna("")
@@ -1161,7 +1174,7 @@ def build_dashboard_data(
     )
     result_s16 = gen_route_type_daily(
         df_tour_count_daily[
-            (df_tour_count_daily[COL_BRANCH] == specialist_branch)
+            (df_tour_count_daily[COL_BRANCH].isin(specialist_branch_values))
             & (
                 df_tour_count_daily[COL_SALESPERSON].isin(specialist_salespeople)
                 if not beta_enabled
@@ -1169,7 +1182,7 @@ def build_dashboard_data(
             )
         ],
         df_tour_amount[
-            (df_tour_amount[COL_BRANCH] == specialist_branch)
+            (df_tour_amount[COL_BRANCH].isin(specialist_branch_values))
             & (
                 df_tour_amount[COL_SALESPERSON].isin(specialist_salespeople)
                 if not beta_enabled
@@ -1351,7 +1364,7 @@ def build_dashboard_data_excluding_receipt_types(
     include_branch_salesperson_sheet: bool = False,
     return_facts: bool = False,
     *,
-    beta_sales_point: str | None = None,
+    beta_sales_point: str | Iterable[str] | None = None,
 ):
     excluded_types = {str(v).strip() for v in excluded_receipt_types if str(v).strip()}
     excluded_methods = {str(v).strip() for v in (excluded_payment_methods or []) if str(v).strip()}

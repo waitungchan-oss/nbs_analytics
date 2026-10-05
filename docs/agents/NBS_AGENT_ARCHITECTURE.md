@@ -116,9 +116,11 @@ Memory Sidecar 是 provider-neutral、non-authoritative 的 bounded hint sidecar
 
 ## 10A. Documentation Dispatch Policy
 
-功能變更在 Review PASS、full verification PASS 與 Hermes PASS 後，Codex 才可針對同一 completed run 呼叫 `agent_workflow.py document`。Documentation Agent 必須是獨立、明確批准的 runner：輸入為 `documentation-evidence-v1`，輸出為 `documentation-proposal-v1`；缺少 runner 時必須 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。
+功能變更在 Review PASS、full verification PASS 與 Hermes PASS 後，Codex 才可針對同一 completed run 呼叫 `agent_workflow.py document`。v1 流程維持 `documentation-evidence-v1` → `documentation-proposal-v1`，歷史 v1 artifacts 不遷移。v2 為額外 target-bound repo workflow；runner 必須明確批准，缺少 runner 時 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。
 
-deterministic classifier 判定為 no-doc 的 typo、format-only、generated evidence 或純測試變更可直接 skip，不調用 LLM。按需 backfill 必須指定 completed run ID。`system map` 與 `ADR` proposal 均需要明確 target approval；Documentation Agent 只產生 proposal，永遠不得 auto-apply、批准 targets 或修改 repo、Obsidian、Hermes/terminal state、SQLite、baseline、runtime、Git。Agent Operations 只顯示 sidecar 的 bounded status/counts，Hermes 只 read-only 驗證 artifact schema、status、cap 與 permissions，兩者都不是寫入入口。
+v2 只接受五個固定 IDs：`handoff.current-conclusion`、`handoff.verification-snapshot`、`runbook.pipeline-rollout-gate`、`runbook.shard-boundary`、`runbook.parallel-rollout-boundary`。Catalog 決定 repo path/section/operation，CLI 不接受任意路徑；先以 `--target-id <id>` 產生 evidence/proposal/preview，再以同一 `--target-id <id> --approve-target-id <id>` 明確批准 apply。Evidence 綁定 run ID、commit SHA、source fingerprint、gate/source hashes 與 target section hash；apply 必須重收 evidence 並與 saved preview 比對，stale/missing/malformed 或 approval mismatch 一律 blocked。目標 section 不存在時不可自行建立替代路徑。
+
+Documentation Agent 只產生 proposal，永遠不得 auto-apply、批准 targets 或修改 repo、Obsidian、Hermes/terminal state、SQLite、baseline、runtime、Git。Agent Operations 只顯示 sidecar 的 bounded status/counts；Hermes 對 v1 五個既有 artifacts 與 v2 四個 target-scoped artifacts 做 read-only schema/status/fingerprint/lineage/cap/permission inspection，不呼叫 runner、不 preview/apply、不寫 gate。`documentation-hermes-report-v1` 不屬於正式 release gate，不表示 handoff/runbook 已完成回填。正式 release gate 仍只由 Full pytest、Hermes、UI acceptance 的 fresh source-bound evidence 組成。
 
 ## 7. Evidence Bundle Pipeline
 

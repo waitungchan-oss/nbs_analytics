@@ -137,8 +137,18 @@ COL_TOUR_NAME = "團名稱"
 COL_SOURCE_TAG = "來源報表標籤"
 COL_RECEIPT_OPERATOR = "收款操作員"
 TARGET_DEPT_FOR_REP = "營銷運營中心-專職銷售組"
+BETA_COMPARISON_SALES_POINTS = (
+    "市場及電商部-電子商務組",
+    "營銷運營中心-同業銷售部",
+    "市場及商務部-電子商務組",
+    "網銷組 i6",
+)
+BETA_COMPARISON_SALES_POINT_LABEL = "市場電商及同業"
+BETA_ONLY_EXCEPTION_PREFIXES = ("1950506",)
+BETA_ONLY_EXCEPTION_SALES_POINT = "市場及商務部-電子商務組"
+BETA_ONLY_EXCEPTION_VERSION = "beta-only-exception-v1"
 # Sales points reserved for comparison exports; they must not enter formal branch KPIs.
-BETA_ONLY_SALES_POINTS = frozenset({"市場及電商部-電子商務組"})
+BETA_ONLY_SALES_POINTS = frozenset(BETA_COMPARISON_SALES_POINTS)
 
 
 def _clean_text(value: Any) -> str:

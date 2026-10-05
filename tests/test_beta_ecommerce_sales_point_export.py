@@ -4,6 +4,13 @@ from pathlib import Path
 
 
 E_COMMERCE = "市場及電商部-電子商務組"
+BETA_SALES_POINTS = (
+    E_COMMERCE,
+    "營銷運營中心-同業銷售部",
+    "市場及商務部-電子商務組",
+    "網銷組 i6",
+)
+BETA_LABEL = "市場電商及同業"
 
 
 def _row(order_id, sales_point, salesperson, department=""):
@@ -104,14 +111,68 @@ def test_beta_workbook_replaces_specialist_sheets_with_all_ecommerce_salespeople
         ["Legacy Rep"],
         make_workbook=False,
         return_facts=True,
-        beta_sales_point=E_COMMERCE,
+        beta_sales_point=BETA_SALES_POINTS,
     )
 
-    assert f"{E_COMMERCE}_經營統計" in facts
-    assert set(facts[f"{E_COMMERCE}_經營統計"]["種類"]) == {"市場電商"}
-    assert set(facts[f"{E_COMMERCE}_經營統計"]["文本"]) >= {"Alice", "未指定"}
-    assert set(facts[f"{E_COMMERCE}_每天旅行團交易人數"]["文本"]) >= {"Alice", "未指定"}
-    assert "Legacy Rep" not in set(facts[f"{E_COMMERCE}_每天旅行團交易人數"]["文本"])
+    assert f"{BETA_LABEL}_經營統計" in facts
+    assert set(facts[f"{BETA_LABEL}_經營統計"]["種類"]) == {BETA_LABEL}
+    assert set(facts[f"{BETA_LABEL}_經營統計"]["文本"]) >= {"Alice", "未指定"}
+    assert set(facts[f"{BETA_LABEL}_每天旅行團交易人數"]["文本"]) >= {"Alice", "未指定"}
+    assert "Legacy Rep" not in set(facts[f"{BETA_LABEL}_每天旅行團交易人數"]["文本"])
+
+
+def test_beta_combines_all_four_sales_points_into_six_named_sheets():
+    import pipeline
+
+    combined_tour = pd.concat(
+        [
+            tour_frame(),
+            pd.DataFrame([_row("T004", "市場及商務部-電子商務組", "Business Rep")]),
+        ],
+        ignore_index=True,
+    )
+    combined_others = pd.concat(
+        [
+            others_frame(),
+            pd.DataFrame(
+                [
+                    _row("O003", "營銷運營中心-同業銷售部", "Industry Rep"),
+                    _row("O004", "網銷組 i6", "Network Rep"),
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    _, _, facts = pipeline.build_dashboard_data(
+        combined_tour,
+        combined_others,
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    expected_sheets = {
+        f"{BETA_LABEL}_經營統計",
+        f"{BETA_LABEL}_旅行團統計",
+        f"{BETA_LABEL}_票務總計",
+        f"{BETA_LABEL}_每天旅行團交易人數",
+        f"{BETA_LABEL}_每天票務交易數量",
+        f"{BETA_LABEL}_線路種類每天統計",
+    }
+    assert expected_sheets <= set(facts)
+    assert set(facts[f"{BETA_LABEL}_經營統計"]["文本"]) >= {
+        "Alice",
+        "Bob",
+        "Business Rep",
+        "Industry Rep",
+        "Network Rep",
+        "未指定",
+    }
 
 
 def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
@@ -126,10 +187,10 @@ def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
         ["Legacy Rep"],
         make_workbook=False,
         return_facts=True,
-        beta_sales_point=E_COMMERCE,
+        beta_sales_point=BETA_SALES_POINTS,
     )
 
-    sheet = f"{E_COMMERCE}_旅行團統計"
+    sheet = f"{BETA_LABEL}_旅行團統計"
     assert facts[sheet].empty
     assert list(facts[sheet].columns) == ["文本", "天數", "日期", "月份", "交易人數"]
 
@@ -157,8 +218,8 @@ def test_beta_export_has_distinct_variant_identity_and_artifacts():
 
     payload = app_workflows._compute_beta_export_workbooks(tour_frame(), others_frame())
 
-    assert payload["export_variant"] == "beta_ecommerce_sales_point_v1"
-    assert payload["sales_point_filter"] == E_COMMERCE
+    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v3"
+    assert payload["sales_point_filter"] == list(BETA_SALES_POINTS)
     assert {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} <= set(payload)
     assert all(payload[key] for key in ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"))
 
@@ -175,5 +236,5 @@ def test_export_ui_exposes_beta_ecommerce_comparison_without_replacing_official_
     source = Path("app_pages.py").read_text(encoding="utf-8")
 
     assert "Beta comparison export" in source
-    assert E_COMMERCE in source
+    assert BETA_LABEL in source
     assert "ex_no_writeoff_refund_transfer" in source

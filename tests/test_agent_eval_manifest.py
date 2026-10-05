@@ -12,7 +12,7 @@ CASE_IDS = [f"case-{index:02}" for index in range(12)]
 
 
 def _manifest() -> dict:
-    created_at = datetime.now(timezone.utc).replace(microsecond=0)
+    created_at = datetime.now(timezone.utc) - timedelta(days=1)
     expires_at = created_at + timedelta(days=12)
     identity = {
         "projectId": "nbs_analytics", "consumerId": "context-agent", "provider": "local",
@@ -40,6 +40,17 @@ def _manifest() -> dict:
     return manifest
 
 
+def test_default_manifest_fixture_remains_live():
+    manifest = _manifest()
+    now = datetime.now(timezone.utc)
+    created = datetime.fromisoformat(manifest["createdAt"])
+    expires = datetime.fromisoformat(manifest["expiresAt"])
+
+    assert created <= now < expires
+    assert expires - now >= timedelta(days=1)
+    assert expires - created <= timedelta(days=30)
+
+
 def test_every_expected_slot_is_retained():
     slots = planned_slots(CASE_IDS, 3)
     assert len(slots) == 72
@@ -65,7 +76,8 @@ def test_manifest_drift_and_overlong_ttl_are_rejected():
     with pytest.raises(ValueError, match="manifest_fingerprint_mismatch"):
         validate_manifest(manifest)
     manifest = _manifest()
-    manifest["expiresAt"] = (datetime.now(timezone.utc) + timedelta(days=31)).isoformat()
+    created = datetime.fromisoformat(manifest["createdAt"])
+    manifest["expiresAt"] = (created + timedelta(days=31)).isoformat()
     manifest["manifestFingerprint"] = canonical_fingerprint({k: v for k, v in manifest.items() if k != "manifestFingerprint"})
     with pytest.raises(ValueError, match="invalid_expiry"):
         validate_manifest(manifest)

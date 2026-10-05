@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .documentation_models import DocumentationDraft, DocumentationSchemaError
+from .documentation_models import (
+    DocumentationDraft, DocumentationDraftV2, DocumentationEvidenceV2,
+    DocumentationSchemaError,
+)
 
 
 CODEX_DOCUMENTATION_INSTRUCTION = (
@@ -22,6 +25,15 @@ CODEX_DOCUMENTATION_INSTRUCTION = (
     "Do not use tools, access files, "
     "network, Git, SQLite, or a vault. Do not include markdown fences, commentary, or any "
     "other output."
+)
+CODEX_DOCUMENTATION_V2_INSTRUCTION = (
+    "Read exactly one documentation-evidence-v2 JSON object from stdin. Produce exactly one JSON object "
+    "with schemaVersion documentation-draft-v2 and the exact keys schemaVersion, evidenceFingerprint, "
+    "status, proposals, and draftFingerprint. Emit exactly one proposals entry containing only targetId "
+    "and content; targetId must exactly equal selectedTargetId from the evidence. Content is replacement "
+    "text for that one fixed section and must not contain a heading, path, approval, or another target. "
+    "Preserve the evidenceFingerprint and calculate the canonical draftFingerprint. Do not use tools, "
+    "access files, network, Git, SQLite, or a vault. Do not emit markdown fences or commentary."
 )
 _STDERR_TAIL_BYTES = 4 * 1024
 
@@ -59,7 +71,10 @@ class CodexDocumentationRunner:
 
         command = (
             "codex", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
-            "--ephemeral", "--ignore-user-config", CODEX_DOCUMENTATION_INSTRUCTION,
+            "--ephemeral", "--ignore-user-config",
+            CODEX_DOCUMENTATION_V2_INSTRUCTION
+            if evidence.get("schemaVersion") == "documentation-evidence-v2"
+            else CODEX_DOCUMENTATION_INSTRUCTION,
         )
         configured_home = os.environ.get("NBS_DOCUMENTATION_CODEX_HOME")
         codex_home = Path(configured_home).expanduser().resolve() if configured_home else self.project_root / ".nbs_agent_runtime" / "codex_home"
@@ -99,6 +114,12 @@ class CodexDocumentationRunner:
 
     @staticmethod
     def _valid_evidence(payload: Any) -> bool:
+        if isinstance(payload, dict) and payload.get("schemaVersion") == "documentation-evidence-v2":
+            try:
+                DocumentationEvidenceV2.from_dict(payload)
+            except (TypeError, ValueError, DocumentationSchemaError):
+                return False
+            return True
         return (
             isinstance(payload, dict)
             and payload.get("schemaVersion") == "documentation-evidence-v1"
@@ -109,6 +130,15 @@ class CodexDocumentationRunner:
 
     @staticmethod
     def _valid_draft(output: str, evidence: dict[str, Any]) -> bool:
+        if evidence.get("schemaVersion") == "documentation-evidence-v2":
+            try:
+                draft = DocumentationDraftV2.from_dict(json.loads(output))
+            except (TypeError, json.JSONDecodeError, DocumentationSchemaError):
+                return False
+            return (
+                draft.evidence_fingerprint == evidence["evidenceFingerprint"]
+                and draft.proposals[0]["targetId"] == evidence["selectedTargetId"]
+            )
         try:
             draft = DocumentationDraft.from_dict(json.loads(output))
         except (TypeError, json.JSONDecodeError, DocumentationSchemaError):
@@ -148,4 +178,7 @@ class CodexDocumentationRunner:
         return DocumentationRunnerResult(-2, "", message, cls._duration(started))
 
 
-__all__ = ["CODEX_DOCUMENTATION_INSTRUCTION", "CodexDocumentationRunner", "DocumentationRunnerResult"]
+__all__ = [
+    "CODEX_DOCUMENTATION_INSTRUCTION", "CODEX_DOCUMENTATION_V2_INSTRUCTION",
+    "CodexDocumentationRunner", "DocumentationRunnerResult",
+]

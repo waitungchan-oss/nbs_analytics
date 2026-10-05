@@ -7,8 +7,15 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .documentation_models import DocumentationProposal
+from .documentation_evidence import _read_target_section
+from .documentation_models import (
+    DocumentationProposal,
+    DocumentationProposalV2,
+    DocumentationSchemaError,
+)
+from .documentation_policy import load_documentation_target
 from .documentation_targets import ObsidianTargetResolver
+from .workflow_models import canonical_sha256
 
 
 class DocumentationValidationError(ValueError):
@@ -53,6 +60,119 @@ class DocumentationPreview:
         }
 
 
+@dataclass(frozen=True)
+class DocumentationPreviewV2:
+    schema_version: str
+    proposal: DocumentationProposalV2
+    status: str
+    task_id: str
+    run_id: str
+    source_fingerprint: str
+    evidence_fingerprint: str
+    proposal_fingerprint: str
+    target_id: str
+    target_kind: str
+    repo_path: str
+    section_heading: str
+    risk_tier: str
+    required_approval_id: str
+    before_section_sha256: str
+    after_section_sha256: str
+    unified_diff: str
+    preview_fingerprint: str
+
+    @property
+    def canonical_fingerprint(self) -> str:
+        return canonical_sha256({
+            key: value for key, value in self.to_dict().items()
+            if key != "previewFingerprint"
+        })
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DocumentationPreviewV2":
+        fields = {
+            "schemaVersion", "proposal", "status", "taskId", "runId",
+            "sourceFingerprint", "evidenceFingerprint", "proposalFingerprint",
+            "targetId", "targetKind", "repoPath", "sectionHeading", "riskTier",
+            "requiredApprovalId", "beforeSectionSha256", "afterSectionSha256",
+            "unifiedDiff", "previewFingerprint",
+        }
+        if not isinstance(payload, dict) or set(payload) != fields:
+            raise DocumentationSchemaError("v2 preview fields are invalid")
+        if payload["schemaVersion"] != "documentation-preview-v2":
+            raise DocumentationSchemaError("v2 preview schemaVersion is invalid")
+        try:
+            proposal = DocumentationProposalV2.from_dict(payload["proposal"])
+            target = load_documentation_target(proposal.target_id)
+        except (DocumentationSchemaError, TypeError) as exc:
+            raise DocumentationSchemaError("v2 preview proposal or target is invalid") from exc
+        expected = {
+            "status": "preview_ready",
+            "taskId": proposal.task_id,
+            "runId": proposal.evidence.run_id,
+            "sourceFingerprint": proposal.evidence.source_fingerprint,
+            "evidenceFingerprint": proposal.evidence_fingerprint,
+            "proposalFingerprint": proposal.proposal_fingerprint,
+            "targetId": target.target_id,
+            "targetKind": target.target_kind,
+            "repoPath": target.repo_path,
+            "sectionHeading": target.section_heading,
+            "riskTier": target.risk_tier,
+            "requiredApprovalId": target.required_approval_id,
+        }
+        if any(payload[key] != value for key, value in expected.items()):
+            raise DocumentationSchemaError("v2 preview identity differs from its proposal or policy")
+        if proposal.status != "ready":
+            raise DocumentationSchemaError("v2 preview proposal is not ready")
+        for key in ("beforeSectionSha256", "afterSectionSha256", "previewFingerprint"):
+            value = payload[key]
+            if not isinstance(value, str) or len(value) != 64 or any(
+                char not in "0123456789abcdef" for char in value
+            ):
+                raise DocumentationSchemaError(f"{key} must be a lowercase SHA-256 digest")
+        if payload["beforeSectionSha256"] != proposal.expected_section_sha256:
+            raise DocumentationSchemaError("preview before hash differs from the proposal's expected section")
+        if payload["afterSectionSha256"] != _digest(proposal.content):
+            raise DocumentationSchemaError("preview after hash differs from proposal content")
+        diff = payload["unifiedDiff"]
+        if not isinstance(diff, str) or len(diff.encode("utf-8")) > _V2_DIFF_MAX_BYTES:
+            raise DocumentationSchemaError("v2 preview diff is invalid or exceeds its byte limit")
+        model = cls(
+            "documentation-preview-v2", proposal, "preview_ready", proposal.task_id,
+            proposal.evidence.run_id, proposal.evidence.source_fingerprint,
+            proposal.evidence_fingerprint, proposal.proposal_fingerprint,
+            target.target_id, target.target_kind, target.repo_path,
+            target.section_heading, target.risk_tier, target.required_approval_id,
+            payload["beforeSectionSha256"], payload["afterSectionSha256"], diff,
+            payload["previewFingerprint"],
+        )
+        if model.canonical_fingerprint != model.preview_fingerprint:
+            raise DocumentationSchemaError("preview fingerprint does not match canonical payload")
+        return model
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": self.schema_version,
+            "proposal": self.proposal.to_dict(),
+            "status": self.status,
+            "taskId": self.task_id,
+            "runId": self.run_id,
+            "sourceFingerprint": self.source_fingerprint,
+            "evidenceFingerprint": self.evidence_fingerprint,
+            "proposalFingerprint": self.proposal_fingerprint,
+            "targetId": self.target_id,
+            "targetKind": self.target_kind,
+            "repoPath": self.repo_path,
+            "sectionHeading": self.section_heading,
+            "riskTier": self.risk_tier,
+            "requiredApprovalId": self.required_approval_id,
+            "beforeSectionSha256": self.before_section_sha256,
+            "afterSectionSha256": self.after_section_sha256,
+            "unifiedDiff": self.unified_diff,
+            "previewFingerprint": self.preview_fingerprint,
+        }
+
+
 _START = "<!-- documentation-agent:implementation-evidence:start -->"
 _END = "<!-- documentation-agent:implementation-evidence:end -->"
 _PROTECTED = ("不含掛賬核銷與TT退款轉團款", "HKD 12,057,968")
@@ -67,6 +187,9 @@ _RAW_PATTERNS = (
     re.compile(r"(?:收款時間|來源單據號|交易號碼)"),
     re.compile(r"^\s*transaction[_ -]?id\s*,\s*(?:amount|value)\s*$", re.I | re.M),
 )
+_V2_DIFF_MAX_BYTES = 32 * 1024
+_ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 def _digest(text: str) -> str:
@@ -97,9 +220,117 @@ def _diff(path_identity: str, before: str, after: str) -> str:
     ))
 
 
+def _markdown_headings(text: str) -> list[tuple[int, str, int]]:
+    headings = []
+    fence = None
+    cursor = 0
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        fence_match = _FENCE.match(bare)
+        if fence is not None:
+            if fence_match and fence_match.group(1)[0] == fence[0] and len(fence_match.group(1)) >= len(fence):
+                fence = None
+            cursor += len(line)
+            continue
+        if fence_match:
+            fence = fence_match.group(1)
+            cursor += len(line)
+            continue
+        match = _ATX_HEADING.match(bare)
+        if match:
+            headings.append((len(match.group(1)), match.group(2).strip(), cursor))
+        cursor += len(line)
+    return headings
+
+
 class DocumentationProposalValidator:
     def __init__(self, project_root: Path):
         self.project_root = Path(project_root)
+
+    def build_target_preview(self, proposal: DocumentationProposalV2) -> DocumentationPreviewV2:
+        """Build a policy-bound, read-only preview for exactly one v2 target section."""
+        if not isinstance(proposal, DocumentationProposalV2):
+            raise DocumentationValidationError("proposal must be DocumentationProposalV2")
+        try:
+            proposal = DocumentationProposalV2.from_dict(proposal.to_dict())
+            target = load_documentation_target(proposal.target_id)
+        except (DocumentationSchemaError, TypeError, ValueError) as exc:
+            raise DocumentationValidationError("invalid v2 proposal or unknown target") from exc
+        if proposal.status != "ready":
+            raise DocumentationValidationError("v2 proposal is not ready")
+        if proposal.operation != "replace_section":
+            raise DocumentationValidationError("v2 target operation is not section replacement")
+        if (
+            proposal.target_kind != target.target_kind
+            or proposal.repo_path != target.repo_path
+            or proposal.section_heading != target.section_heading
+        ):
+            raise DocumentationValidationError("v2 proposal target differs from the fixed catalog")
+        required_gates = {"review", "full-verification", "hermes"}
+        gate_results = proposal.evidence.gate_results
+        if (
+            {item["gate"] for item in gate_results} != required_gates
+            or any(
+                item["status"] not in {"pass", "passed", "success", "ok"}
+                or item["sourceFingerprint"] != proposal.evidence.source_fingerprint
+                for item in gate_results
+            )
+        ):
+            raise DocumentationValidationError("v2 proposal evidence gates are incomplete or stale")
+        self._check_content(proposal.content)
+        try:
+            _, before_text, before_section, start, end = _read_target_section(
+                self.project_root.resolve(), target,
+            )
+        except (OSError, UnicodeError, ValueError, PermissionError) as exc:
+            raise DocumentationValidationError("v2 target section is missing or unsafe") from exc
+
+        before_section_hash = _digest(before_section)
+        if before_section_hash != proposal.expected_section_sha256:
+            raise DocumentationValidationError("stale_target: section hash changed")
+
+        target_level = len(target.section_heading) - len(target.section_heading.lstrip("#"))
+        target_title = target.section_heading[target_level:].strip()
+        headings = _markdown_headings(proposal.content)
+        first_line = proposal.content.splitlines()[0] if proposal.content else ""
+        if (
+            first_line != target.section_heading
+            or not proposal.content.endswith("\n")
+            or not headings
+            or headings[0] != (target_level, target_title, 0)
+            or any(level <= target_level for level, _, _ in headings[1:])
+        ):
+            raise DocumentationValidationError("v2 content must replace only the selected Markdown section")
+
+        after_text = before_text[:start] + proposal.content + before_text[end:]
+        self._check_protected(before_text, after_text)
+        unified_diff = _diff(target.repo_path, before_text, after_text)
+        if len(unified_diff.encode("utf-8")) > _V2_DIFF_MAX_BYTES:
+            raise DocumentationValidationError("v2 preview diff exceeds the 32 KiB limit")
+        unsigned = {
+            "schemaVersion": "documentation-preview-v2",
+            "proposal": proposal.to_dict(),
+            "status": "preview_ready",
+            "taskId": proposal.task_id,
+            "runId": proposal.evidence.run_id,
+            "sourceFingerprint": proposal.evidence.source_fingerprint,
+            "evidenceFingerprint": proposal.evidence_fingerprint,
+            "proposalFingerprint": proposal.proposal_fingerprint,
+            "targetId": target.target_id,
+            "targetKind": target.target_kind,
+            "repoPath": target.repo_path,
+            "sectionHeading": target.section_heading,
+            "riskTier": target.risk_tier,
+            "requiredApprovalId": target.required_approval_id,
+            "beforeSectionSha256": before_section_hash,
+            "afterSectionSha256": _digest(proposal.content),
+            "unifiedDiff": unified_diff,
+        }
+        preview = DocumentationPreviewV2.from_dict({
+            **unsigned,
+            "previewFingerprint": canonical_sha256(unsigned),
+        })
+        return preview
 
     def build_preview(
         self,
@@ -212,6 +443,6 @@ class DocumentationProposalValidator:
 
 
 __all__ = [
-    "DocumentationPreview", "DocumentationPreviewItem", "DocumentationProposalValidator",
+    "DocumentationPreview", "DocumentationPreviewItem", "DocumentationPreviewV2", "DocumentationProposalValidator",
     "DocumentationValidationError",
 ]

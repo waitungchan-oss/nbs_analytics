@@ -7,8 +7,14 @@ from typing import Any
 from .documentation_agent_service import DocumentationAgentService
 from .documentation_controller import DocumentationController
 from .documentation_evidence import DocumentationEvidenceCollector, DocumentationEvidenceError
+from .documentation_models import DocumentationSchemaError
+from .documentation_policy import load_documentation_target
 from .documentation_targets import ObsidianTargetResolver
-from .documentation_validator import DocumentationProposalValidator, DocumentationValidationError
+from .documentation_validator import (
+    DocumentationPreviewV2,
+    DocumentationProposalValidator,
+    DocumentationValidationError,
+)
 from .workflow_store import WorkflowStore
 
 
@@ -30,7 +36,22 @@ class DocumentationWorkflow:
         obsidian_vault: Path | None = None,
         apply_brief: bool = False,
         approved_targets: frozenset[str] = frozenset(),
+        target_id: str | None = None,
+        approve_target_id: str | None = None,
     ) -> dict[str, Any]:
+        if approve_target_id is not None and target_id is None:
+            return self._blocked(run_id, "--approve-target-id requires --target-id")
+        if target_id is not None:
+            return self._run_target(
+                run_id,
+                target_id=target_id,
+                approve_target_id=approve_target_id,
+                agent_command=agent_command,
+                obsidian_vault=obsidian_vault,
+                apply_brief=apply_brief,
+                approved_targets=approved_targets,
+            )
+
         try:
             status = self.store.load_status(run_id)
             if status.status != "completed":
@@ -84,6 +105,93 @@ class DocumentationWorkflow:
             run_id, evidence.documentation_fingerprint, application.status, len(preview.items),
         )
         return application_payload
+
+    def _run_target(
+        self,
+        run_id: str,
+        *,
+        target_id: str,
+        approve_target_id: str | None,
+        agent_command: str | None,
+        obsidian_vault: Path | None,
+        apply_brief: bool,
+        approved_targets: frozenset[str],
+    ) -> dict[str, Any]:
+        if apply_brief or approved_targets or obsidian_vault is not None:
+            return self._blocked(run_id, "v1 apply/vault flags cannot be combined with a v2 target")
+        try:
+            target = load_documentation_target(target_id)
+        except (DocumentationSchemaError, TypeError, ValueError) as exc:
+            return self._blocked(run_id, str(exc))
+        if approve_target_id is not None and approve_target_id != target.required_approval_id:
+            return self._blocked(run_id, "approval ID must exactly match the selected target ID")
+
+        try:
+            status = self.store.load_status(run_id)
+            if status.status != "completed":
+                return self._blocked(run_id, "run must be completed")
+            evidence = self.collector.collect_target(run_id, target.target_id)
+        except (DocumentationEvidenceError, FileNotFoundError, PermissionError, ValueError) as exc:
+            return self._blocked(run_id, str(exc))
+
+        controller = DocumentationController(self.project_root)
+        if approve_target_id is not None:
+            try:
+                preview_payload = controller.read_target_artifact(
+                    run_id, target.target_id, "documentation-preview-v2.json",
+                )
+                preview = DocumentationPreviewV2.from_dict(preview_payload)
+                accepted_evidence = preview.proposal.evidence
+                if (
+                    preview.run_id != run_id
+                    or preview.target_id != target.target_id
+                    or accepted_evidence.run_id != evidence.run_id
+                    or accepted_evidence.selected_target_id != evidence.selected_target_id
+                    or accepted_evidence.commit_sha != evidence.commit_sha
+                    or accepted_evidence.source_fingerprint != evidence.source_fingerprint
+                    or accepted_evidence.expected_section_sha256 != evidence.expected_section_sha256
+                    or accepted_evidence.evidence_fingerprint != evidence.evidence_fingerprint
+                    or accepted_evidence.to_dict() != evidence.to_dict()
+                ):
+                    return self._blocked(run_id, "saved preview no longer matches fresh source and target evidence")
+                application = controller.apply_target(
+                    preview, approved_target_ids=frozenset({approve_target_id}),
+                )
+                application_payload = application.to_dict()
+                controller.write_target_artifact(
+                    run_id, target.target_id, "documentation-application-v2.json", application_payload,
+                )
+                return controller.read_target_artifact(
+                    run_id, target.target_id, "documentation-application-v2.json",
+                )
+            except (
+                DocumentationSchemaError, DocumentationValidationError,
+                FileNotFoundError, OSError, PermissionError, ValueError,
+            ) as exc:
+                return self._blocked(run_id, str(exc))
+
+        try:
+            controller.write_target_artifact(
+                run_id, target.target_id, "documentation-evidence-v2.json", evidence.to_dict(),
+            )
+            proposal = self.service.draft_target(evidence, agent_command=agent_command)
+            proposal_payload = proposal.to_dict()
+            controller.write_target_artifact(
+                run_id, target.target_id, "documentation-proposal-v2.json", proposal_payload,
+            )
+            if proposal.status != "ready":
+                return {**proposal_payload, "status": proposal.status, "runId": run_id}
+            preview = self.validator.build_target_preview(proposal)
+            preview_payload = preview.to_dict()
+            controller.write_target_artifact(
+                run_id, target.target_id, "documentation-preview-v2.json", preview_payload,
+            )
+            return {"status": "preview_ready", "runId": run_id, **preview_payload}
+        except (
+            DocumentationSchemaError, DocumentationValidationError,
+            FileNotFoundError, OSError, PermissionError, ValueError,
+        ) as exc:
+            return self._blocked(run_id, str(exc))
 
     def _blocked(self, run_id: str, message: str) -> dict[str, Any]:
         return {"status": "blocked", "runId": run_id, "message": message}

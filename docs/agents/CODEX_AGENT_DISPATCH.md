@@ -25,7 +25,9 @@ Codex 建立並批准 implementation Task contract 後，只可分派一個 Task
 
 只有在功能變更已通過 Review、full verification 與 Hermes PASS 後，Codex 才可對同一 completed run 呼叫 `agent_workflow.py document`。純 typo、format-only、generated evidence 或 classifier 判定沒有文件影響的測試變更直接 skip，不調用 LLM。按需文件 backfill 必須指定 completed run ID；未提供 approved Documentation runner 時必須停止為 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。
 
-Documentation Agent 只讀 `documentation-evidence-v1` 並輸出 `documentation-proposal-v1`。它不 apply；`system map` 與 `ADR` 需要明確 target approval，Brief backfill 也只能由 Codex 依既有授權交給 trusted Controller。任何 sidecar、Operations 或 Hermes check 都不得 auto-apply、批准 targets、改變 Hermes/terminal state、寫入 SQLite、baseline、runtime、Git 或 Obsidian。
+v1 contract 維持 `documentation-evidence-v1` → `documentation-proposal-v1`，不遷移既有 v1 artifacts。附加的 v2 handoff/runbook workflow 只接受五個固定 IDs：`handoff.current-conclusion`、`handoff.verification-snapshot`、`runbook.pipeline-rollout-gate`、`runbook.shard-boundary`、`runbook.parallel-rollout-boundary`。Catalog 派生 repo path/section，CLI 不接受任意檔案路徑；先 `--target-id <id>` 產生 preview，再以同一 `--target-id <id> --approve-target-id <id>` 明確批准 apply。Evidence 綁定 run/commit/source fingerprint、source hashes、gate results 與 target section hash；任何 stale、malformed、missing preview、unknown target、approval mismatch 或 symlink/path permission 問題都 fail closed。
+
+Hermes 對 v1 五個 root artifacts 與 v2 每 target 四個 artifacts 執行 bounded read-only schema/status/fingerprint/lineage/cap/permission inspection，固定不呼叫 Documentation runner、不 preview/apply、不批准 target、不寫 release-gate state。Catalog 或 Hermes report 不代表 handoff/runbook 內容已回填；`documentation-hermes-report-v1` 不屬於正式 release gate。
 
 ### Verified documentation backfill
 
@@ -77,6 +79,15 @@ Acceptance contract 與 performance baseline lineage 是 metadata/diagnostic-onl
     "triggerAfter": ["review_pass", "full_verification_pass", "hermes_pass"],
     "inputSchema": "documentation-evidence-v1",
     "outputSchema": "documentation-proposal-v1",
+    "additionalTargetWorkflow": {
+      "inputSchema": "documentation-evidence-v2",
+      "proposalSchema": "documentation-proposal-v2",
+      "previewSchema": "documentation-preview-v2",
+      "applicationSchema": "documentation-application-v2",
+      "targetIds": ["handoff.current-conclusion", "handoff.verification-snapshot", "runbook.pipeline-rollout-gate", "runbook.shard-boundary", "runbook.parallel-rollout-boundary"],
+      "approvalArgument": "--approve-target-id",
+      "arbitraryPaths": false
+    },
     "requiresApprovedRunner": true,
     "missingRunnerStatus": "blocked_missing_runner",
     "noDocumentationDecision": "deterministic_classifier_only",
@@ -104,5 +115,5 @@ Phase B Agent Operations Graph view 仍不得寫入正式狀態。
 - Hermes 邊界以 `NBS_HERMES_MONITORING.md` 為準，不與 Review Agent 重複。
 - Hermes post-change check 只 read-only 報告 workflow artifact / retention state 並包含 workflow focused tests；它不得執行 prune、改寫 workflow artifact 或取代 Review / final gates。
 - `acceptance-parallel-rollout` 只是一條 opt-in diagnostic path；serial Full pytest 仍是正式 authority，`agent-eval-72-slot` 不得進入 Full pytest population 或 speedup denominator。Memory Hub、Memory Sidecar、Governance Graph 與 Agent Operations 只能提供 bounded、read-only、non-authoritative context，不能批准、dispatch、寫入、retry 或 promotion candidate。
-- Documentation sidecar check 只 read-only 驗證五個 allowlisted artifact 的 schema、status、bounded counts、cap 與 permission；Hermes 不呼叫 documentation runner，不執行 preview/apply/backup/Git/Obsidian write，也不把 Documentation PASS 當成 runtime acceptance。
+- Documentation sidecar check 只 read-only 驗證 v1 五個 root artifacts 與 v2 固定 target 目錄內四種 artifact 的 schema、status、fingerprint、source lineage、cap 與 path/symlink permission；Hermes 不呼叫 documentation runner，不執行 preview/apply/backup/Git/Obsidian write。`documentation-hermes-report-v1` 不是 release-gate evidence，也不表示文件已回填或 runtime acceptance PASS。
 - Memory Sidecar pilot 只可提供 non-authoritative bounded hints；NBS Hermes 不是 Tencent Hermes。`memory-sidecar-hermes-report-v1` 固定 `policy=read-only`、`invocations=0`、`writes=0`，只檢查 schema、freshness、cap、absolute-path/symlink permission 與 fallback diagnostics。Hermes never starts Gateway、install provider、network recall/distillation、prune、apply、approval、dispatch 或 runtime write；invalid/stale/over-cap/permission evidence 必須 fallback 或 blocked，不能改變 canonical evidence authority。詳見 `MEMORY_SIDECAR_CONTRACT.md`。
