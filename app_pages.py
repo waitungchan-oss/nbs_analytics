@@ -22,8 +22,8 @@ from app_workflows import (
     COL_ORDER_ID,
     COL_QTY,
     COL_SALESPERSON,
+    BETA_COMPARISON_SALES_POINT_LABEL,
     CONFIG_FILE,
-    E_COMMERCE_SALES_POINT,
     HAS_AI_LIBS,
     HAS_MATPLOTLIB,
     REVENUE_SCOPE_CAPTION,
@@ -93,6 +93,7 @@ from app_workflows import (
     build_monthly_baseline_governance,
     build_phase2c_stability_gate,
     clear_database,
+    clear_beta_only_exception_cache,
     draw_forecast_chart,
     draw_month_end_macro_chart,
     draw_seven_day_macro_chart,
@@ -821,6 +822,7 @@ def _render_config_tab() -> None:
     confirm = st.checkbox("我確認要清空所有歷史資料庫")
     if st.button("🗑️ 清空所有歷史資料庫 (危險操作)", disabled=not confirm):
         clear_database()
+        clear_beta_only_exception_cache()
         st.session_state["PROCESSED_DATA_CACHE"] = None
         st.session_state["DB_LOADED_FLAG"] = False
         st.success("資料庫已完全清空，請重新上傳基礎數據。")
@@ -2401,11 +2403,16 @@ def _render_ai_and_exports(cache: dict) -> None:
         beta_loaded = all(cache.get(key) for key in beta_keys)
         st.markdown("#### Beta comparison export")
         st.caption(
-            f"只將 workbook 內原專職表格替換為銷售點「{E_COMMERCE_SALES_POINT}」資料；正式 Dashboard、Forecast 與正式下載不變。"
+            f"只將 workbook 內原專職表格替換為合併銷售點群組「{BETA_COMPARISON_SALES_POINT_LABEL}」資料；另以 Beta-only exception 放行 1950506 + 市場及商務部-電子商務組；正式 Dashboard、Forecast 與正式下載不變。"
         )
-        if not beta_loaded and st.button("準備 Beta 電商組比較匯出", key="PREPARE_BETA_ECOMMERCE_EXPORT"):
-            with st.spinner("正在生成 Beta 電商組比較匯出..."):
-                beta_payload = _compute_beta_export_workbooks(cache.get("raw_t", pd.DataFrame()), cache.get("raw_o", pd.DataFrame()))
+        if not beta_loaded and st.button("準備 Beta 市場電商及同業比較匯出", key="PREPARE_BETA_ECOMMERCE_EXPORT"):
+            with st.spinner(f"正在生成 Beta {BETA_COMPARISON_SALES_POINT_LABEL}比較匯出..."):
+                beta_payload = _compute_beta_export_workbooks(
+                    cache.get("raw_t", pd.DataFrame()),
+                    cache.get("raw_o", pd.DataFrame()),
+                    beta_exception_tour=cache.get("beta_exception_tour", pd.DataFrame()),
+                    beta_exception_others=cache.get("beta_exception_others", pd.DataFrame()),
+                )
             cache.update({key: beta_payload.get(key) for key in beta_keys})
             cache["beta_export_variant"] = beta_payload.get("export_variant")
             cache["beta_sales_point_filter"] = beta_payload.get("sales_point_filter")
@@ -2413,9 +2420,9 @@ def _render_ai_and_exports(cache: dict) -> None:
             st.rerun()
         if beta_loaded:
             st.download_button(
-                "下載 Beta 電商組比較匯出（正式口徑）",
+                "下載 Beta 市場電商及同業比較匯出（正式口徑）",
                 cache["ex_no_writeoff_refund_transfer_beta"] or b"",
-                "Beta_市場及電商部-電子商務組_不含掛賬核銷與TT退款轉團款.xlsx",
+                "Beta_市場電商及同業_不含掛賬核銷與TT退款轉團款.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="DOWNLOAD_BETA_ECOMMERCE_EXPORT",
                 width="stretch",
