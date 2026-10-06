@@ -515,6 +515,7 @@ def normalize_runtime_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col, default in defaults.items():
         if col not in result.columns:
             result[col] = default
+    result[COL_TRANS_TIME] = pd.to_datetime(result[COL_TRANS_TIME], errors="coerce")
     result[COL_MONEY] = pd.to_numeric(result[COL_MONEY], errors="coerce").fillna(0)
     result[COL_DAYS] = pd.to_numeric(result[COL_DAYS], errors="coerce").fillna(0)
     result[COL_QTY] = pd.to_numeric(result[COL_QTY], errors="coerce").fillna(0)
