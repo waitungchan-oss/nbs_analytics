@@ -76,6 +76,15 @@ DEFAULT_RULES = {
             "reason": "2026年9月E6上環服務點銷售額歸入0A展覽會場專用",
         },
         {
+            "month": "2026-09",
+            "from_prefix": "E8",
+            "from_branch": "筲箕灣服務點",
+            "to_prefix": "0B",
+            "to_branch": "展覽會場專用2",
+            "scope": ["旅行團", "郵輪", "票務"],
+            "reason": "2026年9月E8筲箕灣服務點銷售額歸入0B展覽會場專用",
+        },
+        {
             "month": "2026-06",
             "source_order_id": "E9MF16613172500",
             "from_branch": "上環服務點",

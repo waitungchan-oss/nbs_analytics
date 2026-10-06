@@ -372,14 +372,14 @@ def _normalize_branch_value(value: Any) -> str:
 def _reassignment_period_mask(frame: pd.DataFrame, *, month: str = "", year: str = "") -> pd.Series:
     if not month and not year:
         return pd.Series(True, index=frame.index)
+    parsed_dates = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
     for column in ("統一日期", DATE_COL_R, COL_DATE, DATE_COL_Y):
         if column in frame.columns:
             dates = pd.to_datetime(frame[column], errors="coerce")
-            if dates.notna().any():
-                if month:
-                    return dates.dt.strftime("%Y-%m").eq(str(month))
-                return dates.dt.strftime("%Y").eq(str(year))
-    return pd.Series(False, index=frame.index)
+            parsed_dates = parsed_dates.fillna(dates)
+    if month:
+        return parsed_dates.dt.strftime("%Y-%m").eq(str(month))
+    return parsed_dates.dt.strftime("%Y").eq(str(year))
 
 
 def apply_branch_reassignment_overrides(

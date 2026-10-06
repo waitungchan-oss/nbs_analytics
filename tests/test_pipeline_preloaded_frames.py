@@ -83,6 +83,46 @@ def test_default_branch_reassignment_moves_e6_to_0a_for_2026_07_to_09_only():
     assert result.loc[3, "副表_銷售點"] == "上環服務點"
 
 
+def test_default_branch_reassignment_moves_e8_september_to_0b_for_all_products():
+    import pipeline
+
+    source = pd.DataFrame(
+        [
+            {
+                "來源單據號": "E8TOUR20260901",
+                "統一日期": "2026-09-15",
+                "收款時間": "2026-09-15 10:00:00",
+                "銷售點": "筲箕灣服務點",
+                "副表_銷售點": "筲箕灣服務點",
+            },
+            {
+                "來源單據號": "E8TICKET20260902",
+                "統一日期": "套票all1005",
+                "收款時間": "2026-09-27 19:03:50",
+                "銷售點": "筲箕灣服務點",
+                "副表_銷售點": "筲箕灣服務點",
+            },
+            {
+                "來源單據號": "E8TICKET20260803",
+                "統一日期": "套票all1005",
+                "收款時間": "2026-08-27 19:03:50",
+                "銷售點": "筲箕灣服務點",
+                "副表_銷售點": "筲箕灣服務點",
+            },
+        ]
+    )
+
+    result = pipeline.apply_branch_reassignment_overrides(
+        source,
+        pipeline.BRANCH_REASSIGNMENT_OVERRIDES,
+    )
+
+    assert result.loc[:1, "銷售點"].tolist() == ["展覽會場專用2"] * 2
+    assert result.loc[:1, "副表_銷售點"].tolist() == ["展覽會場專用2"] * 2
+    assert result.loc[2, "銷售點"] == "筲箕灣服務點"
+    assert result.loc[2, "副表_銷售點"] == "筲箕灣服務點"
+
+
 def test_branch_reassignment_override_matches_one_exact_source_order_only():
     import pipeline
 
