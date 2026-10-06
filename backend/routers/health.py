@@ -10,6 +10,11 @@ from backend.services.verification_runtime_paths import load_verification_runtim
 router = APIRouter(prefix="/api", tags=["health"])
 
 
+@router.get("/ready")
+def readiness_check() -> dict:
+    return {"status": "ready", "service": "nbs-analytics-api"}
+
+
 @router.get("/health")
 def health_check(verification_profile: str | None = None) -> dict:
     if verification_profile:

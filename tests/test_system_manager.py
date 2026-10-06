@@ -67,6 +67,12 @@ def test_build_service_specs_uses_profile_ports_and_identity(tmp_path):
     assert all(spec["profileId"] == "profile-test" for spec in specs.values())
 
 
+def test_api_service_uses_lightweight_readiness_endpoint(tmp_path):
+    specs = system_manager.build_service_specs(tmp_path, "python", "npm")
+
+    assert specs["api"]["ready_url"] == "http://127.0.0.1:8601/api/ready"
+
+
 def test_start_services_accepts_verification_profile_without_using_default_ports(monkeypatch, tmp_path):
     from types import SimpleNamespace
     profile = SimpleNamespace(
