@@ -319,3 +319,62 @@ def test_repair_subtable_branch_assignments_matches_one_exact_source_order_only(
         "SK2607000001": "上環服務點",
         "SK2606000003": "元朗服務點",
     }
+
+
+def test_repair_subtable_branch_assignments_can_apply_only_explicit_overrides(tmp_path, monkeypatch):
+    live_path = tmp_path / "live.db"
+    monkeypatch.setattr(database, "DB_FILE", str(live_path))
+    monkeypatch.setattr(
+        database,
+        "BRANCH_REASSIGNMENT_OVERRIDES",
+        [
+            {
+                "month": "2026-07",
+                "from_prefix": "E6",
+                "from_branch": "上環服務點",
+                "to_branch": "展覽會場專用",
+                "to_prefix": "0A",
+            }
+        ],
+        raising=False,
+    )
+    existing = pd.DataFrame(
+        [
+            {
+                "來源單據號": "E6TEST2026071",
+                "收款單號": "SK2607000001",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+                "收款時間": "2026-07-15",
+                "統一日期": "2026-07-15",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+            {
+                "來源單據號": "OTHER2026071",
+                "收款單號": "SK2607000002",
+                "銷售點": "營銷運營中心-專職銷售組",
+                "副表_銷售點": "專職銷售組",
+                "收款時間": "2026-07-15",
+                "統一日期": "2026-07-15",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+        ]
+    )
+    conn = sqlite3.connect(live_path)
+    try:
+        existing.to_sql("tour_data", conn, if_exists="replace", index=False)
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = database.repair_subtable_branch_assignments([], apply_only_overrides=True)
+    rows, _ = database.load_all_data_from_db()
+
+    assert result["updated"] == 1
+    by_receipt = rows.set_index("收款單號")["銷售點"].to_dict()
+    assert by_receipt == {
+        "SK2607000001": "展覽會場專用",
+        "SK2607000002": "營銷運營中心-專職銷售組",
+    }

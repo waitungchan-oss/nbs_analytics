@@ -57,6 +57,32 @@ def test_branch_reassignment_override_moves_2026_06_e6_to_0a_only():
     assert result.loc[1, "副表_銷售點"] == "上環服務點"
 
 
+def test_default_branch_reassignment_moves_e6_to_0a_for_2026_07_to_09_only():
+    import pipeline
+
+    source = pd.DataFrame(
+        [
+            {
+                "來源單據號": f"E6A2026{month.replace('-', '')}01",
+                "統一日期": f"{month}-15",
+                "銷售點": "上環服務點",
+                "副表_銷售點": "上環服務點",
+            }
+            for month in ("2026-07", "2026-08", "2026-09", "2026-10")
+        ]
+    )
+
+    result = pipeline.apply_branch_reassignment_overrides(
+        source,
+        pipeline.BRANCH_REASSIGNMENT_OVERRIDES,
+    )
+
+    assert result.loc[:2, "銷售點"].tolist() == ["展覽會場專用"] * 3
+    assert result.loc[:2, "副表_銷售點"].tolist() == ["展覽會場專用"] * 3
+    assert result.loc[3, "銷售點"] == "上環服務點"
+    assert result.loc[3, "副表_銷售點"] == "上環服務點"
+
+
 def test_branch_reassignment_override_matches_one_exact_source_order_only():
     import pipeline
 
