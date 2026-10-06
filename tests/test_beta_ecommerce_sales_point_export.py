@@ -175,6 +175,29 @@ def test_beta_combines_all_four_sales_points_into_six_named_sheets():
     }
 
 
+def test_beta_export_normalizes_mixed_transaction_time_types_before_sorting():
+    import pipeline
+
+    tour = tour_frame()
+    tour.loc[0, "交易時間"] = pd.Timestamp("2026-05-01 09:00:00")
+    others = others_frame()
+    others.loc[0, "交易時間"] = pd.Timestamp("2026-05-01 10:00:00")
+
+    _, _, facts = pipeline.build_dashboard_data(
+        tour,
+        others,
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    assert not facts[f"{BETA_LABEL}_旅行團統計"].empty
+
+
 def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
     import pipeline
 
