@@ -423,7 +423,11 @@ def _branch_reassignment_target(row, table_cols: set[str]) -> str | None:
     return None
 
 
-def repair_subtable_branch_assignments(sales_rep_list: list[str]) -> dict:
+def repair_subtable_branch_assignments(
+    sales_rep_list: list[str],
+    *,
+    apply_only_overrides: bool = False,
+) -> dict:
     """依副表銷售點修復既有資料歸屬，並保留收款操作員命中專職的最高優先級。"""
     from pipeline import match_sales_rep_by_operator
 
@@ -448,6 +452,8 @@ def repair_subtable_branch_assignments(sales_rep_list: list[str]) -> dict:
                     matched_rep = match_sales_rep_by_operator(row.get(COL_RECEIPT_OPERATOR), sales_rep_list)
 
                 reassigned_branch = _branch_reassignment_target(row, table_cols)
+                if apply_only_overrides and not reassigned_branch:
+                    continue
                 desired_branch = TARGET_DEPT_FOR_REP if matched_rep else (reassigned_branch or sub_branch)
                 desired_sales = matched_rep if matched_rep and COL_SALESPERSON in table_cols else None
 
