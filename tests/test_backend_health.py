@@ -3,6 +3,17 @@ from fastapi.testclient import TestClient
 from backend.main import create_app
 
 
+def test_readiness_check_is_lightweight_and_stable():
+    client = TestClient(create_app())
+    response = client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "service": "nbs-analytics-api",
+    }
+
+
 def test_health_check_returns_runtime_status():
     client = TestClient(create_app())
     response = client.get("/api/health")

@@ -60,7 +60,7 @@ def build_service_specs(
         },
         "api": {
             "port": api_port,
-            "ready_url": f"http://127.0.0.1:{api_port}/api/health",
+            "ready_url": f"http://127.0.0.1:{api_port}/api/ready",
             "browser_url": f"http://127.0.0.1:{api_port}/docs",
             "profileId": profile_id,
             "cwd": project_root,
