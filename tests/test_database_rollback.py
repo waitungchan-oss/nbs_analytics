@@ -378,3 +378,66 @@ def test_repair_subtable_branch_assignments_can_apply_only_explicit_overrides(tm
         "SK2607000001": "展覽會場專用",
         "SK2607000002": "營銷運營中心-專職銷售組",
     }
+
+
+def test_repair_subtable_branch_assignments_moves_e8_september_only(tmp_path, monkeypatch):
+    live_path = tmp_path / "live.db"
+    monkeypatch.setattr(database, "DB_FILE", str(live_path))
+    monkeypatch.setattr(
+        database,
+        "BRANCH_REASSIGNMENT_OVERRIDES",
+        [
+            {
+                "month": "2026-09",
+                "from_prefix": "E8",
+                "from_branch": "筲箕灣服務點",
+                "to_branch": "展覽會場專用2",
+                "to_prefix": "0B",
+            }
+        ],
+        raising=False,
+    )
+    existing = pd.DataFrame(
+        [
+            {
+                "來源單據號": "E8TICKET20260901",
+                "收款單號": "SK2609000001",
+                "銷售點": "筲箕灣服務點",
+                "副表_銷售點": "筲箕灣服務點",
+                "收款時間": "2026-09-27 19:03:50",
+                "統一日期": "套票all1005",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+            {
+                "來源單據號": "E8TICKET20260802",
+                "收款單號": "SK2608000002",
+                "銷售點": "筲箕灣服務點",
+                "副表_銷售點": "筲箕灣服務點",
+                "收款時間": "2026-08-27 19:03:50",
+                "統一日期": "套票all1005",
+                "收款操作員": "",
+                "銷售員": "",
+            },
+        ]
+    )
+    conn = sqlite3.connect(live_path)
+    try:
+        existing.to_sql("others_data", conn, if_exists="replace", index=False)
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = database.repair_subtable_branch_assignments([], apply_only_overrides=True)
+    conn = sqlite3.connect(live_path)
+    try:
+        rows = pd.read_sql_query("SELECT 收款單號, 銷售點 FROM others_data", conn)
+    finally:
+        conn.close()
+
+    assert result["updated"] == 1
+    by_receipt = rows.set_index("收款單號")["銷售點"].to_dict()
+    assert by_receipt == {
+        "SK2609000001": "展覽會場專用2",
+        "SK2608000002": "筲箕灣服務點",
+    }
