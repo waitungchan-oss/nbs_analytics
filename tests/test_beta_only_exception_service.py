@@ -42,6 +42,37 @@ def test_build_beta_only_exception_frames_reopens_only_allowed_prefix(monkeypatc
     assert list(others["來源單據號"]) == ["1950506001"]
 
 
+def test_build_beta_only_exception_frames_keeps_all_beta_sales_points(monkeypatch):
+    from backend.services import beta_only_exception_service
+
+    sales_points = (
+        "市場及電商部-電子商務組",
+        "營銷運營中心-同業銷售部",
+        "市場及商務部-電子商務組",
+        "網銷組 i6",
+    )
+
+    def fake_process(main, tour, others, branch_mapping, exclude_prefixes, sales_reps, **kwargs):
+        frame = pd.concat(
+            [_frame(f"195050600{i}", sales_point) for i, sales_point in enumerate(sales_points)],
+            ignore_index=True,
+        )
+        return pd.DataFrame(), frame, pd.DataFrame(), {}
+
+    monkeypatch.setattr(beta_only_exception_service, "process_raw_files", fake_process)
+
+    _, others = beta_only_exception_service.build_beta_only_exception_frames(
+        "main.xlsx",
+        "tour.xlsx",
+        ["other.xlsx"],
+        {"19": "沙田分社"},
+        ["1950506", "1950404"],
+        [],
+    )
+
+    assert set(others["銷售點"]) == set(sales_points)
+
+
 def test_beta_only_exception_cache_round_trips_and_deduplicates_by_receipt(tmp_path):
     from backend.services import beta_only_exception_service
 

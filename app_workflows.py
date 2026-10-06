@@ -77,7 +77,7 @@ TARGET_DEPT_FOR_REP = config_module.TARGET_DEPT_FOR_REP
 BETA_COMPARISON_SALES_POINTS = tuple(config_module.BETA_COMPARISON_SALES_POINTS)
 BETA_COMPARISON_SALES_POINT_LABEL = config_module.BETA_COMPARISON_SALES_POINT_LABEL
 BETA_ONLY_EXCEPTION_PREFIXES = tuple(config_module.BETA_ONLY_EXCEPTION_PREFIXES)
-BETA_ONLY_EXCEPTION_SALES_POINT = config_module.BETA_ONLY_EXCEPTION_SALES_POINT
+BETA_ONLY_EXCEPTION_SALES_POINTS = tuple(config_module.BETA_ONLY_EXCEPTION_SALES_POINTS)
 # Backward-compatible alias for callers that need the original I6 sales point.
 E_COMMERCE_SALES_POINT = BETA_COMPARISON_SALES_POINTS[0]
 init_session_state_config = config_module.init_session_state_config
@@ -1165,7 +1165,7 @@ def _compute_beta_export_workbooks(
         "beta_export_schema": f"{OFFICIAL_EXPORT_SCHEMA_CONTRACT}:{variant}",
         "beta_exception_rule": {
             "prefixes": list(BETA_ONLY_EXCEPTION_PREFIXES),
-            "sales_point": BETA_ONLY_EXCEPTION_SALES_POINT,
+            "sales_points": list(BETA_ONLY_EXCEPTION_SALES_POINTS),
             "official_scope_unchanged": True,
         },
         "beta_exception_rows": {
