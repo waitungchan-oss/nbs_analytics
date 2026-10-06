@@ -33,7 +33,6 @@ from rules import (
     BETA_COMPARISON_SALES_POINTS,
     BETA_COMPARISON_SALES_POINT_LABEL,
     BETA_ONLY_EXCEPTION_PREFIXES,
-    BETA_ONLY_EXCEPTION_SALES_POINTS,
     BETA_ONLY_EXCEPTION_SALES_POINT,
     BETA_ONLY_EXCEPTION_VERSION,
     BETA_ONLY_SALES_POINTS,
@@ -44,6 +43,10 @@ from rules import (
     load_business_rules,
     save_business_rules,
 )
+
+# Derive this alias locally so Streamlit can reload config while an older
+# in-memory rules module is still serving an already-running session.
+BETA_ONLY_EXCEPTION_SALES_POINTS = BETA_COMPARISON_SALES_POINTS
 
 
 def init_session_state_config() -> None:
