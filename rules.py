@@ -181,6 +181,8 @@ BETA_COMPARISON_SALES_POINTS = (
 )
 BETA_COMPARISON_SALES_POINT_LABEL = "市場電商及同業"
 BETA_ONLY_EXCEPTION_PREFIXES = ("1950506",)
+BETA_ONLY_EXCEPTION_SALES_POINTS = BETA_COMPARISON_SALES_POINTS
+# Backward-compatible alias for callers that referenced the former single-point exception.
 BETA_ONLY_EXCEPTION_SALES_POINT = "市場及商務部-電子商務組"
 BETA_ONLY_EXCEPTION_VERSION = "beta-only-exception-v1"
 # Sales points reserved for comparison exports; they must not enter formal branch KPIs.

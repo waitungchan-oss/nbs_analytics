@@ -2403,7 +2403,7 @@ def _render_ai_and_exports(cache: dict) -> None:
         beta_loaded = all(cache.get(key) for key in beta_keys)
         st.markdown("#### Beta comparison export")
         st.caption(
-            f"只將 workbook 內原專職表格替換為合併銷售點群組「{BETA_COMPARISON_SALES_POINT_LABEL}」資料；另以 Beta-only exception 放行 1950506 + 市場及商務部-電子商務組；正式 Dashboard、Forecast 與正式下載不變。"
+            f"只將 workbook 內原專職表格替換為合併銷售點群組「{BETA_COMPARISON_SALES_POINT_LABEL}」資料；另以 Beta-only exception 放行 1950506 + 四個合併銷售點；正式 Dashboard、Forecast 與正式下載不變。"
         )
         if not beta_loaded and st.button("準備 Beta 市場電商及同業比較匯出", key="PREPARE_BETA_ECOMMERCE_EXPORT"):
             with st.spinner(f"正在生成 Beta {BETA_COMPARISON_SALES_POINT_LABEL}比較匯出..."):

@@ -9,7 +9,7 @@ import pandas as pd
 from pipeline import COL_BRANCH, process_raw_files
 from rules import (
     BETA_ONLY_EXCEPTION_PREFIXES,
-    BETA_ONLY_EXCEPTION_SALES_POINT,
+    BETA_ONLY_EXCEPTION_SALES_POINTS,
     BETA_ONLY_EXCEPTION_VERSION,
 )
 
@@ -24,10 +24,11 @@ def _rewind(value) -> None:
         value.seek(0)
 
 
-def _select_sales_point(frame: pd.DataFrame, sales_point: str) -> pd.DataFrame:
+def _select_sales_points(frame: pd.DataFrame, sales_points) -> pd.DataFrame:
     if frame.empty or COL_BRANCH not in frame.columns:
         return frame.iloc[0:0].copy()
-    mask = frame[COL_BRANCH].astype(str).str.strip().eq(sales_point)
+    targets = {str(value).strip() for value in sales_points if str(value).strip()}
+    mask = frame[COL_BRANCH].astype(str).str.strip().isin(targets)
     return frame.loc[mask].copy()
 
 
@@ -62,8 +63,8 @@ def build_beta_only_exception_frames(
         return_entity_audit=True,
     )
     return (
-        _select_sales_point(reopened_tour, BETA_ONLY_EXCEPTION_SALES_POINT),
-        _select_sales_point(reopened_others, BETA_ONLY_EXCEPTION_SALES_POINT),
+        _select_sales_points(reopened_tour, BETA_ONLY_EXCEPTION_SALES_POINTS),
+        _select_sales_points(reopened_others, BETA_ONLY_EXCEPTION_SALES_POINTS),
     )
 
 
@@ -117,8 +118,8 @@ def persist_beta_only_exception_frames(
 ) -> dict:
     path = Path(cache_path) if cache_path is not None else _default_cache_path()
     existing_tour, existing_others = load_beta_only_exception_frames(cache_path=path)
-    merged_tour = _merge_frames(existing_tour, _select_sales_point(tour, BETA_ONLY_EXCEPTION_SALES_POINT))
-    merged_others = _merge_frames(existing_others, _select_sales_point(others, BETA_ONLY_EXCEPTION_SALES_POINT))
+    merged_tour = _merge_frames(existing_tour, _select_sales_points(tour, BETA_ONLY_EXCEPTION_SALES_POINTS))
+    merged_others = _merge_frames(existing_others, _select_sales_points(others, BETA_ONLY_EXCEPTION_SALES_POINTS))
     if merged_tour.empty and merged_others.empty:
         return {"status": "empty", "tourRows": 0, "othersRows": 0, "path": str(path)}
     path.parent.mkdir(parents=True, exist_ok=True)
