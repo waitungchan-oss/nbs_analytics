@@ -41,6 +41,31 @@ from config import (
 )
 
 COL_SUBTABLE_BRANCH = "副表_銷售點"
+_EXCEL_DATETIME_FORMAT = "yyyy-mm-dd hh:mm:ss"
+
+
+def _normalize_export_receipt_time(frame: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
+    """Write receipt timestamps as real Excel datetimes without hiding bad values."""
+    column = "收款時間"
+    if column not in frame.columns:
+        return frame
+
+    result = frame.copy()
+    values = result[column]
+    blank = values.isna() | values.map(
+        lambda value: isinstance(value, str) and value.strip().lower() in {"", "nan", "none", "nat"}
+    )
+    parsed = pd.to_datetime(values.mask(blank), errors="coerce", format="mixed")
+    invalid_count = int(((~blank) & parsed.isna()).sum())
+    if invalid_count:
+        raise ValueError(
+            f"{sheet_name} 的「{column}」有 {invalid_count} 筆無法解析；已停止 workbook 匯出。"
+        )
+    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
+        raise ValueError(f"{sheet_name} 的「{column}」包含時區時間；Excel 匯出只接受無時區 datetime。")
+
+    result[column] = parsed
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1345,9 +1370,10 @@ def build_dashboard_data(
         return None, result_s1, result_s2
 
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+    with pd.ExcelWriter(buf, engine="openpyxl", datetime_format=_EXCEL_DATETIME_FORMAT) as writer:
         for df, sheet_name in sheets:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            export_frame = _normalize_export_receipt_time(df, sheet_name)
+            export_frame.to_excel(writer, sheet_name=sheet_name, index=False)
     buf.seek(0)
     return buf, result_s1, result_s2
 
