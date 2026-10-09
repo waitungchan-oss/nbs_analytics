@@ -547,6 +547,32 @@ def normalize_runtime_columns(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+_BETA_BUSINESS_PEER_SALESPEOPLE = {
+    "011185 洪淑芬",
+    "ctsit 杨慧如",
+    "debby 卢淑贞",
+}
+_BETA_BUSINESS_PEER_SALESPEOPLE_CASEFOLD = {
+    name.casefold() for name in _BETA_BUSINESS_PEER_SALESPEOPLE
+}
+
+
+def _normalize_beta_salesperson(value) -> str:
+    if value is None or pd.isna(value):
+        return "未指定"
+    normalized = " ".join(str(value).split())
+    if normalized.casefold() in {"", "nan", "none", "nat", "<na>", "未知"}:
+        return "未指定"
+    return normalized
+
+
+def _beta_salesperson_category(value) -> str:
+    normalized = _normalize_beta_salesperson(value).casefold()
+    if normalized in _BETA_BUSINESS_PEER_SALESPEOPLE_CASEFOLD:
+        return "商務同業組"
+    return "客戶服務部"
+
+
 def _select_sales_point_frames(
     tour: pd.DataFrame,
     others: pd.DataFrame,
@@ -560,13 +586,7 @@ def _select_sales_point_frames(
     for frame in (tour, others):
         work = normalize_runtime_columns(frame.copy(deep=True))
         work = work.loc[work[COL_BRANCH].astype(str).str.strip().isin(targets)].copy()
-        work[COL_SALESPERSON] = (
-            work[COL_SALESPERSON]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .replace({"": "未指定", "nan": "未指定", "None": "未指定"})
-        )
+        work[COL_SALESPERSON] = work[COL_SALESPERSON].map(_normalize_beta_salesperson)
         selected.append(work)
     return selected[0], selected[1]
 
@@ -854,12 +874,26 @@ def build_dashboard_data(
         specialist_sheet_prefix = ""
     specialist_branch_values = beta_sales_points if beta_enabled else {specialist_branch}
 
+    def normalize_beta_salespeople(frame: pd.DataFrame) -> pd.DataFrame:
+        if not beta_enabled or frame.empty:
+            return frame
+        result = frame.copy(deep=True)
+        beta_mask = result[COL_BRANCH].astype(str).str.strip().isin(beta_sales_points)
+        salesperson = result[COL_SALESPERSON].astype(object)
+        salesperson.loc[beta_mask] = salesperson.loc[beta_mask].map(_normalize_beta_salesperson)
+        result[COL_SALESPERSON] = salesperson
+        return result
+
     def build_summary(df_t, df_o, text_list, text_col, is_branch=True):
         grid = pd.DataFrame(list(itertools.product(text_list, all_days)), columns=["文本", "日期"])
         grid["種類/單選"] = (
             grid["文本"].apply(get_branch_type)
             if is_branch
-            else (BETA_COMPARISON_SALES_POINT_LABEL if beta_enabled else "專職銷售")
+            else (
+                grid["文本"].map(_beta_salesperson_category)
+                if beta_enabled
+                else "專職銷售"
+            )
         )
         grid["MapKey"] = grid["文本"].apply(lambda x: str(x)[2:]) if is_branch else grid["文本"]
 
@@ -1022,6 +1056,7 @@ def build_dashboard_data(
         if COL_ORDER_ID in df_tour_matched.columns
         else df_tour_matched.copy()
     )
+    df_tour_dedup = normalize_beta_salespeople(df_tour_dedup)
     df_tour_dedup["日期"] = (
         _format_date_with_fallback(df_tour_dedup[COL_TRANS_TIME], df_tour_dedup["統一日期"])
         if COL_TRANS_TIME in df_tour_dedup.columns
@@ -1031,28 +1066,32 @@ def build_dashboard_data(
     df_tour_dedup["天數_num"] = pd.to_numeric(df_tour_dedup[COL_DAYS], errors="coerce").fillna(0)
     df_tour_dedup["交易人數"] = pd.to_numeric(df_tour_dedup[COL_QTY], errors="coerce").fillna(0)
     df_tour_dedup["月份"] = pd.to_datetime(df_tour_dedup["日期"], errors="coerce").dt.strftime("%Y-%m")
-    if beta_enabled:
-        beta_mask = df_tour_dedup[COL_BRANCH].astype(str).str.strip().isin(beta_sales_points)
-        df_tour_dedup.loc[beta_mask, COL_SALESPERSON] = (
-            df_tour_dedup.loc[beta_mask, COL_SALESPERSON]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .replace({"": "未指定", "nan": "未指定", "None": "未指定"})
-        )
-
-    def gen_t_stats(df_sub):
+    def gen_t_stats(df_sub, *, include_salesperson=False):
+        columns = ["文本", "天數", "日期", "月份", "交易人數"]
+        if include_salesperson:
+            columns = ["銷售員", "所屬種類", *columns]
         if df_sub.empty:
-            return pd.DataFrame(columns=["文本", "天數", "日期", "月份", "交易人數"])
-        s = df_sub.groupby(["文本", "天數_num", "日期"])["交易人數"].sum().reset_index()
+            return pd.DataFrame(columns=columns)
+        group_cols = ["文本", "天數_num", "日期"]
+        if include_salesperson:
+            group_cols.insert(0, COL_SALESPERSON)
+        s = df_sub.groupby(group_cols)["交易人數"].sum().reset_index()
         s["天數"] = s["天數_num"].apply(lambda x: str(int(x)) if x == int(x) else str(x))
         s["月份"] = pd.to_datetime(s["日期"], errors="coerce").dt.strftime("%Y-%m")
-        return s[s["交易人數"] > 0].sort_values(["文本", "日期", "天數_num"])[["文本", "天數", "日期", "月份", "交易人數"]]
+        if include_salesperson:
+            s["銷售員"] = s[COL_SALESPERSON]
+            s["所屬種類"] = s["銷售員"].map(_beta_salesperson_category)
+        sort_cols = (["銷售員"] if include_salesperson else []) + ["文本", "日期", "天數_num"]
+        return s[s["交易人數"] > 0].sort_values(sort_cols)[columns]
 
     result_s3 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)])
-    result_s4 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)])
+    result_s4 = gen_t_stats(
+        df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)],
+        include_salesperson=beta_enabled,
+    )
 
     df_ticket = df_others_matched.copy()
+    df_ticket = normalize_beta_salespeople(df_ticket)
     df_ticket["日期"] = (
         _format_date_with_fallback(df_ticket[COL_TRANS_TIME], df_ticket["統一日期"])
         if COL_TRANS_TIME in df_ticket.columns
@@ -1063,39 +1102,80 @@ def build_dashboard_data(
     df_ticket["文本"] = df_ticket.apply(map_ticket_category, axis=1)
     df_ticket = df_ticket[df_ticket["文本"].notnull()]
 
-    def gen_tk_stats(df_sub):
+    def gen_tk_stats(df_sub, *, include_salesperson=False):
+        columns = ["文本", "日期", "月份", "交易數量"]
+        if include_salesperson:
+            columns = ["銷售員", "所屬種類", *columns]
         if df_sub.empty:
-            return pd.DataFrame(columns=["文本", "日期", "月份", "交易數量"])
-        s = df_sub.groupby(["文本", "日期", "月份"])["交易數量"].sum().reset_index()
+            return pd.DataFrame(columns=columns)
+        group_cols = ["文本", "日期", "月份"]
+        if include_salesperson:
+            group_cols.insert(0, COL_SALESPERSON)
+        s = df_sub.groupby(group_cols)["交易數量"].sum().reset_index()
+        if include_salesperson:
+            s["銷售員"] = s[COL_SALESPERSON]
+            s["所屬種類"] = s["銷售員"].map(_beta_salesperson_category)
         s["文本"] = pd.Categorical(s["文本"], categories=["船票", "巴士票", "機票", "高鐵", "其它門券", "套票", "酒店"], ordered=True)
-        return s[s["交易數量"] > 0].sort_values(["文本", "日期"])[["文本", "日期", "月份", "交易數量"]]
+        sort_cols = (["銷售員"] if include_salesperson else []) + ["文本", "日期"]
+        return s[s["交易數量"] > 0].sort_values(sort_cols)[columns]
 
     result_s5 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)])
-    result_s6 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)])
+    result_s6 = gen_tk_stats(
+        df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)],
+        include_salesperson=beta_enabled,
+    )
     result_s7 = gen_tk_stats(df_ticket)
 
-    def gen_d_tour(df_sub, grp_col, t_name):
+    def gen_d_tour(df_sub, grp_col, t_name, *, include_salesperson=False):
+        columns = ["文本", "日期", "月份", t_name, "郵輪交易人數"]
+        if include_salesperson:
+            columns = ["銷售員", "所屬種類", "日期", "月份", t_name, "郵輪交易人數"]
         if df_sub.empty:
-            return pd.DataFrame(columns=["文本", "日期", "月份", t_name, "郵輪交易人數"])
+            return pd.DataFrame(columns=columns)
         t = df_sub[df_sub["文本"] != "郵輪"].groupby([grp_col, "日期", "月份"])["交易人數"].sum().reset_index(name=t_name)
         c = df_sub[df_sub["文本"] == "郵輪"].groupby([grp_col, "日期", "月份"])["交易人數"].sum().reset_index(name="郵輪交易人數")
         res = df_sub[[grp_col, "日期", "月份"]].drop_duplicates().merge(t, how="left").merge(c, how="left")
         _fill_numeric_columns(res, (t_name, "郵輪交易人數"))
-        return res[(res[t_name] > 0) | (res["郵輪交易人數"] > 0)].rename(columns={grp_col: "文本"}).sort_values(["文本", "日期"])
+        res = res[(res[t_name] > 0) | (res["郵輪交易人數"] > 0)]
+        if include_salesperson:
+            res = res.rename(columns={grp_col: "銷售員"})
+            res["所屬種類"] = res["銷售員"].map(_beta_salesperson_category)
+        else:
+            res = res.rename(columns={grp_col: "文本"})
+        sort_cols = ["銷售員", "日期"] if include_salesperson else ["文本", "日期"]
+        return res.sort_values(sort_cols)[columns]
 
     result_s8 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH, "交易人數")
-    result_s9 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)], COL_SALESPERSON, "旅行團交易人數")
+    result_s9 = gen_d_tour(
+        df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)],
+        COL_SALESPERSON,
+        "旅行團交易人數",
+        include_salesperson=beta_enabled,
+    )
 
-    def gen_d_tkt(df_sub, grp_col):
+    def gen_d_tkt(df_sub, grp_col, *, include_salesperson=False):
+        columns = ["文本", "種類", "日期", "月份", "交易數量"]
+        if include_salesperson:
+            columns = ["銷售員", "所屬種類", "種類", "日期", "月份", "交易數量"]
         if df_sub.empty:
-            return pd.DataFrame(columns=["文本", "種類", "日期", "月份", "交易數量"])
+            return pd.DataFrame(columns=columns)
         s = df_sub.groupby([grp_col, "文本", "日期", "月份"])["交易數量"].sum().reset_index()
-        s = s[s["交易數量"] > 0].rename(columns={grp_col: "文本", "文本": "種類"})
+        s = s[s["交易數量"] > 0]
+        if include_salesperson:
+            s = s.rename(columns={grp_col: "銷售員", "文本": "種類"})
+            s["所屬種類"] = s["銷售員"].map(_beta_salesperson_category)
+        else:
+            s = s.rename(columns={grp_col: "文本", "文本": "種類"})
         s["種類"] = pd.Categorical(s["種類"], categories=["其它門券", "巴士票", "船票", "高鐵", "機票", "酒店", "套票"], ordered=True)
-        return s.sort_values(["文本", "種類", "日期"])
+        sort_cols = ["銷售員", "種類", "日期"] if include_salesperson else ["文本", "種類", "日期"]
+        return s.sort_values(sort_cols)[columns]
 
     result_s10 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH)
-    result_s11 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)], COL_SALESPERSON)
+    result_s11 = gen_d_tkt(
+        df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)],
+        COL_SALESPERSON,
+        include_salesperson=beta_enabled,
+    )
 
     def gen_mny(df_sub, grp_col, type_col):
         if df_sub.empty:
@@ -1140,28 +1220,26 @@ def build_dashboard_data(
     df_tour_count_daily["月份"] = pd.to_datetime(df_tour_count_daily["日期"], errors="coerce").dt.strftime("%Y-%m")
 
     df_tour_amount = df_tour_matched.copy()
+    df_tour_amount = normalize_beta_salespeople(df_tour_amount)
     df_tour_amount["日期"] = df_tour_amount["統一日期"]
     df_tour_amount["文本"] = df_tour_amount.apply(lambda r: map_dest_category(r, cruise_depts), axis=1)
     df_tour_amount["月份"] = pd.to_datetime(df_tour_amount["日期"], errors="coerce").dt.strftime("%Y-%m")
     df_tour_amount[COL_MONEY] = pd.to_numeric(df_tour_amount[COL_MONEY], errors="coerce").fillna(0)
-    if beta_enabled:
-        beta_mask = df_tour_amount[COL_BRANCH].astype(str).str.strip().isin(beta_sales_points)
-        df_tour_amount.loc[beta_mask, COL_SALESPERSON] = (
-            df_tour_amount.loc[beta_mask, COL_SALESPERSON]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .replace({"": "未指定", "nan": "未指定", "None": "未指定"})
-        )
-
     def gen_route_type_daily(
         count_df: pd.DataFrame,
         amount_df: pd.DataFrame,
         grp_col: str,
         grp_name: str,
+        *,
+        include_salesperson_category=False,
     ) -> pd.DataFrame:
+        columns = [grp_name, "線路種類", "日子", "月份", "交易人數", "交易金額"]
+        if include_salesperson_category:
+            columns.insert(1, "所屬種類")
+            count_df = count_df.loc[count_df["日期"].notna()]
+            amount_df = amount_df.loc[amount_df["日期"].notna()]
         if count_df.empty and amount_df.empty:
-            return pd.DataFrame(columns=[grp_name, "線路種類", "日子", "月份", "交易人數", "交易金額"])
+            return pd.DataFrame(columns=columns)
 
         if count_df.empty:
             count_s = pd.DataFrame(columns=[grp_col, "文本", "日期", "月份", "交易人數"])
@@ -1190,7 +1268,9 @@ def build_dashboard_data(
         s["交易人數"] = pd.to_numeric(s.get("交易人數", 0), errors="coerce").fillna(0)
         s["交易金額"] = pd.to_numeric(s.get("交易金額", 0), errors="coerce").fillna(0)
         s = s[(s["交易人數"] != 0) | (s["交易金額"] != 0)]
-        return s[[grp_name, "線路種類", "日子", "月份", "交易人數", "交易金額"]].sort_values([grp_name, "線路種類", "日子"])
+        if include_salesperson_category:
+            s["所屬種類"] = s[grp_name].map(_beta_salesperson_category)
+        return s[columns].sort_values([grp_name, "線路種類", "日子"])
 
     result_s15 = gen_route_type_daily(
         df_tour_count_daily[df_tour_count_daily[COL_BRANCH].isin(target_branches_s3)],
@@ -1216,7 +1296,8 @@ def build_dashboard_data(
             )
         ],
         COL_SALESPERSON,
-        "專職銷售員",
+        "銷售員" if beta_enabled else "專職銷售員",
+        include_salesperson_category=beta_enabled,
     )
 
     def _project_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:

@@ -1,3 +1,4 @@
+import pickle
 from pathlib import Path
 
 import pandas as pd
@@ -91,6 +92,86 @@ def test_beta_only_exception_cache_round_trips_and_deduplicates_by_receipt(tmp_p
     assert len(tour) == 1
     assert float(tour.iloc[0]["收款原幣金額"]) == 200
     assert others.empty
+
+
+def test_build_beta_only_exception_frames_requires_allowed_prefix_and_sales_point(monkeypatch):
+    from backend.services import beta_only_exception_service
+
+    valid = _frame("1950506001", "市場及商務部-電子商務組")
+    wrong_prefix = _frame("1950404001", "網銷組 i6")
+    wrong_sales_point = _frame("1950506002", "銅鑼灣分社")
+    rows = pd.concat([valid, wrong_prefix, wrong_sales_point], ignore_index=True)
+
+    monkeypatch.setattr(
+        beta_only_exception_service,
+        "process_raw_files",
+        lambda *args, **kwargs: (rows, rows, pd.DataFrame(), {}),
+    )
+
+    tour, others = beta_only_exception_service.build_beta_only_exception_frames(
+        "main.xlsx", "tour.xlsx", [], {}, ["1950506"], []
+    )
+
+    assert list(tour["來源單據號"]) == ["1950506001"]
+    assert list(others["來源單據號"]) == ["1950506001"]
+
+
+def test_load_beta_only_exception_frames_filters_legacy_cache_rows(tmp_path):
+    from backend.services import beta_only_exception_service
+    from rules import BETA_ONLY_EXCEPTION_VERSION
+
+    cache_path = Path(tmp_path) / "legacy-beta-only-exception.pkl"
+    cached_rows = pd.concat(
+        [
+            _frame("1950506001", "市場及商務部-電子商務組"),
+            _frame("1950404001", "網銷組 i6"),
+            _frame("1950506002", "銅鑼灣分社"),
+        ],
+        ignore_index=True,
+    )
+    with cache_path.open("wb") as handle:
+        pickle.dump(
+            {"version": BETA_ONLY_EXCEPTION_VERSION, "tour": cached_rows, "others": cached_rows},
+            handle,
+        )
+
+    tour, others = beta_only_exception_service.load_beta_only_exception_frames(
+        cache_path=cache_path
+    )
+
+    assert list(tour["來源單據號"]) == ["1950506001"]
+    assert list(others["來源單據號"]) == ["1950506001"]
+
+
+def test_persist_beta_only_exception_frames_does_not_cache_non_exception_rows(tmp_path):
+    from backend.services import beta_only_exception_service
+
+    cache_path = Path(tmp_path) / "beta-only-exception.pkl"
+    tour_rows = pd.concat(
+        [
+            _frame("1950506001", "市場及商務部-電子商務組"),
+            _frame("1950404001", "網銷組 i6"),
+        ],
+        ignore_index=True,
+    )
+    others_rows = pd.concat(
+        [
+            _frame("1950506002", "營銷運營中心-同業銷售部"),
+            _frame("1950506003", "銅鑼灣分社"),
+        ],
+        ignore_index=True,
+    )
+
+    result = beta_only_exception_service.persist_beta_only_exception_frames(
+        tour_rows, others_rows, cache_path=cache_path
+    )
+
+    assert result["tourRows"] == 1
+    assert result["othersRows"] == 1
+    with cache_path.open("rb") as handle:
+        payload = pickle.load(handle)
+    assert list(payload["tour"]["來源單據號"]) == ["1950506001"]
+    assert list(payload["others"]["來源單據號"]) == ["1950506002"]
 
 
 def test_beta_export_can_include_beta_only_exception_without_changing_formal_inputs():
