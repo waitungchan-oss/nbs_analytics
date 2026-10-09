@@ -53,6 +53,24 @@ def branch_mapping():
     return {"I6": E_COMMERCE, "225": "營銷運營中心-專職銷售組"}
 
 
+def beta_category_frames():
+    salespeople = [
+        "011185 洪淑芬",
+        "CTSIT 杨慧如",
+        "debby 卢淑贞",
+        "New Ecommerce Rep",
+        " NaN ",
+    ]
+    tours = []
+    tickets = []
+    for index, salesperson in enumerate(salespeople, start=1):
+        tours.append(_row(f"BT{index:03}", E_COMMERCE, salesperson))
+        ticket = _row(f"BO{index:03}", E_COMMERCE, salesperson)
+        ticket["來源報表標籤"] = "門券"
+        tickets.append(ticket)
+    return pd.DataFrame(tours), pd.DataFrame(tickets)
+
+
 def test_beta_selects_sales_point_and_keeps_all_salespeople():
     import pipeline
 
@@ -74,6 +92,17 @@ def test_beta_does_not_use_department_as_fallback():
 
     assert "Wrong" not in set(beta_tour["銷售員"])
     assert len(beta_tour) == 2
+
+
+def test_beta_missing_salesperson_column_becomes_unspecified():
+    import pipeline
+
+    tours = tour_frame().drop(columns=["銷售員"])
+    beta_tour, _ = pipeline._select_sales_point_frames(
+        tours, empty_frame(), sales_point=E_COMMERCE
+    )
+
+    assert set(beta_tour["銷售員"]) == {"未指定"}
 
 
 def test_beta_does_not_filter_by_legacy_sales_rep_list():
@@ -115,10 +144,10 @@ def test_beta_workbook_replaces_specialist_sheets_with_all_ecommerce_salespeople
     )
 
     assert f"{BETA_LABEL}_經營統計" in facts
-    assert set(facts[f"{BETA_LABEL}_經營統計"]["種類"]) == {BETA_LABEL}
+    assert set(facts[f"{BETA_LABEL}_經營統計"]["種類"]) == {"客戶服務部"}
     assert set(facts[f"{BETA_LABEL}_經營統計"]["文本"]) >= {"Alice", "未指定"}
-    assert set(facts[f"{BETA_LABEL}_每天旅行團交易人數"]["文本"]) >= {"Alice", "未指定"}
-    assert "Legacy Rep" not in set(facts[f"{BETA_LABEL}_每天旅行團交易人數"]["文本"])
+    assert set(facts[f"{BETA_LABEL}_每天旅行團交易人數"]["銷售員"]) >= {"Alice", "未指定"}
+    assert "Legacy Rep" not in set(facts[f"{BETA_LABEL}_每天旅行團交易人數"]["銷售員"])
 
 
 def test_beta_combines_all_four_sales_points_into_six_named_sheets():
@@ -213,9 +242,172 @@ def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
         beta_sales_point=BETA_SALES_POINTS,
     )
 
-    sheet = f"{BETA_LABEL}_旅行團統計"
-    assert facts[sheet].empty
-    assert list(facts[sheet].columns) == ["文本", "天數", "日期", "月份", "交易人數"]
+    expected_schemas = {
+        f"{BETA_LABEL}_旅行團統計": [
+            "銷售員", "所屬種類", "文本", "天數", "日期", "月份", "交易人數"
+        ],
+        f"{BETA_LABEL}_票務總計": [
+            "銷售員", "所屬種類", "文本", "日期", "月份", "交易數量"
+        ],
+        f"{BETA_LABEL}_每天旅行團交易人數": [
+            "銷售員", "所屬種類", "日期", "月份", "旅行團交易人數", "郵輪交易人數"
+        ],
+        f"{BETA_LABEL}_每天票務交易數量": [
+            "銷售員", "所屬種類", "種類", "日期", "月份", "交易數量"
+        ],
+        f"{BETA_LABEL}_線路種類每天統計": [
+            "銷售員", "所屬種類", "線路種類", "日子", "月份", "交易人數", "交易金額"
+        ],
+    }
+    for sheet_name, columns in expected_schemas.items():
+        assert facts[sheet_name].empty
+        assert list(facts[sheet_name].columns) == columns
+
+
+def test_beta_market_summary_classifies_named_salespeople_and_defaults_others():
+    import pipeline
+
+    tours, tickets = beta_category_frames()
+    _, _, facts = pipeline.build_dashboard_data(
+        tours,
+        tickets,
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    summary = facts[f"{BETA_LABEL}_經營統計"]
+    categories = dict(zip(summary["文本"], summary["種類"]))
+    assert categories == {
+        "011185 洪淑芬": "商務同業組",
+        "CTSIT 杨慧如": "商務同業組",
+        "debby 卢淑贞": "商務同業組",
+        "New Ecommerce Rep": "客戶服務部",
+        "未指定": "客戶服務部",
+    }
+
+
+def test_beta_seller_normalization_does_not_change_matched_total_detail():
+    import pipeline
+
+    _, _, facts = pipeline.build_dashboard_data(
+        tour_frame(),
+        others_frame(),
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    total = facts["總表_多表匹配完成"]
+    blank_seller = total.loc[total["來源單據號"].eq("T002"), "銷售員"]
+    assert len(blank_seller) == 1
+    assert blank_seller.iloc[0] == ""
+
+
+def test_beta_detail_sheets_split_by_salesperson_and_reconcile_totals():
+    import pipeline
+
+    tours, tickets = beta_category_frames()
+    _, _, facts = pipeline.build_dashboard_data(
+        tours,
+        tickets,
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    expected_salespeople = {
+        "011185 洪淑芬",
+        "CTSIT 杨慧如",
+        "debby 卢淑贞",
+        "New Ecommerce Rep",
+        "未指定",
+    }
+    sheet_specs = {
+        f"{BETA_LABEL}_旅行團統計": ("交易人數", 10),
+        f"{BETA_LABEL}_票務總計": ("交易數量", 10),
+        f"{BETA_LABEL}_每天旅行團交易人數": ("旅行團交易人數", 10),
+        f"{BETA_LABEL}_每天票務交易數量": ("交易數量", 10),
+        f"{BETA_LABEL}_線路種類每天統計": ("交易人數", 10),
+    }
+    for sheet_name, (measure, expected_total) in sheet_specs.items():
+        sheet = facts[sheet_name]
+        assert {"銷售員", "所屬種類"} <= set(sheet.columns), sheet_name
+        assert set(sheet["銷售員"]) == expected_salespeople, sheet_name
+        assert int(sheet[measure].sum()) == expected_total, sheet_name
+        assert set(sheet["所屬種類"]) == {"商務同業組", "客戶服務部"}, sheet_name
+
+    assert "種類" in facts[f"{BETA_LABEL}_每天票務交易數量"].columns
+    assert set(facts[f"{BETA_LABEL}_每天票務交易數量"]["種類"]) == {"其它門券"}
+    assert int(facts[f"{BETA_LABEL}_線路種類每天統計"]["交易金額"].sum()) == 500
+
+
+def test_beta_tour_detail_sheets_exclude_rows_without_a_reportable_date():
+    import pipeline
+
+    tours = pd.DataFrame([_row("BT-NO-DATE", E_COMMERCE, "Alice")])
+    tickets = pd.DataFrame([_row("BO-NO-DATE", E_COMMERCE, "Alice")])
+    tickets["來源報表標籤"] = "門券"
+    for frame in (tours, tickets):
+        frame["統一日期"] = None
+        frame["交易時間"] = None
+    _, _, facts = pipeline.build_dashboard_data(
+        tours,
+        tickets,
+        branch_mapping(),
+        [],
+        [],
+        [],
+        make_workbook=False,
+        return_facts=True,
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    assert facts[f"{BETA_LABEL}_旅行團統計"].empty
+    assert facts[f"{BETA_LABEL}_每天旅行團交易人數"].empty
+    assert facts[f"{BETA_LABEL}_票務總計"].empty
+    assert facts[f"{BETA_LABEL}_每天票務交易數量"].empty
+    assert facts[f"{BETA_LABEL}_線路種類每天統計"].empty
+
+
+def test_beta_workbook_writes_salesperson_and_category_headers():
+    import pipeline
+
+    tours, tickets = beta_category_frames()
+    workbook_bytes, _, _ = pipeline.build_dashboard_data(
+        tours,
+        tickets,
+        branch_mapping(),
+        [],
+        [],
+        ["Legacy Rep"],
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    workbook = pd.ExcelFile(workbook_bytes)
+    expected_headers = {
+        f"{BETA_LABEL}_經營統計": {"文本", "種類"},
+        f"{BETA_LABEL}_旅行團統計": {"銷售員", "所屬種類"},
+        f"{BETA_LABEL}_票務總計": {"銷售員", "所屬種類"},
+        f"{BETA_LABEL}_每天旅行團交易人數": {"銷售員", "所屬種類"},
+        f"{BETA_LABEL}_每天票務交易數量": {"銷售員", "所屬種類", "種類"},
+        f"{BETA_LABEL}_線路種類每天統計": {"銷售員", "所屬種類"},
+    }
+    assert set(expected_headers) <= set(workbook.sheet_names)
+    for sheet_name, columns in expected_headers.items():
+        assert columns <= set(pd.read_excel(workbook, sheet_name=sheet_name, nrows=0).columns)
 
 
 def test_formal_dashboard_excludes_beta_sales_point_from_branch_aggregation():

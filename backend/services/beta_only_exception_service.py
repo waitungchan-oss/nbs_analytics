@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pipeline import COL_BRANCH, process_raw_files
+from pipeline import COL_BRANCH, COL_ORDER_ID, process_raw_files
 from rules import (
     BETA_ONLY_EXCEPTION_PREFIXES,
     BETA_ONLY_EXCEPTION_SALES_POINTS,
@@ -30,6 +30,20 @@ def _select_sales_points(frame: pd.DataFrame, sales_points) -> pd.DataFrame:
     targets = {str(value).strip() for value in sales_points if str(value).strip()}
     mask = frame[COL_BRANCH].astype(str).str.strip().isin(targets)
     return frame.loc[mask].copy()
+
+
+def _select_exception_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or COL_ORDER_ID not in frame.columns:
+        return frame.iloc[0:0].copy()
+    prefixes = tuple(
+        str(value).strip() for value in BETA_ONLY_EXCEPTION_PREFIXES if str(value).strip()
+    )
+    if not prefixes:
+        return frame.iloc[0:0].copy()
+    order_ids = frame[COL_ORDER_ID].fillna("").astype(str).str.strip()
+    return _select_sales_points(
+        frame.loc[order_ids.str.startswith(prefixes)], BETA_ONLY_EXCEPTION_SALES_POINTS
+    )
 
 
 def build_beta_only_exception_frames(
@@ -63,8 +77,8 @@ def build_beta_only_exception_frames(
         return_entity_audit=True,
     )
     return (
-        _select_sales_points(reopened_tour, BETA_ONLY_EXCEPTION_SALES_POINTS),
-        _select_sales_points(reopened_others, BETA_ONLY_EXCEPTION_SALES_POINTS),
+        _select_exception_rows(reopened_tour),
+        _select_exception_rows(reopened_others),
     )
 
 
@@ -103,8 +117,8 @@ def load_beta_only_exception_frames(
         tour = payload.get("tour")
         others = payload.get("others")
         return (
-            tour.copy() if isinstance(tour, pd.DataFrame) else pd.DataFrame(),
-            others.copy() if isinstance(others, pd.DataFrame) else pd.DataFrame(),
+            _select_exception_rows(tour) if isinstance(tour, pd.DataFrame) else pd.DataFrame(),
+            _select_exception_rows(others) if isinstance(others, pd.DataFrame) else pd.DataFrame(),
         )
     except Exception:
         return pd.DataFrame(), pd.DataFrame()
@@ -118,8 +132,8 @@ def persist_beta_only_exception_frames(
 ) -> dict:
     path = Path(cache_path) if cache_path is not None else _default_cache_path()
     existing_tour, existing_others = load_beta_only_exception_frames(cache_path=path)
-    merged_tour = _merge_frames(existing_tour, _select_sales_points(tour, BETA_ONLY_EXCEPTION_SALES_POINTS))
-    merged_others = _merge_frames(existing_others, _select_sales_points(others, BETA_ONLY_EXCEPTION_SALES_POINTS))
+    merged_tour = _merge_frames(existing_tour, _select_exception_rows(tour))
+    merged_others = _merge_frames(existing_others, _select_exception_rows(others))
     if merged_tour.empty and merged_others.empty:
         return {"status": "empty", "tourRows": 0, "othersRows": 0, "path": str(path)}
     path.parent.mkdir(parents=True, exist_ok=True)
