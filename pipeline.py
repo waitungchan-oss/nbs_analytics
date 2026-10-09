@@ -551,6 +551,7 @@ _BETA_BUSINESS_PEER_SALESPEOPLE = {
     "011185 洪淑芬",
     "ctsit 杨慧如",
     "debby 卢淑贞",
+    "004014 杨慧如",
 }
 _BETA_BUSINESS_PEER_SALESPEOPLE_CASEFOLD = {
     name.casefold() for name in _BETA_BUSINESS_PEER_SALESPEOPLE

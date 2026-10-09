@@ -58,6 +58,7 @@ def beta_category_frames():
         "011185 洪淑芬",
         "CTSIT 杨慧如",
         "debby 卢淑贞",
+        "004014 杨慧如",
         "New Ecommerce Rep",
         " NaN ",
     ]
@@ -286,6 +287,7 @@ def test_beta_market_summary_classifies_named_salespeople_and_defaults_others():
         "011185 洪淑芬": "商務同業組",
         "CTSIT 杨慧如": "商務同業組",
         "debby 卢淑贞": "商務同業組",
+        "004014 杨慧如": "商務同業組",
         "New Ecommerce Rep": "客戶服務部",
         "未指定": "客戶服務部",
     }
@@ -332,15 +334,16 @@ def test_beta_detail_sheets_split_by_salesperson_and_reconcile_totals():
         "011185 洪淑芬",
         "CTSIT 杨慧如",
         "debby 卢淑贞",
+        "004014 杨慧如",
         "New Ecommerce Rep",
         "未指定",
     }
     sheet_specs = {
-        f"{BETA_LABEL}_旅行團統計": ("交易人數", 10),
-        f"{BETA_LABEL}_票務總計": ("交易數量", 10),
-        f"{BETA_LABEL}_每天旅行團交易人數": ("旅行團交易人數", 10),
-        f"{BETA_LABEL}_每天票務交易數量": ("交易數量", 10),
-        f"{BETA_LABEL}_線路種類每天統計": ("交易人數", 10),
+        f"{BETA_LABEL}_旅行團統計": ("交易人數", 12),
+        f"{BETA_LABEL}_票務總計": ("交易數量", 12),
+        f"{BETA_LABEL}_每天旅行團交易人數": ("旅行團交易人數", 12),
+        f"{BETA_LABEL}_每天票務交易數量": ("交易數量", 12),
+        f"{BETA_LABEL}_線路種類每天統計": ("交易人數", 12),
     }
     for sheet_name, (measure, expected_total) in sheet_specs.items():
         sheet = facts[sheet_name]
@@ -348,10 +351,13 @@ def test_beta_detail_sheets_split_by_salesperson_and_reconcile_totals():
         assert set(sheet["銷售員"]) == expected_salespeople, sheet_name
         assert int(sheet[measure].sum()) == expected_total, sheet_name
         assert set(sheet["所屬種類"]) == {"商務同業組", "客戶服務部"}, sheet_name
+        assert set(
+            sheet.loc[sheet["銷售員"].eq("004014 杨慧如"), "所屬種類"]
+        ) == {"商務同業組"}, sheet_name
 
     assert "種類" in facts[f"{BETA_LABEL}_每天票務交易數量"].columns
     assert set(facts[f"{BETA_LABEL}_每天票務交易數量"]["種類"]) == {"其它門券"}
-    assert int(facts[f"{BETA_LABEL}_線路種類每天統計"]["交易金額"].sum()) == 500
+    assert int(facts[f"{BETA_LABEL}_線路種類每天統計"]["交易金額"].sum()) == 600
 
 
 def test_beta_tour_detail_sheets_exclude_rows_without_a_reportable_date():
