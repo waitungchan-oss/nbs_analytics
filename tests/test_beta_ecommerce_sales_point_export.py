@@ -439,7 +439,7 @@ def test_beta_export_has_distinct_variant_identity_and_artifacts():
 
     payload = app_workflows._compute_beta_export_workbooks(tour_frame(), others_frame())
 
-    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v3"
+    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v4"
     assert payload["sales_point_filter"] == list(BETA_SALES_POINTS)
     assert {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} <= set(payload)
     assert all(payload[key] for key in ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"))

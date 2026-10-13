@@ -36,6 +36,21 @@ DEFAULT_BRANCH_MAPPING = {
     "225": "營銷運營中心-專職銷售組",
 }
 
+# Reporting-only aliases: keep the source sales-point value in SQLite and
+# canonicalize these exact store labels only in derived report copies.
+BRANCH_NAME_ALIASES = {
+    "大埔門市": "大埔分社",
+    "太古門市": "太古分社",
+    "將軍澳門市": "將軍澳分社",
+    "屯門門市": "屯門市廣場分社",
+    "旺角銀行中心門市": "旺角銀行中心分社",
+    "沙田門市": "沙田分社",
+    "荃灣門市": "荃灣綠楊坊分社",
+    "西九龍門市": "西九龍站分社",
+    "觀塘門市": "觀塘分社",
+    "銅鑼灣門市": "銅鑼灣分社",
+}
+
 DEFAULT_RULES = {
     "BRANCH_MAPPING": DEFAULT_BRANCH_MAPPING,
     "BRANCH_REASSIGNMENT_OVERRIDES": [

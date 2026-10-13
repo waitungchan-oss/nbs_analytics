@@ -187,6 +187,6 @@ def test_beta_export_can_include_beta_only_exception_without_changing_formal_inp
         beta_exception_others=exception_others,
     )
 
-    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v3"
+    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v4"
     assert payload["beta_exception_rows"] == {"tour": 0, "others": 1}
     assert payload["ex_no_writeoff_refund_transfer_beta"]
