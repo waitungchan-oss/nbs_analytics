@@ -88,10 +88,10 @@ if st.session_state.get("SUBTABLE_BRANCH_REPAIR_RULE_VERSION") != 1:
     st.session_state["PROCESSED_DATA_CACHE"] = None
     st.session_state["DB_LOADED_FLAG"] = False
     st.session_state["SUBTABLE_BRANCH_REPAIR_RULE_VERSION"] = 1
-if st.session_state.get("EXPORT_RULE_VERSION") != 5:
+if st.session_state.get("EXPORT_RULE_VERSION") != 6:
     st.session_state["PROCESSED_DATA_CACHE"] = None
     st.session_state["DB_LOADED_FLAG"] = False
-    st.session_state["EXPORT_RULE_VERSION"] = 5
+    st.session_state["EXPORT_RULE_VERSION"] = 6
 if st.session_state.get("REVENUE_SCOPE_RULE_VERSION") != 1:
     st.session_state["PROCESSED_DATA_CACHE"] = None
     st.session_state["DB_LOADED_FLAG"] = False
@@ -106,7 +106,7 @@ REVENUE_SCOPE_CAPTION = "收入口徑：不含收款類型「掛賬核銷」；�
 REVENUE_SCOPE_EXCLUDED_RECEIPT_TYPES = ("掛賬核銷",)
 REVENUE_SCOPE_EXCLUDED_PAYMENT_METHODS = ("TT 退款轉團款",)
 AI_CACHE_VERSION = "daily-macro-normal-tight-v1"
-EXPORT_CACHE_VERSION = "export-lazy-v3"
+EXPORT_CACHE_VERSION = "export-lazy-v4"
 AI_CACHE_DIR = Path(__file__).resolve().parent / ".nbs_runtime_cache"
 
 from app_styles import apply_global_styles

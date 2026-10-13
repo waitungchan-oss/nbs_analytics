@@ -122,10 +122,10 @@ if st.session_state.get('SUBTABLE_BRANCH_REPAIR_RULE_VERSION') != 1:
     st.session_state['PROCESSED_DATA_CACHE'] = None
     st.session_state['DB_LOADED_FLAG'] = False
     st.session_state['SUBTABLE_BRANCH_REPAIR_RULE_VERSION'] = 1
-if st.session_state.get('EXPORT_RULE_VERSION') != 5:
+if st.session_state.get('EXPORT_RULE_VERSION') != 6:
     st.session_state['PROCESSED_DATA_CACHE'] = None
     st.session_state['DB_LOADED_FLAG'] = False
-    st.session_state['EXPORT_RULE_VERSION'] = 5
+    st.session_state['EXPORT_RULE_VERSION'] = 6
 if st.session_state.get('REVENUE_SCOPE_RULE_VERSION') != 1:
     st.session_state['PROCESSED_DATA_CACHE'] = None
     st.session_state['DB_LOADED_FLAG'] = False
@@ -140,9 +140,9 @@ REVENUE_SCOPE_CAPTION = '收入口徑：不含收款類型「掛賬核銷」；�
 REVENUE_SCOPE_EXCLUDED_RECEIPT_TYPES = ('掛賬核銷',)
 REVENUE_SCOPE_EXCLUDED_PAYMENT_METHODS = ('TT 退款轉團款',)
 AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
-EXPORT_CACHE_VERSION = 'export-lazy-v3'
+EXPORT_CACHE_VERSION = 'export-lazy-v4'
 EXPORT_FAST_PATH_MODE = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", "shadow").strip().lower()
-OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v1'
+OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v2'
 AI_CACHE_DIR = Path(os.environ.get("NBS_ANALYTICS_CACHE_DIR", str(Path(__file__).resolve().parent / ".nbs_runtime_cache")))
 EXPORT_FAST_CACHE_DIR = AI_CACHE_DIR / "export_fast"
 PERSISTENT_REPAIR_STATE_PATH = Path(__file__).resolve().parent / '.nbs_runtime' / 'persistent_repair_state.json'
@@ -1151,7 +1151,7 @@ def _compute_beta_export_workbooks(
     source_payload += pd.util.hash_pandas_object(beta_others, index=True).values.tobytes()
     source_fingerprint = hashlib.sha256(source_payload).hexdigest()
     rules_fingerprint = _file_content_hash(CONFIG_FILE)
-    variant = "beta_market_ecommerce_peer_sales_points_v3"
+    variant = "beta_market_ecommerce_peer_sales_points_v4"
     return {
         **{
             key: _buffer_to_bytes(value[0] if isinstance(value, tuple) else value)

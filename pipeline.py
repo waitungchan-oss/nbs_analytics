@@ -39,8 +39,10 @@ from config import (
     BETA_ONLY_SALES_POINTS,
     TARGET_DEPT_FOR_REP,
 )
+from rules import BRANCH_NAME_ALIASES
 
 COL_SUBTABLE_BRANCH = "副表_銷售點"
+_SOURCE_BRANCH_FOR_EXPORT = "_source_branch_for_export"
 _EXCEL_DATETIME_FORMAT = "yyyy-mm-dd hh:mm:ss"
 
 
@@ -392,6 +394,25 @@ def apply_subtable_branch_override(
 
 def _normalize_branch_value(value: Any) -> str:
     return str(value or "").replace("\u3000", " ").strip()
+
+
+def apply_branch_name_aliases(
+    df: pd.DataFrame,
+    aliases: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Canonicalize confirmed store labels on a derived reporting copy only."""
+    result = df.copy(deep=True)
+    mapping = BRANCH_NAME_ALIASES if aliases is None else aliases
+    if result.empty or COL_BRANCH not in result.columns or not mapping:
+        return result
+
+    source = result[COL_BRANCH]
+    normalized = source.map(
+        lambda value: "" if pd.isna(value) else str(value).replace("\u3000", " ").strip()
+    )
+    canonical = normalized.map(mapping)
+    result.loc[canonical.notna(), COL_BRANCH] = canonical.loc[canonical.notna()]
+    return result
 
 
 def _reassignment_period_mask(frame: pd.DataFrame, *, month: str = "", year: str = "") -> pd.Series:
@@ -836,6 +857,13 @@ def build_dashboard_data(
         df_tour_matched["統一日期"] = pd.to_datetime(df_tour_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
         df_others_matched["統一日期"] = pd.to_datetime(df_others_matched["統一日期"], errors="coerce").dt.strftime("%Y-%m-%d")
 
+    if COL_BRANCH in df_tour_matched.columns:
+        df_tour_matched[_SOURCE_BRANCH_FOR_EXPORT] = df_tour_matched[COL_BRANCH]
+    if COL_BRANCH in df_others_matched.columns:
+        df_others_matched[_SOURCE_BRANCH_FOR_EXPORT] = df_others_matched[COL_BRANCH]
+    df_tour_matched = apply_branch_name_aliases(df_tour_matched)
+    df_others_matched = apply_branch_name_aliases(df_others_matched)
+
     all_days = sorted(list(set(df_tour_matched["統一日期"].dropna()) | set(df_others_matched["統一日期"].dropna())))
     branch_list = [
         f"{c}{n}"
@@ -1182,11 +1210,7 @@ def build_dashboard_data(
         if df_sub.empty:
             return pd.DataFrame(columns=[grp_col, type_col, "天數", "日期", "月份", "交易金額"])
         df_m = df_sub.copy()
-        df_m["日期"] = (
-            _format_date_with_fallback(df_m[COL_TRANS_TIME], df_m["統一日期"])
-            if COL_TRANS_TIME in df_m.columns
-            else df_m["統一日期"]
-        )
+        df_m["日期"] = df_m["統一日期"]
         df_m["月份"] = pd.to_datetime(df_m["日期"], errors="coerce").dt.strftime("%Y-%m")
         df_m["天數_num"] = pd.to_numeric(df_m[COL_DAYS], errors="coerce").fillna(0)
         df_m["天數"] = df_m["天數_num"].apply(lambda x: str(int(x)) if x == int(x) else str(x))
@@ -1389,6 +1413,9 @@ def build_dashboard_data(
 
     def _build_export_df(df: pd.DataFrame) -> pd.DataFrame:
         source = df.copy()
+        if _SOURCE_BRANCH_FOR_EXPORT in source.columns:
+            source[COL_BRANCH] = source[_SOURCE_BRANCH_FOR_EXPORT]
+            source.drop(columns=[_SOURCE_BRANCH_FOR_EXPORT], inplace=True)
         if "來源單據號" in source.columns and "收款單號" not in source.columns:
             source["收款單號"] = source["來源單據號"]
         if "收款状态" in source.columns and "收款單狀態" not in source.columns:

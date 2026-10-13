@@ -9,7 +9,8 @@ from tempfile import NamedTemporaryFile
 from threading import Lock
 
 from database import load_all_data_from_db
-from pipeline import build_dashboard_data_excluding_receipt_types
+from pipeline import apply_branch_name_aliases, build_dashboard_data_excluding_receipt_types
+from rules import BRANCH_NAME_ALIASES
 from backend.services.dashboard_analytics_service import build_analytics_from_facts
 from backend.services.revenue_scope_service import build_revenue_scope_frames
 
@@ -72,6 +73,7 @@ def build_facts_cache_key(
         "targetBranches": list(target_branches_s3),
         "cruiseDepartments": list(cruise_depts),
         "salesReps": list(sales_rep_list),
+        "branchNameAliases": BRANCH_NAME_ALIASES,
     }
     encoded = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -217,6 +219,8 @@ def build_dashboard_facts(
         explicit_db_path = Path(db_path)
         raw_tour, raw_others = load_all_data_from_db(db_path=explicit_db_path)
         analysis_tour, analysis_others, scope_audit = build_revenue_scope_frames(raw_tour, raw_others)
+        analysis_tour = apply_branch_name_aliases(analysis_tour)
+        analysis_others = apply_branch_name_aliases(analysis_others)
         _, branch_facts, specialist_facts = build_dashboard_data_excluding_receipt_types(
             raw_tour,
             raw_others,

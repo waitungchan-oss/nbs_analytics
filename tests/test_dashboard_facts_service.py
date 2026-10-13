@@ -91,6 +91,23 @@ def test_build_dashboard_facts_returns_scope_and_summary_frames(monkeypatch, tmp
     assert payload["factsCacheStatus"] == "rebuilt"
 
 
+def test_dashboard_facts_canonicalize_analysis_copy_but_preserve_raw_sales_point(monkeypatch, tmp_path):
+    tour = _tour_frame()
+    tour.loc[0, "銷售點"] = "大埔門市"
+    source = tour.copy(deep=True)
+    monkeypatch.setattr(
+        service,
+        "load_all_data_from_db",
+        lambda *, db_path: (tour, _others_frame()),
+    )
+
+    payload = service.build_dashboard_facts(generation_token="1:alias", **_kwargs(tmp_path))
+
+    assert payload["rawTour"].loc[0, "銷售點"] == "大埔門市"
+    assert payload["analysisTour"].loc[0, "銷售點"] == "大埔分社"
+    pd.testing.assert_frame_equal(tour, source)
+
+
 def test_generation_token_changes_cache_key_and_forces_rebuild(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
@@ -113,6 +130,15 @@ def test_cache_key_changes_when_business_rules_change(tmp_path):
     second = service.build_facts_cache_key("1:a", {"01": "太古分社"}, [], [], [])
 
     assert first != second
+
+
+def test_cache_key_includes_permanent_branch_alias_rules(monkeypatch):
+    source = service.build_facts_cache_key("1:a", {"01": "銅鑼灣分社"}, [], [], [])
+    monkeypatch.setattr(service, "BRANCH_NAME_ALIASES", {"測試門市": "測試分社"})
+
+    changed = service.build_facts_cache_key("1:a", {"01": "銅鑼灣分社"}, [], [], [])
+
+    assert source != changed
 
 
 def test_dashboard_read_model_reuses_cached_analytics(monkeypatch, tmp_path):
