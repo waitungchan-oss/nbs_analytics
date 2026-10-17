@@ -11,6 +11,8 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 
 VERIFICATION_PROFILE_SCHEMA = "verification-runtime-profile-v1"
+VERIFICATION_PROFILE_SCHEMA_V2 = "verification-runtime-profile-v2"
+VERIFICATION_SOURCE_BINDING_SCHEMA = "verification-source-binding-v1"
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
@@ -27,6 +29,18 @@ _TOP_LEVEL_KEYS = frozenset(
         "services",
         "createdAt",
         "profileFingerprint",
+    }
+)
+_TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS | {"sourceBinding"}
+_SOURCE_BINDING_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "sourceRole",
+        "repositoryFingerprint",
+        "sourceHead",
+        "databaseFingerprint",
+        "generationFingerprint",
+        "baselineRegistryFingerprint",
     }
 )
 
@@ -74,6 +88,47 @@ def _runtime_dir_ref(value: str, label: str, profile_id: str) -> str:
     if value != f"verification/{profile_id}" and not value.startswith(f"verification/{profile_id}/"):
         raise VerificationRuntimeProfileError(f"{label} must be scoped to profileId")
     return value
+
+
+@dataclass(frozen=True)
+class ProfileSourceBinding:
+    source_role: str
+    repository_fingerprint: str
+    source_head: str
+    database_fingerprint: str
+    generation_fingerprint: str
+    baseline_registry_fingerprint: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ProfileSourceBinding":
+        if not isinstance(value, Mapping):
+            raise VerificationRuntimeProfileError("sourceBinding must be an object")
+        _exact_keys(value, _SOURCE_BINDING_KEYS, "sourceBinding")
+        if value["schemaVersion"] != VERIFICATION_SOURCE_BINDING_SCHEMA:
+            raise VerificationRuntimeProfileError("sourceBinding schemaVersion is invalid")
+        if value["sourceRole"] != "primary-checkout":
+            raise VerificationRuntimeProfileError("sourceBinding sourceRole is invalid")
+        return cls(
+            source_role="primary-checkout",
+            repository_fingerprint=_fingerprint(value["repositoryFingerprint"], "sourceBinding.repositoryFingerprint"),
+            source_head=_string(value["sourceHead"], "sourceBinding.sourceHead", _HEX40),
+            database_fingerprint=_fingerprint(value["databaseFingerprint"], "sourceBinding.databaseFingerprint"),
+            generation_fingerprint=_fingerprint(value["generationFingerprint"], "sourceBinding.generationFingerprint"),
+            baseline_registry_fingerprint=_fingerprint(
+                value["baselineRegistryFingerprint"], "sourceBinding.baselineRegistryFingerprint",
+            ),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "schemaVersion": VERIFICATION_SOURCE_BINDING_SCHEMA,
+            "sourceRole": self.source_role,
+            "repositoryFingerprint": self.repository_fingerprint,
+            "sourceHead": self.source_head,
+            "databaseFingerprint": self.database_fingerprint,
+            "generationFingerprint": self.generation_fingerprint,
+            "baselineRegistryFingerprint": self.baseline_registry_fingerprint,
+        }
 
 
 @dataclass(frozen=True)
@@ -226,6 +281,7 @@ class VerificationRuntimeProfile:
     services: ProfileServices
     created_at: str
     profile_fingerprint: str
+    source_binding: ProfileSourceBinding | None = None
 
     @classmethod
     def from_dict(
@@ -237,8 +293,14 @@ class VerificationRuntimeProfile:
     ) -> "VerificationRuntimeProfile":
         if not isinstance(payload, Mapping):
             raise VerificationRuntimeProfileError("profile must be an object")
-        _exact_keys(payload, _TOP_LEVEL_KEYS, "profile")
-        if payload["schemaVersion"] != VERIFICATION_PROFILE_SCHEMA:
+        schema = payload.get("schemaVersion")
+        if schema == VERIFICATION_PROFILE_SCHEMA:
+            _exact_keys(payload, _TOP_LEVEL_KEYS, "profile")
+            source_binding = None
+        elif schema == VERIFICATION_PROFILE_SCHEMA_V2:
+            _exact_keys(payload, _TOP_LEVEL_KEYS_V2, "profile")
+            source_binding = ProfileSourceBinding.from_dict(payload["sourceBinding"])
+        else:
             raise VerificationRuntimeProfileError("schemaVersion is invalid")
         profile_id = _string(payload["profileId"], "profileId", _ID)
         project_id = _string(payload["projectId"], "projectId", _ID)
@@ -259,7 +321,16 @@ class VerificationRuntimeProfile:
             ProfileServices.from_dict(payload["services"]),
             _string(payload["createdAt"], "createdAt"),
             _fingerprint(payload["profileFingerprint"], "profileFingerprint"),
+            source_binding,
         )
+        if profile.source_binding is not None:
+            binding = profile.source_binding
+            if binding.database_fingerprint != profile.database.source_fingerprint:
+                raise VerificationRuntimeProfileError("sourceBinding databaseFingerprint mismatch")
+            if binding.generation_fingerprint != profile.runtime.generation_fingerprint:
+                raise VerificationRuntimeProfileError("sourceBinding generationFingerprint mismatch")
+            if binding.baseline_registry_fingerprint != profile.baseline.registry_fingerprint:
+                raise VerificationRuntimeProfileError("sourceBinding baselineRegistryFingerprint mismatch")
         if profile.fingerprint() != profile.profile_fingerprint:
             raise VerificationRuntimeProfileError("profile fingerprint does not match profile content")
         return profile
@@ -288,8 +359,10 @@ class VerificationRuntimeProfile:
         )
 
     def _unsigned_dict(self) -> dict[str, object]:
-        return {
-            "schemaVersion": VERIFICATION_PROFILE_SCHEMA,
+        payload: dict[str, object] = {
+            "schemaVersion": (
+                VERIFICATION_PROFILE_SCHEMA_V2 if self.source_binding is not None else VERIFICATION_PROFILE_SCHEMA
+            ),
             "profileId": self.profile_id,
             "projectId": self.project_id,
             "gitHead": self.git_head,
@@ -300,6 +373,9 @@ class VerificationRuntimeProfile:
             "services": self.services.to_dict(),
             "createdAt": self.created_at,
         }
+        if self.source_binding is not None:
+            payload["sourceBinding"] = self.source_binding.to_dict()
+        return payload
 
     def fingerprint(self) -> str:
         return canonical_fingerprint(self._unsigned_dict())

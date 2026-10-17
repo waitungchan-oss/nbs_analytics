@@ -58,7 +58,7 @@ def test_verification_writer_preserves_required_review_provenance_commands(tmp_p
     commands = [
         _command(label="review-head-fingerprint", argv=["git", "rev-parse", "HEAD"], stdoutTail="a" * 40),
         _command(label="review-brief-fingerprint", argv=["shasum", "-a", "256", "docs/brief.md"], stdoutTail="b" * 64),
-        _command(label="review-worktree-fingerprint", argv=["sh", "-c", "git status --porcelain --untracked-files=all -- . ':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256"], stdoutTail="c" * 64),
+        _command(label="review-worktree-fingerprint", argv=["sh", "-c", "git status --porcelain=v1 --untracked-files=all --no-renames -z -- . ':(exclude,icase,glob)**/Summay/**' ':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256"], stdoutTail="c" * 64),
     ]
 
     output = write_verification_v1(commands, tmp_path / "verification.json")

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from backend.agents.evidence_models import canonical_fingerprint, load_json_config
 from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
+from backend.agents.safe_repo_file import open_repo_file_nofollow
 
 
 _CONTRACT_KEYS = {
@@ -15,7 +19,7 @@ _CONTRACT_KEYS = {
 }
 _OPTIONAL_CONTRACT_KEYS = {
     "taskType", "redCommands", "greenCommands", "approvedTestBehaviorChanges",
-    "memoryContextAllowed", "expectedMemoryEvidenceFingerprint",
+    "memoryContextAllowed", "expectedMemoryEvidenceFingerprint", "carryForwardFiles",
 }
 _TASK_TYPES = {"behavior", "refactor", "test", "documentation", "configuration"}
 _CONTRACT_SCHEMA = "implementation-task-v1"
@@ -44,6 +48,58 @@ def _require_positive_int(payload: dict[str, Any], key: str) -> int:
 
 
 @dataclass(frozen=True)
+class CarryForwardFile:
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        parsed = PurePosixPath(self.path) if isinstance(self.path, str) else None
+        if (
+            parsed is None or not self.path or "\\" in self.path or "\x00" in self.path
+            or parsed.is_absolute() or str(parsed) != self.path
+            or any(part in {"", ".", ".."} for part in parsed.parts)
+        ):
+            raise ValueError("carryForwardFiles path is invalid")
+        if (
+            not isinstance(self.sha256, str) or len(self.sha256) != 64
+            or any(char not in "0123456789abcdef" for char in self.sha256)
+        ):
+            raise ValueError("carryForwardFiles sha256 is invalid")
+
+    @classmethod
+    def from_dict(cls, payload: object) -> "CarryForwardFile":
+        if not isinstance(payload, dict) or set(payload) != {"path", "sha256"}:
+            raise ValueError("carryForwardFiles entry schema is invalid")
+        try:
+            return cls(path=payload["path"], sha256=payload["sha256"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"carryForwardFiles entry is invalid: {exc}") from exc
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "sha256": self.sha256}
+
+
+def _require_carry_forward_files(payload: dict[str, Any]) -> tuple[CarryForwardFile, ...]:
+    raw = payload.get("carryForwardFiles", [])
+    if not isinstance(raw, list):
+        raise ValueError("carryForwardFiles must be a list")
+    entries = tuple(CarryForwardFile.from_dict(item) for item in raw)
+    if len(entries) > 50:
+        raise ValueError("carryForwardFiles exceeds the bounded entry limit")
+    paths = [item.path for item in entries]
+    if len(paths) != len(set(paths)):
+        raise ValueError("carryForwardFiles contains duplicate paths")
+    write_paths = payload.get("allowedWritePaths", [])
+    for entry in entries:
+        entry_parts = PurePosixPath(entry.path).parts
+        for write_path in write_paths:
+            write_parts = PurePosixPath(write_path).parts
+            if entry_parts[:len(write_parts)] == write_parts or write_parts[:len(entry_parts)] == entry_parts:
+                raise ValueError("carryForwardFiles must not overlap allowedWritePaths")
+    return entries
+
+
+@dataclass(frozen=True)
 class ImplementationTaskContract:
     schema_version: str
     task_id: str
@@ -64,6 +120,7 @@ class ImplementationTaskContract:
     approved_test_behavior_changes: tuple[str, ...] = ()
     memory_context_allowed: bool = False
     expected_memory_evidence_fingerprint: str | None = None
+    carry_forward_files: tuple[CarryForwardFile, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version != _CONTRACT_SCHEMA:
@@ -100,6 +157,15 @@ class ImplementationTaskContract:
             raise ValueError("expectedMemoryEvidenceFingerprint is invalid")
         if not self.memory_context_allowed and self.expected_memory_evidence_fingerprint is not None:
             raise ValueError("expectedMemoryEvidenceFingerprint requires memoryContextAllowed")
+        paths = [item.path for item in self.carry_forward_files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("carryForwardFiles contains duplicate paths")
+        for entry in self.carry_forward_files:
+            entry_parts = PurePosixPath(entry.path).parts
+            for write_path in self.allowed_write_paths:
+                write_parts = PurePosixPath(write_path).parts
+                if entry_parts[:len(write_parts)] == write_parts or write_parts[:len(entry_parts)] == entry_parts:
+                    raise ValueError("carryForwardFiles must not overlap allowedWritePaths")
         for key, value in (
             ("maxChangedFiles", self.max_changed_files),
             ("maxDiffLines", self.max_diff_lines),
@@ -140,6 +206,7 @@ class ImplementationTaskContract:
             ),
             memory_context_allowed=payload.get("memoryContextAllowed", False),
             expected_memory_evidence_fingerprint=payload.get("expectedMemoryEvidenceFingerprint"),
+            carry_forward_files=_require_carry_forward_files(payload),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,6 +232,9 @@ class ImplementationTaskContract:
                 "memoryContextAllowed": True,
                 "expectedMemoryEvidenceFingerprint": self.expected_memory_evidence_fingerprint,
             } if self.memory_context_allowed else {}),
+            **({
+                "carryForwardFiles": [item.to_dict() for item in self.carry_forward_files],
+            } if self.carry_forward_files else {}),
         }
 
     @property
@@ -269,3 +339,82 @@ class ImplementationRunReport:
 
 def load_implementation_policy(project_root: Path) -> dict[str, Any]:
     return load_json_config(project_root, "agent_config/implementation_policies.json")
+
+
+def validate_carry_forward_approval(
+    contract: ImplementationTaskContract,
+    *,
+    project_root: Path,
+    brief_path: str,
+    expected_brief_fingerprint: str,
+) -> None:
+    """Bind hash-pinned Review omissions to the exact source-sealed brief manifest."""
+    if not contract.carry_forward_files:
+        return
+    if contract.plan_path != brief_path:
+        raise ValueError("carry-forward approval is not bound to the sealed brief path")
+    root = Path(project_root).resolve()
+    relative = PurePosixPath(contract.plan_path)
+    if (
+        relative.is_absolute()
+        or "\\" in contract.plan_path
+        or "\x00" in contract.plan_path
+        or str(relative) != contract.plan_path
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("carry-forward approval brief path is unsafe")
+    try:
+        with open_repo_file_nofollow(root, contract.plan_path) as descriptor:
+            before = os.fstat(descriptor)
+            chunks = []
+            size = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            after = os.fstat(descriptor)
+            identity_before = (
+                before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+                before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+            )
+            identity_after = (
+                after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+            )
+            if identity_before != identity_after or size != before.st_size:
+                raise ValueError("carry-forward approval brief changed while being read")
+            raw = b"".join(chunks)
+    except (OSError, ValueError) as exc:
+        raise ValueError("carry-forward approval brief is unavailable or unsafe") from exc
+    actual_fingerprint = hashlib.sha256(raw).hexdigest()
+    if (
+        actual_fingerprint != contract.plan_fingerprint
+        or actual_fingerprint != expected_brief_fingerprint
+    ):
+        raise ValueError("carry-forward approval brief fingerprint does not match the source seal")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("carry-forward approval brief is not UTF-8") from exc
+    start_marker = "<!-- review-carry-forward-v1:start -->"
+    end_marker = "<!-- review-carry-forward-v1:end -->"
+    if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+        raise ValueError("carry-forward approval manifest markers are missing or duplicated")
+    manifest_text = text.split(start_marker, 1)[1].split(end_marker, 1)[0].strip()
+    if manifest_text.startswith("```json") and manifest_text.endswith("```"):
+        manifest_text = manifest_text[len("```json"): -len("```")].strip()
+    try:
+        manifest = json.loads(manifest_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("carry-forward approval manifest is malformed") from exc
+    if not isinstance(manifest, dict) or set(manifest) != {"schemaVersion", "files"}:
+        raise ValueError("carry-forward approval manifest schema is invalid")
+    if manifest["schemaVersion"] != "review-carry-forward-v1" or not isinstance(manifest["files"], list):
+        raise ValueError("carry-forward approval manifest schema is invalid")
+    approved = tuple(CarryForwardFile.from_dict(item) for item in manifest["files"])
+    if tuple(item.to_dict() for item in approved) != tuple(
+        item.to_dict() for item in contract.carry_forward_files
+    ):
+        raise ValueError("carry-forward approval list does not match the sealed brief")

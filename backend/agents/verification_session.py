@@ -32,7 +32,12 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 
 SESSION_SCHEMA_VERSION = "verification-session-v1"
-SOURCE_PROBE_VERSION = "verification-source-probe-v1"
+LEGACY_SOURCE_PROBE_VERSION = "verification-source-probe-v1"
+SOURCE_PROBE_VERSION = "verification-source-probe-v2"
+SUPPORTED_SOURCE_PROBE_VERSIONS = frozenset({
+    LEGACY_SOURCE_PROBE_VERSION,
+    SOURCE_PROBE_VERSION,
+})
 
 SESSION_KEYS = {
     "schemaVersion", "sessionId", "status", "projectId", "baseSha", "headSha",
@@ -147,9 +152,9 @@ class VerificationSession:
         _require_rfc3339(self.created_at, "createdAt")
         if not isinstance(self.gates, dict):
             raise ValueError("gates must be an object")
-        if self.gates.get("sourceProbeVersion") != SOURCE_PROBE_VERSION:
+        if self.gates.get("sourceProbeVersion") not in SUPPORTED_SOURCE_PROBE_VERSIONS:
             raise ValueError(
-                "gates.sourceProbeVersion must be the supported source probe version"
+                "gates.sourceProbeVersion must be a supported source probe version"
             )
 
     @classmethod
@@ -173,7 +178,7 @@ class VerificationSession:
         """Build a sealed session from the approved source seal inputs."""
         session_gates = dict(gates or {})
         session_gates.setdefault("sourceProbeVersion", SOURCE_PROBE_VERSION)
-        if session_gates["sourceProbeVersion"] != SOURCE_PROBE_VERSION:
+        if session_gates["sourceProbeVersion"] not in SUPPORTED_SOURCE_PROBE_VERSIONS:
             raise ValueError("gates.sourceProbeVersion is unsupported")
         return cls(
             schema_version=SESSION_SCHEMA_VERSION,

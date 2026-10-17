@@ -199,7 +199,25 @@ def test_session_assert_fresh_rejects_changed_source_probe_version():
             diff_fingerprint=session.diff_fingerprint,
             contract_fingerprint=session.contract_fingerprint,
             policy_fingerprint=session.policy_fingerprint,
-            source_probe_version="verification-source-probe-v2",
+            source_probe_version="verification-source-probe-v1",
+        )
+
+
+def test_historical_v1_session_remains_readable_but_is_stale_under_v2_probe():
+    historical = _session().to_dict()
+    historical["gates"]["sourceProbeVersion"] = "verification-source-probe-v1"
+    session = VerificationSession.from_dict(historical)
+
+    assert session.gates["sourceProbeVersion"] == "verification-source-probe-v1"
+    with pytest.raises(StaleVerificationSession, match="sourceProbeVersion"):
+        session.assert_fresh(
+            head_sha=session.head_sha,
+            brief_fingerprint=session.brief_fingerprint,
+            worktree_fingerprint=session.worktree_fingerprint,
+            diff_fingerprint=session.diff_fingerprint,
+            contract_fingerprint=session.contract_fingerprint,
+            policy_fingerprint=session.policy_fingerprint,
+            source_probe_version=SOURCE_PROBE_VERSION,
         )
 
 

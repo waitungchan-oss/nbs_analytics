@@ -182,6 +182,14 @@ Strict Review 只在一份已 seal 的 `verification-session-v1` 內執行。Rev
 - runner capability receipt（static + live turn）；
 - optional Memory Hub observation（non-authoritative，見下）。
 
+`implementation-task-v1` 可選帶有 `carryForwardFiles`，每筆只含 repo-relative
+`path` 與 lowercase SHA-256。Collector 只接受仍為 dirty tracked、內容雜湊相符、
+不與 `allowedWritePaths` 重疊的檔案；並在收集前後重驗雜湊。這些檔案只從
+task-attribution patches 排除，仍包含於完整 source seal；Review evidence 會保留
+path/hash 清單，且以該清單完成 dirty-file attribution。它不等於 `preserve-dirty-path`，
+不能用來略過 untracked 檔案、process artifacts 或雜湊不符內容，也不能省略 full
+source/worktree fingerprint。
+
 Review 的 code-level `pass` 只需要上述 changed-surface targeted evidence、
 compile/static evidence 與 requirement coverage；它**不要求 full pytest 或
 Hermes**（does not require full pytest or Hermes）作為自身 PASS 的前置條件。

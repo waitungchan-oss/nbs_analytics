@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -11,13 +14,21 @@ from types import MappingProxyType
 from typing import Mapping
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.repository_scope import repository_git_pathspecs
+from backend.agents.safe_repo_file import open_repo_file_nofollow
 from backend.services.verification_runtime_paths import VerificationRuntimePaths
-from backend.services.verification_runtime_profile import VerificationRuntimeProfile
+from backend.services.verification_runtime_profile import (
+    ProfileSourceBinding,
+    VerificationRuntimeProfile,
+)
 
 VERIFICATION_ACCEPTANCE_SCHEMA = "verification-profile-acceptance-v1"
+VERIFICATION_ACCEPTANCE_SCHEMA_V2 = "verification-profile-acceptance-v2"
+NBS_PROJECT_ID = "nbs_analytics"
 DEFAULT_MAX_PROFILE_AGE = timedelta(hours=24)
 _GENERATION_MAX_BYTES = 16 * 1024
 _HANDOFF_CONSUMERS = frozenset({"review", "hermes"})
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class VerificationProfileAcceptanceError(ValueError):
@@ -30,6 +41,255 @@ class ServiceIdentityEvidence:
 
     available: bool
     detail: str = ""
+
+
+class SourceBindingInspectionError(ValueError):
+    """A bounded, path-free source binding validation failure."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+@dataclass(frozen=True)
+class SourceBindingInspection:
+    """Current primary-checkout identity and file fingerprints; paths stay local."""
+
+    repository_fingerprint: str
+    source_head: str
+    database_fingerprint: str
+    generation_fingerprint: str
+    baseline_registry_fingerprint: str
+    database_path: Path
+    generation_payload: Mapping[str, object]
+    file_state: tuple[object, ...]
+
+    def matches(self, binding: ProfileSourceBinding) -> bool:
+        return (
+            self.repository_fingerprint == binding.repository_fingerprint
+            and self.source_head == binding.source_head
+            and self.database_fingerprint == binding.database_fingerprint
+            and self.generation_fingerprint == binding.generation_fingerprint
+            and self.baseline_registry_fingerprint == binding.baseline_registry_fingerprint
+        )
+
+
+def _has_symlink_component(path: Path) -> bool:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_ctime_ns, value.st_mtime_ns, value.st_size)
+
+
+def _path_component_state(root: Path, path: Path) -> tuple[tuple[int, int, int, int, int], ...]:
+    relative = Path(os.path.abspath(path)).relative_to(Path(os.path.abspath(root)))
+    current = Path(root)
+    state: list[tuple[int, int, int, int, int]] = []
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        item = current.lstat()
+        if stat.S_ISLNK(item.st_mode):
+            raise SourceBindingInspectionError("source_binding:source_file_invalid")
+        is_leaf = index == len(relative.parts) - 1
+        if (is_leaf and not stat.S_ISREG(item.st_mode)) or (not is_leaf and not stat.S_ISDIR(item.st_mode)):
+            raise SourceBindingInspectionError("source_binding:source_file_invalid")
+        state.append(_stat_identity(item))
+    return tuple(state)
+
+
+def _repo_relative_path(root: Path, path: Path) -> str:
+    absolute_root = Path(os.path.abspath(root))
+    absolute_path = Path(os.path.abspath(path))
+    try:
+        return absolute_path.relative_to(absolute_root).as_posix()
+    except ValueError:
+        raise SourceBindingInspectionError("source_binding:source_file_invalid") from None
+
+
+def _hash_file_nofollow(root: Path, path: Path) -> tuple[str, tuple[int, int, int, int, int]]:
+    relative_path = _repo_relative_path(root, path)
+    with open_repo_file_nofollow(root, relative_path) as descriptor:
+        before = os.fstat(descriptor)
+        before_identity = _stat_identity(before)
+        if not stat.S_ISREG(before.st_mode):
+            raise SourceBindingInspectionError("source_binding:source_file_invalid")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        after_identity = _stat_identity(after)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or after_identity != before_identity
+        ):
+            raise SourceBindingInspectionError("source_binding:source_changed_during_inspection")
+        return digest.hexdigest(), after_identity
+
+
+def _read_generation_nofollow(root: Path, path: Path) -> tuple[dict[str, object], tuple[int, int, int, int, int]]:
+    relative_path = _repo_relative_path(root, path)
+    with open_repo_file_nofollow(root, relative_path) as descriptor:
+        before = os.fstat(descriptor)
+        before_identity = _stat_identity(before)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _GENERATION_MAX_BYTES:
+            raise SourceBindingInspectionError("source_binding:generation_invalid")
+        raw = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(4096, _GENERATION_MAX_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > _GENERATION_MAX_BYTES:
+                raise SourceBindingInspectionError("source_binding:generation_invalid")
+        after = os.fstat(descriptor)
+        after_identity = _stat_identity(after)
+        if after_identity != before_identity:
+            raise SourceBindingInspectionError("source_binding:source_changed_during_inspection")
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise SourceBindingInspectionError("source_binding:generation_invalid")
+        return value, after_identity
+
+
+def _repo_identity(root: Path, *, primary: bool) -> tuple[str, str]:
+    git_marker = root / ".git"
+    if _has_symlink_component(root) or git_marker.is_symlink():
+        raise SourceBindingInspectionError("source_binding:primary_checkout_invalid")
+    if primary and (not git_marker.is_dir() or not stat.S_ISDIR(git_marker.lstat().st_mode)):
+        raise SourceBindingInspectionError("source_binding:primary_checkout_invalid")
+    if not primary and not (git_marker.is_dir() or git_marker.is_file()):
+        raise SourceBindingInspectionError("source_binding:repository_identity_mismatch")
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=True,
+        )
+        common_dir = Path(result.stdout.strip()).resolve(strict=True)
+        head_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError, RuntimeError):
+        raise SourceBindingInspectionError("source_binding:repository_identity_mismatch") from None
+    head = head_result.stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise SourceBindingInspectionError("source_binding:source_head_unavailable")
+    return hashlib.sha256(str(common_dir).encode("utf-8")).hexdigest(), head
+
+
+def inspect_primary_source(
+    project_root: Path,
+    source_root: Path,
+    *,
+    expected_project_id: str,
+) -> SourceBindingInspection:
+    """Validate one explicit primary checkout and return path-free source identity."""
+    project = Path(project_root)
+    source = Path(source_root)
+    if source.name != expected_project_id:
+        raise SourceBindingInspectionError("source_binding:project_id_mismatch")
+    source_repo, source_head = _repo_identity(source, primary=True)
+    code_repo, code_head = _repo_identity(project, primary=False)
+    if source_repo != code_repo:
+        raise SourceBindingInspectionError("source_binding:repository_identity_mismatch")
+    if source_head != code_head:
+        raise SourceBindingInspectionError("source_binding:source_head_project_mismatch")
+
+    database = source / "nbs_marketing_data.db"
+    generation_path = source / ".nbs_runtime" / "data_generation.json"
+    source_baseline = source / "data" / "monthly_revenue_baselines.json"
+    code_baseline = project / "data" / "monthly_revenue_baselines.json"
+    try:
+        paths = (database, generation_path, source_baseline, code_baseline)
+        component_roots = (source, source, source, project)
+        before = tuple(_path_component_state(root, path) for root, path in zip(component_roots, paths))
+        database_fingerprint, database_identity = _hash_file_nofollow(source, database)
+        baseline_fingerprint, source_baseline_identity = _hash_file_nofollow(source, source_baseline)
+        code_baseline_fingerprint, code_baseline_identity = _hash_file_nofollow(project, code_baseline)
+        if baseline_fingerprint != code_baseline_fingerprint:
+            raise SourceBindingInspectionError("source_binding:baseline_source_mismatch")
+        generation_payload, generation_identity = _read_generation_nofollow(source, generation_path)
+        legacy_keys = {"generation", "operationId", "status", "updatedAt", "dbSignature"}
+        v2_keys = legacy_keys | {"schemaVersion", "signatureScope", "coreRevenueSignature"}
+        if set(generation_payload) not in (legacy_keys, v2_keys):
+            raise SourceBindingInspectionError("source_binding:generation_invalid")
+        signature = generation_payload.get("dbSignature")
+        if (
+            not isinstance(signature, dict)
+            or set(signature) != {"sizeBytes", "modifiedNs", "sha256"}
+            or not isinstance(signature.get("sizeBytes"), int)
+            or isinstance(signature.get("sizeBytes"), bool)
+            or not isinstance(signature.get("modifiedNs"), int)
+            or isinstance(signature.get("modifiedNs"), bool)
+            or not isinstance(signature.get("sha256"), str)
+            or _SHA256.fullmatch(signature["sha256"]) is None
+        ):
+            raise SourceBindingInspectionError("source_binding:generation_invalid")
+        if (
+            signature["sha256"] != database_fingerprint
+            or signature["sizeBytes"] != database_identity[4]
+            or signature["modifiedNs"] != database_identity[3]
+        ):
+            raise SourceBindingInspectionError("source_binding:generation_database_signature_mismatch")
+
+        database_fingerprint_after, database_identity_after = _hash_file_nofollow(source, database)
+        generation_payload_after, generation_identity_after = _read_generation_nofollow(source, generation_path)
+        baseline_fingerprint_after, source_baseline_identity_after = _hash_file_nofollow(source, source_baseline)
+        code_baseline_fingerprint_after, code_baseline_identity_after = _hash_file_nofollow(project, code_baseline)
+        after = tuple(_path_component_state(root, path) for root, path in zip(component_roots, paths))
+        if (
+            before != after
+            or database_fingerprint != database_fingerprint_after
+            or generation_identity != generation_identity_after
+            or canonical_fingerprint(generation_payload) != canonical_fingerprint(generation_payload_after)
+            or baseline_fingerprint != baseline_fingerprint_after
+            or code_baseline_fingerprint != code_baseline_fingerprint_after
+            or database_identity != database_identity_after
+            or source_baseline_identity != source_baseline_identity_after
+            or code_baseline_identity != code_baseline_identity_after
+        ):
+            raise SourceBindingInspectionError("source_binding:source_changed_during_inspection")
+        source_repo_after, source_head_after = _repo_identity(source, primary=True)
+        code_repo_after, code_head_after = _repo_identity(project, primary=False)
+        if (
+            (source_repo_after, source_head_after) != (source_repo, source_head)
+            or (code_repo_after, code_head_after) != (code_repo, code_head)
+        ):
+            raise SourceBindingInspectionError("source_binding:source_changed_during_inspection")
+        file_state = tuple(zip(after, (
+            database_fingerprint,
+            canonical_fingerprint(generation_payload),
+            baseline_fingerprint,
+            code_baseline_fingerprint,
+        )))
+    except SourceBindingInspectionError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        raise SourceBindingInspectionError("source_binding:source_file_invalid") from None
+
+    return SourceBindingInspection(
+        repository_fingerprint=source_repo,
+        source_head=source_head,
+        database_fingerprint=database_fingerprint,
+        generation_fingerprint=canonical_fingerprint(generation_payload),
+        baseline_registry_fingerprint=baseline_fingerprint,
+        database_path=database,
+        generation_payload=MappingProxyType(generation_payload),
+        file_state=file_state,
+    )
 
 
 @dataclass(frozen=True)
@@ -53,10 +313,11 @@ class ProfileAcceptance:
     runtime_dir: str
     service_ports: Mapping[str, int]
     created_at: str
+    source_binding: Mapping[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "schemaVersion": VERIFICATION_ACCEPTANCE_SCHEMA,
+        payload: dict[str, object] = {
+            "schemaVersion": VERIFICATION_ACCEPTANCE_SCHEMA_V2 if self.source_binding is not None else VERIFICATION_ACCEPTANCE_SCHEMA,
             "status": "ready" if self.ready else "blocked",
             "identity": {
                 "profileId": self.profile_id,
@@ -71,6 +332,9 @@ class ProfileAcceptance:
             },
             "blockedReasons": list(self.blocked_reasons),
         }
+        if self.source_binding is not None:
+            payload["sourceBinding"] = dict(self.source_binding)
+        return payload
 
 
 def _sha256(path: Path) -> str:
@@ -96,7 +360,10 @@ def _git_head(project_root: Path) -> str | None:
 def _worktree_fingerprint(project_root: Path, git_head: str) -> str | None:
     try:
         status = subprocess.run(
-            ["git", "-C", str(project_root), "status", "--porcelain"],
+            [
+                "git", "-C", str(project_root), "status", "--porcelain",
+                "--no-renames", "--", *repository_git_pathspecs(),
+            ],
             capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
@@ -116,6 +383,18 @@ def _generation_fingerprint(generation_path: Path) -> str | None:
     return canonical_fingerprint(value)
 
 
+def _source_binding_evidence(binding: ProfileSourceBinding, *, status: str) -> Mapping[str, object]:
+    return MappingProxyType({
+        "status": status,
+        "sourceRole": "primary-checkout",
+        "repositoryFingerprint": binding.repository_fingerprint,
+        "sourceHead": binding.source_head,
+        "databaseFingerprint": binding.database_fingerprint,
+        "generationFingerprint": binding.generation_fingerprint,
+        "baselineRegistryFingerprint": binding.baseline_registry_fingerprint,
+    })
+
+
 def _parse_created_at(value: str) -> datetime | None:
     try:
         return datetime.fromisoformat(value)
@@ -132,6 +411,7 @@ def accept_verification_profile(
     expected_project_id: str | None = None,
     max_profile_age: timedelta | None = DEFAULT_MAX_PROFILE_AGE,
     service_identity: ServiceIdentityEvidence | None = None,
+    source_root: Path | None = None,
     now: datetime | None = None,
 ) -> ProfileAcceptance:
     """Run every fail-closed acceptance check and collect blocked reasons.
@@ -144,7 +424,9 @@ def accept_verification_profile(
     """
     reasons: list[str] = []
     project = Path(project_root)
-    expected_project = expected_project_id or project.name
+    expected_project = expected_project_id or (
+        NBS_PROJECT_ID if profile.source_binding is not None else project.name
+    )
     if profile.project_id != expected_project:
         reasons.append("identity_drift:projectId")
 
@@ -166,12 +448,46 @@ def accept_verification_profile(
     else:
         reasons.append("signature_mismatch:snapshot_unavailable")
 
-    source_db = project / "nbs_marketing_data.db"
-    if source_db.is_file():
-        if _sha256(source_db) != profile.database.source_fingerprint:
-            reasons.append("signature_mismatch:source")
+    source_binding_evidence: Mapping[str, object] | None = None
+    if profile.source_binding is not None:
+        binding = profile.source_binding
+        source_binding_ok = False
+        if source_root is None:
+            reasons.append("source_binding:source_root_required")
+        else:
+            try:
+                inspection = inspect_primary_source(
+                    project,
+                    Path(source_root),
+                    expected_project_id=expected_project,
+                )
+            except SourceBindingInspectionError as exc:
+                reasons.append(exc.reason_code)
+            else:
+                if inspection.repository_fingerprint != binding.repository_fingerprint:
+                    reasons.append("source_binding:repository_fingerprint_mismatch")
+                if inspection.source_head != binding.source_head:
+                    reasons.append("source_binding:source_head_mismatch")
+                if inspection.database_fingerprint != binding.database_fingerprint:
+                    reasons.append("source_binding:database_fingerprint_mismatch")
+                if inspection.generation_fingerprint != binding.generation_fingerprint:
+                    reasons.append("source_binding:generation_fingerprint_mismatch")
+                if inspection.baseline_registry_fingerprint != binding.baseline_registry_fingerprint:
+                    reasons.append("source_binding:baseline_fingerprint_mismatch")
+                source_binding_ok = not any(reason.startswith("source_binding:") for reason in reasons)
+        source_binding_evidence = _source_binding_evidence(
+            binding,
+            status="accepted" if source_binding_ok else "blocked",
+        )
     else:
-        reasons.append("signature_mismatch:source_unavailable")
+        # V1 never consults source_root; preserve its original project-local
+        # source validation even when newer callers pass the optional flag.
+        source_db = project / "nbs_marketing_data.db"
+        if source_db.is_file():
+            if _sha256(source_db) != profile.database.source_fingerprint:
+                reasons.append("signature_mismatch:source")
+        else:
+            reasons.append("signature_mismatch:source_unavailable")
 
     generation_fingerprint = _generation_fingerprint(paths.generation_path)
     if generation_fingerprint is None:
@@ -217,6 +533,7 @@ def accept_verification_profile(
         runtime_dir=profile.runtime.runtime_dir,
         service_ports=profile.services.ports,
         created_at=profile.created_at,
+        source_binding=source_binding_evidence,
     )
 
 
@@ -228,6 +545,7 @@ def accept_profile_file(
     expected_project_id: str | None = None,
     max_profile_age: timedelta | None = DEFAULT_MAX_PROFILE_AGE,
     service_identity: ServiceIdentityEvidence | None = None,
+    source_root: Path | None = None,
     now: datetime | None = None,
 ) -> ProfileAcceptance:
     """Load and accept a profile file, converting load/path errors to blocked.
@@ -266,6 +584,7 @@ def accept_profile_file(
         expected_project_id=expected_project_id,
         max_profile_age=max_profile_age,
         service_identity=service_identity,
+        source_root=source_root,
         now=now,
     )
 
