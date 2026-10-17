@@ -306,6 +306,56 @@ def test_cli_preflight_uses_the_session_source_fingerprint(monkeypatch, tmp_path
     assert captured["argv"][captured["argv"].index("--source-fingerprint") + 1] == source
 
 
+def test_run_hermes_forwards_source_root_only_to_child_process(monkeypatch, tmp_path, capsys):
+    from scripts import verification_chain as verification_chain_cli
+
+    source_root = str(tmp_path / "primary-checkout")
+    source_fingerprint = "a" * 64
+    fake_chain = SimpleNamespace(
+        session=SimpleNamespace(status="full_verification_passed", source_fingerprint=source_fingerprint),
+        session_id="session-1",
+        run_hermes=lambda **_: SimpleNamespace(
+            status="hermes_passed", to_dict=lambda: {"sessionId": "session-1", "status": "hermes_passed"},
+        ),
+    )
+    captured = {}
+    monkeypatch.setattr(verification_chain_cli, "_load_chain", lambda *args: fake_chain)
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "sessionId": "session-1", "sourceFingerprint": source_fingerprint,
+                "profile": "isolated-profile", "overallStatus": "pass",
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(verification_chain_cli.subprocess, "run", fake_run)
+    args = SimpleNamespace(
+        project_root=str(tmp_path), session="session-1", runtime_root=str(tmp_path / "sessions"),
+        profile="isolated-profile", hermes_command=None, verification_profile="profile.json",
+        source_root=source_root,
+    )
+
+    assert verification_chain_cli.cmd_run_hermes(args) == 0
+    assert "--source-root" in captured["argv"]
+    assert captured["argv"][captured["argv"].index("--source-root") + 1] == source_root
+    assert source_root not in capsys.readouterr().out
+
+
+def test_run_hermes_parser_accepts_explicit_source_root():
+    from scripts import verification_chain as verification_chain_cli
+
+    args = verification_chain_cli._parser().parse_args([
+        "run-hermes", "--session", "session-1", "--profile", "isolated-profile",
+        "--source-root", "/tmp/primary-checkout",
+    ])
+
+    assert args.source_root == "/tmp/primary-checkout"
+
+
 def test_chain_source_freshness_check_blocks_drift(tmp_path):
     from backend.agents.verification_chain import VerificationChain
 
@@ -470,6 +520,48 @@ def test_git_source_probe_binds_both_sides_of_renamed_dirty_file(tmp_path):
     second = build_case("case-b", "original-b.txt")
 
     assert first["worktree_fingerprint"] != second["worktree_fingerprint"]
+
+
+def test_git_source_probe_excludes_summary_paths_before_reading_content(tmp_path, monkeypatch):
+    from backend.agents.repository_scope import is_excluded_repository_path
+    from backend.agents.verification_chain import git_source_probe
+
+    def run_git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True
+        )
+
+    run_git("init", "-q")
+    run_git("config", "user.email", "tests@example.com")
+    run_git("config", "user.name", "Acceptance Tests")
+    (tmp_path / "brief.md").write_text("brief\n", encoding="utf-8")
+    (tmp_path / "source.txt").write_text("source\n", encoding="utf-8")
+    summary = tmp_path / "Summay" / "private.md"
+    summary.parent.mkdir()
+    summary.write_text("initial fixture content\n", encoding="utf-8")
+    run_git("add", "--all")
+    run_git("commit", "-qm", "initial")
+    base_sha = run_git("rev-parse", "HEAD").stdout.strip()
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path):
+        try:
+            relative = path.relative_to(tmp_path).as_posix()
+        except ValueError:
+            relative = ""
+        if is_excluded_repository_path(relative):
+            raise AssertionError("source probe attempted to read an excluded fixture path")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    first = git_source_probe(tmp_path, brief_path="brief.md", base_sha=base_sha)
+    summary.write_text("changed fixture content\n", encoding="utf-8")
+    (tmp_path / "Summay" / "untracked.md").write_text("new fixture content\n", encoding="utf-8")
+    second = git_source_probe(tmp_path, brief_path="brief.md", base_sha=base_sha)
+
+    assert first["worktree_fingerprint"] == second["worktree_fingerprint"]
+    assert first["diff_fingerprint"] == second["diff_fingerprint"]
+    assert first["source_probe_version"] == SOURCE_PROBE_VERSION
 
 
 def test_full_gate_checks_source_before_runner(tmp_path):

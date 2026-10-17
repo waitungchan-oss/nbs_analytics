@@ -45,6 +45,85 @@ def _payload(tmp_path: Path) -> dict:
     return {**unsigned, "profileFingerprint": canonical_fingerprint(unsigned)}
 
 
+def _v2_payload(tmp_path: Path) -> dict:
+    v1_payload = _payload(tmp_path)
+    unsigned = {key: value for key, value in v1_payload.items() if key != "profileFingerprint"}
+    unsigned["schemaVersion"] = "verification-runtime-profile-v2"
+    unsigned["sourceBinding"] = {
+        "schemaVersion": "verification-source-binding-v1",
+        "sourceRole": "primary-checkout",
+        "repositoryFingerprint": "1" * 64,
+        "sourceHead": "2" * 40,
+        "databaseFingerprint": "b" * 64,
+        "generationFingerprint": "f" * 64,
+        "baselineRegistryFingerprint": "d" * 64,
+    }
+    return {**unsigned, "profileFingerprint": canonical_fingerprint(unsigned)}
+
+
+def _refresh_fingerprint(payload: dict) -> None:
+    unsigned = {key: value for key, value in payload.items() if key != "profileFingerprint"}
+    payload["profileFingerprint"] = canonical_fingerprint(unsigned)
+
+
+def test_v2_profile_round_trips_exact_source_binding(tmp_path: Path) -> None:
+    payload = _v2_payload(tmp_path)
+
+    profile = VerificationRuntimeProfile.from_dict(payload)
+
+    assert profile.to_dict() == payload
+    assert profile.source_binding.source_role == "primary-checkout"
+    assert profile.source_binding.source_head == "2" * 40
+
+
+def test_v2_profile_rejects_unknown_source_binding_keys(tmp_path: Path) -> None:
+    payload = _v2_payload(tmp_path)
+    payload["sourceBinding"]["unapprovedPath"] = "/private/source"
+    _refresh_fingerprint(payload)
+
+    with pytest.raises(VerificationRuntimeProfileError, match="sourceBinding.*exact"):
+        VerificationRuntimeProfile.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repositoryFingerprint", "not-a-sha256"),
+        ("sourceHead", "not-a-git-sha"),
+        ("sourceRole", "arbitrary-checkout"),
+        ("schemaVersion", "verification-source-binding-v0"),
+    ],
+)
+def test_v2_profile_rejects_malformed_source_binding_identity(
+    tmp_path: Path, field: str, value: str,
+) -> None:
+    payload = _v2_payload(tmp_path)
+    payload["sourceBinding"][field] = value
+    _refresh_fingerprint(payload)
+
+    with pytest.raises(VerificationRuntimeProfileError):
+        VerificationRuntimeProfile.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("databaseFingerprint", "3" * 64),
+        ("generationFingerprint", "4" * 64),
+        ("baselineRegistryFingerprint", "5" * 64),
+    ],
+)
+def test_v2_profile_rejects_inconsistent_source_fingerprints(
+    tmp_path: Path, field: str, value: str,
+) -> None:
+    payload = _v2_payload(tmp_path)
+    payload["sourceBinding"][field] = value
+    _refresh_fingerprint(payload)
+
+    with pytest.raises(VerificationRuntimeProfileError, match="sourceBinding.*mismatch"):
+        VerificationRuntimeProfile.from_dict(payload)
+
+
 def test_load_accepts_exact_immutable_profile(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
     profile = VerificationRuntimeProfile.from_dict(payload, expected_git_head="a" * 40)

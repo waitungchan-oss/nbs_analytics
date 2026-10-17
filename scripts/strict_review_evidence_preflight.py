@@ -20,6 +20,7 @@ from backend.agents.strict_review_evidence_service import (
 )
 from backend.agents.validation_runner import ValidationRunner
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.repository_scope import repository_git_pathspecs
 
 
 def _emit(payload: dict) -> None:
@@ -28,7 +29,13 @@ def _emit(payload: dict) -> None:
 
 def _source_fingerprint(project_root: Path) -> str:
     import subprocess
-    completed = subprocess.run(["git", "status", "--short"], cwd=project_root, capture_output=True, text=True, check=False)
+    completed = subprocess.run(
+        [
+            "git", "status", "--short", "--untracked-files=all", "--no-renames",
+            "--", *repository_git_pathspecs(),
+        ],
+        cwd=project_root, capture_output=True, text=True, check=False,
+    )
     return hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest()
 
 

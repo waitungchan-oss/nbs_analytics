@@ -22,6 +22,7 @@ from backend.agents.evidence_models import (
     estimate_tokens,
 )
 from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
+from backend.agents.implementation_models import CarryForwardFile
 from backend.agents.verification_session import VerificationSession
 from backend.agents.acceptance_attempts import record_attempt
 
@@ -174,6 +175,22 @@ def _validate_task_contract(task: object) -> dict:
         value = task.get(field)
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ValueError(f"Review task {field} must be a list of strings")
+    if "carryForwardFiles" in task:
+        raw = task["carryForwardFiles"]
+        if not isinstance(raw, list):
+            raise ValueError("Review task carryForwardFiles must be a list")
+        if len(raw) > 50:
+            raise ValueError("Review task carryForwardFiles exceeds the bounded entry limit")
+        entries = tuple(CarryForwardFile.from_dict(item) for item in raw)
+        paths = [item.path for item in entries]
+        if len(paths) != len(set(paths)):
+            raise ValueError("Review task carryForwardFiles contains duplicate paths")
+        for entry in entries:
+            entry_parts = Path(entry.path).parts
+            for scope_path in task["scope"]:
+                scope_parts = Path(scope_path).parts
+                if entry_parts[:len(scope_parts)] == scope_parts or scope_parts[:len(entry_parts)] == entry_parts:
+                    raise ValueError("Review task carryForwardFiles overlap the approved scope")
     return task
 
 
@@ -249,7 +266,10 @@ def _runtime_instructions(instructions: str, *, strict: bool) -> str:
         "gitDiff.sourceFingerprint is the complete canonical session identity; "
         "gitDiff.sourceDiffFingerprint is only the sealed diff component and must "
         "match verificationSession.diffFingerprint. Do not compare those two "
-        "different-scope fingerprints directly."
+        "different-scope fingerprints directly. carryForwardFiles are approved "
+        "path/SHA-256 entries excluded only from task patch attribution; they remain "
+        "inside the complete sealed source and worktree fingerprints. Treat a missing, "
+        "mismatched, or patch-overlapping entry as invalid evidence."
     )
 
 
@@ -315,6 +335,19 @@ def build_review_evidence_payload(
         validate_context_summary(context_summary)
     _validate_verification(verification)
     patches = [item for item in bundle.evidence if item.kind == "diff"]
+    task_carry_forward = bundle.task.get("carryForwardFiles", [])
+    repository_carry_forward = bundle.repository.get("carryForwardFiles", [])
+    if task_carry_forward != repository_carry_forward:
+        raise ValueError("Review carryForwardFiles do not match the approved task contract")
+    if task_carry_forward:
+        if not isinstance(task_carry_forward, list) or not all(
+            isinstance(item, dict) and set(item) == {"path", "sha256"}
+            and isinstance(item["path"], str) and isinstance(item["sha256"], str)
+            for item in task_carry_forward
+        ):
+            raise ValueError("Review carryForwardFiles schema is invalid")
+        if set(item.source for item in patches) & {item["path"] for item in task_carry_forward}:
+            raise ValueError("Review carryForwardFiles must not also appear in task patches")
     head_ref = bundle.repository.get("headRef")
     git_diff = {
         "base": bundle.repository.get("baseSha"),
@@ -324,6 +357,8 @@ def build_review_evidence_payload(
         "truncated": bool(bundle.repository.get("diffFileLimitExceeded"))
         or any(bool(item.metadata.get("truncated")) for item in patches),
     }
+    if task_carry_forward:
+        git_diff["carryForwardFiles"] = json.loads(json.dumps(task_carry_forward))
     if verification_session is not None:
         source_fingerprint = verification_session.get("sourceFingerprint")
         if isinstance(source_fingerprint, str):
@@ -524,6 +559,17 @@ def build_review_report(
     preserved_dirty = bundle.repository.get("preservedDirtyFiles") or []
     if not isinstance(preserved_dirty, list) or not all(isinstance(item, str) for item in preserved_dirty):
         raise ValueError("Review repository preservedDirtyFiles must be a list of strings")
+    carry_forward = bundle.repository.get("carryForwardFiles") or []
+    if carry_forward != bundle.task.get("carryForwardFiles", []):
+        raise ValueError("Review carryForwardFiles do not match the approved task contract")
+    if not isinstance(carry_forward, list) or not all(
+        isinstance(item, dict) and set(item) == {"path", "sha256"}
+        and isinstance(item["path"], str) and isinstance(item["sha256"], str)
+        for item in carry_forward
+    ):
+        raise ValueError("Review repository carryForwardFiles schema is invalid")
+    if not {item["path"] for item in carry_forward} <= set(dirty_files):
+        raise ValueError("Review carryForwardFiles must identify dirty files")
     if strict and not verification:
         return finish(_report(
             "blocked",
@@ -534,6 +580,7 @@ def build_review_report(
         set(dirty_files)
         - set(evidence_payload["gitDiff"]["files"])
         - set(preserved_dirty)
+        - {item["path"] for item in carry_forward}
     )
     if strict and unattributed_dirty:
         return finish(_report(

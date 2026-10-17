@@ -143,6 +143,12 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
     labels = [step.label for step in plan]
 
     assert labels[:3] == ["git-status", "git-diff-stat", "git-diff-name-only"]
+    git_commands = {step.label: step.command for step in plan[:3]}
+    assert all(
+        command[-2:] == [".", ":(exclude,icase,glob)**/Summay/**"]
+        for command in git_commands.values()
+    )
+    assert all("--no-renames" in command for command in git_commands.values())
     assert "system-status" in labels
     assert "system-acceptance" in labels
     assert "system-monitor" in labels
@@ -612,3 +618,181 @@ def test_markdown_report_summarizes_baseline_tests_and_commit_advice():
     assert "promotionReady" in markdown
     assert "39 passed" in markdown
     assert "Commit recommendation: ready after reviewing grouped diff" in markdown
+
+
+def test_isolated_hermes_fails_closed_without_verification_profile(tmp_path, monkeypatch):
+    invoked_steps = []
+
+    def passing_step(step, *, project_root):
+        invoked_steps.append(step.label)
+        return {
+            "label": step.label,
+            "required": step.required,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(post_check, "run_step", passing_step)
+
+    report = post_check.run_checks(
+        include_monitor=False,
+        include_tests=False,
+        include_system_acceptance=False,
+        project_root=tmp_path,
+        hermes_profile="isolated-profile",
+        source_root=tmp_path / "primary",
+    )
+
+    assert report["overallStatus"] == "fail"
+    assert invoked_steps == []
+    result = report["results"][0]
+    assert result["label"] == "source-binding-acceptance"
+    assert result["exitCode"] == 1
+    assert "source_binding:verification_profile_required" in json.loads(result["stdout"])["blockedReasons"]
+
+
+def test_isolated_hermes_rejects_legacy_profile_without_source_binding(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.services import verification_runtime_paths
+
+    profile = SimpleNamespace(
+        profile_id="profile-legacy",
+        project_id="nbs_analytics",
+        git_head="a" * 40,
+        database=SimpleNamespace(snapshot_fingerprint="b" * 64, source_fingerprint="c" * 64),
+        source_binding=None,
+    )
+    paths = SimpleNamespace(runtime_dir="runtime")
+    monkeypatch.setattr(
+        verification_runtime_paths,
+        "load_verification_runtime_profile",
+        lambda *_args, **_kwargs: (profile, paths),
+    )
+    invoked_steps = []
+    monkeypatch.setattr(
+        post_check,
+        "run_step",
+        lambda step, *, project_root: invoked_steps.append(step.label)
+        or {"label": step.label, "required": step.required, "exitCode": 0, "stdout": "", "stderr": ""},
+    )
+
+    report = post_check.run_checks(
+        include_monitor=False,
+        include_tests=False,
+        include_system_acceptance=False,
+        project_root=tmp_path,
+        verification_profile="legacy-profile.json",
+        source_root=tmp_path / "primary",
+        hermes_profile="isolated-profile",
+    )
+
+    assert report["overallStatus"] == "fail"
+    assert invoked_steps == []
+    result = report["results"][0]
+    assert result["label"] == "source-binding-acceptance"
+    assert result["exitCode"] == 1
+    assert "source_binding:v2_profile_required" in json.loads(result["stdout"])["blockedReasons"]
+
+
+def test_primary_runtime_hermes_keeps_existing_v2_profile_behavior_without_source_root(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.services import verification_runtime_paths
+
+    profile = SimpleNamespace(
+        profile_id="profile-v2",
+        project_id="nbs_analytics",
+        git_head="a" * 40,
+        database=SimpleNamespace(snapshot_fingerprint="b" * 64, source_fingerprint="c" * 64),
+        source_binding=SimpleNamespace(
+            repository_fingerprint="d" * 64,
+            source_head="a" * 40,
+            database_fingerprint="e" * 64,
+            generation_fingerprint="f" * 64,
+            baseline_registry_fingerprint="0" * 64,
+        ),
+    )
+    paths = SimpleNamespace(runtime_dir="runtime")
+    monkeypatch.setattr(
+        verification_runtime_paths,
+        "load_verification_runtime_profile",
+        lambda *_args, **_kwargs: (profile, paths),
+    )
+    invoked_steps = []
+
+    def passing_step(step, *, project_root):
+        invoked_steps.append(step.label)
+        return {
+            "label": step.label,
+            "required": step.required,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(post_check, "run_step", passing_step)
+
+    report = post_check.run_checks(
+        include_monitor=False,
+        include_tests=False,
+        include_system_acceptance=False,
+        project_root=tmp_path,
+        verification_profile="profile-v2.json",
+        hermes_profile="primary-runtime",
+    )
+
+    assert report["overallStatus"] == "pass"
+    assert invoked_steps
+    assert "source-binding-acceptance" not in [item["label"] for item in report["results"]]
+
+
+def test_unnamed_hermes_profile_keeps_existing_v2_behavior_without_source_root(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.services import verification_runtime_paths
+
+    profile = SimpleNamespace(
+        profile_id="profile-v2",
+        project_id="nbs_analytics",
+        git_head="a" * 40,
+        database=SimpleNamespace(snapshot_fingerprint="b" * 64, source_fingerprint="c" * 64),
+        source_binding=SimpleNamespace(
+            repository_fingerprint="d" * 64,
+            source_head="a" * 40,
+            database_fingerprint="e" * 64,
+            generation_fingerprint="f" * 64,
+            baseline_registry_fingerprint="0" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        verification_runtime_paths,
+        "load_verification_runtime_profile",
+        lambda *_args, **_kwargs: (profile, SimpleNamespace(runtime_dir="runtime")),
+    )
+    invoked_steps = []
+
+    def passing_step(step, *, project_root):
+        invoked_steps.append(step.label)
+        return {
+            "label": step.label,
+            "required": step.required,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(post_check, "run_step", passing_step)
+
+    report = post_check.run_checks(
+        include_monitor=False,
+        include_tests=False,
+        include_system_acceptance=False,
+        project_root=tmp_path,
+        verification_profile="profile-v2.json",
+    )
+
+    assert report["overallStatus"] == "pass"
+    assert invoked_steps
+    assert "source-binding-acceptance" not in [item["label"] for item in report["results"]]

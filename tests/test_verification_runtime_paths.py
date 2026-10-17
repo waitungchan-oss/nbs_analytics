@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -13,11 +15,23 @@ from backend.services.verification_runtime_paths import (
 from scripts.build_verification_runtime_profile import build_verification_profile
 
 
-def test_profile_resolves_only_to_its_isolated_artifacts(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    import subprocess
+def _init_repo(project: Path) -> str:
     subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.email=fixture@example.invalid", "-c", "user.name=fixture", "commit", "--allow-empty", "-m", "fixture", "-q"],
+        check=True,
+    )
+    return subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_profile_resolves_only_to_its_isolated_artifacts(tmp_path: Path) -> None:
+    project = tmp_path / "nbs_analytics"
+    project.mkdir()
+    git_head = _init_repo(project)
     db = project / "nbs_marketing_data.db"
     with sqlite3.connect(db) as conn:
         conn.execute("create table sample (value text)")
@@ -25,16 +39,16 @@ def test_profile_resolves_only_to_its_isolated_artifacts(tmp_path: Path) -> None
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
-        project_root=project, source_db=db, source_runtime=runtime,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        project_root=project, source_root=project,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
-    profile, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head="a" * 40)
+    profile, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head=git_head)
     assert paths.db_path.name == "snapshot.sqlite"
     assert paths.generation_path.name == "generation.json"
     assert paths.runtime_dir == profile_path.parent
@@ -49,10 +63,9 @@ def test_profile_path_rejects_missing_artifacts(tmp_path: Path) -> None:
 
 
 def test_nested_profile_refs_resolve_without_basename_substitution(tmp_path: Path) -> None:
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    import subprocess
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    git_head = _init_repo(project)
     db = project / "nbs_marketing_data.db"
     with sqlite3.connect(db) as conn:
         conn.execute("create table sample (value text)")
@@ -60,13 +73,13 @@ def test_nested_profile_refs_resolve_without_basename_substitution(tmp_path: Pat
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
-        project_root=project, source_db=db, source_runtime=runtime,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        project_root=project, source_root=project,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
     payload = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -81,16 +94,15 @@ def test_nested_profile_refs_resolve_without_basename_substitution(tmp_path: Pat
     from backend.agents.evidence_models import canonical_fingerprint
     payload["profileFingerprint"] = canonical_fingerprint(unsigned)
     profile_path.write_text(json.dumps(payload), encoding="utf-8")
-    _, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head="a" * 40)
+    _, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head=git_head)
     assert paths.db_path == nested / "snapshot.sqlite"
     assert paths.generation_path == nested / "generation.json"
 
 
 def test_symlinked_verification_root_is_rejected(tmp_path: Path) -> None:
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    import subprocess
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    git_head = _init_repo(project)
     db = project / "nbs_marketing_data.db"
     with sqlite3.connect(db) as conn:
         conn.execute("create table sample (value text)")
@@ -98,13 +110,13 @@ def test_symlinked_verification_root_is_rejected(tmp_path: Path) -> None:
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
-        project_root=project, source_db=db, source_runtime=runtime,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        project_root=project, source_root=project,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
     verification_root = project / ".nbs_agent_runtime" / "verification"
@@ -112,14 +124,13 @@ def test_symlinked_verification_root_is_rejected(tmp_path: Path) -> None:
     verification_root.rename(real_root)
     verification_root.symlink_to(real_root, target_is_directory=True)
     with pytest.raises(VerificationRuntimePathError, match="symlink"):
-        load_verification_runtime_profile(profile_path, project_root=project, expected_git_head="a" * 40)
+        load_verification_runtime_profile(profile_path, project_root=project, expected_git_head=git_head)
 
 
 def test_nested_artifact_symlink_is_rejected(tmp_path: Path) -> None:
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    import subprocess
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    git_head = _init_repo(project)
     db = project / "nbs_marketing_data.db"
     with sqlite3.connect(db) as conn:
         conn.execute("create table sample (value text)")
@@ -127,13 +138,13 @@ def test_nested_artifact_symlink_is_rejected(tmp_path: Path) -> None:
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
-        project_root=project, source_db=db, source_runtime=runtime,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        project_root=project, source_root=project,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
     profile_dir = profile_path.parent
@@ -154,14 +165,13 @@ def test_nested_artifact_symlink_is_rejected(tmp_path: Path) -> None:
     payload["profileFingerprint"] = canonical_fingerprint(unsigned)
     profile_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(VerificationRuntimePathError, match="symlink"):
-        load_verification_runtime_profile(profile_path, project_root=project, expected_git_head="a" * 40)
+        load_verification_runtime_profile(profile_path, project_root=project, expected_git_head=git_head)
 
 
 def test_cache_internal_symlink_is_rejected(tmp_path: Path) -> None:
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    import subprocess
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    git_head = _init_repo(project)
     db = project / "nbs_marketing_data.db"
     with sqlite3.connect(db) as conn:
         conn.execute("create table sample (value text)")
@@ -169,13 +179,13 @@ def test_cache_internal_symlink_is_rejected(tmp_path: Path) -> None:
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
-        project_root=project, source_db=db, source_runtime=runtime,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        project_root=project, source_root=project,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
     cache = profile_path.parent / "cache"
@@ -183,7 +193,7 @@ def test_cache_internal_symlink_is_rejected(tmp_path: Path) -> None:
     outside.mkdir()
     (cache / "link").symlink_to(outside, target_is_directory=True)
     with pytest.raises(VerificationRuntimePathError, match="symlink"):
-        load_verification_runtime_profile(profile_path, project_root=project, expected_git_head="a" * 40)
+        load_verification_runtime_profile(profile_path, project_root=project, expected_git_head=git_head)
 
 
 def test_health_profile_mode_passes_all_explicit_paths(monkeypatch, tmp_path: Path) -> None:
@@ -232,9 +242,9 @@ def test_runtime_dir_subdir_ref_resolves_under_profile_dir(tmp_path: Path) -> No
     import subprocess
     from pathlib import Path
 
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    git_head = _init_repo(project)
     db = project / "nbs_marketing_data.db"
     with sqlite3.connect(db) as conn:
         conn.execute("create table sample (value text)")
@@ -242,13 +252,13 @@ def test_runtime_dir_subdir_ref_resolves_under_profile_dir(tmp_path: Path) -> No
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
-        project_root=project, source_db=db, source_runtime=runtime,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        project_root=project, source_root=project,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
     payload = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -258,6 +268,6 @@ def test_runtime_dir_subdir_ref_resolves_under_profile_dir(tmp_path: Path) -> No
     from backend.agents.evidence_models import canonical_fingerprint
     payload["profileFingerprint"] = canonical_fingerprint(unsigned)
     profile_path.write_text(json.dumps(payload), encoding="utf-8")
-    _, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head="a" * 40)
+    _, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head=git_head)
     assert paths.runtime_dir == profile_path.parent / "runtime"
     assert paths.db_path == profile_path.parent / "snapshot.sqlite"

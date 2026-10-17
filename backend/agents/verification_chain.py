@@ -43,6 +43,11 @@ from backend.agents.review_runner_profile import (
     ALLOWED_RECEIPT_STATUSES,
     RunnerCapabilityReceipt,
 )
+from backend.agents.repository_scope import (
+    is_excluded_repository_path,
+    repository_git_pathspecs,
+)
+from backend.agents.safe_repo_file import open_repo_file_nofollow
 from backend.agents.verification_evidence_writer import (
     _resolve_session_output_dir,
     write_gate_evidence,
@@ -206,9 +211,9 @@ def git_source_probe(
 ) -> dict:
     """Compute the four source-seal fingerprints from the live repository.
 
-    Uses ``git rev-parse HEAD``, the brief bytes SHA-256, a filtered porcelain
-    worktree fingerprint that includes dirty-file content, and the base/head
-    diff fingerprint.
+    Uses ``git rev-parse HEAD``, no-follow repository file fingerprints, a
+    path-scoped porcelain worktree fingerprint, and a scoped base/head diff.
+    User-owned ``Summay`` roots are excluded before Git emits paths or content.
     """
     project_root = Path(project_root).resolve()
 
@@ -218,20 +223,23 @@ def git_source_probe(
         )
 
     head_sha = _run(["git", "rev-parse", "HEAD"]).stdout.strip()
-    brief_candidate = project_root / brief_path
-    if brief_candidate.is_symlink():
-        raise ValueError("brief path cannot be a symlink")
-    brief = brief_candidate.resolve()
-    try:
-        brief.relative_to(project_root)
-    except ValueError as exc:
-        raise ValueError("brief path is outside project root") from exc
-    if not brief.is_file():
-        raise ValueError(f"brief path is unavailable: {brief_path}")
-    brief_fingerprint = sha256(brief.read_bytes()).hexdigest()
+    def _repository_file_fingerprint(relative_path: str, *, label: str) -> str:
+        if is_excluded_repository_path(relative_path):
+            raise ValueError(f"{label} path is excluded")
+        digest = sha256()
+        try:
+            with open_repo_file_nofollow(project_root, relative_path) as file_fd:
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    digest.update(chunk)
+        except (OSError, PermissionError) as exc:
+            raise ValueError(f"{label} path is unavailable or unsafe") from exc
+        return digest.hexdigest()
+
+    brief_fingerprint = _repository_file_fingerprint(brief_path, label="brief")
     status = subprocess.run(
         [
-            "git", "status", "--porcelain=v1", "--untracked-files=all", "-z",
+            "git", "status", "--porcelain=v1", "--untracked-files=all",
+            "--no-renames", "-z", "--", *repository_git_pathspecs(),
         ], cwd=project_root, capture_output=True, check=True,
     ).stdout
     dirty_entries: list[dict[str, str]] = []
@@ -249,15 +257,20 @@ def git_source_probe(
             if index >= len(raw_entries):
                 raise ValueError("git status returned an incomplete rename entry")
             paths.append(raw_entries[index].decode("utf-8", errors="surrogateescape"))
+        if any(is_excluded_repository_path(path) for path in paths):
+            index += 1
+            continue
         def _content_fingerprint(relative_path: str) -> str:
-            path = (project_root / relative_path).resolve()
+            if is_excluded_repository_path(relative_path):
+                raise ValueError("git status returned an excluded path")
             try:
-                path.relative_to(project_root.resolve())
-            except ValueError as exc:
-                raise ValueError("git status returned a path outside project root") from exc
-            if not path.is_file() or path.is_symlink():
+                with open_repo_file_nofollow(project_root, relative_path) as file_fd:
+                    digest = sha256()
+                    while chunk := os.read(file_fd, 1024 * 1024):
+                        digest.update(chunk)
+                    return digest.hexdigest()
+            except (OSError, PermissionError):
                 return "missing"
-            return sha256(path.read_bytes()).hexdigest()
 
         if len(paths) == 2:
             dirty_entries.append({
@@ -279,9 +292,15 @@ def git_source_probe(
                    ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     if head_ref == "WORKTREE":
-        diff_stdout = _run(["git", "diff", "--no-ext-diff", base_sha]).stdout
+        diff_stdout = _run([
+            "git", "diff", "--no-ext-diff", "--no-renames", base_sha, "--",
+            *repository_git_pathspecs(),
+        ]).stdout
     else:
-        diff_stdout = _run(["git", "diff", "--no-ext-diff", f"{base_sha}...{head_ref}"]).stdout
+        diff_stdout = _run([
+            "git", "diff", "--no-ext-diff", "--no-renames",
+            f"{base_sha}...{head_ref}", "--", *repository_git_pathspecs(),
+        ]).stdout
     diff_fingerprint = sha256(diff_stdout.encode("utf-8")).hexdigest()
     result = {
         "head_sha": head_sha,
@@ -295,14 +314,7 @@ def git_source_probe(
         ("policy_fingerprint", policy_path),
     ):
         if relative_path is not None:
-            candidate = (project_root / relative_path).resolve()
-            try:
-                candidate.relative_to(project_root.resolve())
-            except ValueError as exc:
-                raise ValueError("source identity path is outside project root") from exc
-            if not candidate.is_file() or candidate.is_symlink():
-                raise ValueError(f"source identity file is unavailable: {relative_path}")
-            result[key] = sha256(candidate.read_bytes()).hexdigest()
+            result[key] = _repository_file_fingerprint(relative_path, label="source identity")
     return result
 
 

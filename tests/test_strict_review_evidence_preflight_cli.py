@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
 
-from scripts.strict_review_evidence_preflight import main
+from scripts.strict_review_evidence_preflight import _source_fingerprint, main
 from backend.agents.strict_review_preflight_models import validate_preflight_result
 
 
@@ -38,3 +39,29 @@ def test_cli_rejects_output_outside_runtime(tmp_path: Path, capsys):
     assert main(["--project-root", str(tmp_path), "--session", "s1", "--source-fingerprint", "a" * 64, "--output", str(tmp_path / "escape")]) == 3
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "invalid_evidence"
+
+
+def test_preflight_source_fingerprint_excludes_summary_paths(tmp_path: Path):
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=tmp_path, capture_output=True, text=True, check=True,
+        )
+        return result.stdout
+
+    git("init", "-q")
+    git("config", "user.email", "tests@example.com")
+    git("config", "user.name", "Acceptance Tests")
+    summary = tmp_path / "Summay" / "fixture.md"
+    summary.parent.mkdir()
+    summary.write_text("summary fixture one\n", encoding="utf-8")
+    git("add", "--all")
+    git("commit", "-qm", "fixture")
+
+    first = _source_fingerprint(tmp_path)
+    summary.write_text("summary fixture two\n", encoding="utf-8")
+    (tmp_path / "Summay/untracked.md").write_text("summary fixture untracked\n", encoding="utf-8")
+    second = _source_fingerprint(tmp_path)
+
+    assert first == second
+    (tmp_path / "ordinary.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert _source_fingerprint(tmp_path) != second
