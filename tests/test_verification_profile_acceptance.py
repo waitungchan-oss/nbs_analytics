@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ import pytest
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.services.verification_profile_acceptance import (
     ServiceIdentityEvidence,
+    _worktree_fingerprint,
     accept_profile_file,
     accept_verification_profile,
     gather_service_identity,
@@ -35,7 +37,7 @@ def _generation_payload(source_db: Path) -> dict:
         "operationId": "op-7",
         "status": "accepted",
         "updatedAt": "2026-08-17T10:00:00+08:00",
-        "dbSignature": {"sizeBytes": source_db.stat().st_size, "modifiedNs": source_db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": source_db.stat().st_size, "modifiedNs": source_db.stat().st_mtime_ns, "sha256": _file_sha256(source_db)},
     }
 
 
@@ -48,8 +50,13 @@ def _git_repo(project: Path) -> str:
     return subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def _build_ready_profile(tmp_path: Path) -> tuple[Path, str]:
-    project = tmp_path / "project"
+def _build_ready_profile(
+    tmp_path: Path,
+    *,
+    legacy_profile: bool = True,
+    project_name: str = "nbs_analytics",
+) -> tuple[Path, str, Path]:
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
     head = _git_repo(project)
     source_db = project / "nbs_marketing_data.db"
@@ -61,13 +68,74 @@ def _build_ready_profile(tmp_path: Path) -> tuple[Path, str]:
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
         project_root=project,
-        source_db=source_db,
-        source_runtime=runtime,
+        source_root=project,
         output_root=project / ".nbs_agent_runtime" / "verification",
         git_head=head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
+    if not legacy_profile:
+        return project, head, profile_path
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    payload["schemaVersion"] = VERIFICATION_PROFILE_SCHEMA
+    payload.pop("sourceBinding", None)
+    payload["projectId"] = project_name
+    payload["profileFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in payload.items() if key != "profileFingerprint"}
+    )
+    profile_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    if project_name != project.name:
+        relative_profile = profile_path.relative_to(project)
+        relocated_project = tmp_path / project_name
+        project.rename(relocated_project)
+        project = relocated_project
+        profile_path = project / relative_profile
     return project, head, profile_path
+
+
+def test_acceptance_worktree_fingerprint_ignores_summary_only_changes(tmp_path: Path) -> None:
+    project = tmp_path / "nbs_analytics"
+    project.mkdir()
+    head = _git_repo(project)
+    summary = project / "docs" / "Summay" / "fixture.md"
+    summary.parent.mkdir(parents=True)
+    summary.write_text("fixture one\n", encoding="utf-8")
+
+    first = _worktree_fingerprint(project, head)
+    summary.write_text("fixture two\n", encoding="utf-8")
+    second = _worktree_fingerprint(project, head)
+
+    assert first == second
+    (project / "ordinary.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert _worktree_fingerprint(project, head) != second
+
+
+def test_v2_acceptance_passes_from_differently_named_linked_worktree(tmp_path: Path) -> None:
+    primary, head, primary_profile = _build_ready_profile(tmp_path, legacy_profile=False)
+    profile_payload = json.loads(primary_profile.read_text(encoding="utf-8"))
+    linked_worktree = tmp_path / "renamed-linked-worktree"
+    subprocess.run(
+        ["git", "-C", str(primary), "worktree", "add", "--quiet", "--detach", str(linked_worktree), head],
+        check=True,
+    )
+    shutil.copy2(primary / "nbs_marketing_data.db", linked_worktree / "nbs_marketing_data.db")
+    shutil.copytree(primary / ".nbs_runtime", linked_worktree / ".nbs_runtime")
+    shutil.copytree(primary / "data", linked_worktree / "data")
+    linked_profile_dir = (
+        linked_worktree / ".nbs_agent_runtime" / "verification" / primary_profile.parent.name
+    )
+    shutil.copytree(primary_profile.parent, linked_profile_dir)
+
+    result = accept_profile_file(
+        linked_profile_dir / "profile.json",
+        project_root=linked_worktree,
+        service_identity=ServiceIdentityEvidence(True),
+        source_root=primary,
+    )
+
+    assert profile_payload["projectId"] == "nbs_analytics"
+    assert linked_worktree.name == "renamed-linked-worktree"
+    assert result.ready is True
+    assert result.project_id == "nbs_analytics"
 
 
 def _load(project: Path, profile_path: Path, expected_git_head: str):
@@ -84,7 +152,9 @@ def _file_sha256(path: Path) -> str:
 
 
 def test_acceptance_ready_when_all_bindings_match(tmp_path: Path) -> None:
-    project, head, profile_path = _build_ready_profile(tmp_path)
+    project, head, profile_path = _build_ready_profile(
+        tmp_path, project_name="legacy-v1-project",
+    )
     profile, paths = _load(project, profile_path, head)
     result = accept_verification_profile(
         profile, paths, project_root=project,
@@ -93,7 +163,7 @@ def test_acceptance_ready_when_all_bindings_match(tmp_path: Path) -> None:
     assert result.ready is True
     assert result.blocked_reasons == ()
     assert result.profile_id == profile.profile_id
-    assert result.project_id == "project"
+    assert result.project_id == "legacy-v1-project"
     assert result.git_head == head
     assert result.runtime_dir == f"verification/{profile.profile_id}"
 
@@ -110,7 +180,7 @@ def test_acceptance_blocked_on_project_id_drift(tmp_path: Path) -> None:
     profile, paths = _load(project, profile_path, head)
     result = accept_verification_profile(
         profile, paths, project_root=project,
-        expected_git_head=head, expected_project_id="nbs_analytics",
+        expected_git_head=head, expected_project_id="different-project",
         service_identity=ServiceIdentityEvidence(True),
     )
     assert result.ready is False

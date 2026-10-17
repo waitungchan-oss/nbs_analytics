@@ -28,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Project root that owns the verification runtime (default: current directory).",
     )
     parser.add_argument(
+        "--source-root",
+        default=None,
+        help="Explicit primary checkout supplying the read-only DB/generation/baseline inputs for V2.",
+    )
+    parser.add_argument(
         "--expected-git-head",
         default=None,
         help="Expected Git HEAD the profile must be bound to (default: current repo HEAD).",
@@ -35,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--expected-project-id",
         default=None,
-        help="Expected projectId binding (default: project root directory name).",
+        help="Expected projectId binding (default: V1 project-root name; V2 stable deployment identity).",
     )
     parser.add_argument(
         "--max-age-hours",
@@ -65,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_project_id=args.expected_project_id,
         max_profile_age=timedelta(hours=args.max_age_hours),
         service_identity=service_identity,
+        source_root=Path(args.source_root) if args.source_root else None,
     )
     print(json.dumps(acceptance.handoff_evidence(result, consumer=args.consumer), ensure_ascii=False, indent=2))
     return 0 if result.ready else 1

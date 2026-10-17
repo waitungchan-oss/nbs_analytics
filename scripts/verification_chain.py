@@ -43,7 +43,10 @@ from backend.agents.agent_runtime import SubprocessAgentRunner
 from backend.agents.context_agent_service import context_summary_from_evidence_payload
 from backend.agents.evidence_collector import EvidenceCollector, EvidencePolicy
 from backend.agents.evidence_collector import normalize_review_head_ref
-from backend.agents.implementation_models import ImplementationTaskContract
+from backend.agents.implementation_models import (
+    ImplementationTaskContract,
+    validate_carry_forward_approval,
+)
 from backend.agents.review_agent_service import (
     merge_review_batches,
     plan_review_batches,
@@ -160,6 +163,7 @@ def _parser() -> argparse.ArgumentParser:
     hermes.add_argument("--profile", required=True, choices=HERMES_PROFILES)
     hermes.add_argument("--hermes-command", help="Hermes command override (shlex string).")
     hermes.add_argument("--verification-profile", help="Isolated verification profile path.")
+    hermes.add_argument("--source-root", help="Explicit primary checkout for V2 source binding; never persisted.")
 
     attest = subparsers.add_parser("attest", parents=[_common_parser()])
     attest.add_argument("--session", required=True)
@@ -269,6 +273,10 @@ def _read_verification(path: str) -> list[dict]:
 
 def _review_task_from_implementation_contract(path: Path) -> dict:
     contract = ImplementationTaskContract.from_dict(_read_object(str(path), "Implementation task contract"))
+    return _review_task_from_contract(contract)
+
+
+def _review_task_from_contract(contract: ImplementationTaskContract) -> dict:
     return {
         **contract.to_dict(),
         "scope": list(contract.allowed_write_paths),
@@ -436,19 +444,40 @@ def cmd_run_review(args) -> int:
         if not brief.is_file():
             return _emit_error(f"brief not found: {brief_path}", status="invalid_evidence", session_id=args.session)
         policy.resolve_read_path(brief)
+        implementation_contract = None
+        if args.task_contract:
+            task_contract_path = policy.resolve_input_path(Path(args.task_contract))
+            implementation_contract = ImplementationTaskContract.from_dict(
+                _read_object(str(task_contract_path), "Implementation task contract")
+            )
+            if implementation_contract.carry_forward_files:
+                try:
+                    validate_carry_forward_approval(
+                        implementation_contract,
+                        project_root=project_root,
+                        brief_path=brief_path,
+                        expected_brief_fingerprint=chain.session.brief_fingerprint,
+                    )
+                except ValueError as exc:
+                    return _emit_error(str(exc), status="invalid_evidence", session_id=args.session)
         bundle = EvidenceCollector(project_root, policy=policy).collect_review(
             brief,
             base_ref=base_ref,
             head_ref=head_ref,
             preserve_dirty_paths=tuple(args.preserve_dirty_path),
+            carry_forward_files=tuple(
+                (entry.path, entry.sha256)
+                for entry in (
+                    implementation_contract.carry_forward_files
+                    if implementation_contract is not None else ()
+                )
+            ),
         )
         _assert_review_bundle_bound(chain.session, bundle)
-        if args.task_contract:
+        if implementation_contract is not None:
             bundle = replace(
                 bundle,
-                task=_review_task_from_implementation_contract(
-                    policy.resolve_input_path(Path(args.task_contract))
-                ),
+                task=_review_task_from_contract(implementation_contract),
             )
         context_summary = {}
         if args.context:
@@ -604,6 +633,8 @@ def cmd_run_hermes(args) -> int:
         ]
         if args.verification_profile and args.profile == "isolated-profile":
             argv += ["--verification-profile", args.verification_profile]
+    if args.source_root and args.profile == "isolated-profile":
+        argv += ["--source-root", args.source_root]
     argv += ["--session", args.session, "--profile", args.profile, "--session-root", args.runtime_root]
     try:
         completed = subprocess.run(

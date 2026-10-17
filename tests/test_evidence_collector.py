@@ -1,4 +1,5 @@
 import hashlib
+import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -22,11 +23,12 @@ def write_configs(
     *,
     context_input_tokens: int = 12000,
     review_command_characters: int | None = None,
+    default_context_files: tuple[str, ...] = (),
 ) -> None:
     (root / "agent_config").mkdir()
     (root / "agent_config/evidence_allowlist.json").write_text(
-        '{"readRoots":["docs","backend","tests"],"rootFiles":["AGENTS.md",".gitignore"],'
-        '"defaultContextFiles":[],"extensions":[".md",".py"],'
+        '{"readRoots":["docs","backend","tests","Summay"],"rootFiles":["AGENTS.md",".gitignore"],'
+        f'"defaultContextFiles":{json.dumps(list(default_context_files))},"extensions":[".md",".py"],'
         '"denyPatterns":["*.db",".env","outputs/**"],"agentExecutables":["codex"]}',
         encoding="utf-8",
     )
@@ -53,6 +55,58 @@ def test_policy_rejects_path_escape_and_denied_data(tmp_path):
     denied.write_text("x", encoding="utf-8")
     with pytest.raises(PermissionError):
         policy.resolve_read_path(denied)
+
+
+def test_policy_rejects_summary_path_before_reading(tmp_path, monkeypatch):
+    write_configs(tmp_path)
+    summary = tmp_path / "Summay/private.md"
+    summary.parent.mkdir()
+    summary.write_text("fixture only", encoding="utf-8")
+    policy = EvidencePolicy.from_project(tmp_path)
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path, *args, **kwargs):
+        if path.is_relative_to(tmp_path / "Summay"):
+            raise AssertionError("Summary fixture content must not be opened")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    with pytest.raises(PermissionError, match="Excluded"):
+        policy.resolve_read_path(summary)
+
+
+def test_context_collection_skips_summary_defaults_and_prunes_queries(tmp_path, monkeypatch):
+    init_repo(tmp_path)
+    write_configs(
+        tmp_path,
+        default_context_files=("Summay/private.md", "docs/allowed.md"),
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "Summay").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    allowed = tmp_path / "docs/allowed.md"
+    summary = tmp_path / "Summay/private.md"
+    brief.write_text("objective", encoding="utf-8")
+    allowed.write_text("needle in allowlisted doc", encoding="utf-8")
+    summary.write_text("needle in excluded fixture", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path, *args, **kwargs):
+        if path.is_relative_to(tmp_path / "Summay"):
+            raise AssertionError("Context collection attempted to read an excluded fixture")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    bundle = EvidenceCollector(tmp_path).collect_context(
+        brief, base_ref="HEAD", queries=("needle",),
+    )
+
+    sources = [item.source for item in bundle.evidence]
+    assert sources == ["docs/brief.md", "docs/allowed.md"]
+    assert all("Summay/" not in source for source in sources)
 
 
 def test_project_policy_allows_only_named_root_worker_governance_file():
@@ -240,6 +294,39 @@ def test_review_collection_uses_argv_and_captures_changed_files(tmp_path):
     assert len(bundle.repository["baseSha"]) == 40
 
 
+def test_review_collection_excludes_summary_roots_from_inventory_and_patches(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "docs/Summay").mkdir()
+    (tmp_path / "Summay").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    allowed = tmp_path / "backend/allowed.py"
+    summary = tmp_path / "docs/Summay/private.md"
+    brief.write_text("objective", encoding="utf-8")
+    allowed.write_text("VALUE = 'before'\n", encoding="utf-8")
+    summary.write_text("private fixture before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    allowed.write_text("VALUE = 'after'\n", encoding="utf-8")
+    summary.write_text("private fixture after\n", encoding="utf-8")
+    (tmp_path / "Summay/untracked.md").write_text("untracked private fixture\n", encoding="utf-8")
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief, base_ref="HEAD", head_ref="WORKTREE",
+    )
+
+    assert bundle.repository["dirtyFiles"] == ["backend/allowed.py"]
+    assert [item.source for item in bundle.evidence] == ["backend/allowed.py"]
+    assert all("Summay/" not in item.source for item in bundle.evidence)
+    assert all("private fixture" not in item.content for item in bundle.evidence)
+    for label in ("git-status", "review-launch-worktree-fingerprint", "git-diff-name-only", "git-untracked-files"):
+        command = next(item for item in bundle.commands if item.label == label)
+        assert "Summay/private.md" not in command.stdout
+        assert "Summay/untracked.md" not in command.stdout
+
+
 def test_review_diff_uses_review_only_excerpt_budget_without_broadening_context(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path, review_command_characters=1200)
@@ -277,8 +364,8 @@ def test_review_launch_fingerprint_uses_full_status_when_excerpt_is_truncated(tm
     collector = EvidenceCollector(tmp_path)
     bundle = collector.collect_review(brief, base_ref="HEAD", head_ref="WORKTREE")
     raw = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all", "--",
-         ".", ":(exclude)docs/superpowers", ":(exclude).superpowers"],
+        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z", "--",
+         ".", ":(exclude,icase,glob)**/Summay/**", ":(exclude)docs/superpowers", ":(exclude).superpowers"],
         cwd=tmp_path, text=True, capture_output=True, check=True,
     ).stdout
 
@@ -655,14 +742,158 @@ def test_review_collection_rejects_preserve_source_file(tmp_path):
         )
 
 
+def test_review_collection_omits_only_hash_pinned_tracked_carry_forward_files(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "tests").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    carry = tmp_path / "tests/test_legacy.py"
+    carry.write_text("legacy = 1\n", encoding="utf-8")
+    source = tmp_path / "backend/new.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    carry.write_text("legacy = 2\n", encoding="utf-8")
+    source.write_text("value = 2\n", encoding="utf-8")
+    carry_hash = hashlib.sha256(carry.read_bytes()).hexdigest()
+
+    bundle = EvidenceCollector(tmp_path).collect_review(
+        brief,
+        base_ref="HEAD",
+        head_ref="WORKTREE",
+        carry_forward_files=(("tests/test_legacy.py", carry_hash),),
+    )
+
+    assert [item.source for item in bundle.evidence] == ["backend/new.py"]
+    assert bundle.repository["carryForwardFiles"] == [
+        {"path": "tests/test_legacy.py", "sha256": carry_hash},
+    ]
+    assert "tests/test_legacy.py" in bundle.repository["dirtyFiles"]
+    assert "tests/test_legacy.py" not in bundle.repository["preservedDirtyFiles"]
+    assert bundle.repository["reviewLaunchWorktreeFingerprint"]
+
+
+@pytest.mark.parametrize("mutation", ["hash", "untracked", "clean", "symlink"])
+def test_review_collection_rejects_invalid_carry_forward_file(tmp_path, mutation):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "tests").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    carry = tmp_path / "tests/test_legacy.py"
+    carry.write_text("legacy = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    carry_hash = hashlib.sha256(carry.read_bytes()).hexdigest()
+    carry.write_text("legacy = 2\n", encoding="utf-8")
+    if mutation == "hash":
+        carry_hash = "0" * 64
+    elif mutation == "untracked":
+        subprocess.run(["git", "rm", "--cached", "-q", "tests/test_legacy.py"], cwd=tmp_path, check=True)
+    elif mutation == "clean":
+        carry.write_text("legacy = 1\n", encoding="utf-8")
+    elif mutation == "symlink":
+        carry.unlink()
+        carry.symlink_to(brief)
+
+    with pytest.raises((PermissionError, ValueError), match="carry-forward"):
+        EvidenceCollector(tmp_path).collect_review(
+            brief,
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            carry_forward_files=(("tests/test_legacy.py", carry_hash),),
+        )
+
+
+def test_review_collection_fails_if_carry_forward_changes_during_collection(tmp_path):
+    init_repo(tmp_path)
+    write_configs(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "tests").mkdir()
+    brief = tmp_path / "docs/brief.md"
+    brief.write_text("objective", encoding="utf-8")
+    carry = tmp_path / "tests/test_legacy.py"
+    carry.write_text("legacy = 1\n", encoding="utf-8")
+    source = tmp_path / "docs/changed.md"
+    source.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    carry.write_text("legacy = 2\n", encoding="utf-8")
+    source.write_text("after\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(carry.read_bytes()).hexdigest()
+    collector = EvidenceCollector(tmp_path)
+    run_full_stdout = collector._run_full_stdout
+
+    def mutate_after_diff(argv, **kwargs):
+        result = run_full_stdout(argv, **kwargs)
+        if argv[:3] == ["git", "diff", "--no-textconv"] and argv[-1] == "docs/changed.md":
+            carry.write_text("legacy = 3\n", encoding="utf-8")
+        return result
+
+    collector._run_full_stdout = mutate_after_diff
+
+    with pytest.raises(RuntimeError, match="carry-forward file changed during Review collection"):
+        collector.collect_review(
+            brief,
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            carry_forward_files=(("tests/test_legacy.py", expected_hash),),
+        )
+
+
+def test_hash_pinned_carry_forward_uses_open_directory_descriptors_during_parent_swap(tmp_path, monkeypatch):
+    import os
+
+    from backend.agents import evidence_collector
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    source = tests_dir / "test_legacy.py"
+    source.write_text("inside repository\n", encoding="utf-8")
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_dir.mkdir()
+    (outside_dir / "test_legacy.py").write_text("outside repository\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    moved_dir = tmp_path / "tests-held"
+    collector = EvidenceCollector.__new__(EvidenceCollector)
+    collector.project_root = tmp_path
+    real_open = os.open
+    swapped = False
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path).name == "test_legacy.py" and not swapped:
+            os.rename(tests_dir, moved_dir)
+            tests_dir.symlink_to(outside_dir, target_is_directory=True)
+            swapped = True
+            try:
+                return real_open(path, flags, *args, **kwargs)
+            finally:
+                tests_dir.unlink()
+                os.rename(moved_dir, tests_dir)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(evidence_collector.os, "open", swapping_open)
+
+    actual_hash = collector._hash_review_carry_forward_file("tests/test_legacy.py")
+
+    assert swapped
+    assert actual_hash == expected_hash
+    assert not tests_dir.is_symlink()
+
+
 def test_review_collection_allows_explicit_untracked_source_boundary(tmp_path):
     init_repo(tmp_path)
     write_configs(tmp_path)
     allowlist = tmp_path / "agent_config/evidence_allowlist.json"
     allowlist.write_text(
         allowlist.read_text(encoding="utf-8").replace(
-            '"readRoots":["docs","backend","tests"]',
-            '"readRoots":["docs","backend","scripts","tests"]',
+            '"readRoots":["docs","backend","tests","Summay"]',
+            '"readRoots":["docs","backend","scripts","tests","Summay"]',
         ),
         encoding="utf-8",
     )

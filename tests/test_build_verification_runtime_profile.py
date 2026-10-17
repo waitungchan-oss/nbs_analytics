@@ -19,6 +19,7 @@ from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL
 from backend.services.verification_runtime_profile import VerificationRuntimeProfile
 from scripts.build_verification_runtime_profile import (
     VerificationRuntimeProfileBuildError,
+    _worktree_fingerprint,
     build_verification_profile,
 )
 
@@ -27,6 +28,20 @@ def _db(path: Path) -> None:
     with sqlite3.connect(path) as conn:
         conn.execute("create table sample (value text)")
         conn.execute("insert into sample values ('source')")
+
+
+def _init_repo(project: Path) -> str:
+    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.email=fixture@example.invalid", "-c", "user.name=fixture", "commit", "--allow-empty", "-m", "fixture", "-q"],
+        check=True,
+    )
+    return subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _core_revenue_signature() -> dict[str, object]:
@@ -56,16 +71,16 @@ def _generation_v2_payload(source_db: Path) -> dict[str, object]:
         "dbSignature": {
             "sizeBytes": source_db.stat().st_size,
             "modifiedNs": source_db.stat().st_mtime_ns,
-            "sha256": "e" * 64,
+            "sha256": _sha256(source_db),
         },
         "coreRevenueSignature": _core_revenue_signature(),
     }
 
 
 def _generation_profile_project(tmp_path: Path, generation: dict[str, object]) -> tuple[Path, Path, Path]:
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    _init_repo(project)
     source_db = project / "nbs_marketing_data.db"
     _db(source_db)
     runtime = project / ".nbs_runtime"
@@ -77,9 +92,9 @@ def _generation_profile_project(tmp_path: Path, generation: dict[str, object]) -
 
 
 def test_builder_creates_profile_snapshot_and_generation_metadata(tmp_path: Path) -> None:
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    git_head = _init_repo(project)
     source_db = project / "nbs_marketing_data.db"
     _db(source_db)
     runtime = project / ".nbs_runtime"
@@ -89,7 +104,7 @@ def test_builder_creates_profile_snapshot_and_generation_metadata(tmp_path: Path
         "operationId": "op-7",
         "status": "accepted",
         "updatedAt": "2026-08-17T10:00:00+08:00",
-        "dbSignature": {"sizeBytes": source_db.stat().st_size, "modifiedNs": source_db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": source_db.stat().st_size, "modifiedNs": source_db.stat().st_mtime_ns, "sha256": _sha256(source_db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
@@ -98,14 +113,13 @@ def test_builder_creates_profile_snapshot_and_generation_metadata(tmp_path: Path
 
     profile_path = build_verification_profile(
         project_root=project,
-        source_db=source_db,
-        source_runtime=runtime,
+        source_root=project,
         output_root=output_root,
-        git_head="a" * 40,
+        git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
 
-    profile = VerificationRuntimeProfile.load(profile_path, expected_git_head="a" * 40)
+    profile = VerificationRuntimeProfile.load(profile_path, expected_git_head=git_head)
     assert profile.database.read_only is True
     assert profile.database.snapshot_ref.startswith("verification/")
     assert (profile_path.parent / "generation.json").is_file()
@@ -116,14 +130,31 @@ def test_builder_creates_profile_snapshot_and_generation_metadata(tmp_path: Path
     assert source_db.stat().st_mtime_ns == source_stat.st_mtime_ns
 
 
+def test_builder_worktree_fingerprint_ignores_summary_only_changes(tmp_path: Path) -> None:
+    project = tmp_path / "nbs_analytics"
+    project.mkdir()
+    git_head = _init_repo(project)
+    summary = project / "Summay" / "fixture.md"
+    summary.parent.mkdir()
+    summary.write_text("fixture one\n", encoding="utf-8")
+
+    first = _worktree_fingerprint(project, git_head)
+    summary.write_text("fixture two\n", encoding="utf-8")
+    second = _worktree_fingerprint(project, git_head)
+
+    assert first == second
+    (project / "ordinary.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert _worktree_fingerprint(project, git_head) != second
+
+
 def test_builder_preserves_current_generation_v2_signature(tmp_path: Path) -> None:
     project, source_db, runtime = _generation_profile_project(tmp_path, {})
     generation = _generation_v2_payload(source_db)
     (runtime / "data_generation.json").write_text(json.dumps(generation), encoding="utf-8")
 
     profile = build_verification_profile(
-        project_root=project, source_db=source_db, source_runtime=runtime,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head="a" * 40,
+        project_root=project, source_root=project,
+        output_root=project / ".nbs_agent_runtime" / "verification", git_head=subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip(),
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
 
@@ -131,35 +162,58 @@ def test_builder_preserves_current_generation_v2_signature(tmp_path: Path) -> No
     assert copied == generation
 
 
+def test_builder_supports_legacy_source_db_and_runtime_keywords(tmp_path: Path) -> None:
+    project, source_db, source_runtime = _generation_profile_project(tmp_path, {})
+    generation = _generation_v2_payload(source_db)
+    (source_runtime / "data_generation.json").write_text(json.dumps(generation), encoding="utf-8")
+    git_head = subprocess.run(
+        ["git", "-C", str(project), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    profile_path = build_verification_profile(
+        project_root=project,
+        source_db=source_db,
+        source_runtime=source_runtime,
+        output_root=project / ".nbs_agent_runtime" / "verification",
+        git_head=git_head,
+        ports={"api": 18601, "streamlit": 18502, "vue": 15173},
+    )
+
+    assert json.loads(profile_path.read_text(encoding="utf-8"))["schemaVersion"] == "verification-runtime-profile-v2"
+
+
 @pytest.mark.parametrize("invalid_hash", ["g" * 64, "A" * 64])
 def test_builder_rejects_noncanonical_database_signature_hash(tmp_path: Path, invalid_hash: str) -> None:
     project, source_db, runtime = _generation_profile_project(tmp_path, {})
+    git_head = subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     generation = _generation_v2_payload(source_db)
     generation["dbSignature"]["sha256"] = invalid_hash
     (runtime / "data_generation.json").write_text(json.dumps(generation), encoding="utf-8")
 
-    with pytest.raises(VerificationRuntimeProfileBuildError, match="dbSignature hash"):
+    with pytest.raises(VerificationRuntimeProfileBuildError, match="source_binding:generation_invalid"):
         build_verification_profile(
-            project_root=project, source_db=source_db, source_runtime=runtime,
-            output_root=project / ".nbs_agent_runtime" / "verification", git_head="c" * 40,
+            project_root=project, source_root=project,
+            output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
             ports={"api": 18601, "streamlit": 18502, "vue": 15173},
         )
-    assert not (project / ".nbs_agent_runtime" / "verification" / f"profile-{'c' * 12}").exists()
+    assert not (project / ".nbs_agent_runtime" / "verification" / f"profile-{git_head[:12]}").exists()
 
 
 def test_builder_rejects_unknown_generation_v2_fields(tmp_path: Path) -> None:
     project, source_db, runtime = _generation_profile_project(tmp_path, {})
+    git_head = subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     generation = _generation_v2_payload(source_db)
     generation["unexpected"] = "must fail closed"
     (runtime / "data_generation.json").write_text(json.dumps(generation), encoding="utf-8")
 
-    with pytest.raises(VerificationRuntimeProfileBuildError, match="generation metadata keys"):
+    with pytest.raises(VerificationRuntimeProfileBuildError, match="source_binding:generation_invalid"):
         build_verification_profile(
-            project_root=project, source_db=source_db, source_runtime=runtime,
-            output_root=project / ".nbs_agent_runtime" / "verification", git_head="b" * 40,
+            project_root=project, source_root=project,
+            output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
             ports={"api": 18601, "streamlit": 18502, "vue": 15173},
         )
-    assert not (project / ".nbs_agent_runtime" / "verification" / f"profile-{'b' * 12}").exists()
+    assert not (project / ".nbs_agent_runtime" / "verification" / f"profile-{git_head[:12]}").exists()
 
 
 def test_builder_rejects_missing_source_before_output_creation(tmp_path: Path) -> None:
@@ -167,8 +221,7 @@ def test_builder_rejects_missing_source_before_output_creation(tmp_path: Path) -
     with pytest.raises(VerificationRuntimeProfileBuildError):
         build_verification_profile(
             project_root=tmp_path,
-            source_db=tmp_path / "missing.sqlite",
-            source_runtime=tmp_path / "runtime",
+            source_root=tmp_path,
             output_root=output_root,
             git_head="a" * 40,
             ports={"api": 18601, "streamlit": 18502, "vue": 15173},
@@ -177,22 +230,22 @@ def test_builder_rejects_missing_source_before_output_creation(tmp_path: Path) -
 
 
 def test_builder_rejects_output_outside_ignored_verification_runtime(tmp_path: Path) -> None:
-    project = tmp_path / "project"
+    project = tmp_path / "nbs_analytics"
     project.mkdir()
-    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    git_head = _init_repo(project)
     source_db = project / "nbs_marketing_data.db"
     _db(source_db)
     runtime = project / ".nbs_runtime"
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": source_db.stat().st_size, "modifiedNs": source_db.stat().st_mtime_ns, "sha256": "a" * 64},
+        "dbSignature": {"sizeBytes": source_db.stat().st_size, "modifiedNs": source_db.stat().st_mtime_ns, "sha256": _sha256(source_db)},
     }), encoding="utf-8")
     (project / "data").mkdir()
     (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     with pytest.raises(VerificationRuntimeProfileBuildError, match="verification runtime"):
         build_verification_profile(
-            project_root=project, source_db=source_db, source_runtime=runtime,
-            output_root=tmp_path / "outside", git_head="a" * 40,
+            project_root=project, source_root=project,
+            output_root=tmp_path / "outside", git_head=git_head,
             ports={"api": 18601, "streamlit": 18502, "vue": 15173},
         )

@@ -171,7 +171,7 @@ def test_live_probe_invokes_codex_exec_subcommand(tmp_path, monkeypatch):
     probe_argv = next(argv for argv in observed if "--version" not in argv)
     assert probe_argv[1:3] == ["exec", "--ephemeral"]
     assert probe_argv[3:5] == ["--color", "never"]
-    assert "--json" not in probe_argv
+    assert "--json" in probe_argv
 
 
 def test_live_probe_decodes_codex_jsonl_agent_message(tmp_path, monkeypatch):
@@ -191,16 +191,22 @@ def test_live_probe_decodes_codex_jsonl_agent_message(tmp_path, monkeypatch):
             "text": json.dumps({"status": "ok", "model": "gpt-5.4"}),
         },
     })
+    observed = []
 
     def fake_run(argv, **kwargs):
+        observed.append(argv)
         if "--version" in argv:
             return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.150.1\n", stderr="")
-        return subprocess.CompletedProcess(argv, 0, stdout=event_stream + "\n", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="OpenAI Codex v0.150.1\n" + event_stream + "\ntokens used\n", stderr=""
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     receipt = probe_runner(profile)
 
     assert receipt.status == "turn_ready"
+    probe_argv = next(argv for argv in observed if "--version" not in argv)
+    assert "--json" in probe_argv
 
 
 def test_probe_runner_static_failure_blocks_capability_without_probe(tmp_path):

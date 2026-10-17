@@ -19,7 +19,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.agents.agent_runtime import SubprocessAgentRunner, resolve_runtime_output_path
 from backend.agents.context_agent_service import context_summary_from_evidence_payload
 from backend.agents.evidence_collector import EvidenceCollector, EvidencePolicy
-from backend.agents.implementation_models import ImplementationTaskContract
+from backend.agents.implementation_models import (
+    ImplementationTaskContract,
+    validate_carry_forward_approval,
+)
 from backend.agents.review_runner_profile import RunnerProfile, load_runner_profile, preflight_runner
 from backend.agents.verification_evidence_writer import sha256_from_output, validate_verification_v1
 from backend.agents.review_agent_service import (
@@ -127,7 +130,7 @@ def _verification_freshness_diagnostics(
         return ["Strict review verification brief identity does not match the requested brief."]
     if worktree["argv"] != [
         "sh", "-c",
-        "git status --porcelain --untracked-files=all -- . ':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256",
+        "git status --porcelain=v1 --untracked-files=all --no-renames -z -- . ':(exclude,icase,glob)**/Summay/**' ':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256",
     ]:
         return ["Strict review worktree fingerprint command is not the approved command."]
     expected_head = bundle.repository.get("headSha") or current_head_sha
@@ -143,6 +146,10 @@ def _verification_freshness_diagnostics(
 def _review_task_from_implementation_contract(path: Path) -> dict:
     payload = _read_object(str(path), "Implementation task contract")
     contract = ImplementationTaskContract.from_dict(payload)
+    return _review_task_from_contract(contract)
+
+
+def _review_task_from_contract(contract: ImplementationTaskContract) -> dict:
     return {
         **contract.to_dict(),
         "scope": list(contract.allowed_write_paths),
@@ -167,17 +174,36 @@ def main(argv: list[str] | None = None) -> int:
             args.strict and args.agent_command and args.approved_brief != args.brief
         )
         policy.resolve_read_path(brief)
+        implementation_contract = None
+        if args.task_contract:
+            task_contract_path = policy.resolve_input_path(Path(args.task_contract))
+            implementation_contract = ImplementationTaskContract.from_dict(
+                _read_object(str(task_contract_path), "Implementation task contract")
+            )
+            if implementation_contract.carry_forward_files:
+                validate_carry_forward_approval(
+                    implementation_contract,
+                    project_root=PROJECT_ROOT,
+                    brief_path=brief.relative_to(PROJECT_ROOT.resolve()).as_posix(),
+                    expected_brief_fingerprint=hashlib.sha256(brief.read_bytes()).hexdigest(),
+                )
         bundle = EvidenceCollector(PROJECT_ROOT, policy=policy).collect_review(
             brief,
             base_ref=args.base,
             head_ref=args.head,
             preserve_dirty_paths=tuple(args.preserve_dirty_path),
+            carry_forward_files=tuple(
+                (entry.path, entry.sha256)
+                for entry in (
+                    implementation_contract.carry_forward_files
+                    if implementation_contract is not None else ()
+                )
+            ),
         )
-        if args.task_contract:
-            task_contract_path = policy.resolve_input_path(Path(args.task_contract))
+        if implementation_contract is not None:
             bundle = replace(
                 bundle,
-                task=_review_task_from_implementation_contract(task_contract_path),
+                task=_review_task_from_contract(implementation_contract),
             )
         if args.collect_only:
             report = build_review_evidence_payload(

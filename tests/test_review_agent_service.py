@@ -6,6 +6,7 @@ import pytest
 from backend.agents.evidence_models import EvidenceBundle, EvidenceItem, canonical_fingerprint
 from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
 from backend.agents.review_agent_service import (
+    _validate_task_contract,
     build_review_evidence_payload,
     build_review_report,
     compact_review_evidence_payload,
@@ -329,6 +330,65 @@ def test_strict_review_allows_explicitly_preserved_process_artifact(tmp_path):
         instructions="contract", strict=True,
     )
     assert report["verdict"] == "pass"
+
+
+def test_strict_review_accepts_hash_pinned_carry_forward_attribution_and_emits_it():
+    carry_forward = [{"path": "tests/test_legacy.py", "sha256": "c" * 64}]
+    bundle = review_bundle(dirty=["tests/test_legacy.py"])
+    task = {
+        **bundle.task,
+        "carryForwardFiles": carry_forward,
+    }
+    bundle = EvidenceBundle(
+        schema_version=bundle.schema_version,
+        task=task,
+        repository={
+            **bundle.repository,
+            "dirtyFiles": ["x.py", "tests/test_legacy.py"],
+            "carryForwardFiles": carry_forward,
+        },
+        guardrails=bundle.guardrails,
+        evidence=bundle.evidence,
+    )
+
+    payload = build_review_evidence_payload(
+        bundle, context_summary=context_summary(), verification=verification(),
+    )
+
+    assert payload["gitDiff"]["carryForwardFiles"] == carry_forward
+    assert payload["taskContract"]["carryForwardFiles"] == carry_forward
+
+
+def test_review_rejects_carry_forward_evidence_not_bound_to_task_contract():
+    bundle = review_bundle(dirty=["tests/test_legacy.py"])
+    bundle = EvidenceBundle(
+        schema_version=bundle.schema_version,
+        task={**bundle.task, "carryForwardFiles": [{"path": "tests/test_legacy.py", "sha256": "c" * 64}]},
+        repository={**bundle.repository, "carryForwardFiles": []},
+        guardrails=bundle.guardrails,
+        evidence=bundle.evidence,
+    )
+
+    with pytest.raises(ValueError, match="do not match the approved task contract"):
+        build_review_evidence_payload(
+            bundle, context_summary=context_summary(), verification=verification(),
+        )
+
+
+def test_review_task_contract_rejects_more_than_fifty_carry_forward_files():
+    carry_forward = [
+        {"path": f"legacy/{index}.py", "sha256": "c" * 64}
+        for index in range(51)
+    ]
+    task = {
+        "objective": "Review a bounded change set",
+        "scope": ["backend"],
+        "forbidden": [],
+        "carryForwardFiles": carry_forward,
+    }
+
+    with pytest.raises(ValueError, match="bounded entry limit"):
+        _validate_task_contract(task)
 
 
 def test_strict_review_rejects_truncated_evidence(tmp_path):
