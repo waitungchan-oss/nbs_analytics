@@ -5,9 +5,11 @@ import codecs
 import hashlib
 import json
 import os
+import unicodedata
+import stat
 import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -15,9 +17,18 @@ from backend.agents.evidence_models import (
     CommandEvidence,
     EvidenceBundle,
     EvidenceItem,
+    canonical_fingerprint,
     estimate_tokens,
     load_json_config,
 )
+from backend.agents.implementation_models import MAX_CARRY_FORWARD_FILES
+from backend.agents.repository_scope import (
+    is_excluded_repository_path,
+    repository_git_pathspecs,
+    verification_source_git_pathspecs,
+)
+from backend.agents.safe_repo_file import open_repo_file_nofollow
+from backend.agents.verification_chain import BoundedSubprocessOutputError, run_bounded_subprocess
 
 
 _WORKTREE_HEAD_ALIASES = frozenset({"WORKTREE", "WORKING-TREE"})
@@ -148,6 +159,14 @@ class EvidencePolicy:
         return self._resolve_read_path(path, allow_tracked_root_source=True)
 
     def _resolve_read_path(self, path: Path, *, allow_tracked_root_source: bool) -> Path:
+        lexical = Path(os.path.abspath(os.fspath(path)))
+        lexical_root = Path(os.path.abspath(os.fspath(self.project_root)))
+        try:
+            lexical_relative = lexical.relative_to(lexical_root)
+        except ValueError as exc:
+            raise PermissionError(f"Path is outside project root: {path}") from exc
+        if is_excluded_repository_path(lexical_relative.as_posix()):
+            raise PermissionError("Excluded user-owned evidence path")
         resolved = path.resolve()
         try:
             relative = resolved.relative_to(self.project_root)
@@ -155,6 +174,8 @@ class EvidencePolicy:
             raise PermissionError(f"Path is outside project root: {path}") from exc
 
         relative_text = relative.as_posix()
+        if is_excluded_repository_path(relative_text):
+            raise PermissionError("Excluded user-owned evidence path")
         if any(
             fnmatch.fnmatch(relative_text, pattern)
             or fnmatch.fnmatch(resolved.name, pattern)
@@ -178,6 +199,12 @@ class EvidencePolicy:
         """Resolve Review inputs without allowing arbitrary files or symlink escapes."""
         lexical_project = Path(os.path.abspath(os.fspath(self.project_root)))
         lexical = Path(os.path.abspath(os.fspath(path)))
+        try:
+            lexical_relative = lexical.relative_to(lexical_project)
+        except ValueError:
+            return self.resolve_read_path(lexical)
+        if is_excluded_repository_path(lexical_relative.as_posix()):
+            raise PermissionError("Excluded user-owned evidence input")
         if not lexical.is_file():
             raise PermissionError(f"Evidence input must be an existing file: {path}")
 
@@ -221,8 +248,13 @@ class EvidenceCollector:
     _MAX_REVIEW_EVIDENCE_BYTES = 16 * 1024 * 1024
     _MAX_FULL_COMMAND_EXCERPT_BYTES = 4096
     _MAX_FULL_COMMAND_DIAGNOSTIC_BYTES = 4096
+    _BOUNDED_REVIEW_INVENTORY_LABELS = frozenset({
+        "git-status", "review-launch-worktree-fingerprint",
+        "git-diff-name-only", "git-untracked-files",
+    })
 
     def __init__(self, project_root: Path, *, policy: EvidencePolicy | None = None) -> None:
+        self.project_root_lexical = Path(os.path.abspath(os.fspath(project_root)))
         self.project_root = project_root.resolve()
         self.policy = policy or EvidencePolicy.from_project(self.project_root)
 
@@ -241,15 +273,21 @@ class EvidenceCollector:
             else command_character_limit
         )
         try:
-            completed = subprocess.run(
+            completed = run_bounded_subprocess(
                 argv,
                 cwd=self.project_root,
-                text=True,
-                capture_output=True,
-                timeout=60,
+                timeout_seconds=60,
+                max_output_bytes=(
+                    self._MAX_REVIEW_STATUS_BYTES
+                    if label in self._BOUNDED_REVIEW_INVENTORY_LABELS
+                    else self._MAX_REVIEW_EVIDENCE_BYTES
+                ),
+                error_message=f"{label} exceeded its bounded output budget",
                 check=False,
-                shell=False,
+                text=True,
             )
+        except BoundedSubprocessOutputError as exc:
+            raise RuntimeError(str(exc)) from exc
         except FileNotFoundError:
             # ripgrep is an optional accelerator: when it is missing, degrade to
             # a deterministic Python fixed-string search instead of crashing.
@@ -446,15 +484,57 @@ class EvidenceCollector:
 
     def _candidate_paths(self) -> tuple[str, ...]:
         candidates: set[str] = set()
-        roots = [self.project_root / root for root in self.policy.read_roots]
-        paths = [
-            self.project_root / relative
-            for relative in self.policy.root_files
-            if (self.project_root / relative).is_file()
-        ]
+        roots: list[Path] = []
+        for configured_root in self.policy.read_roots:
+            relative_root = os.fspath(configured_root)
+            relative_path = Path(relative_root)
+            if (
+                is_excluded_repository_path(relative_root)
+                or relative_path.is_absolute()
+                or ".." in relative_path.parts
+                or "\\" in relative_root
+            ):
+                continue
+            candidate_root = self.project_root / relative_path
+            current = self.project_root
+            for component in relative_path.parts:
+                current = current / component
+                if current.is_symlink():
+                    break
+            else:
+                try:
+                    resolved_root = candidate_root.resolve(strict=True)
+                    resolved_root.relative_to(self.project_root)
+                except (OSError, ValueError):
+                    continue
+                if resolved_root.is_dir():
+                    roots.append(resolved_root)
+        paths: list[Path] = []
+        for relative in self.policy.root_files:
+            if is_excluded_repository_path(relative):
+                continue
+            path = self.project_root / relative
+            try:
+                resolved = self.policy.resolve_read_path(path)
+            except PermissionError:
+                continue
+            if resolved.is_file():
+                paths.append(resolved)
         for root in roots:
-            if root.exists():
-                paths.extend(path for path in root.rglob("*") if path.is_file())
+            if not root.is_dir():
+                continue
+            for current, directory_names, file_names in os.walk(
+                root, topdown=True, followlinks=False,
+            ):
+                directory_names[:] = [
+                    name for name in directory_names
+                    if name.casefold() != "summay"
+                    and not (Path(current) / name).is_symlink()
+                ]
+                paths.extend(
+                    Path(current) / name for name in file_names
+                    if not (Path(current) / name).is_symlink()
+                )
         for path in paths:
             try:
                 resolved = self.policy.resolve_read_path(path)
@@ -554,16 +634,55 @@ class EvidenceCollector:
     def _repository(self) -> tuple[dict, tuple[CommandEvidence, ...]]:
         head = self._run("git-head", ["git", "rev-parse", "HEAD"])
         branch = self._run("git-branch", ["git", "branch", "--show-current"])
-        status = self._run(
-            "git-status", ["git", "status", "--porcelain", "--untracked-files=all"],
+        status_complete = self._run(
+            "git-status", [
+                "git", "status", "--porcelain=v1", "--untracked-files=all",
+                "--no-renames", "-z", "--", *repository_git_pathspecs(),
+            ],
+            command_character_limit=self._MAX_REVIEW_STATUS_BYTES,
         )
         recent = self._run("git-log", ["git", "log", "-5", "--oneline"])
-        dirty = sorted(line[3:] for line in status.stdout.splitlines() if len(line) > 3)
+        if status_complete.truncated:
+            raise ValueError("git status output was truncated")
+        status_output = status_complete.stdout
+        status_excerpt_limit = self.policy.review_max_command_characters
+        if status_excerpt_limit is None:
+            status_excerpt_limit = self.policy.max_command_characters
+        status = replace(
+            status_complete,
+            stdout=status_output[:status_excerpt_limit],
+            truncated=len(status_output) > status_excerpt_limit,
+        )
+        raw_status_entries = status_output.split("\0")
+        status_entries = [entry for entry in raw_status_entries if entry]
+        if any(
+            len(entry) < 4
+            or entry[2] != " "
+            or any(character not in " MADRCUT?!" for character in entry[:2])
+            for entry in status_entries
+        ):
+            raise ValueError("malformed git status record")
+        dirty = sorted(entry[3:] for entry in status_entries)
         return {
             "branch": branch.stdout.strip(),
             "head": head.stdout.strip(),
             "dirtyFiles": dirty,
         }, (head, branch, status, recent)
+
+    def _review_source_probe(self, brief_path: Path, *, base_sha: str, head_ref: str) -> dict:
+        from backend.agents.verification_chain import git_source_probe
+
+        brief_absolute = Path(os.path.abspath(os.fspath(brief_path)))
+        try:
+            brief_relative = brief_absolute.relative_to(self.project_root_lexical).as_posix()
+        except ValueError as exc:
+            raise PermissionError("Review brief must remain inside the approved worktree") from exc
+        return git_source_probe(
+            self.project_root_lexical,
+            brief_path=brief_relative,
+            base_sha=base_sha,
+            head_ref=head_ref,
+        )
 
     def collect_context(
         self,
@@ -576,13 +695,17 @@ class EvidenceCollector:
         repository, commands = self._repository()
         base_sha, base = self._resolve_ref("git-base", base_ref)
         query_paths, query_commands = self._query_paths(queries)
-        default_paths = [
-            self.project_root / relative
-            for relative in self.policy.default_context_files
-            if (self.project_root / relative).is_file()
-        ]
+        default_paths = []
+        for relative in self.policy.default_context_files:
+            if is_excluded_repository_path(relative):
+                continue
+            resolved = self.policy.resolve_read_path(self.project_root / relative)
+            if resolved.is_file():
+                default_paths.append(resolved)
         selected_paths = [brief_path, *default_paths, *include_paths, *query_paths]
-        unique_paths = tuple(dict.fromkeys(path.resolve() for path in selected_paths))
+        unique_paths = tuple(
+            dict.fromkeys(self.policy.resolve_read_path(path) for path in selected_paths)
+        )
         evidence = tuple(self._document(path) for path in unique_paths)
         task = {
             "id": brief_path.stem,
@@ -620,12 +743,21 @@ class EvidenceCollector:
         base_ref: str = "main",
         head_ref: str = "WORKTREE",
         preserve_dirty_paths: tuple[str, ...] = (),
+        carry_forward_files: tuple[tuple[str, str], ...] = (),
     ) -> EvidenceBundle:
+        if len(carry_forward_files) > MAX_CARRY_FORWARD_FILES:
+            raise ValueError(
+                f"Hash-pinned carry-forward list exceeds maximum of {MAX_CARRY_FORWARD_FILES} files"
+            )
         head_ref = normalize_review_head_ref(head_ref)
         repository, commands = self._repository()
         launch_worktree_argv = [
-            "git", "status", "--porcelain", "--untracked-files=all", "--",
-            ".", ":(exclude)docs/superpowers", ":(exclude).superpowers",
+            "git", "status", "--porcelain=v1", "--untracked-files=all",
+            "--no-renames", "-z", "--",
+            *verification_source_git_pathspecs(
+                ":(exclude)docs/superpowers",
+                ":(exclude).superpowers",
+            ),
         ]
         launch_worktree_command = self._run(
             "review-launch-worktree-fingerprint",
@@ -651,12 +783,27 @@ class EvidenceCollector:
         else:
             head_sha, head_command = self._resolve_ref("git-head-ref", head_ref)
             diff_range = f"{base_sha}...{head_sha}"
+        try:
+            collection_source_identity = self._review_source_probe(
+                brief_path, base_sha=base_sha, head_ref=head_ref,
+            )
+        except (OSError, ValueError) as exc:
+            if carry_forward_files:
+                raise PermissionError(
+                    "Hash-pinned carry-forward source is not safe to inspect"
+                ) from exc
+            raise RuntimeError("Review source probe failed") from exc
         diff_options = ["--no-textconv", "--no-ext-diff"]
         changed = self._run(
             "git-diff-name-only",
-            ["git", "diff", *diff_options, "--name-only", diff_range],
+            [
+                "git", "diff", *diff_options, "--no-renames", "--name-only", "-z",
+                diff_range, "--", *repository_git_pathspecs(),
+            ],
             command_character_limit=self.policy.review_max_command_characters,
         )
+        if changed.truncated:
+            raise RuntimeError("Review tracked diff file enumeration was truncated")
         untracked_command = None
         untracked_paths: list[str] = []
         preserved_dirty_paths: list[str] = []
@@ -664,7 +811,10 @@ class EvidenceCollector:
         explicit_preserved_paths = set()
         for relative in preserve_dirty_paths:
             path = Path(relative)
-            if path.is_absolute() or ".." in path.parts:
+            if (
+                path.is_absolute() or ".." in path.parts
+                or is_excluded_repository_path(relative)
+            ):
                 raise PermissionError("Explicit preserved dirty path is unsafe")
             if not relative.startswith(process_artifact_prefixes):
                 if path.suffix in {".py", ".js", ".mjs", ".vue"} and path.parts[0] in {
@@ -688,11 +838,30 @@ class EvidenceCollector:
         if head_ref == "WORKTREE":
             untracked_command = self._run(
                 "git-untracked-files",
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                command_character_limit=self.policy.review_max_command_characters,
+                [
+                    "git", "ls-files", "--others", "--exclude-standard", "-z",
+                    "--", *repository_git_pathspecs(),
+                ],
+                command_character_limit=self._MAX_REVIEW_STATUS_BYTES,
             )
-            for relative in untracked_command.stdout.splitlines():
-                if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+            if untracked_command.truncated:
+                raise RuntimeError("Review untracked path enumeration was truncated")
+            untracked_paths_output = untracked_command.stdout
+            untracked_excerpt_limit = self.policy.review_max_command_characters
+            if untracked_excerpt_limit is None:
+                untracked_excerpt_limit = self.policy.max_command_characters
+            untracked_command = replace(
+                untracked_command,
+                stdout=untracked_paths_output[:untracked_excerpt_limit],
+                truncated=len(untracked_paths_output) > untracked_excerpt_limit,
+            )
+            for relative in untracked_paths_output.split("\0"):
+                if not relative:
+                    continue
+                if (
+                    relative.startswith("/") or ".." in Path(relative).parts
+                    or is_excluded_repository_path(relative)
+                ):
                     raise PermissionError(f"Unsafe untracked path: {relative}")
                 if relative in explicit_preserved_paths:
                     preserved_dirty_paths.append(relative)
@@ -704,21 +873,73 @@ class EvidenceCollector:
                         preserved_dirty_paths.append(relative)
                     continue
                 untracked_paths.append(relative)
-        tracked_paths = changed.stdout.splitlines()
+        tracked_paths = [
+            relative for relative in changed.stdout.split("\0")
+            if relative and not is_excluded_repository_path(relative)
+        ]
+        if carry_forward_files and (head_ref != "WORKTREE" or changed.truncated):
+            raise ValueError("Hash-pinned carry-forward requires a complete working-tree diff")
+        carry_forward_hashes: dict[str, str] = {}
+        for relative, expected_hash in carry_forward_files:
+            path = Path(relative)
+            if (
+                not relative or path.is_absolute() or "\\" in relative
+                or "\x00" in relative or ".." in path.parts or "." in path.parts
+                or any(unicodedata.category(char) == "Cc" for char in relative)
+                or is_excluded_repository_path(relative)
+            ):
+                raise PermissionError("Hash-pinned carry-forward path is unsafe")
+            if (
+                len(expected_hash) != 64
+                or any(char not in "0123456789abcdef" for char in expected_hash)
+                or relative in carry_forward_hashes
+            ):
+                raise ValueError("Hash-pinned carry-forward fingerprint is invalid")
+            if relative not in tracked_paths:
+                raise PermissionError("Hash-pinned carry-forward path is not a dirty tracked file")
+            try:
+                tracked = run_bounded_subprocess(
+                    [
+                        "git", "ls-files", "-z", "--error-unmatch", "--", relative,
+                        *repository_git_pathspecs()[1:],
+                    ],
+                    cwd=self.project_root,
+                    timeout_seconds=15,
+                    max_output_bytes=16 * 1024,
+                    error_message="Hash-pinned carry-forward tracked-file probe exceeded its output budget",
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                raise PermissionError(
+                    "Hash-pinned carry-forward tracked-file probe was not safely bounded"
+                ) from exc
+            if tracked.returncode != 0 or tracked.stdout != os.fsencode(relative) + b"\0":
+                raise PermissionError("Hash-pinned carry-forward path is not tracked")
+            carry_forward_hashes[relative] = expected_hash
+        observed_carry_forward_hashes = {
+            relative: self._hash_review_carry_forward_file(relative)
+            for relative in carry_forward_hashes
+        }
+        for relative, expected_hash in carry_forward_hashes.items():
+            if observed_carry_forward_hashes[relative] != expected_hash:
+                raise PermissionError("Hash-pinned carry-forward content fingerprint mismatch")
         for relative in tracked_paths:
             if relative in explicit_preserved_paths:
                 preserved_dirty_paths.append(relative)
         selected_paths = sorted(dict.fromkeys([*tracked_paths, *untracked_paths]))
         selected_paths = [
             relative for relative in selected_paths
-            if relative not in explicit_preserved_paths
+            if relative not in explicit_preserved_paths and relative not in carry_forward_hashes
         ]
         untracked_set = set(untracked_paths)
         patches: list[EvidenceItem] = []
         patch_commands: list[CommandEvidence] = []
         captured_patch_bytes = 0
         for index, relative in enumerate(selected_paths[:50]):
-            if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+            if (
+                not relative or relative.startswith("/") or ".." in Path(relative).parts
+                or is_excluded_repository_path(relative)
+            ):
                 raise PermissionError(f"Unsafe changed path: {relative}")
             candidate_path = self.project_root / relative
             try:
@@ -736,7 +957,10 @@ class EvidenceCollector:
             patch_argv = (
                 ["git", "diff", *diff_options, "--no-index", "--", "/dev/null", relative]
                 if relative in untracked_set
-                else ["git", "diff", *diff_options, diff_range, "--", relative]
+                else [
+                    "git", "diff", *diff_options, diff_range, "--", f":(literal){relative}",
+                    *repository_git_pathspecs()[1:],
+                ]
             )
             patch_limit = min(
                 self.policy.review_max_command_characters or self.policy.max_command_characters,
@@ -786,6 +1010,30 @@ class EvidenceCollector:
                         },
                     )
                 )
+        final_carry_forward_hashes: dict[str, str] = {}
+        for relative, expected_hash in carry_forward_hashes.items():
+            actual_hash = self._hash_review_carry_forward_file(relative)
+            if actual_hash != expected_hash:
+                raise RuntimeError("carry-forward file changed during Review collection")
+            final_carry_forward_hashes[relative] = actual_hash
+        try:
+            final_source_identity = self._review_source_probe(
+                brief_path, base_sha=base_sha, head_ref=head_ref,
+            )
+        except (OSError, ValueError) as exc:
+            if carry_forward_files:
+                raise RuntimeError("carry-forward source changed during Review collection") from exc
+            raise RuntimeError("Review source changed during collection") from exc
+        if final_source_identity != collection_source_identity:
+            raise RuntimeError("source changed during Review collection")
+        final_carry_forward_files = [
+            {"path": relative, "sha256": final_carry_forward_hashes[relative]}
+            for relative in sorted(final_carry_forward_hashes)
+        ]
+        review_worktree_fingerprint = canonical_fingerprint({
+            "sourceWorktreeFingerprint": final_source_identity["worktree_fingerprint"],
+            "carryForwardFiles": final_carry_forward_files,
+        })
         return EvidenceBundle(
             schema_version="review-evidence-v1",
             task={
@@ -801,6 +1049,11 @@ class EvidenceCollector:
                 "headRef": head_ref,
                 "headSha": head_sha,
                 "preservedDirtyFiles": sorted(preserved_dirty_paths),
+                "carryForwardFiles": [
+                    {"path": relative, "sha256": final_carry_forward_hashes[relative]}
+                    for relative in sorted(final_carry_forward_hashes)
+                ],
+                "reviewWorktreeFingerprint": review_worktree_fingerprint,
                 "reviewLaunchWorktreeFingerprint": launch_worktree_fingerprint,
                 "reviewLaunchWorktreeProbeExitCode": launch_output.returncode,
                 "diffFileLimitExceeded": changed.truncated
@@ -821,3 +1074,32 @@ class EvidenceCollector:
                 *patch_commands,
             ),
         )
+
+    def _hash_review_carry_forward_file(self, relative: str) -> str:
+        digest = hashlib.sha256()
+        try:
+            with open_repo_file_nofollow(self.project_root_lexical, relative) as descriptor:
+                metadata = os.fstat(descriptor)
+                size = 0
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+                after = os.fstat(descriptor)
+                identity_before = (
+                    metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                    metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns,
+                    metadata.st_ctime_ns,
+                )
+                identity_after = (
+                    after.st_dev, after.st_ino, after.st_mode,
+                    after.st_nlink, after.st_size, after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                if identity_before != identity_after or size != metadata.st_size:
+                    raise PermissionError("Hash-pinned carry-forward file changed while being read")
+        except (OSError, ValueError) as exc:
+            raise PermissionError("Hash-pinned carry-forward file cannot be opened safely") from exc
+        return digest.hexdigest()

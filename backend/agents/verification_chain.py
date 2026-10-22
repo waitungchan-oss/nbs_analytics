@@ -30,9 +30,13 @@ Design rules enforced here:
 from __future__ import annotations
 
 import json
+import locale
 import os
+import selectors
+import stat
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -42,6 +46,15 @@ from typing import Any, Callable
 from backend.agents.review_runner_profile import (
     ALLOWED_RECEIPT_STATUSES,
     RunnerCapabilityReceipt,
+)
+from backend.agents.repository_scope import (
+    is_excluded_repository_path,
+    repository_git_pathspecs,
+    verification_source_git_pathspecs,
+)
+from backend.agents.safe_repo_file import (
+    open_repo_file_from_root_fd,
+    open_repo_root_nofollow,
 )
 from backend.agents.verification_evidence_writer import (
     _resolve_session_output_dir,
@@ -62,6 +75,89 @@ from backend.agents.acceptance_attempts import (
 GATE_RESULT_SCHEMA = "verification-gate-result-v1"
 TERMINAL_SCHEMA = "verification-terminal-v1"
 COMPLETION_SCHEMA = "completion-attestation-v1"
+SOURCE_PROBE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+SOURCE_PROBE_MAX_STDERR_BYTES = 64 * 1024
+
+
+class BoundedSubprocessOutputError(ValueError):
+    """Output-budget failure with a stable, content-free reason code."""
+
+    reason_code = "output_budget_exceeded"
+
+    def __init__(self, diagnostic: str) -> None:
+        super().__init__(f"{diagnostic} ({self.reason_code})")
+
+
+def run_bounded_subprocess(
+    argv: list[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout_seconds: float,
+    max_output_bytes: int,
+    error_message: str,
+    check: bool = True,
+    text: bool = False,
+) -> subprocess.CompletedProcess:
+    """Capture stdout/stderr concurrently under one live byte budget."""
+    if max_output_bytes < 0:
+        raise ValueError("max_output_bytes must be non-negative")
+    deadline = time.monotonic() + timeout_seconds
+    process = subprocess.Popen(
+        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+    )
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        raise OSError("bounded subprocess output pipes are unavailable")
+
+    outputs = {process.stdout: bytearray(), process.stderr: bytearray()}
+    total_bytes = 0
+    over_limit = False
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stderr, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout_seconds)
+                events = selector.select(remaining)
+                if not events:
+                    raise subprocess.TimeoutExpired(argv, timeout_seconds)
+                for key, _ in events:
+                    stream = key.fileobj
+                    remaining_budget = max_output_bytes - total_bytes
+                    chunk = os.read(stream.fileno(), min(8192, max(1, remaining_budget + 1)))
+                    if not chunk:
+                        selector.unregister(stream)
+                        continue
+                    if len(chunk) > remaining_budget:
+                        if not over_limit:
+                            over_limit = True
+                            process.kill()
+                        continue
+                    if not over_limit:
+                        outputs[stream].extend(chunk)
+                        total_bytes += len(chunk)
+        return_code = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+        process.stderr.close()
+    if over_limit:
+        raise BoundedSubprocessOutputError(error_message)
+    stdout_bytes = bytes(outputs[process.stdout])
+    stderr_bytes = bytes(outputs[process.stderr])
+    stdout = stdout_bytes.decode(locale.getpreferredencoding(False), errors="replace") if text else stdout_bytes
+    stderr = stderr_bytes.decode(locale.getpreferredencoding(False), errors="replace") if text else stderr_bytes
+    completed = subprocess.CompletedProcess(argv, return_code, stdout, stderr)
+    if check and return_code != 0:
+        raise subprocess.CalledProcessError(return_code, argv, output=stdout, stderr=stderr)
+    return completed
 
 _GATE_NAMES = {
     "pre_review": "preReview",
@@ -206,34 +302,154 @@ def git_source_probe(
 ) -> dict:
     """Compute the four source-seal fingerprints from the live repository.
 
-    Uses ``git rev-parse HEAD``, the brief bytes SHA-256, a filtered porcelain
-    worktree fingerprint that includes dirty-file content, and the base/head
-    diff fingerprint.
+    Uses ``git rev-parse HEAD``, no-follow repository file fingerprints, a
+    path-scoped porcelain worktree fingerprint, and a scoped base/head diff.
+    User-owned ``Summay`` roots are excluded before Git emits paths or content.
     """
-    project_root = Path(project_root).resolve()
-
-    def _run(argv: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            argv, cwd=project_root, capture_output=True, text=True, check=True
+    lexical_project_root = Path(project_root)
+    with open_repo_root_nofollow(lexical_project_root) as root_fd:
+        return _git_source_probe_from_root_fd(
+            lexical_project_root,
+            root_fd,
+            brief_path=brief_path,
+            base_sha=base_sha,
+            head_ref=head_ref,
+            contract_path=contract_path,
+            policy_path=policy_path,
         )
 
+
+def _git_source_probe_from_root_fd(
+    project_root: Path,
+    root_fd: int,
+    *,
+    brief_path: str,
+    base_sha: str,
+    head_ref: str,
+    contract_path: str | None,
+    policy_path: str | None,
+) -> dict:
+    """Inspect Git and repository files from the same validated directory identity."""
+
+    opened_stat = os.fstat(root_fd)
+    opened_identity = (opened_stat.st_dev, opened_stat.st_ino)
+    expected_common_identity: tuple[int, int] | None = None
+
+    def _verify_git_root_identity() -> None:
+        nonlocal expected_common_identity
+
+        def verify_open_root() -> None:
+            try:
+                with open_repo_root_nofollow(project_root) as lexical_fd:
+                    lexical_stat = os.fstat(lexical_fd)
+            except (OSError, PermissionError) as exc:
+                raise ValueError("repository root changed after no-follow validation") from exc
+            if (lexical_stat.st_dev, lexical_stat.st_ino) != opened_identity:
+                raise ValueError("repository root identity changed after no-follow validation")
+
+        verify_open_root()
+        completed = run_bounded_subprocess(
+            ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
+            cwd=project_root,
+            timeout_seconds=60,
+            max_output_bytes=SOURCE_PROBE_MAX_OUTPUT_BYTES + SOURCE_PROBE_MAX_STDERR_BYTES,
+            error_message="source probe output exceeded its bounded transport budget",
+            check=True,
+            text=True,
+        )
+        probe_stdout = completed.stdout
+        verify_open_root()
+        lines = probe_stdout.splitlines()
+        if len(lines) != 2:
+            raise ValueError("Git returned an incomplete repository identity")
+        top_level = Path(os.path.abspath(lines[0]))
+        common_dir = Path(lines[1])
+        if not common_dir.is_absolute():
+            common_dir = project_root / common_dir
+        common_dir = Path(os.path.abspath(os.fspath(common_dir)))
+        try:
+            with open_repo_root_nofollow(top_level) as top_level_fd:
+                top_stat = os.fstat(top_level_fd)
+            with open_repo_root_nofollow(common_dir) as common_dir_fd:
+                common_stat = os.fstat(common_dir_fd)
+        except (OSError, PermissionError) as exc:
+            raise ValueError("Git metadata directories cannot be opened safely") from exc
+        if (top_stat.st_dev, top_stat.st_ino) != opened_identity:
+            raise ValueError("Git worktree root does not match the opened repository root")
+        common_identity = (common_stat.st_dev, common_stat.st_ino)
+        if expected_common_identity is None:
+            expected_common_identity = common_identity
+        elif common_identity != expected_common_identity:
+            raise ValueError("Git common directory identity changed during source probing")
+
+    def _run(argv: list[str], *, text: bool = True) -> subprocess.CompletedProcess:
+        _verify_git_root_identity()
+        try:
+            result = run_bounded_subprocess(
+                argv,
+                cwd=project_root,
+                timeout_seconds=60,
+                max_output_bytes=SOURCE_PROBE_MAX_OUTPUT_BYTES + SOURCE_PROBE_MAX_STDERR_BYTES,
+                error_message="source probe output exceeded its bounded transport budget",
+                check=True,
+                text=text,
+            )
+        except (OSError, subprocess.SubprocessError):
+            _verify_git_root_identity()
+            raise
+        _verify_git_root_identity()
+        return result
+
     head_sha = _run(["git", "rev-parse", "HEAD"]).stdout.strip()
-    brief_candidate = project_root / brief_path
-    if brief_candidate.is_symlink():
-        raise ValueError("brief path cannot be a symlink")
-    brief = brief_candidate.resolve()
-    try:
-        brief.relative_to(project_root)
-    except ValueError as exc:
-        raise ValueError("brief path is outside project root") from exc
-    if not brief.is_file():
-        raise ValueError(f"brief path is unavailable: {brief_path}")
-    brief_fingerprint = sha256(brief.read_bytes()).hexdigest()
-    status = subprocess.run(
-        [
-            "git", "status", "--porcelain=v1", "--untracked-files=all", "-z",
-        ], cwd=project_root, capture_output=True, check=True,
+
+    def _repository_file_fingerprint(relative_path: str, *, label: str) -> str:
+        if is_excluded_repository_path(relative_path):
+            raise ValueError(f"{label} path is excluded")
+        digest = sha256()
+        try:
+            with open_repo_file_from_root_fd(root_fd, relative_path) as file_fd:
+                before = os.fstat(file_fd)
+                if not stat.S_ISREG(before.st_mode):
+                    raise ValueError(f"{label} path is not a regular file")
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    digest.update(chunk)
+                after = os.fstat(file_fd)
+                before_identity = (
+                    before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+                    before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+                )
+                after_identity = (
+                    after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+                )
+                if before_identity != after_identity:
+                    raise ValueError(f"{label} changed during fingerprint")
+        except (OSError, PermissionError) as exc:
+            raise ValueError(f"{label} path is unavailable or unsafe") from exc
+        return digest.hexdigest()
+
+    brief_fingerprint = _repository_file_fingerprint(brief_path, label="brief")
+    status_argv = [
+        "git", "status", "--porcelain=v1", "--untracked-files=all",
+        "--no-renames", "-z", "--", *verification_source_git_pathspecs(),
+    ]
+    status = _run(
+        status_argv,
+        text=False,
     ).stdout
+
+    def _content_fingerprint(relative_path: str) -> str:
+        if is_excluded_repository_path(relative_path):
+            raise ValueError("git status returned an excluded path")
+        try:
+            with open_repo_file_from_root_fd(root_fd, relative_path) as file_fd:
+                digest = sha256()
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    digest.update(chunk)
+                return digest.hexdigest()
+        except FileNotFoundError:
+            return "missing"
+
     dirty_entries: list[dict[str, str]] = []
     raw_entries = [entry for entry in status.split(b"\0") if entry]
     index = 0
@@ -249,16 +465,8 @@ def git_source_probe(
             if index >= len(raw_entries):
                 raise ValueError("git status returned an incomplete rename entry")
             paths.append(raw_entries[index].decode("utf-8", errors="surrogateescape"))
-        def _content_fingerprint(relative_path: str) -> str:
-            path = (project_root / relative_path).resolve()
-            try:
-                path.relative_to(project_root.resolve())
-            except ValueError as exc:
-                raise ValueError("git status returned a path outside project root") from exc
-            if not path.is_file() or path.is_symlink():
-                return "missing"
-            return sha256(path.read_bytes()).hexdigest()
-
+        if any(is_excluded_repository_path(path) for path in paths):
+            raise ValueError("git status returned an excluded path")
         if len(paths) == 2:
             dirty_entries.append({
                 "status": status_code,
@@ -279,10 +487,17 @@ def git_source_probe(
                    ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     if head_ref == "WORKTREE":
-        diff_stdout = _run(["git", "diff", "--no-ext-diff", base_sha]).stdout
+        diff_argv = [
+            "git", "diff", "--no-ext-diff", "--no-renames", base_sha, "--",
+            *verification_source_git_pathspecs(),
+        ]
     else:
-        diff_stdout = _run(["git", "diff", "--no-ext-diff", f"{base_sha}...{head_ref}"]).stdout
-    diff_fingerprint = sha256(diff_stdout.encode("utf-8")).hexdigest()
+        diff_argv = [
+            "git", "diff", "--no-ext-diff", "--no-renames",
+            f"{base_sha}...{head_ref}", "--", *verification_source_git_pathspecs(),
+        ]
+    diff_stdout = _run(diff_argv, text=False).stdout
+    diff_fingerprint = sha256(diff_stdout).hexdigest()
     result = {
         "head_sha": head_sha,
         "brief_fingerprint": brief_fingerprint,
@@ -295,14 +510,38 @@ def git_source_probe(
         ("policy_fingerprint", policy_path),
     ):
         if relative_path is not None:
-            candidate = (project_root / relative_path).resolve()
-            try:
-                candidate.relative_to(project_root.resolve())
-            except ValueError as exc:
-                raise ValueError("source identity path is outside project root") from exc
-            if not candidate.is_file() or candidate.is_symlink():
-                raise ValueError(f"source identity file is unavailable: {relative_path}")
-            result[key] = sha256(candidate.read_bytes()).hexdigest()
+            result[key] = _repository_file_fingerprint(relative_path, label="source identity")
+    status_after = _run(status_argv, text=False).stdout
+    if status_after != status:
+        raise ValueError("Git worktree status changed during source probing")
+    for entry in dirty_entries:
+        for path_key, fingerprint_key in (
+            ("path", "contentFingerprint"),
+            ("pairedPath", "pairedContentFingerprint"),
+        ):
+            relative_path = entry.get(path_key)
+            if (
+                relative_path is not None
+                and _content_fingerprint(relative_path) != entry[fingerprint_key]
+            ):
+                raise ValueError("Git worktree content changed during source probing")
+    diff_after = _run(diff_argv, text=False).stdout
+    if sha256(diff_after).hexdigest() != diff_fingerprint:
+        raise ValueError("Git diff changed during source probing")
+    if _repository_file_fingerprint(brief_path, label="brief") != brief_fingerprint:
+        raise ValueError("brief changed during source probing")
+    for key, relative_path in (
+        ("contract_fingerprint", contract_path),
+        ("policy_fingerprint", policy_path),
+    ):
+        if relative_path is not None and (
+            _repository_file_fingerprint(relative_path, label="source identity") != result[key]
+        ):
+            raise ValueError("source identity file changed during source probing")
+    _verify_git_root_identity()
+    final_head_sha = _run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    if final_head_sha != head_sha:
+        raise ValueError("Git HEAD changed during source probing")
     return result
 
 

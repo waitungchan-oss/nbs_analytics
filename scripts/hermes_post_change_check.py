@@ -13,6 +13,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from backend.agents.repository_scope import repository_git_pathspecs
+
 DEFAULT_TIMEOUT_SECONDS = 180
 TARGETED_TESTS = [
     "tests/test_governance_graph_models.py",
@@ -859,10 +861,19 @@ def build_check_plan(
         "print(json.dumps(sandbox_capability_artifact_report(), sort_keys=True))"
     )
     profile_args = ["--verification-profile", verification_profile] if verification_profile else []
+    git_scope = ["--", *repository_git_pathspecs()]
     plan = [
-        CheckStep("git-status", ["git", "status", "--short", "--branch"]),
-        CheckStep("git-diff-stat", ["git", "diff", "--stat"], required=False),
-        CheckStep("git-diff-name-only", ["git", "diff", "--name-only"], required=False),
+        CheckStep("git-status", [
+            "git", "status", "--short", "--branch", "--untracked-files=all",
+            "--no-renames", *git_scope,
+        ]),
+        CheckStep("git-diff-stat", [
+            "git", "diff", "--no-ext-diff", "--no-renames", "--stat", *git_scope,
+        ], required=False),
+        CheckStep("git-diff-name-only", [
+            "git", "diff", "--no-ext-diff", "--no-renames", "--name-only",
+            *git_scope,
+        ], required=False),
         CheckStep("system-status", [py, "scripts/system_manager.py", "status", *profile_args]),
     ]
     if include_system_acceptance:
@@ -1032,6 +1043,21 @@ def compute_overall_status(results: list[dict]) -> str:
     return "pass"
 
 
+def _blocked_source_binding_result(reason_code: str) -> dict:
+    return {
+        "label": "source-binding-acceptance",
+        "command": ["<in-process-source-binding>"],
+        "required": True,
+        "timeout": 0,
+        "exitCode": 1,
+        "stdout": json.dumps({
+            "sourceBinding": {"status": "blocked", "sourceRole": "primary-checkout"},
+            "blockedReasons": [reason_code],
+        }, sort_keys=True),
+        "stderr": "",
+    }
+
+
 def run_checks(
     *,
     include_monitor: bool = True,
@@ -1039,6 +1065,7 @@ def run_checks(
     include_system_acceptance: bool = True,
     project_root: Path = PROJECT_ROOT,
     verification_profile: str | None = None,
+    source_root: Path | str | None = None,
     session_id: str | None = None,
     hermes_profile: str | None = None,
     session_root: Path | str | None = None,
@@ -1051,6 +1078,14 @@ def run_checks(
         if session_id is not None:
             attach_session_binding(report, sessions_root, session_id, hermes_profile)
         return report
+
+    if hermes_profile == "isolated-profile" and not verification_profile:
+        report = {
+            "overallStatus": "fail",
+            "projectRoot": str(project_root),
+            "results": [_blocked_source_binding_result("source_binding:verification_profile_required")],
+        }
+        return _with_binding(report)
 
     profile_identity = None
     if verification_profile:
@@ -1069,12 +1104,24 @@ def run_checks(
                 "runtimeDir": str(paths.runtime_dir),
             }
         except Exception as exc:
+            results = (
+                [_blocked_source_binding_result("source_binding:profile_load_failed")]
+                if hermes_profile == "isolated-profile" else []
+            )
             return _with_binding({
                 "overallStatus": "fail",
                 "projectRoot": str(project_root),
                 "verificationProfile": {"status": "blocked_runner_capability", "reason": type(exc).__name__},
-                "results": [],
+                "results": results,
             })
+        if hermes_profile == "isolated-profile" and profile.source_binding is None:
+            report = {
+                "overallStatus": "fail",
+                "projectRoot": str(project_root),
+                "verificationProfile": {"status": "blocked", "reason": "source_binding:v2_profile_required"},
+                "results": [_blocked_source_binding_result("source_binding:v2_profile_required")],
+            }
+            return _with_binding(report)
     plan = build_check_plan(
         include_monitor=include_monitor,
         include_tests=include_tests,
@@ -1082,7 +1129,76 @@ def run_checks(
         project_root=project_root,
         verification_profile=verification_profile,
     )
-    results = [run_step(step, project_root=project_root) for step in plan]
+    results = []
+    source_binding = getattr(profile, "source_binding", None) if verification_profile else None
+    if hermes_profile == "isolated-profile" and verification_profile and source_binding is not None:
+        from backend.services.verification_profile_acceptance import (
+            NBS_PROJECT_ID,
+            SourceBindingInspectionError,
+            inspect_primary_source,
+        )
+
+        binding = source_binding
+        blocked_reasons: list[str] = []
+        source_status = "blocked"
+        project_id_matches = profile.project_id == NBS_PROJECT_ID
+        if not project_id_matches:
+            blocked_reasons.append("source_binding:project_id_mismatch")
+        source_role_matches = getattr(binding, "source_role", None) == "primary-checkout"
+        if not source_role_matches:
+            blocked_reasons.append("source_binding:source_role_mismatch")
+        if source_root is None:
+            blocked_reasons.append("source_binding:source_root_required")
+        elif source_role_matches and project_id_matches:
+            try:
+                inspection = inspect_primary_source(
+                    project_root,
+                    Path(source_root),
+                    expected_project_id=NBS_PROJECT_ID,
+                )
+            except SourceBindingInspectionError as exc:
+                blocked_reasons.append(exc.reason_code)
+            else:
+                if inspection.repository_fingerprint != binding.repository_fingerprint:
+                    blocked_reasons.append("source_binding:repository_fingerprint_mismatch")
+                if inspection.source_head != binding.source_head:
+                    blocked_reasons.append("source_binding:source_head_mismatch")
+                if inspection.database_fingerprint != binding.database_fingerprint:
+                    blocked_reasons.append("source_binding:database_fingerprint_mismatch")
+                if inspection.generation_fingerprint != binding.generation_fingerprint:
+                    blocked_reasons.append("source_binding:generation_fingerprint_mismatch")
+                if inspection.baseline_registry_fingerprint != binding.baseline_registry_fingerprint:
+                    blocked_reasons.append("source_binding:baseline_fingerprint_mismatch")
+                if not blocked_reasons:
+                    source_status = "accepted"
+        source_evidence = {
+            "status": source_status,
+            "sourceRole": "primary-checkout",
+            "repositoryFingerprint": binding.repository_fingerprint,
+            "sourceHead": binding.source_head,
+            "databaseFingerprint": binding.database_fingerprint,
+            "generationFingerprint": binding.generation_fingerprint,
+            "baselineRegistryFingerprint": binding.baseline_registry_fingerprint,
+        }
+        binding_result = {
+            "label": "source-binding-acceptance",
+            "command": ["<in-process-source-binding>"],
+            "required": True,
+            "timeout": 0,
+            "exitCode": 0 if source_status == "accepted" else 1,
+            "stdout": json.dumps({"sourceBinding": source_evidence, "blockedReasons": blocked_reasons}, sort_keys=True),
+            "stderr": "",
+        }
+        results.append(binding_result)
+        if source_status != "accepted":
+            report = {
+                "overallStatus": compute_overall_status(results),
+                "projectRoot": str(project_root),
+                "results": results,
+                **({"verificationProfile": profile_identity} if profile_identity else {}),
+            }
+            return _with_binding(report)
+    results.extend(run_step(step, project_root=project_root) for step in plan)
     report = {
         "overallStatus": compute_overall_status(results),
         "projectRoot": str(project_root),
@@ -1118,6 +1234,7 @@ def format_markdown_report(report: dict) -> str:
     monthly = _result_by_label(report, "monthly-baseline-governance")
     tests = _result_by_label(report, "targeted-tests")
     workflow = _result_by_label(report, "workflow-artifact-retention-report")
+    source_binding = _result_by_label(report, "source-binding-acceptance")
     git_status = _result_by_label(report, "git-status")
     baseline_line = _first_matching_line(
         baseline.get("stdout", ""),
@@ -1151,6 +1268,7 @@ def format_markdown_report(report: dict) -> str:
             "",
             f"- phase2-baseline: {_status_text(baseline)}",
             f"- monthly-baseline-governance: {_status_text(monthly)}",
+            f"- source-binding-acceptance: {_status_text(source_binding)}" if source_binding else "- source-binding-acceptance: not required",
             f"- targeted-tests: {_status_text(tests)}",
             f"- workflow-artifact-retention-report: {_status_text(workflow)}",
             "",
@@ -1158,6 +1276,7 @@ def format_markdown_report(report: dict) -> str:
             "",
             f"- Baseline: `{baseline_line or 'not found in stdout'}`",
             f"- Monthly governance: `{monthly_line or 'not found in stdout'}`",
+            f"- Source binding: `{_status_text(source_binding)}`" if source_binding else "- Source binding: `not required`",
             f"- Tests: `{tests_line or 'not found in stdout'}`",
             f"- Workflow artifacts / retention: `{workflow_line or 'not found in stdout'}`",
             "",
@@ -1184,6 +1303,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
     parser.add_argument("--markdown", action="store_true", help="Print a concise Markdown report.")
     parser.add_argument("--verification-profile", help="Read-only verification profile path.")
+    parser.add_argument("--source-root", help="Explicit primary checkout used for V2 source-binding acceptance.")
     parser.add_argument(
         "--session",
         help="Bind the report to one verification session (session evidence input/output binding).",
@@ -1207,6 +1327,7 @@ def main(argv: list[str] | None = None) -> int:
         include_tests=not args.skip_tests,
         include_system_acceptance=not args.skip_system_acceptance,
         verification_profile=args.verification_profile,
+        source_root=args.source_root,
         session_id=args.session,
         hermes_profile=args.profile,
         session_root=args.session_root,

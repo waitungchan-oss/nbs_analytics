@@ -75,6 +75,9 @@ Review evidence 與實際 diff／verification bundle 的完整性綁定。
 
 `requirementCoverage`、`testCoverage`、`residualRisk` 與 `hermesRequiredChecks` 必須是
 只含字串的 JSON array；不得輸出物件、巢狀 array 或其他型別。若沒有內容，使用空 array。
+但在 `strict=true` 且 `verdict=pass` 時，`requirementCoverage`、`testCoverage`、
+`residualRisk` 與 `hermesRequiredChecks` 均必須是非空陣列；`hermesRequiredChecks`
+至少列出本次改動後續必須由 Hermes 驗證的具體項目。這與一般非 strict Review 可用空陣列的規則分開處理。
 
 `verdict` 只允許：
 
@@ -181,6 +184,27 @@ Strict Review 只在一份已 seal 的 `verification-session-v1` 內執行。Rev
 - pre-review targeted `verification-v1` evidence；
 - runner capability receipt（static + live turn）；
 - optional Memory Hub observation（non-authoritative，見下）。
+
+對 `verification-runtime-profile-v2` 的跨 checkout source binding，code worktree
+HEAD 與 primary source checkout HEAD 是兩個獨立身份：code HEAD 必須符合 profile
+`gitHead`，primary source HEAD 必須符合 `sourceBinding.sourceHead`。兩個 sealed HEAD
+可以不同；不得僅因它們彼此不同而要求一致或提出 finding。任一 checkout 與自身 seal
+不符、repository common-dir 不同、source binding 漂移或資料／baseline fingerprint
+不符時，仍須 fail closed 並依具體證據提出 finding。
+穩定 `projectId` 是顯式契約值，不由任何 checkout 的目錄 basename 推導；primary
+source 必須由該 project ID、primary-checkout 狀態及與 code worktree 相同的 Git
+common-dir 共同驗證。目錄改名本身不構成 identity drift。
+
+Live runner probe 的 stdout 與 stderr 必須共享同一個 bounded transport budget；超限時
+應在解析或接受回覆前 fail closed，且不得將不受限的輸出整體載入記憶體。
+
+`implementation-task-v1` 可選帶有 `carryForwardFiles`，每筆只含 repo-relative
+`path` 與 lowercase SHA-256。Collector 只接受仍為 dirty tracked、內容雜湊相符、
+不與 `allowedWritePaths` 重疊的檔案；並在收集前後重驗雜湊。這些檔案只從
+task-attribution patches 排除，仍包含於完整 source seal；Review evidence 會保留
+path/hash 清單，且以該清單完成 dirty-file attribution。它不等於 `preserve-dirty-path`，
+不能用來略過 untracked 檔案、process artifacts 或雜湊不符內容，也不能省略 full
+source/worktree fingerprint。
 
 Review 的 code-level `pass` 只需要上述 changed-surface targeted evidence、
 compile/static evidence 與 requirement coverage；它**不要求 full pytest 或

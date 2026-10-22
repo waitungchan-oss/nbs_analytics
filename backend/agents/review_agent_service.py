@@ -22,6 +22,11 @@ from backend.agents.evidence_models import (
     estimate_tokens,
 )
 from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
+from backend.agents.implementation_models import (
+    CarryForwardFile,
+    repo_relative_path_key,
+    repo_relative_paths_overlap,
+)
 from backend.agents.verification_session import VerificationSession
 from backend.agents.acceptance_attempts import record_attempt
 
@@ -61,7 +66,7 @@ _MEMORY_CONTEXT_KEYS = {
 }
 
 # Task 4: session-bound, resumable Review batches.
-_BATCH_SCHEMA = "review-batch-v1"
+_BATCH_SCHEMA = "review-batch-v2"
 _BATCH_REPORT_KEYS = _REPORT_KEYS | {
     "sessionId", "batchId", "batchFingerprint", "sessionFingerprint", "resultFingerprint",
 }
@@ -69,7 +74,7 @@ _BATCH_REPORT_KEYS = _REPORT_KEYS | {
 # old bound.  Batch planning still controls total prompt size; this bound only
 # prevents a syntactically valid patch from being cut mid-statement.
 _MAX_PATCH_CHARS = 24000
-_DEFAULT_BATCH_PATCH_BUDGET = 12000
+_DEFAULT_BATCH_PATCH_BUDGET = 8000
 
 
 def _split_patch_item(patch: EvidenceItem) -> list[EvidenceItem]:
@@ -164,16 +169,50 @@ def compact_review_evidence_payload(
     return {**unsigned, "bundleFingerprint": source_bundle_fingerprint}
 
 
-def _validate_task_contract(task: object) -> dict:
+def _validate_task_contract(task: object, *, require_scope: bool = False) -> dict:
     if not isinstance(task, dict):
         raise ValueError("Review task contract must be an object")
     objective = task.get("objective")
     if not isinstance(objective, str) or not objective.strip():
         raise ValueError("Review task objective must be non-empty")
-    for field in ("scope", "forbidden"):
-        value = task.get(field)
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            raise ValueError(f"Review task {field} must be a list of strings")
+    scope = task.get("scope")
+    if require_scope and (
+        not isinstance(scope, list)
+        or not scope
+        or not all(isinstance(item, str) and item.strip() for item in scope)
+    ):
+        raise ValueError("Strict Review task scope must be a non-empty list of strings")
+    if scope is not None and (
+        not isinstance(scope, list) or not all(isinstance(item, str) for item in scope)
+    ):
+        raise ValueError("Review task scope must be a list of strings")
+    forbidden = task.get("forbidden")
+    if not isinstance(forbidden, list) or not all(isinstance(item, str) for item in forbidden):
+        raise ValueError("Review task forbidden must be a list of strings")
+    if "allowedWritePaths" in task:
+        write_paths = task.get("allowedWritePaths")
+    else:
+        write_paths = scope
+    if write_paths is None:
+        raise ValueError("Review task allowedWritePaths must be provided")
+    if not isinstance(write_paths, list) or not all(
+        isinstance(item, str) and item for item in write_paths
+    ):
+        raise ValueError("Review task allowedWritePaths must be a list of non-empty strings")
+    if "carryForwardFiles" in task:
+        raw = task["carryForwardFiles"]
+        if not isinstance(raw, list):
+            raise ValueError("Review task carryForwardFiles must be a list")
+        if len(raw) > 50:
+            raise ValueError("Review task carryForwardFiles exceeds the bounded entry limit")
+        entries = tuple(CarryForwardFile.from_dict(item) for item in raw)
+        paths = [repo_relative_path_key(item.path) for item in entries]
+        if len(paths) != len(set(paths)):
+            raise ValueError("Review task carryForwardFiles contains duplicate paths")
+        for entry in entries:
+            for write_path in write_paths:
+                if repo_relative_paths_overlap(entry.path, write_path):
+                    raise ValueError("Review task carryForwardFiles overlap the approved allowedWritePaths")
     return task
 
 
@@ -249,7 +288,12 @@ def _runtime_instructions(instructions: str, *, strict: bool) -> str:
         "gitDiff.sourceFingerprint is the complete canonical session identity; "
         "gitDiff.sourceDiffFingerprint is only the sealed diff component and must "
         "match verificationSession.diffFingerprint. Do not compare those two "
-        "different-scope fingerprints directly."
+        "different-scope fingerprints directly. carryForwardFiles are approved "
+        "path/SHA-256 entries excluded only from task patch attribution; they remain "
+        "inside the complete sealed source and worktree fingerprints. Treat a missing, "
+        "mismatched, or patch-overlapping entry as invalid evidence. "
+        "For strict review with verdict=pass, hermesRequiredChecks must be non-empty "
+        "for strict pass and contain actionable downstream checks."
     )
 
 
@@ -307,14 +351,29 @@ def build_review_evidence_payload(
     review_batch: dict | None = None,
     verification_session: dict | None = None,
     runner_capability: dict | None = None,
+    strict: bool = False,
 ) -> dict:
     if bundle.schema_version != REVIEW_EVIDENCE_SCHEMA:
         raise ValueError("Unexpected Review evidence schema")
-    _validate_task_contract(bundle.task)
+    _validate_task_contract(bundle.task, require_scope=strict)
     if context_summary:
         validate_context_summary(context_summary)
     _validate_verification(verification)
     patches = [item for item in bundle.evidence if item.kind == "diff"]
+    patch_path_keys = {repo_relative_path_key(item.source) for item in patches}
+    task_carry_forward = bundle.task.get("carryForwardFiles", [])
+    repository_carry_forward = bundle.repository.get("carryForwardFiles", [])
+    if task_carry_forward != repository_carry_forward:
+        raise ValueError("Review carryForwardFiles do not match the approved task contract")
+    if task_carry_forward:
+        if not isinstance(task_carry_forward, list) or not all(
+            isinstance(item, dict) and set(item) == {"path", "sha256"}
+            and isinstance(item["path"], str) and isinstance(item["sha256"], str)
+            for item in task_carry_forward
+        ):
+            raise ValueError("Review carryForwardFiles schema is invalid")
+        if patch_path_keys & {repo_relative_path_key(item["path"]) for item in task_carry_forward}:
+            raise ValueError("Review carryForwardFiles must not also appear in task patches")
     head_ref = bundle.repository.get("headRef")
     git_diff = {
         "base": bundle.repository.get("baseSha"),
@@ -324,6 +383,8 @@ def build_review_evidence_payload(
         "truncated": bool(bundle.repository.get("diffFileLimitExceeded"))
         or any(bool(item.metadata.get("truncated")) for item in patches),
     }
+    if task_carry_forward:
+        git_diff["carryForwardFiles"] = json.loads(json.dumps(task_carry_forward))
     if verification_session is not None:
         source_fingerprint = verification_session.get("sourceFingerprint")
         if isinstance(source_fingerprint, str):
@@ -493,6 +554,10 @@ def build_review_report(
     validated_runtime_root = _runtime_path(project_root, runtime_root)
     evidence_payload = build_review_evidence_payload(
         bundle, context_summary=context_summary, verification=verification,
+        # Let the report layer return the intended blocked verdict for absent
+        # verification; strict scope validation remains mandatory whenever
+        # evidence exists and in direct evidence-payload calls.
+        strict=strict and bool(verification),
         memory_hub_context=(
             _memory_hub_observation(memory_hub_evidence)
             if memory_hub_evidence is not None else None
@@ -518,12 +583,23 @@ def build_review_report(
             review_fingerprint,
             residual_risk=["Strict review requires a ready Context Agent summary."],
         ))
-    dirty_files = bundle.repository.get("dirtyFiles") or []
+    dirty_files = bundle.repository.get("dirtyFiles", [])
     if not isinstance(dirty_files, list) or not all(isinstance(item, str) for item in dirty_files):
         raise ValueError("Review repository dirtyFiles must be a list of strings")
-    preserved_dirty = bundle.repository.get("preservedDirtyFiles") or []
+    preserved_dirty = bundle.repository.get("preservedDirtyFiles", [])
     if not isinstance(preserved_dirty, list) or not all(isinstance(item, str) for item in preserved_dirty):
         raise ValueError("Review repository preservedDirtyFiles must be a list of strings")
+    carry_forward = bundle.repository.get("carryForwardFiles", [])
+    if carry_forward != bundle.task.get("carryForwardFiles", []):
+        raise ValueError("Review carryForwardFiles do not match the approved task contract")
+    if not isinstance(carry_forward, list) or not all(
+        isinstance(item, dict) and set(item) == {"path", "sha256"}
+        and isinstance(item["path"], str) and isinstance(item["sha256"], str)
+        for item in carry_forward
+    ):
+        raise ValueError("Review repository carryForwardFiles schema is invalid")
+    if not {item["path"] for item in carry_forward} <= set(dirty_files):
+        raise ValueError("Review carryForwardFiles must identify dirty files")
     if strict and not verification:
         return finish(_report(
             "blocked",
@@ -534,6 +610,7 @@ def build_review_report(
         set(dirty_files)
         - set(evidence_payload["gitDiff"]["files"])
         - set(preserved_dirty)
+        - {item["path"] for item in carry_forward}
     )
     if strict and unattributed_dirty:
         return finish(_report(
@@ -623,6 +700,7 @@ class ReviewBatch:
 
     session_id: str
     batch_id: str
+    batch_count: int
     session_fingerprint: str
     files: tuple[str, ...]
     patch_fingerprint: str
@@ -635,6 +713,7 @@ class ReviewBatch:
             "schemaVersion": _BATCH_SCHEMA,
             "sessionId": self.session_id,
             "batchId": self.batch_id,
+            "batchCount": self.batch_count,
             "sessionFingerprint": self.session_fingerprint,
             "files": list(self.files),
             "patchFingerprint": self.patch_fingerprint,
@@ -645,6 +724,7 @@ class ReviewBatch:
             "schemaVersion": _BATCH_SCHEMA,
             "sessionId": self.session_id,
             "batchId": self.batch_id,
+            "batchCount": self.batch_count,
             "sessionFingerprint": self.session_fingerprint,
             "files": list(self.files),
             "patchFingerprint": self.patch_fingerprint,
@@ -710,6 +790,7 @@ def plan_review_batches(
         payload_fingerprint = canonical_fingerprint({
             "schemaVersion": _BATCH_SCHEMA,
             "sessionFingerprint": session.source_fingerprint,
+            "batchCount": len(groups),
             "files": list(files),
             "patchFingerprint": patch_fingerprint,
         })
@@ -732,6 +813,7 @@ def plan_review_batches(
         batches.append(ReviewBatch(
             session_id=session.session_id,
             batch_id=f"batch-{index + 1:03d}",
+            batch_count=len(groups),
             session_fingerprint=session.source_fingerprint,
             files=files,
             patch_fingerprint=patch_fingerprint,
@@ -844,6 +926,7 @@ def run_review_batch(
     verification = verification or []
     evidence_payload = build_review_evidence_payload(
         batch.bundle, context_summary=context_summary, verification=verification,
+        strict=strict,
         review_batch=batch.to_dict(),
         verification_session=verification_session,
         runner_capability=runner_capability,
@@ -1184,12 +1267,16 @@ def run_review_batches(
     memory_hub_evidence: dict | None = None,
     runner_diagnostics: list[str] | None = None,
 ) -> dict:
+    if input_token_limit <= 0 or output_token_limit <= 0:
+        raise ValueError("Review Agent token budgets must be positive")
+    memory_observation = (
+        _memory_hub_observation(memory_hub_evidence)
+        if memory_hub_evidence is not None else None
+    )
     full_payload = build_review_evidence_payload(
         bundle, context_summary=context_summary, verification=verification,
-        memory_hub_context=(
-            _memory_hub_observation(memory_hub_evidence)
-            if memory_hub_evidence is not None else None
-        ),
+        strict=False,
+        memory_hub_context=memory_observation,
     )
     runtime_root = _runtime_path(project_root, runtime_root)
     runtime_instructions = _runtime_instructions(instructions, strict=strict)
@@ -1199,8 +1286,27 @@ def run_review_batches(
         output_schema=REVIEW_REPORT_SCHEMA,
         evidence_payload=full_payload,
     )
+    minimum_request = json.dumps(
+        {"instructions": runtime_instructions, "evidence": {}},
+        ensure_ascii=False, sort_keys=True,
+    )
+    if estimate_tokens(minimum_request) > input_token_limit:
+        return _attach_memory_observation(_report(
+            "context_overflow", fingerprint,
+            residual_risk=["Review request cannot fit the input token budget."],
+        ), memory_observation)
+    if estimate_tokens(json.dumps(_report("context_overflow", fingerprint), ensure_ascii=False)) > output_token_limit:
+        return _attach_memory_observation(_report(
+            "context_overflow", fingerprint,
+            residual_risk=["Review report cannot fit the output token budget."],
+        ), memory_observation)
+    _validate_task_contract(bundle.task, require_scope=strict and bool(verification))
     batches = split_review_bundle_by_file(
-        bundle, patch_token_budget=max(1000, input_token_limit // 2),
+        bundle,
+        patch_token_budget=min(
+            _DEFAULT_BATCH_PATCH_BUDGET,
+            max(1000, input_token_limit // 3),
+        ),
     )
     reports = [
         build_review_report(
@@ -1222,11 +1328,7 @@ def run_review_batches(
     merged = merge_review_batches(
         reports, fingerprint=fingerprint, output_token_limit=output_token_limit,
     )
-    observation = (
-        _memory_hub_observation(memory_hub_evidence)
-        if memory_hub_evidence is not None else None
-    )
-    return _attach_memory_observation(merged, observation)
+    return _attach_memory_observation(merged, memory_observation)
 
 
 def _markdown_list(values: list[Any]) -> str:

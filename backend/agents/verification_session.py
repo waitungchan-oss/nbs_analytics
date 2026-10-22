@@ -32,7 +32,12 @@ from backend.agents.evidence_models import canonical_fingerprint
 
 
 SESSION_SCHEMA_VERSION = "verification-session-v1"
-SOURCE_PROBE_VERSION = "verification-source-probe-v1"
+LEGACY_SOURCE_PROBE_VERSION = "verification-source-probe-v1"
+SOURCE_PROBE_VERSION = "verification-source-probe-v2"
+SUPPORTED_SOURCE_PROBE_VERSIONS = frozenset({
+    LEGACY_SOURCE_PROBE_VERSION,
+    SOURCE_PROBE_VERSION,
+})
 
 SESSION_KEYS = {
     "schemaVersion", "sessionId", "status", "projectId", "baseSha", "headSha",
@@ -147,9 +152,9 @@ class VerificationSession:
         _require_rfc3339(self.created_at, "createdAt")
         if not isinstance(self.gates, dict):
             raise ValueError("gates must be an object")
-        if self.gates.get("sourceProbeVersion") != SOURCE_PROBE_VERSION:
+        if self.gates.get("sourceProbeVersion") not in SUPPORTED_SOURCE_PROBE_VERSIONS:
             raise ValueError(
-                "gates.sourceProbeVersion must be the supported source probe version"
+                "gates.sourceProbeVersion must be a supported source probe version"
             )
 
     @classmethod
@@ -174,7 +179,7 @@ class VerificationSession:
         session_gates = dict(gates or {})
         session_gates.setdefault("sourceProbeVersion", SOURCE_PROBE_VERSION)
         if session_gates["sourceProbeVersion"] != SOURCE_PROBE_VERSION:
-            raise ValueError("gates.sourceProbeVersion is unsupported")
+            raise ValueError("new source seals require verification-source-probe-v2")
         return cls(
             schema_version=SESSION_SCHEMA_VERSION,
             session_id=session_id or str(uuid4()),
@@ -259,6 +264,10 @@ class VerificationSession:
         source_probe_version = _require_non_empty(
             source_probe_version, "sourceProbeVersion"
         )
+        if source_probe_version != SOURCE_PROBE_VERSION:
+            raise StaleVerificationSession(
+                "verification source is stale: sourceProbeVersion is not current"
+            )
         current = {
             "headSha": _require_sha(head_sha, "headSha"),
             "briefFingerprint": _require_sha256(brief_fingerprint, "briefFingerprint"),

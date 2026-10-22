@@ -242,7 +242,7 @@ def test_cli_status_does_not_select_old_report(tmp_path):
     assert result["sessionId"] == "new"
     assert result["status"] == "blocked_runner_transport"
     assert set(result["gates"]) == {"sourceProbeVersion"}
-    assert result["gates"]["sourceProbeVersion"] == "verification-source-probe-v1"
+    assert result["gates"]["sourceProbeVersion"] == "verification-source-probe-v2"
 
 
 def test_cli_status_is_scoped_to_the_requested_session(tmp_path):

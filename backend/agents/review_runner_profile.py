@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
 from backend.agents.evidence_models import canonical_fingerprint
-from backend.agents.agent_runtime import _decode_json_or_codex_event_stream
 from backend.agents.runner_identity import RunnerIdentity, RunnerIdentityError
 
 
@@ -166,12 +167,13 @@ ALLOWED_RECEIPT_STATUSES = {
     "blocked_runner_transport",
 }
 _PROBE_TIMEOUT_SECONDS = 30
-_PROBE_MAX_OUTPUT_BYTES = 8 * 1024
+_PROBE_MAX_TRANSPORT_BYTES = 64 * 1024
+_PROBE_MAX_RESPONSE_BYTES = 8 * 1024
 # Fixed, short, read-only probe command shape (model and prompt are filled in).
-# Plain final-message output avoids retaining the verbose Codex JSONL event
-# envelope; the response itself remains a small, strictly validated JSON object.
+# JSONL lets the decoder select the final agent_message despite CLI startup and
+# usage text; the response remains small and strictly validated.
 _PROBE_ARGV_TEMPLATE = (
-    "exec", "--ephemeral", "--color", "never", "--model", "<model>", "<prompt>",
+    "exec", "--ephemeral", "--color", "never", "--model", "<model>", "--json", "<prompt>",
 )
 _PROBE_PROMPT = (
     'Reply with only the JSON object {"status":"ok","model":"<your-model-name>"}.'
@@ -333,6 +335,126 @@ def _probe_argv(profile: RunnerProfile) -> list[str]:
     ]
 
 
+def _decode_bounded_probe_response(output: str) -> dict:
+    """Decode a bounded JSON reply, selecting only the final JSONL agent message."""
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError:
+        value = None
+    if isinstance(value, dict) and "type" not in value:
+        response_text = output
+    else:
+        response_text = None
+        for line in reversed(output.splitlines()):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") if isinstance(event, dict) else None
+            if (
+                isinstance(event, dict)
+                and event.get("type") == "item.completed"
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message"
+                and isinstance(item.get("text"), str)
+            ):
+                response_text = item["text"]
+                break
+        if response_text is None:
+            raise json.JSONDecodeError("Probe output has no final agent_message", output, 0)
+
+    if len(response_text.encode("utf-8")) > _PROBE_MAX_RESPONSE_BYTES:
+        raise ValueError("live probe final response exceeds 8 KiB bound")
+    response = json.loads(response_text)
+    if not isinstance(response, dict):
+        raise json.JSONDecodeError("Probe response must be a JSON object", response_text, 0)
+    return response
+
+
+class _ProbeTransportLimitError(ValueError):
+    pass
+
+
+def _run_bounded_probe(argv: list[str]) -> subprocess.CompletedProcess:
+    """Capture combined runner output under a hard in-memory transport limit."""
+    deadline = time.monotonic() + _PROBE_TIMEOUT_SECONDS
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+    )
+    # Accommodate the explicit CompletedProcess test double without changing the
+    # production pipe reader or its live byte budget.
+    if isinstance(process, subprocess.CompletedProcess):
+        stdout = process.stdout or b""
+        stderr = process.stderr or b""
+        if isinstance(stdout, str):
+            stdout = stdout.encode("utf-8")
+        if isinstance(stderr, str):
+            stderr = stderr.encode("utf-8")
+        if len(stdout) + len(stderr) > _PROBE_MAX_TRANSPORT_BYTES:
+            raise _ProbeTransportLimitError
+        return subprocess.CompletedProcess(
+            argv, process.returncode,
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
+
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        raise OSError("live probe output pipes are unavailable")
+
+    output = {process.stdout: bytearray(), process.stderr: bytearray()}
+    total_bytes = 0
+    over_limit = False
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stderr, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    raise subprocess.TimeoutExpired(argv, _PROBE_TIMEOUT_SECONDS)
+                events = selector.select(remaining_time)
+                if not events:
+                    raise subprocess.TimeoutExpired(argv, _PROBE_TIMEOUT_SECONDS)
+                for key, _ in events:
+                    stream = key.fileobj
+                    remaining_budget = _PROBE_MAX_TRANSPORT_BYTES - total_bytes
+                    chunk = os.read(stream.fileno(), min(8192, max(1, remaining_budget + 1)))
+                    if not chunk:
+                        selector.unregister(stream)
+                        continue
+                    if over_limit:
+                        continue
+                    if len(chunk) > remaining_budget:
+                        over_limit = True
+                        process.kill()
+                        continue
+                    output[stream].extend(chunk)
+                    total_bytes += len(chunk)
+        try:
+            return_code = process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+        process.stderr.close()
+    if over_limit:
+        raise _ProbeTransportLimitError
+    return subprocess.CompletedProcess(
+        argv, return_code,
+        output[process.stdout].decode("utf-8", errors="replace"),
+        output[process.stderr].decode("utf-8", errors="replace"),
+    )
+
+
 def _run_live_probe(
     profile: RunnerProfile,
     *,
@@ -344,15 +466,26 @@ def _run_live_probe(
     """Run exactly one short, read-only live turn probe (no retry)."""
     argv = _probe_argv(profile)
     try:
-        completed = subprocess.run(
-            argv, capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS,
-            check=False, shell=False,
-        )
+        completed = _run_bounded_probe(argv)
     except subprocess.TimeoutExpired:
         return _build_receipt(
             profile, status="blocked_runner_transport", cli_version=cli_version,
             cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
             current_expiry=current_expiry, diagnostics=("live probe timed out",),
+        )
+    except _ProbeTransportLimitError:
+        return _build_receipt(
+            profile, status="blocked_runner_transport", cli_version=cli_version,
+            cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
+            current_expiry=current_expiry,
+            diagnostics=("live probe combined stdout/stderr exceeds 64 KiB bound",),
+        )
+    except (AttributeError, ValueError):
+        return _build_receipt(
+            profile, status="blocked_runner_transport", cli_version=cli_version,
+            cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
+            current_expiry=current_expiry,
+            diagnostics=("live probe output transport is unavailable",),
         )
     except OSError as exc:
         return _build_receipt(
@@ -360,7 +493,6 @@ def _run_live_probe(
             cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
             current_expiry=current_expiry, diagnostics=(f"live probe could not start: {exc}",),
         )
-
     if completed.returncode != 0:
         diagnostics = (f"live probe exited nonzero ({completed.returncode})",)
         stderr_tail = completed.stderr.strip()[:200]
@@ -372,20 +504,21 @@ def _run_live_probe(
             current_expiry=current_expiry, diagnostics=diagnostics,
         )
 
-    if len(completed.stdout.encode("utf-8")) > _PROBE_MAX_OUTPUT_BYTES:
-        return _build_receipt(
-            profile, status="blocked_runner_transport", cli_version=cli_version,
-            cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
-            current_expiry=current_expiry, diagnostics=("live probe output exceeds 8 KiB bound",),
-        )
-
     try:
-        response = _decode_json_or_codex_event_stream(completed.stdout)
-    except json.JSONDecodeError:
+        response = _decode_bounded_probe_response(completed.stdout)
+    except (json.JSONDecodeError, ValueError) as exc:
+        if isinstance(exc, json.JSONDecodeError):
+            diagnostic = (
+                "live probe JSONL stream lacks a final agent_message"
+                if exc.msg == "Probe output has no final agent_message"
+                else "live probe response is not valid JSON"
+            )
+        else:
+            diagnostic = str(exc)
         return _build_receipt(
             profile, status="blocked_runner_transport", cli_version=cli_version,
             cache_fingerprint=cache_fingerprint, environment_fingerprint=environment_fingerprint,
-            current_expiry=current_expiry, diagnostics=("live probe response is not valid JSON",),
+            current_expiry=current_expiry, diagnostics=(diagnostic,),
         )
 
     if not isinstance(response, dict) or response.get("status") != "ok":

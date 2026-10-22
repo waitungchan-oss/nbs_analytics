@@ -19,6 +19,7 @@ import pytest
 from backend.agents.evidence_models import canonical_fingerprint
 from backend.agents.verification_session import (
     ALLOWED_SESSION_STATUSES,
+    LEGACY_SOURCE_PROBE_VERSION,
     SOURCE_PROBE_VERSION,
     StaleVerificationSession,
     VerificationSession,
@@ -65,6 +66,11 @@ def test_session_round_trip_has_exact_schema():
     assert restored == session
     assert set(session.to_dict()) == _EXPECTED_KEYS
     assert session.to_dict()["gates"]["sourceProbeVersion"] == SOURCE_PROBE_VERSION
+
+
+def test_new_session_cannot_be_created_with_legacy_source_probe_version():
+    with pytest.raises(ValueError, match="new source seals require verification-source-probe-v2"):
+        _session(gates={"sourceProbeVersion": LEGACY_SOURCE_PROBE_VERSION})
 
 
 def test_session_from_dict_rejects_non_object():
@@ -199,7 +205,42 @@ def test_session_assert_fresh_rejects_changed_source_probe_version():
             diff_fingerprint=session.diff_fingerprint,
             contract_fingerprint=session.contract_fingerprint,
             policy_fingerprint=session.policy_fingerprint,
-            source_probe_version="verification-source-probe-v2",
+            source_probe_version="verification-source-probe-v1",
+        )
+
+
+def test_historical_v1_session_remains_readable_but_is_stale_under_v2_probe():
+    historical = _session().to_dict()
+    historical["gates"]["sourceProbeVersion"] = "verification-source-probe-v1"
+    session = VerificationSession.from_dict(historical)
+
+    assert session.gates["sourceProbeVersion"] == "verification-source-probe-v1"
+    with pytest.raises(StaleVerificationSession, match="sourceProbeVersion"):
+        session.assert_fresh(
+            head_sha=session.head_sha,
+            brief_fingerprint=session.brief_fingerprint,
+            worktree_fingerprint=session.worktree_fingerprint,
+            diff_fingerprint=session.diff_fingerprint,
+            contract_fingerprint=session.contract_fingerprint,
+            policy_fingerprint=session.policy_fingerprint,
+            source_probe_version=SOURCE_PROBE_VERSION,
+        )
+
+
+def test_historical_v1_session_cannot_pass_freshness_when_v1_is_explicitly_requested():
+    historical = _session().to_dict()
+    historical["gates"]["sourceProbeVersion"] = LEGACY_SOURCE_PROBE_VERSION
+    session = VerificationSession.from_dict(historical)
+
+    with pytest.raises(StaleVerificationSession, match="sourceProbeVersion"):
+        session.assert_fresh(
+            head_sha=session.head_sha,
+            brief_fingerprint=session.brief_fingerprint,
+            worktree_fingerprint=session.worktree_fingerprint,
+            diff_fingerprint=session.diff_fingerprint,
+            contract_fingerprint=session.contract_fingerprint,
+            policy_fingerprint=session.policy_fingerprint,
+            source_probe_version=LEGACY_SOURCE_PROBE_VERSION,
         )
 
 

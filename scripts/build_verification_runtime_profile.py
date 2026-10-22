@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
 from backend.agents.evidence_models import canonical_fingerprint
+from backend.agents.repository_scope import verification_source_git_pathspecs
 from backend.services.cache_generation_service import GENERATION_SCHEMA_VERSION, GENERATION_SIGNATURE_SCOPE
 from backend.services.gmv_refund_models import canonical_payload_sha256
 from backend.services.revenue_generation_service import (
@@ -18,7 +21,16 @@ from backend.services.revenue_generation_service import (
     REVENUE_SCOPE_CONTRACT_VERSION,
 )
 from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL
-from backend.services.verification_runtime_profile import VERIFICATION_PROFILE_SCHEMA, VerificationRuntimeProfile
+from backend.services.verification_profile_acceptance import (
+    NBS_PROJECT_ID,
+    SourceBindingInspectionError,
+    inspect_primary_source,
+)
+from backend.services.verification_runtime_profile import (
+    VERIFICATION_PROFILE_SCHEMA_V2,
+    ProfileSourceBinding,
+    VerificationRuntimeProfile,
+)
 from backend.services.verification_runtime_snapshot import build_read_only_snapshot
 
 
@@ -73,12 +85,19 @@ def _sha256(path: Path) -> str:
 def _worktree_fingerprint(project_root: Path, git_head: str) -> str:
     try:
         status = subprocess.run(
-            ["git", "-C", str(project_root), "status", "--porcelain"],
-            capture_output=True, text=True, check=True,
+            [
+                "git", "-C", str(project_root), "status", "--porcelain=v1",
+                "--untracked-files=all", "--no-renames", "-z", "--",
+                *verification_source_git_pathspecs(),
+            ],
+            capture_output=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise VerificationRuntimeProfileBuildError("project root is not a readable Git worktree") from exc
-    return canonical_fingerprint({"head": git_head, "status": status})
+    return canonical_fingerprint({
+        "head": git_head,
+        "statusFingerprint": hashlib.sha256(status).hexdigest(),
+    })
 
 
 def _cache_inventory(project_root: Path) -> dict[str, object]:
@@ -99,13 +118,7 @@ def _cache_inventory(project_root: Path) -> dict[str, object]:
     }
 
 
-def _bounded_generation(path: Path) -> dict[str, object]:
-    if path.stat().st_size > 16 * 1024:
-        raise VerificationRuntimeProfileBuildError("runtime generation metadata exceeds bounded size")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise VerificationRuntimeProfileBuildError("runtime generation metadata is invalid") from exc
+def _validate_generation_payload(value: object) -> dict[str, object]:
     legacy_keys = {"generation", "operationId", "status", "updatedAt", "dbSignature"}
     v2_keys = legacy_keys | {"schemaVersion", "signatureScope", "coreRevenueSignature"}
     if not isinstance(value, dict):
@@ -135,21 +148,63 @@ def _bounded_generation(path: Path) -> dict[str, object]:
     return value
 
 
+def _resolve_source_root(
+    *,
+    source_root: Path | None,
+    source_db: Path | None,
+    source_runtime: Path | None,
+) -> Path:
+    if source_root is not None:
+        if source_db is not None or source_runtime is not None:
+            raise VerificationRuntimeProfileBuildError(
+                "source_root cannot be combined with legacy source paths"
+            )
+        return Path(source_root)
+    if source_db is None or source_runtime is None:
+        raise VerificationRuntimeProfileBuildError(
+            "source_root or both legacy source paths are required"
+        )
+
+    database = Path(source_db)
+    runtime = Path(source_runtime)
+    if database.name != "nbs_marketing_data.db" or runtime.name != ".nbs_runtime":
+        raise VerificationRuntimeProfileBuildError("legacy source paths are invalid")
+    database_root = Path(os.path.abspath(database.parent))
+    runtime_root = Path(os.path.abspath(runtime.parent))
+    if database_root != runtime_root:
+        raise VerificationRuntimeProfileBuildError(
+            "legacy source paths must belong to the same checkout"
+        )
+    return database_root
+
+
 def build_verification_profile(
-    *, project_root: Path, source_db: Path, source_runtime: Path, output_root: Path,
+    *, project_root: Path, output_root: Path,
     git_head: str, ports: Mapping[str, int],
+    source_root: Path | None = None, source_db: Path | None = None,
+    source_runtime: Path | None = None,
 ) -> Path:
     project = Path(project_root)
-    source = Path(source_db)
-    runtime = Path(source_runtime)
-    if not source.is_file() or source.is_symlink():
-        raise VerificationRuntimeProfileBuildError("source database is missing or symlinked")
-    generation = runtime / "data_generation.json"
-    if not generation.is_file() or generation.is_symlink():
-        raise VerificationRuntimeProfileBuildError("runtime generation metadata is missing or symlinked")
-    registry = project / "data" / "monthly_revenue_baselines.json"
-    if not registry.is_file() or registry.is_symlink():
-        raise VerificationRuntimeProfileBuildError("monthly baseline registry is missing or symlinked")
+    resolved_source_root = _resolve_source_root(
+        source_root=source_root,
+        source_db=source_db,
+        source_runtime=source_runtime,
+    )
+    try:
+        source_before = inspect_primary_source(
+            project, resolved_source_root, expected_project_id=NBS_PROJECT_ID,
+        )
+    except SourceBindingInspectionError as exc:
+        raise VerificationRuntimeProfileBuildError(exc.reason_code) from None
+    generation_payload = _validate_generation_payload(dict(source_before.generation_payload))
+    try:
+        actual_head = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        raise VerificationRuntimeProfileBuildError("project root is not a readable Git worktree") from None
+    if actual_head != git_head:
+        raise VerificationRuntimeProfileBuildError("git_head does not match the code checkout")
     if set(ports) != {"api", "streamlit", "vue"} or any(not isinstance(v, int) or isinstance(v, bool) or not 1024 <= v <= 65535 for v in ports.values()) or len(set(ports.values())) != 3:
         raise VerificationRuntimeProfileBuildError("profile ports must be allocated positive integers")
     allowed_root = (project / ".nbs_agent_runtime" / "verification").resolve()
@@ -166,26 +221,42 @@ def build_verification_profile(
     profile_dir = Path(output_root) / profile_id
     if profile_dir.exists():
         raise VerificationRuntimeProfileBuildError("profile output already exists")
+    staging_dir = None
     try:
-        snapshot = build_read_only_snapshot(source, profile_dir / "snapshot.sqlite")
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        (profile_dir / "cache").mkdir()
-        generation_payload = _bounded_generation(generation)
-        (profile_dir / "generation.json").write_text(json.dumps(generation_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        baseline_fingerprint = _sha256(registry)
+        Path(output_root).mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix=f".{profile_id}.staging-", dir=output_root))
+        snapshot = build_read_only_snapshot(source_before.database_path, staging_dir / "snapshot.sqlite")
+        if snapshot.source_fingerprint != source_before.database_fingerprint:
+            raise VerificationRuntimeProfileBuildError("source database changed during snapshot")
+        (staging_dir / "cache").mkdir()
+        (staging_dir / "generation.json").write_text(json.dumps(generation_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        source_after = inspect_primary_source(
+            project, resolved_source_root, expected_project_id=NBS_PROJECT_ID,
+        )
+        if source_after != source_before:
+            raise VerificationRuntimeProfileBuildError("source changed during profile build")
+        source_binding = ProfileSourceBinding(
+            source_role="primary-checkout",
+            repository_fingerprint=source_before.repository_fingerprint,
+            source_head=source_before.source_head,
+            database_fingerprint=source_before.database_fingerprint,
+            generation_fingerprint=source_before.generation_fingerprint,
+            baseline_registry_fingerprint=source_before.baseline_registry_fingerprint,
+        )
         unsigned = {
-            "schemaVersion": VERIFICATION_PROFILE_SCHEMA,
+            "schemaVersion": VERIFICATION_PROFILE_SCHEMA_V2,
             "profileId": profile_id,
-            "projectId": project.name,
+            "projectId": NBS_PROJECT_ID,
             "gitHead": git_head,
             "worktreeFingerprint": _worktree_fingerprint(project, git_head),
+            "sourceBinding": source_binding.to_dict(),
             "database": {
                 "snapshotRef": f"verification/{profile_id}/snapshot.sqlite",
                 "sourceFingerprint": snapshot.source_fingerprint,
                 "snapshotFingerprint": snapshot.snapshot_fingerprint,
                 "readOnly": True,
             },
-            "baseline": {"registryFingerprint": baseline_fingerprint, "requiredMay2026Total": "HKD 12,057,968"},
+            "baseline": {"registryFingerprint": source_before.baseline_registry_fingerprint, "requiredMay2026Total": "HKD 12,057,968"},
             "runtime": {
                 "runtimeDir": f"verification/{profile_id}",
                 "generationRef": f"verification/{profile_id}/generation.json",
@@ -201,15 +272,36 @@ def build_verification_profile(
             expected_git_head=git_head,
             expected_worktree_fingerprint=unsigned["worktreeFingerprint"],
         )
-        profile_path = profile_dir / "profile.json"
+        profile_path = staging_dir / "profile.json"
+        try:
+            final_source = inspect_primary_source(
+                project, resolved_source_root, expected_project_id=NBS_PROJECT_ID,
+            )
+        except SourceBindingInspectionError as exc:
+            raise VerificationRuntimeProfileBuildError(exc.reason_code) from None
+        if final_source != source_before:
+            raise VerificationRuntimeProfileBuildError("source changed during profile build")
         profile_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        return profile_path
+        try:
+            published_source = inspect_primary_source(
+                project, resolved_source_root, expected_project_id=NBS_PROJECT_ID,
+            )
+        except SourceBindingInspectionError as exc:
+            raise VerificationRuntimeProfileBuildError(exc.reason_code) from None
+        if published_source != source_before:
+            raise VerificationRuntimeProfileBuildError("source changed during profile build")
+        if profile_dir.exists():
+            raise VerificationRuntimeProfileBuildError("profile output already exists")
+        os.rename(staging_dir, profile_dir)
+        staging_dir = None
+        return profile_dir / "profile.json"
     except Exception as exc:
         import shutil
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         if isinstance(exc, VerificationRuntimeProfileBuildError):
             raise
-        raise VerificationRuntimeProfileBuildError(str(exc)) from exc
+        raise VerificationRuntimeProfileBuildError(f"profile build failed: {type(exc).__name__}") from None
 
 
 if __name__ == "__main__":
