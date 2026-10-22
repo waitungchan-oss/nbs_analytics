@@ -138,7 +138,7 @@ def test_verification_freshness_accepts_standard_shasum_output():
         [
             {"label": "review-head-fingerprint", "argv": ["git", "rev-parse", "HEAD"], "exitCode": 0, "stdoutTail": "a" * 40, "stderrTail": ""},
             {"label": "review-brief-fingerprint", "argv": ["shasum", "-a", "256", "docs/brief.md"], "exitCode": 0, "stdoutTail": f"{digest}  docs/brief.md", "stderrTail": ""},
-            {"label": "review-worktree-fingerprint", "argv": ["sh", "-c", "git status --porcelain=v1 --untracked-files=all --no-renames -z -- . ':(exclude,icase,glob)**/Summay/**' ':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256"], "exitCode": 0, "stdoutTail": digest, "stderrTail": ""},
+            {"label": "review-worktree-fingerprint", "argv": ["sh", "-c", "git status --porcelain=v1 --untracked-files=all --no-renames -z -- . ':(exclude,icase,glob)**/Summay/**' ':(exclude,icase,glob)**/Summay' ':(exclude).nbs_agent_runtime' ':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256"], "exitCode": 0, "stdoutTail": digest, "stderrTail": ""},
         ],
         brief_sha=digest,
         worktree_fingerprint=digest,

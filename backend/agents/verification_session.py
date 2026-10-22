@@ -178,8 +178,8 @@ class VerificationSession:
         """Build a sealed session from the approved source seal inputs."""
         session_gates = dict(gates or {})
         session_gates.setdefault("sourceProbeVersion", SOURCE_PROBE_VERSION)
-        if session_gates["sourceProbeVersion"] not in SUPPORTED_SOURCE_PROBE_VERSIONS:
-            raise ValueError("gates.sourceProbeVersion is unsupported")
+        if session_gates["sourceProbeVersion"] != SOURCE_PROBE_VERSION:
+            raise ValueError("new source seals require verification-source-probe-v2")
         return cls(
             schema_version=SESSION_SCHEMA_VERSION,
             session_id=session_id or str(uuid4()),
@@ -264,6 +264,10 @@ class VerificationSession:
         source_probe_version = _require_non_empty(
             source_probe_version, "sourceProbeVersion"
         )
+        if source_probe_version != SOURCE_PROBE_VERSION:
+            raise StaleVerificationSession(
+                "verification source is stale: sourceProbeVersion is not current"
+            )
         current = {
             "headSha": _require_sha(head_sha, "headSha"),
             "briefFingerprint": _require_sha256(brief_fingerprint, "briefFingerprint"),

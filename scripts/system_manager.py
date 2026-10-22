@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from collections.abc import Mapping
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +23,23 @@ if str(PROJECT_ROOT) not in sys.path:
 RUNTIME_DIR = PROJECT_ROOT / ".nbs_runtime"
 LOG_DIR = RUNTIME_DIR / "logs"
 STATE_PATH = RUNTIME_DIR / "services.json"
+_MAX_PROCESS_ENV_OUTPUT_CHARS = 131_072
+_PROFILE_SERVICE_ENV_KEYS = frozenset({
+    "NBS_ANALYTICS_DB_FILE",
+    "NBS_ANALYTICS_CACHE_DIR",
+})
+
+
+def _has_complete_profile_environment(spec: dict) -> bool:
+    environment = spec.get("env")
+    return (
+        isinstance(environment, dict)
+        and _PROFILE_SERVICE_ENV_KEYS <= environment.keys()
+        and all(
+            isinstance(environment[key], str) and bool(environment[key])
+            for key in _PROFILE_SERVICE_ENV_KEYS
+        )
+    )
 
 
 def build_service_specs(
@@ -188,6 +207,136 @@ def _process_cwd(pid: int) -> Path | None:
     return None
 
 
+def _process_environment(pid: int, required_keys) -> dict[str, str] | None:
+    if os.name == "nt" or sys.platform != "linux":
+        return None
+    keys = frozenset(required_keys)
+    if not keys:
+        return {}
+    try:
+        with Path(f"/proc/{int(pid)}/environ").open("rb") as handle:
+            raw = handle.read(_MAX_PROCESS_ENV_OUTPUT_CHARS + 1)
+    except (OSError, TypeError, ValueError):
+        return None
+    if len(raw) > _MAX_PROCESS_ENV_OUTPUT_CHARS:
+        return None
+    values: dict[str, str] = {}
+    for raw_token in raw.split(b"\0"):
+        try:
+            token = raw_token.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        key, separator, value = token.partition("=")
+        if separator and key in keys:
+            if key in values:
+                return None
+            values[key] = value
+    return values if keys <= values.keys() else None
+
+
+def _environment_fingerprint(environment: Mapping[str, str]) -> str:
+    payload = json.dumps(dict(sorted(environment.items())), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _macos_process_start_identity(pid: int) -> str | None:
+    import ctypes
+
+    # Match macOS SDK <sys/proc_info.h> struct proc_bsdinfo (MAXCOMLEN = 16).
+    class ProcBsdInfo(ctypes.Structure):
+        _fields_ = [
+            ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
+            ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
+            ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+            ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
+            ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
+            ("pbi_svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
+            ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+            ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+            ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+            ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+            ("pbi_start_tvsec", ctypes.c_uint64), ("pbi_start_tvusec", ctypes.c_uint64),
+        ]
+
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        proc_pidinfo = libproc.proc_pidinfo
+        proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        proc_pidinfo.restype = ctypes.c_int
+        info = ProcBsdInfo()
+        result = proc_pidinfo(int(pid), 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+    if (
+        result != ctypes.sizeof(info) or info.pbi_pid != int(pid)
+        or info.pbi_start_tvsec == 0 or info.pbi_start_tvusec >= 1_000_000
+    ):
+        return None
+    return f"darwin:{info.pbi_start_tvsec}:{info.pbi_start_tvusec}"
+
+
+def _windows_process_start_identity(pid: int) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return None
+        creation = FileTime()
+        exit_time = FileTime()
+        kernel_time = FileTime()
+        user_time = FileTime()
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(creation), ctypes.byref(exit_time),
+            ctypes.byref(kernel_time), ctypes.byref(user_time),
+        ):
+            return None
+        ticks = (int(creation.high) << 32) | int(creation.low)
+        return f"windows:{ticks}"
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+    finally:
+        if "kernel32" in locals() and "handle" in locals() and handle:
+            try:
+                kernel32.CloseHandle(handle)
+            except (OSError, AttributeError, TypeError, ValueError):
+                pass
+
+
+def _process_start_identity(pid: int) -> str | None:
+    if sys.platform == "darwin":
+        return _macos_process_start_identity(pid)
+    if os.name == "nt" or sys.platform == "win32":
+        return _windows_process_start_identity(pid)
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with Path(f"/proc/{int(pid)}/stat").open("rb") as handle:
+            raw = handle.read(8192)
+        closing = raw.rfind(b")")
+        if closing < 0:
+            return None
+        fields = raw[closing + 1:].split()
+        start_ticks = fields[19].decode("ascii")
+    except (OSError, IndexError, UnicodeDecodeError, TypeError, ValueError):
+        return None
+    return f"linux:{int(pid)}:{start_ticks}" if start_ticks.isdigit() else None
+
+
 def _command_matches_service(
     name: str,
     command: str,
@@ -226,14 +375,89 @@ def _command_matches_service(
     return False
 
 
-def find_reusable_service_pid(name: str, spec: dict, project_root: Path) -> int | None:
+def _process_matches_service(
+    name: str,
+    pid: int,
+    spec: dict,
+    project_root: Path,
+    launch_record: dict | None = None,
+) -> bool:
+    if isinstance(pid, bool):
+        return False
+    if isinstance(pid, str):
+        if not pid.isdecimal():
+            return False
+        pid = int(pid)
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    process_cwd = _process_cwd(pid)
+    if spec.get("profileId") is not None:
+        expected_cwd = Path(spec.get("cwd") or project_root).resolve()
+        if process_cwd is None or process_cwd != expected_cwd:
+            return False
+    if not _command_matches_service(
+        name,
+        _process_command(pid),
+        spec,
+        project_root,
+        process_cwd=process_cwd,
+    ):
+        return False
+    expected_environment = spec.get("env")
+    if spec.get("profileId") is not None and not _has_complete_profile_environment(spec):
+        return False
+    if not expected_environment:
+        return True
+    if not isinstance(expected_environment, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in expected_environment.items()
+    ):
+        return False
+    if not isinstance(launch_record, dict):
+        return False
+    expected_start_identity = launch_record.get("processStartIdentity")
+    if (
+        str(launch_record.get("pid")) != str(pid)
+        or launch_record.get("profileId") != spec.get("profileId")
+        or launch_record.get("profileEnvironmentFingerprint")
+        != _environment_fingerprint(expected_environment)
+        or not expected_start_identity
+        or expected_start_identity != _process_start_identity(pid)
+    ):
+        return False
+    observed = _process_environment(pid, expected_environment.keys())
+    return observed == expected_environment or (
+        observed is None and sys.platform == "darwin"
+    )
+
+
+def find_reusable_service_pid(
+    name: str,
+    spec: dict,
+    project_root: Path,
+    *,
+    launch_record: dict | None = None,
+) -> int | None:
     for pid in _listening_pids(spec["port"]):
-        if _command_matches_service(name, _process_command(pid), spec, project_root):
+        record = launch_record
+        if not isinstance(record, dict) or str(record.get("pid")) != str(pid):
+            record = None
+        if _process_matches_service(name, pid, spec, project_root, record):
             return pid
     return None
 
 
 def _adopt_service_record(pid: int, spec: dict, name: str, runtime_dir: Path) -> dict:
+    process_start_identity = _process_start_identity(pid)
+    expected_environment = spec.get("env")
+    if spec.get("profileId") is not None and not _has_complete_profile_environment(spec):
+        raise RuntimeError("Cannot adopt profile-managed service: profile service environment is incomplete")
+    if (
+        (spec.get("profileId") is not None or (isinstance(expected_environment, dict) and expected_environment))
+        and not process_start_identity
+    ):
+        raise RuntimeError(
+            "Cannot adopt profile-managed service: process-start identity unavailable"
+        )
     return {
         "pid": int(pid),
         "port": spec["port"],
@@ -242,6 +466,11 @@ def _adopt_service_record(pid: int, spec: dict, name: str, runtime_dir: Path) ->
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "adopted": True,
         "profileId": spec.get("profileId"),
+        "profileEnvironmentFingerprint": (
+            _environment_fingerprint(spec["env"])
+            if isinstance(spec.get("env"), dict) and spec["env"] else None
+        ),
+        "processStartIdentity": process_start_identity,
     }
 
 
@@ -272,7 +501,20 @@ def _command_available(command: str) -> bool:
     return path.exists() if path.is_absolute() else shutil.which(command) is not None
 
 
-def preflight(project_root: Path, specs: dict, runtime_dir: Path = RUNTIME_DIR) -> dict:
+def preflight(
+    project_root: Path,
+    specs: dict,
+    runtime_dir: Path = RUNTIME_DIR,
+    *,
+    database_path: Path | None = None,
+) -> dict:
+    if (os.name == "nt" or sys.platform == "win32") and any(
+        spec.get("profileId") is not None for spec in specs.values()
+    ):
+        return {
+            "ok": False,
+            "issues": ["Verification-profile service ownership is unsupported on Windows"],
+        }
     issues: list[str] = []
     state = read_state(runtime_dir)
     managed = state.get("services", {})
@@ -284,13 +526,30 @@ def preflight(project_root: Path, specs: dict, runtime_dir: Path = RUNTIME_DIR) 
         if command and not _command_available(str(command[0])):
             issues.append(f"{name} executable is unavailable: {command[0]}")
         if port_is_open("127.0.0.1", spec["port"]):
-            pid = (managed.get(name) or {}).get("pid")
-            if not process_is_alive(pid):
-                reusable_pid = find_reusable_service_pid(name, spec, project_root)
+            record = managed.get(name) or {}
+            pid = record.get("pid")
+            profile_id = spec.get("profileId")
+            managed_matches = bool(
+                process_is_alive(pid)
+                and (
+                    profile_id is None
+                    or (
+                        record.get("profileId") == profile_id
+                        and _process_matches_service(name, pid, spec, project_root, record)
+                    )
+                )
+            )
+            if managed_matches and not endpoint_is_ready(spec["ready_url"]):
+                issues.append(f"{name} managed process on port {spec['port']} is not ready")
+            elif not managed_matches:
+                reusable_pid = find_reusable_service_pid(
+                    name, spec, project_root, launch_record=record,
+                )
                 if not reusable_pid or not endpoint_is_ready(spec["ready_url"]):
                     issues.append(f"{name} port {spec['port']} is occupied by an unmanaged process")
-    if not (project_root / "nbs_marketing_data.db").exists():
-        issues.append("SQLite database is missing: nbs_marketing_data.db")
+    required_database = database_path or (project_root / "nbs_marketing_data.db")
+    if not required_database.is_file():
+        issues.append(f"SQLite database is missing or not a file: {required_database.name}")
     return {"ok": not issues, "issues": issues}
 
 
@@ -301,7 +560,29 @@ def _resolve_runtime(project_root: Path) -> tuple[str, str]:
     return python_bin, npm_bin
 
 
+def _verification_profile_paths(profile, project_root: Path):
+    from backend.services.verification_runtime_paths import resolve_verification_paths
+
+    return resolve_verification_paths(profile, project_root=project_root)
+
+
+def _bind_profile_environment(specs: dict, profile, project_root: Path):
+    if profile is None:
+        return None
+    paths = _verification_profile_paths(profile, project_root)
+    environment = {
+        "NBS_ANALYTICS_DB_FILE": str(paths.db_path),
+        "NBS_ANALYTICS_CACHE_DIR": str(paths.cache_path),
+    }
+    for spec in specs.values():
+        spec["env"] = dict(environment)
+    return paths
+
+
 def _spawn_service(name: str, spec: dict, runtime_dir: Path) -> dict:
+    profile_managed = spec.get("profileId") is not None
+    if profile_managed and not _has_complete_profile_environment(spec):
+        raise RuntimeError("Cannot spawn profile-managed service: profile service environment is incomplete")
     log_dir = runtime_dir / "logs"
     log_path = log_dir / f"{name}.log"
     rotate_log(log_path)
@@ -312,12 +593,33 @@ def _spawn_service(name: str, spec: dict, runtime_dir: Path) -> dict:
         "stdout": log_handle,
         "stderr": subprocess.STDOUT,
     }
+    service_env = spec.get("env")
+    if isinstance(service_env, dict) and service_env:
+        kwargs["env"] = {**os.environ, **service_env}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
     process = subprocess.Popen(spec["command"], **kwargs)
     log_handle.close()
+    process_start_identity = _process_start_identity(process.pid)
+    if profile_managed and not process_start_identity:
+        try:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        except OSError:
+            try:
+                process.kill()
+                process.wait(timeout=5)
+            except OSError:
+                pass
+        raise RuntimeError(
+            "Cannot start profile-managed service: process-start identity unavailable; spawned child was stopped"
+        )
     return {
         "pid": process.pid,
         "port": spec["port"],
@@ -325,6 +627,11 @@ def _spawn_service(name: str, spec: dict, runtime_dir: Path) -> dict:
         "logPath": str(log_path),
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "profileId": spec.get("profileId"),
+        "profileEnvironmentFingerprint": (
+            _environment_fingerprint(spec["env"])
+            if isinstance(spec.get("env"), dict) and spec["env"] else None
+        ),
+        "processStartIdentity": process_start_identity,
     }
 
 
@@ -348,7 +655,12 @@ def start_services(project_root: Path = PROJECT_ROOT, open_browser: bool = True,
         project_root / ".nbs_agent_runtime" / "verification" / profile.profile_id
         if profile is not None else project_root / ".nbs_runtime"
     )
-    check = preflight(project_root, specs, runtime_dir)
+    paths = _bind_profile_environment(specs, profile, project_root)
+    database_path = paths.db_path if paths is not None else None
+    if database_path is None:
+        check = preflight(project_root, specs, runtime_dir)
+    else:
+        check = preflight(project_root, specs, runtime_dir, database_path=database_path)
     if not check["ok"]:
         for issue in check["issues"]:
             print(f"[ERROR] {issue}")
@@ -359,16 +671,38 @@ def start_services(project_root: Path = PROJECT_ROOT, open_browser: bool = True,
     started_names: list[str] = []
     for name, spec in specs.items():
         existing = services.get(name) or {}
-        if process_is_alive(existing.get("pid")) and endpoint_is_ready(spec["ready_url"]):
+        existing_pid = existing.get("pid")
+        existing_identity = bool(
+            profile is None
+            or (
+                existing.get("profileId") == profile.profile_id
+                and _process_matches_service(name, existing_pid, spec, project_root, existing)
+            )
+        )
+        if (
+            process_is_alive(existing_pid)
+            and existing_identity
+            and endpoint_is_ready(spec["ready_url"])
+        ):
             print(f"[READY] {name}: {spec['ready_url']}")
             continue
-        reusable_pid = find_reusable_service_pid(name, spec, project_root)
+        reusable_pid = find_reusable_service_pid(
+            name, spec, project_root, launch_record=existing,
+        )
         if reusable_pid and endpoint_is_ready(spec["ready_url"]):
             services[name] = _adopt_service_record(reusable_pid, spec, name, runtime_dir)
             write_state(state, runtime_dir)
             print(f"[READY] {name}: {spec['ready_url']} (adopted pid={reusable_pid})")
             continue
-        services[name] = _spawn_service(name, spec, runtime_dir)
+        try:
+            service_record = _spawn_service(name, spec, runtime_dir)
+        except (OSError, RuntimeError) as exc:
+            if profile is None:
+                raise
+            print(f"[ERROR] {name} could not be started for profile {profile.profile_id}: {exc}")
+            stop_services(project_root, profile=profile)
+            return 1
+        services[name] = service_record
         started_names.append(name)
         write_state(state, runtime_dir)
 
@@ -420,6 +754,7 @@ def stop_services_report(project_root: Path = PROJECT_ROOT, *, profile=None) -> 
     profile_ports = dict(profile.services.ports) if profile is not None else None
     profile_id = profile.profile_id if profile is not None else None
     specs = build_service_specs(project_root, python_bin, npm_bin, ports=profile_ports, profile_id=profile_id)
+    _bind_profile_environment(specs, profile, project_root)
     runtime_dir = (
         project_root / ".nbs_agent_runtime" / "verification" / profile.profile_id
         if profile is not None else project_root / ".nbs_runtime"
@@ -436,20 +771,24 @@ def stop_services_report(project_root: Path = PROJECT_ROOT, *, profile=None) -> 
         if not managed:
             already_absent.append(name)
             continue
-        if profile is not None:
-            if record.get("profileId") != profile.profile_id:
-                identity_mismatches.append(name)
-                continue
-            spec = specs.get(name)
-            if spec is None or not _command_matches_service(
-                name,
-                _process_command(pid),
-                spec,
-                project_root,
-                process_cwd=_process_cwd(pid),
-            ):
-                identity_mismatches.append(name)
-                continue
+        if profile is not None and record.get("profileId") != profile.profile_id:
+            identity_mismatches.append(name)
+            continue
+        spec = specs.get(name)
+        matches = spec is not None and _process_matches_service(
+            name, pid, spec, project_root, record,
+        )
+        if profile is None:
+            matches = bool(
+                matches
+                and isinstance(record, dict)
+                and str(record.get("pid")) == str(pid)
+                and record.get("processStartIdentity")
+                and record.get("processStartIdentity") == _process_start_identity(int(pid))
+            )
+        if not matches:
+            identity_mismatches.append(name)
+            continue
         if managed:
             print(f"[STOP] {name} pid={pid}")
             try:
@@ -458,7 +797,20 @@ def stop_services_report(project_root: Path = PROJECT_ROOT, *, profile=None) -> 
                 errors.append({"service": name, "reason": type(exc).__name__})
             else:
                 stopped.append(name)
-    write_state({"status": "stopped", "services": {}}, runtime_dir)
+    unresolved = set(identity_mismatches) | set(skipped)
+    unresolved.update(item["service"] for item in errors)
+    retained_services = {
+        name: record
+        for name, record in (state.get("services") or {}).items()
+        if name in unresolved
+    }
+    write_state(
+        {
+            "status": "partial" if retained_services else "stopped",
+            "services": retained_services,
+        },
+        runtime_dir,
+    )
     status = "error" if errors else "partial" if identity_mismatches or skipped else "clean"
     return {
         "schemaVersion": "service-stop-result-v1",
@@ -483,6 +835,7 @@ def service_status(project_root: Path = PROJECT_ROOT, *, profile=None) -> dict:
     profile_ports = dict(profile.services.ports) if profile is not None else None
     profile_id = profile.profile_id if profile is not None else None
     specs = build_service_specs(project_root, python_bin, npm_bin, ports=profile_ports, profile_id=profile_id)
+    _bind_profile_environment(specs, profile, project_root)
     runtime_dir = (
         project_root / ".nbs_agent_runtime" / "verification" / profile.profile_id
         if profile is not None
@@ -496,13 +849,7 @@ def service_status(project_root: Path = PROJECT_ROOT, *, profile=None) -> dict:
         ready = endpoint_is_ready(spec["ready_url"])
         owner_match = bool(
             alive
-            and _command_matches_service(
-                name,
-                _process_command(record.get("pid")),
-                spec,
-                project_root,
-                process_cwd=_process_cwd(record.get("pid")),
-            )
+            and _process_matches_service(name, record.get("pid"), spec, project_root, record)
         )
         identity_match = bool(owner_match and (profile is None or record.get("profileId") == profile.profile_id))
         services[name] = {

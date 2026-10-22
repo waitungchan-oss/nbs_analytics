@@ -16,6 +16,7 @@ from backend.agents.evidence_models import canonical_fingerprint
 from backend.services.verification_profile_acceptance import (
     ServiceIdentityEvidence,
     SourceBindingInspectionError,
+    _legacy_worktree_fingerprint,
     accept_profile_file,
     inspect_primary_source,
 )
@@ -152,6 +153,9 @@ def _bind_v1(profile_path: Path) -> None:
     payload = json.loads(profile_path.read_text(encoding="utf-8"))
     payload.pop("sourceBinding", None)
     payload["schemaVersion"] = "verification-runtime-profile-v1"
+    payload["worktreeFingerprint"] = _legacy_worktree_fingerprint(
+        profile_path.parents[3], payload["gitHead"]
+    )
     _refresh_profile_fingerprint(payload)
     profile_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
@@ -207,6 +211,46 @@ def test_builder_and_v2_acceptance_use_stable_project_id_for_differently_named_w
     assert result.project_id == "nbs_analytics"
 
 
+def test_v2_builder_binds_primary_source_head_separately_from_code_worktree_head(tmp_path: Path) -> None:
+    source = _source_fixture(tmp_path)
+    subprocess.run(
+        [
+            "git", "-C", str(source.primary), "-c", "user.email=fixture@example.invalid",
+            "-c", "user.name=fixture", "commit", "--quiet", "--allow-empty",
+            "-m", "advance primary source only",
+        ],
+        check=True,
+    )
+
+    profile_path = _build_profile(source)
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    assert payload["gitHead"] == _git(source.project, "rev-parse", "HEAD")
+    assert payload["sourceBinding"]["sourceHead"] == _git(source.primary, "rev-parse", "HEAD")
+    assert payload["gitHead"] != payload["sourceBinding"]["sourceHead"]
+
+
+def test_v2_acceptance_rejects_caller_override_of_stable_project_identity(
+    tmp_path: Path,
+) -> None:
+    source = _source_fixture(tmp_path)
+    profile_path = _build_profile(source)
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    payload["projectId"] = "caller-selected-project"
+    _refresh_profile_fingerprint(payload)
+    profile_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _accept(
+        profile_path,
+        source.project,
+        expected_project_id="caller-selected-project",
+        source_root=source.primary,
+    )
+
+    assert result.ready is False
+    assert "identity_drift:projectId" in result.blocked_reasons
+
+
 def test_successful_source_inspection_returns_immutable_generation_payload(tmp_path: Path) -> None:
     source = _source_fixture(tmp_path)
 
@@ -218,6 +262,58 @@ def test_successful_source_inspection_returns_immutable_generation_payload(tmp_p
 
     with pytest.raises(TypeError):
         inspection.generation_payload["generation"] = 99
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("generation", -1), ("operationId", "x" * 129), ("status", ""), ("updatedAt", 7)],
+)
+def test_source_inspection_rejects_invalid_generation_metadata_values(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    source = _source_fixture(tmp_path)
+    generation_path = source.runtime / "data_generation.json"
+    payload = json.loads(generation_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    generation_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(SourceBindingInspectionError, match="source_binding:generation_invalid"):
+        inspect_primary_source(source.project, source.primary, expected_project_id=source.project.name)
+
+
+def test_source_inspection_rejects_noncanonical_project_identity(tmp_path: Path) -> None:
+    source = _source_fixture(tmp_path)
+
+    with pytest.raises(SourceBindingInspectionError, match="project_identity_mismatch"):
+        inspect_primary_source(
+            source.project,
+            source.primary,
+            expected_project_id="caller-selected-project",
+        )
+
+
+def test_source_inspection_fails_closed_on_symlink_loop(tmp_path: Path) -> None:
+    source = _source_fixture(tmp_path)
+    loop = tmp_path / "source-loop"
+    loop.symlink_to(loop)
+
+    with pytest.raises(SourceBindingInspectionError, match="repository_identity_mismatch"):
+        inspect_primary_source(
+            source.project,
+            loop,
+            expected_project_id="nbs_analytics",
+        )
+
+
+def test_source_inspection_rejects_primary_checkout_as_isolated_project(tmp_path: Path) -> None:
+    source = _source_fixture(tmp_path)
+
+    with pytest.raises(SourceBindingInspectionError, match="primary_checkout_isolation_required"):
+        inspect_primary_source(
+            source.primary,
+            source.primary,
+            expected_project_id=source.primary.name,
+        )
 
 
 @pytest.mark.parametrize(
@@ -317,6 +413,124 @@ def test_safe_repo_file_closes_child_descriptor_if_fstat_raises(tmp_path: Path, 
         real_fstat(child_descriptors[0])
 
 
+def test_safe_repo_file_closes_root_descriptor_if_dup_raises(tmp_path: Path, monkeypatch) -> None:
+    import backend.agents.safe_repo_file as safe_repo_file
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "file.txt").write_text("fixture", encoding="utf-8")
+    real_open = os.open
+    real_close = os.close
+    root_descriptors: list[int] = []
+    closed_descriptors: list[int] = []
+
+    def track_root(_project_root, *, nofollow: int, directory: int):
+        descriptor = real_open(root, os.O_RDONLY | directory | nofollow)
+        root_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_dup(_descriptor: int) -> int:
+        raise OSError("injected dup failure")
+
+    def track_close(descriptor: int) -> None:
+        closed_descriptors.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(safe_repo_file, "_open_root_directory_nofollow", track_root)
+    monkeypatch.setattr(safe_repo_file.os, "dup", fail_dup)
+    monkeypatch.setattr(safe_repo_file.os, "close", track_close)
+
+    with pytest.raises(OSError, match="injected dup failure"):
+        with safe_repo_file.open_repo_file_nofollow(root, "file.txt"):
+            pytest.fail("file should not be yielded when root duplication fails")
+
+    assert root_descriptors
+    assert root_descriptors[0] in closed_descriptors
+
+
+def test_root_fd_file_open_preserves_dup_error_without_masking(tmp_path: Path, monkeypatch) -> None:
+    import backend.agents.safe_repo_file as safe_repo_file
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(safe_repo_file.os, "dup", lambda _fd: (_ for _ in ()).throw(OSError("injected dup failure")))
+
+    try:
+        with pytest.raises(OSError, match="injected dup failure"):
+            with safe_repo_file.open_repo_file_from_root_fd(root_fd, "file.txt"):
+                pytest.fail("file should not be yielded when root duplication fails")
+        os.fstat(root_fd)
+    finally:
+        os.close(root_fd)
+
+
+def test_open_repo_file_nofollow_rejects_symlinked_project_root(tmp_path: Path) -> None:
+    import backend.agents.safe_repo_file as safe_repo_file
+
+    real_root = tmp_path / "repo"
+    real_root.mkdir()
+    (real_root / "file.txt").write_text("fixture", encoding="utf-8")
+    linked_root = tmp_path / "repo-link"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(PermissionError, match="Repository root cannot be opened safely"):
+        with safe_repo_file.open_repo_file_nofollow(linked_root, "file.txt"):
+            pytest.fail("a symlinked project root must be rejected")
+
+
+def test_git_source_probe_rejects_symlinked_project_root(tmp_path: Path) -> None:
+    from backend.agents.verification_chain import git_source_probe
+
+    source = _source_fixture(tmp_path)
+    brief = source.project / "brief.md"
+    brief.write_text("approved brief\n", encoding="utf-8")
+    linked_root = tmp_path / "linked-project-root"
+    linked_root.symlink_to(source.project, target_is_directory=True)
+
+    with pytest.raises(PermissionError, match="root.*safely|symlink"):
+        git_source_probe(
+            linked_root,
+            brief_path="brief.md",
+            base_sha=_git(source.project, "rev-parse", "HEAD"),
+        )
+
+
+def test_git_source_probe_keeps_validated_root_identity_during_inspection(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import backend.agents.verification_chain as verification_chain
+
+    source = _source_fixture(tmp_path)
+    brief = source.project / "brief.md"
+    brief.write_text("approved brief\n", encoding="utf-8")
+    expected_head = _git(source.project, "rev-parse", "HEAD")
+    original_run = verification_chain.run_bounded_subprocess
+    replaced = False
+
+    def replace_path_before_git(argv, **kwargs):
+        nonlocal replaced
+        if not replaced and argv == ["git", "rev-parse", "HEAD"]:
+            replaced = True
+            moved = tmp_path / "validated-repository"
+            source.project.rename(moved)
+            source.project.mkdir()
+            subprocess.run(["git", "-C", str(source.project), "init", "-q"], check=True)
+            (source.project / "brief.md").write_text("replacement brief\n", encoding="utf-8")
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(verification_chain, "run_bounded_subprocess", replace_path_before_git)
+
+    with pytest.raises(ValueError, match="repository root identity changed"):
+        verification_chain.git_source_probe(
+            source.project,
+            brief_path="brief.md",
+            base_sha=expected_head,
+        )
+
+    assert replaced is True
+
+
 def test_v2_acceptance_passes_from_same_repository_linked_worktree(tmp_path: Path) -> None:
     source = _source_fixture(tmp_path)
     profile_path = _build_profile(source)
@@ -328,6 +542,24 @@ def test_v2_acceptance_passes_from_same_repository_linked_worktree(tmp_path: Pat
     assert result.blocked_reasons == ()
     assert result.to_dict()["sourceBinding"]["status"] == "accepted"
     assert str(source.primary) not in json.dumps(result.to_dict())
+
+
+def test_source_binding_evidence_remains_local_when_other_acceptance_check_blocks(
+    tmp_path: Path,
+) -> None:
+    source = _source_fixture(tmp_path)
+    profile_path = _build_profile(source)
+    _bind_v2(profile_path, source.primary)
+    profile_payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile_payload["gitHead"] = "a" * 40
+    _refresh_profile_fingerprint(profile_payload)
+    profile_path.write_text(json.dumps(profile_payload, sort_keys=True), encoding="utf-8")
+
+    result = _accept(profile_path, source.project, source_root=source.primary)
+
+    assert result.ready is False
+    assert "identity_drift:gitHead" in result.blocked_reasons
+    assert result.to_dict()["sourceBinding"]["status"] == "accepted"
 
 
 def test_v2_acceptance_blocks_missing_source_root(tmp_path: Path) -> None:
@@ -364,11 +596,13 @@ def test_v2_acceptance_rejects_linked_worktree_as_primary_source(tmp_path: Path)
     assert any(reason.startswith("source_binding:primary_checkout") for reason in result.blocked_reasons)
 
 
-def test_builder_rejects_source_project_id_mismatch(tmp_path: Path) -> None:
+def test_builder_uses_stable_project_id_not_primary_checkout_directory_name(tmp_path: Path) -> None:
     source = _source_fixture(tmp_path, primary_name="official-source")
 
-    with pytest.raises(VerificationRuntimeProfileBuildError, match="project"):
-        _build_profile(source)
+    profile_path = _build_profile(source)
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    assert payload["projectId"] == "nbs_analytics"
 
 
 def test_builder_rejects_symlinked_generation_parent_before_read(tmp_path: Path, monkeypatch) -> None:
@@ -433,13 +667,38 @@ def test_source_inspection_detects_primary_head_change_during_file_checks(tmp_pa
         if root == source.primary:
             source_identity_reads += 1
             if source_identity_reads == 2:
-                return identity[0], "f" * 40
+                return identity[0], "f" * 40, identity[2]
         return identity
 
     monkeypatch.setattr(acceptance, "_repo_identity", change_primary_head_on_second_read)
 
     with pytest.raises(SourceBindingInspectionError, match="source_changed_during_inspection"):
         inspect_primary_source(source.project, source.primary, expected_project_id=source.project.name)
+
+
+def test_source_inspection_detects_git_metadata_identity_change_with_same_head(tmp_path: Path, monkeypatch) -> None:
+    source = _source_fixture(tmp_path)
+    import backend.services.verification_profile_acceptance as acceptance
+
+    head_path = source.primary / ".git" / "HEAD"
+    before = head_path.stat()
+    original_hash = acceptance._hash_file_nofollow
+    changed_metadata = False
+
+    def touch_git_head_metadata(root: Path, path: Path):
+        nonlocal changed_metadata
+        result = original_hash(root, path)
+        if root == source.primary and path == source.database and not changed_metadata:
+            os.utime(head_path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+            changed_metadata = True
+        return result
+
+    monkeypatch.setattr(acceptance, "_hash_file_nofollow", touch_git_head_metadata)
+
+    with pytest.raises(SourceBindingInspectionError, match="source_changed_during_inspection"):
+        inspect_primary_source(source.project, source.primary, expected_project_id=source.project.name)
+
+    assert changed_metadata
 
 
 def test_builder_discards_profile_when_source_changes_during_snapshot(tmp_path: Path, monkeypatch) -> None:
@@ -462,6 +721,29 @@ def test_builder_discards_profile_when_source_changes_during_snapshot(tmp_path: 
         _build_profile(source)
 
     assert not (source.project / ".nbs_agent_runtime" / "verification" / f"profile-{_git(source.project, 'rev-parse', 'HEAD')[:12]}").exists()
+
+
+def test_builder_discards_profile_when_database_inode_changes_during_snapshot(tmp_path: Path, monkeypatch) -> None:
+    source = _source_fixture(tmp_path)
+    import scripts.build_verification_runtime_profile as builder
+
+    original = builder.build_read_only_snapshot
+
+    def replace_database_after_snapshot(database: Path, destination: Path):
+        evidence = original(database, destination)
+        replacement = source.primary / "database-replacement.sqlite"
+        replacement.write_bytes(source.database.read_bytes())
+        os.utime(
+            replacement,
+            ns=(source.database.stat().st_atime_ns, source.database.stat().st_mtime_ns),
+        )
+        replacement.replace(source.database)
+        return evidence
+
+    monkeypatch.setattr(builder, "build_read_only_snapshot", replace_database_after_snapshot)
+
+    with pytest.raises(VerificationRuntimeProfileBuildError, match="source changed during profile build"):
+        _build_profile(source)
 
 
 def test_source_root_cli_flags_are_explicit_and_local_only(tmp_path: Path):
@@ -523,29 +805,27 @@ def test_v2_acceptance_blocks_generation_database_signature_mismatch(tmp_path: P
     assert "source_binding:generation_database_signature_mismatch" in result.blocked_reasons
 
 
-def test_v2_acceptance_blocks_code_head_different_from_primary_source_head(tmp_path: Path) -> None:
+def test_v2_acceptance_binds_code_and_primary_source_heads_independently(tmp_path: Path) -> None:
     source = _source_fixture(tmp_path)
-    profile_path = _build_profile(source)
     subprocess.run(
         [
-            "git", "-C", str(source.project), "-c", "user.email=fixture@example.invalid",
+            "git", "-C", str(source.primary), "-c", "user.email=fixture@example.invalid",
             "-c", "user.name=fixture", "commit", "--quiet", "--allow-empty",
-            "-m", "code checkout head drift",
+            "-m", "advance primary source only",
         ],
         check=True,
     )
-    from scripts.build_verification_runtime_profile import _worktree_fingerprint
-
-    payload = json.loads(profile_path.read_text(encoding="utf-8"))
-    payload["gitHead"] = _git(source.project, "rev-parse", "HEAD")
-    payload["worktreeFingerprint"] = _worktree_fingerprint(source.project, payload["gitHead"])
-    _refresh_profile_fingerprint(payload)
-    profile_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-
+    profile_path = _build_profile(source)
     result = _accept(profile_path, source.project, source_root=source.primary)
+    payload = result.to_dict()
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
 
-    assert result.ready is False
-    assert "source_binding:source_head_project_mismatch" in result.blocked_reasons
+    assert result.ready is True
+    assert payload["identity"]["gitHead"] == profile["gitHead"]
+    assert payload["identity"]["gitHead"] == _git(source.project, "rev-parse", "HEAD")
+    assert payload["sourceBinding"]["sourceHead"] == profile["sourceBinding"]["sourceHead"]
+    assert payload["sourceBinding"]["sourceHead"] == _git(source.primary, "rev-parse", "HEAD")
+    assert payload["identity"]["gitHead"] != payload["sourceBinding"]["sourceHead"]
 
 
 def test_v2_acceptance_blocks_symlinked_source_database(tmp_path: Path) -> None:
@@ -564,7 +844,10 @@ def test_v2_acceptance_blocks_symlinked_source_database(tmp_path: Path) -> None:
 
 def test_v1_acceptance_ignores_external_source_root_and_remains_local_only(tmp_path: Path) -> None:
     source = _source_fixture(tmp_path)
-    profile_path = _build_profile(source, project_root=source.primary)
+    built_profile = _build_profile(source)
+    profile_dir = source.primary / ".nbs_agent_runtime" / "verification" / built_profile.parent.name
+    shutil.copytree(built_profile.parent, profile_dir)
+    profile_path = profile_dir / "profile.json"
     _bind_v1(profile_path)
 
     local_result = _accept(profile_path, source.primary)
@@ -573,6 +856,28 @@ def test_v1_acceptance_ignores_external_source_root_and_remains_local_only(tmp_p
     assert local_result.ready is True
     assert external_result.ready is True
     assert external_result.blocked_reasons == local_result.blocked_reasons
+
+
+def test_v1_legacy_worktree_fingerprint_matches_original_porcelain_contract(tmp_path: Path) -> None:
+    source = _source_fixture(tmp_path)
+    runtime_state = source.project / ".nbs_agent_runtime/legacy-state.json"
+    runtime_state.parent.mkdir()
+    runtime_state.write_text("baseline\n", encoding="utf-8")
+    _git(source.project, "add", "-f", ".nbs_agent_runtime/legacy-state.json")
+    subprocess.run(
+        ["git", "-C", str(source.project), "-c", "user.email=fixture@example.invalid",
+         "-c", "user.name=fixture", "commit", "--quiet", "-m", "runtime fixture"],
+        check=True,
+    )
+    head = _git(source.project, "rev-parse", "HEAD")
+    runtime_state.write_text("legacy dirty state\n", encoding="utf-8")
+    legacy_status = subprocess.run(
+        ["git", "-C", str(source.project), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    expected = canonical_fingerprint({"head": head, "status": legacy_status})
+
+    assert _legacy_worktree_fingerprint(source.project, head) == expected
 
 
 def test_hermes_requires_v2_source_binding_and_never_serializes_source_root(tmp_path: Path, monkeypatch) -> None:
@@ -599,10 +904,63 @@ def test_hermes_requires_v2_source_binding_and_never_serializes_source_root(tmp_
         hermes_profile="isolated-profile",
     )
     check = next(item for item in report["results"] if item["label"] == "source-binding-acceptance")
+    source_binding = json.loads(check["stdout"])["sourceBinding"]
+    expected_binding = json.loads(profile_path.read_text(encoding="utf-8"))["sourceBinding"]
 
     assert check["required"] is True
     assert check["exitCode"] == 0
+    assert report["overallStatus"] == "pass"
+    assert source_binding["status"] == "accepted"
+    assert source_binding["sourceRole"] == "primary-checkout"
+    assert source_binding["repositoryFingerprint"] == expected_binding["repositoryFingerprint"]
+    assert source_binding["sourceHead"] == expected_binding["sourceHead"]
+    assert source_binding["databaseFingerprint"] == expected_binding["databaseFingerprint"]
+    assert source_binding["generationFingerprint"] == expected_binding["generationFingerprint"]
+    assert source_binding["baselineRegistryFingerprint"] == expected_binding["baselineRegistryFingerprint"]
     assert str(source.primary) not in json.dumps(report)
+
+
+def test_hermes_propagates_failed_v2_source_binding_acceptance(tmp_path: Path, monkeypatch) -> None:
+    from backend.services import verification_profile_acceptance
+    from scripts import hermes_post_change_check
+
+    source = _source_fixture(tmp_path)
+    profile_path = _build_profile(source)
+    executed_steps = []
+
+    def reject_primary_source(*_args, **_kwargs):
+        raise verification_profile_acceptance.SourceBindingInspectionError(
+            "source_binding:database_fingerprint_mismatch"
+        )
+
+    def record_run_step(step, **_):
+        executed_steps.append(step.label)
+        return {
+            "label": step.label, "command": step.command, "required": step.required,
+            "timeout": step.timeout, "exitCode": 0, "stdout": "ok", "stderr": "",
+        }
+
+    monkeypatch.setattr(verification_profile_acceptance, "inspect_primary_source", reject_primary_source)
+    monkeypatch.setattr(hermes_post_change_check, "run_step", record_run_step)
+
+    report = hermes_post_change_check.run_checks(
+        include_monitor=False,
+        include_tests=False,
+        include_system_acceptance=False,
+        project_root=source.project,
+        verification_profile=str(profile_path),
+        source_root=source.primary,
+        hermes_profile="isolated-profile",
+    )
+    check = next(item for item in report["results"] if item["label"] == "source-binding-acceptance")
+    evidence = json.loads(check["stdout"])
+
+    assert report["overallStatus"] == "fail"
+    assert check["required"] is True
+    assert check["exitCode"] == 1
+    assert evidence["sourceBinding"]["status"] == "blocked"
+    assert "source_binding:database_fingerprint_mismatch" in evidence["blockedReasons"]
+    assert executed_steps == []
 
 
 def test_hermes_v2_source_binding_fails_closed_without_source_root(tmp_path: Path, monkeypatch) -> None:
@@ -635,3 +993,26 @@ def test_hermes_v2_source_binding_fails_closed_without_source_root(tmp_path: Pat
     assert check["exitCode"] != 0
     assert "source_binding:source_root_required" in check["stdout"]
     assert executed_steps == []
+
+
+def test_hermes_emits_required_source_binding_result_when_profile_load_fails(tmp_path: Path) -> None:
+    from scripts import hermes_post_change_check
+
+    project = tmp_path / "project"
+    project.mkdir()
+    invalid_profile = tmp_path / "invalid-profile.json"
+    invalid_profile.write_text("not-json", encoding="utf-8")
+
+    report = hermes_post_change_check.run_checks(
+        project_root=project,
+        verification_profile=str(invalid_profile),
+        hermes_profile="isolated-profile",
+    )
+
+    check = next(item for item in report["results"] if item["label"] == "source-binding-acceptance")
+    evidence = json.loads(check["stdout"])
+    assert report["overallStatus"] == "fail"
+    assert check["required"] is True
+    assert check["exitCode"] == 1
+    assert evidence["sourceBinding"]["status"] == "blocked"
+    assert evidence["blockedReasons"] == ["source_binding:profile_load_failed"]

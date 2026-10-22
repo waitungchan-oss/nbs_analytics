@@ -12,6 +12,7 @@ from backend.agents.review_agent_service import (
     compact_review_evidence_payload,
     merge_review_batches,
     plan_review_batches,
+    run_review_batches,
     split_review_bundle_by_file,
     validate_context_summary,
 )
@@ -247,6 +248,7 @@ def test_review_runtime_instructions_bind_output_fingerprint_to_input_bundle(tmp
     assert "reviewFingerprint" in runtime_instructions
     assert "payload.bundleFingerprint" in runtime_instructions
     assert "nested evidence.bundleFingerprint" in runtime_instructions
+    assert "hermesRequiredChecks must be non-empty for strict pass" in runtime_instructions
 
 
 def test_strict_review_blocks_pass_without_verification(tmp_path):
@@ -375,6 +377,34 @@ def test_review_rejects_carry_forward_evidence_not_bound_to_task_contract():
         )
 
 
+@pytest.mark.parametrize(
+    ("patch_source", "message"),
+    [
+        ("Backend/Legacy.py", "must not also appear in task patches"),
+        ("../backend/legacy.py", "repo-relative path is invalid"),
+    ],
+)
+def test_review_rejects_case_equivalent_or_invalid_carry_forward_patch_path(patch_source, message):
+    carry_forward = [{"path": "backend/legacy.py", "sha256": "c" * 64}]
+    original = review_bundle()
+    bundle = EvidenceBundle(
+        schema_version=original.schema_version,
+        task={
+            **original.task,
+            "allowedWritePaths": ["scripts/new.py"],
+            "carryForwardFiles": carry_forward,
+        },
+        repository={**original.repository, "carryForwardFiles": carry_forward},
+        guardrails=original.guardrails,
+        evidence=(EvidenceItem(kind="diff", source=patch_source, content="+change"),),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        build_review_evidence_payload(
+            bundle, context_summary=context_summary(), verification=verification(),
+        )
+
+
 def test_review_task_contract_rejects_more_than_fifty_carry_forward_files():
     carry_forward = [
         {"path": f"legacy/{index}.py", "sha256": "c" * 64}
@@ -388,6 +418,132 @@ def test_review_task_contract_rejects_more_than_fifty_carry_forward_files():
     }
 
     with pytest.raises(ValueError, match="bounded entry limit"):
+        _validate_task_contract(task)
+
+
+def test_review_task_contract_uses_write_allowlist_not_broad_review_scope_for_carry_forward():
+    task = {
+        "objective": "Review a bounded change set",
+        "scope": ["backend"],
+        "allowedWritePaths": ["scripts/verification_chain.py"],
+        "forbidden": [],
+        "carryForwardFiles": [{"path": "backend/legacy.py", "sha256": "c" * 64}],
+    }
+
+    assert _validate_task_contract(task) is task
+
+
+def test_strict_review_requires_explicit_nonempty_scope_even_with_write_allowlist():
+    task = {
+        "id": "x",
+        "objective": "Review approved source changes",
+        "scope": [],
+        "allowedWritePaths": ["backend/agents/example.py"],
+        "forbidden": [],
+    }
+    bundle = EvidenceBundle(
+        schema_version="review-evidence-v1",
+        task=task,
+        repository={"dirtyFiles": []},
+        guardrails={},
+        evidence=(),
+    )
+
+    with pytest.raises(ValueError, match="Strict Review task scope"):
+        build_review_evidence_payload(
+            bundle, context_summary={}, verification=[], strict=True,
+        )
+
+    assert build_review_evidence_payload(
+        bundle, context_summary={}, verification=[], strict=False,
+    )["taskContract"]["allowedWritePaths"] == ["backend/agents/example.py"]
+
+
+@pytest.mark.parametrize(("input_limit", "output_limit"), [(1, 2000), (24000, 1)])
+def test_impossible_review_budget_reports_overflow_before_scope_error(tmp_path, input_limit, output_limit):
+    original = review_bundle()
+    bundle = EvidenceBundle(
+        schema_version=original.schema_version,
+        task={**original.task, "scope": [], "allowedWritePaths": ["x.py"]},
+        repository=original.repository,
+        guardrails=original.guardrails,
+        evidence=original.evidence,
+    )
+    runner = ReviewRunner()
+
+    report = run_review_batches(
+        bundle, project_root=tmp_path, context_summary=context_summary(),
+        verification=verification(), runner=runner, runtime_root=runtime_path(tmp_path),
+        instructions="contract", strict=True,
+        input_token_limit=input_limit, output_token_limit=output_limit,
+    )
+
+    assert report["verdict"] == "context_overflow"
+    assert runner.calls == 0
+
+
+def test_review_batch_scope_still_rejected_with_usable_budget(tmp_path):
+    original = review_bundle()
+    bundle = EvidenceBundle(
+        schema_version=original.schema_version,
+        task={**original.task, "scope": [], "allowedWritePaths": ["x.py"]},
+        repository=original.repository,
+        guardrails=original.guardrails,
+        evidence=original.evidence,
+    )
+
+    with pytest.raises(ValueError, match="Strict Review task scope"):
+        run_review_batches(
+            bundle, project_root=tmp_path, context_summary=context_summary(),
+            verification=verification(), runner=ReviewRunner(),
+            runtime_root=runtime_path(tmp_path), instructions="contract", strict=True,
+        )
+
+
+@pytest.mark.parametrize("field", ["dirtyFiles", "preservedDirtyFiles", "carryForwardFiles"])
+def test_review_rejects_explicit_null_repository_attribution_fields(tmp_path, field):
+    original = review_bundle()
+    bundle = EvidenceBundle(
+        schema_version=original.schema_version,
+        task=original.task,
+        repository={**original.repository, field: None},
+        guardrails=original.guardrails,
+        evidence=original.evidence,
+    )
+    runner = ReviewRunner()
+
+    with pytest.raises(ValueError):
+        build_review_report(
+            bundle, project_root=tmp_path, context_summary=context_summary(),
+            verification=verification(), runner=runner, runtime_root=runtime_path(tmp_path),
+            instructions="contract", strict=True,
+        )
+    assert runner.calls == 0
+
+
+def test_review_task_contract_rejects_carry_forward_overlapping_write_allowlist():
+    task = {
+        "objective": "Review a bounded change set",
+        "scope": ["backend"],
+        "allowedWritePaths": ["backend"],
+        "forbidden": [],
+        "carryForwardFiles": [{"path": "backend/legacy.py", "sha256": "c" * 64}],
+    }
+
+    with pytest.raises(ValueError, match="overlap the approved allowedWritePaths"):
+        _validate_task_contract(task)
+
+
+def test_review_task_contract_rejects_case_equivalent_carry_forward_overlap():
+    task = {
+        "objective": "Review a bounded change set",
+        "scope": ["backend"],
+        "allowedWritePaths": ["Docs/Agents"],
+        "forbidden": [],
+        "carryForwardFiles": [{"path": "docs/agents/legacy.md", "sha256": "c" * 64}],
+    }
+
+    with pytest.raises(ValueError, match="overlap the approved allowedWritePaths"):
         _validate_task_contract(task)
 
 
@@ -468,7 +624,7 @@ def test_session_bound_batch_keeps_a_large_single_file_patch_complete():
 def test_strict_review_batches_scope_known_dirty_files_and_keep_unattributed_dirty_blocked(tmp_path):
     bundle = EvidenceBundle(
         schema_version="review-evidence-v1",
-        task={"id": "x", "objective": "approved", "scope": [], "forbidden": []},
+        task={"id": "x", "objective": "approved", "scope": ["one.py", "two.py"], "forbidden": []},
         repository={
             "branch": "feature", "head": "abc", "headRef": "WORKTREE", "base": "HEAD",
             "dirtyFiles": ["one.py", "two.py"],
@@ -584,6 +740,17 @@ def test_review_rejects_malformed_task_contract(task):
         build_review_evidence_payload(
             malformed, context_summary=context_summary(), verification=verification(),
         )
+
+
+def test_review_task_contract_accepts_write_allowlist_without_legacy_scope():
+    task = {
+        "id": "x",
+        "objective": "approved task",
+        "allowedWritePaths": ["scripts/verification_chain.py"],
+        "forbidden": [],
+    }
+
+    assert _validate_task_contract(task) is task
 
 
 @pytest.mark.parametrize(
@@ -825,9 +992,18 @@ def test_plan_review_batches_is_deterministic_and_session_bound():
         assert batch.session_id == session.session_id
         assert batch.session_fingerprint == session.source_fingerprint
         assert batch.batch_id
+        assert batch.to_dict()["batchCount"] == len(first)
         assert batch.batch_fingerprint
         assert batch.payload_fingerprint
         assert batch.files == tuple(sorted(batch.files))
+
+    payload = build_review_evidence_payload(
+        first[0].bundle,
+        context_summary=context_summary(),
+        verification=verification(),
+        review_batch=first[0].to_dict(),
+    )
+    assert payload["reviewBatch"]["batchCount"] == len(first)
 
 
 def test_plan_review_batches_splits_deterministically_by_budget():
@@ -840,6 +1016,30 @@ def test_plan_review_batches_splits_deterministically_by_budget():
     assert [batch.files for batch in batches] == [
         ("file-0.py",), ("file-1.py",), ("file-2.py",),
     ]
+
+
+def test_default_review_batches_reserve_prompt_room_for_shared_context():
+    from backend.agents.evidence_models import estimate_tokens
+    from backend.agents.review_agent_service import plan_review_batches
+
+    session = _session()
+    content = "diff --git a/large.py b/large.py\n" + ("+source-line-0123456789\n" * 3000)
+    bundle = EvidenceBundle(
+        schema_version="review-evidence-v1",
+        task={"id": "x", "objective": "approved", "scope": [], "forbidden": []},
+        repository={"branch": "feature", "head": "abc", "dirtyFiles": []},
+        guardrails={"mayBaseline": "HKD 12,057,968"},
+        evidence=(EvidenceItem(kind="diff", source="large.py", content=content),),
+    )
+
+    batches = plan_review_batches(session, bundle)
+    patch_tokens_by_batch = [
+        sum(estimate_tokens(item.content) for item in batch.bundle.evidence)
+        for batch in batches
+    ]
+
+    assert len(batches) > 1
+    assert max(patch_tokens_by_batch) <= 8000
 
 
 def test_plan_review_batches_preserves_complete_large_single_file_patch():
@@ -896,7 +1096,7 @@ def test_batch_identity_does_not_embed_patch_content():
     batch = plan_review_batches(session, bundle)[0]
 
     assert set(batch.to_dict()) == {
-        "schemaVersion", "sessionId", "batchId", "sessionFingerprint", "files",
+        "schemaVersion", "sessionId", "batchId", "batchCount", "sessionFingerprint", "files",
         "patchFingerprint", "payloadFingerprint", "batchFingerprint",
     }
     assert "secret-line" not in json.dumps(batch.to_dict(), ensure_ascii=False)

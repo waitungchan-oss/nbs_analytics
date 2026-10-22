@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from backend.agents.safe_repo_file import open_repo_root_nofollow
+
 
 PRESERVED_UNTRACKED_ROOTS = frozenset(
     {
@@ -164,17 +166,17 @@ def _list_directory_names(directory_fd: int, budget: _Budget) -> list[str]:
     try:
         with os.scandir(directory_fd) as entries:
             for entry in entries:
-                if budget.total_entries + len(names) >= MAX_TOTAL_ENTRIES:
+                if budget.total_entries >= MAX_TOTAL_ENTRIES:
                     raise PreservedUntrackedError(
                         "preserved_untracked_limit_exceeded", "total inventory entry cap exceeded"
                     )
                 names.append(entry.name)
+                budget.total_entries += 1
     except PreservedUntrackedError:
         raise
     except OSError as exc:
         raise PreservedUntrackedError("preserved_untracked_source_drift", "tree could not be read consistently") from exc
     names = _validate_names(names)
-    budget.total_entries += len(names)
     return names
 
 
@@ -325,15 +327,14 @@ def snapshot_preserved_untracked(project_root: Path, paths: Sequence[str]) -> Pr
         raise PreservedUntrackedError(
             "preserved_untracked_unsafe_entry", "secure no-follow directory traversal is unavailable"
         )
-    project = Path(project_root).resolve(strict=True)
-    if not project.is_dir():
-        raise ValueError("project root must be a directory")
-    project_fd = os.open(project, os.O_RDONLY | _OPEN_DIRECTORY | _OPEN_NOFOLLOW)
     budget = _Budget()
     try:
-        entries = tuple(_snapshot_root(project_fd, path, budget) for path in ordered_roots)
-    finally:
-        os.close(project_fd)
+        with open_repo_root_nofollow(Path(project_root)) as project_fd:
+            entries = tuple(_snapshot_root(project_fd, path, budget) for path in ordered_roots)
+    except OSError as exc:
+        raise PreservedUntrackedError(
+            "preserved_untracked_unsafe_entry", "project root cannot be opened safely"
+        ) from exc
     entry_payloads = [entry.to_dict() for entry in entries]
     fingerprint = _canonical_sha256({"schemaVersion": _INVENTORY_SCHEMA, "entries": entry_payloads})
     return PreservedUntrackedInventory(entries, fingerprint)

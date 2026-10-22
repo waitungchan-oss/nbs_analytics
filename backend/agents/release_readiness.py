@@ -8,6 +8,7 @@ from typing import Any
 
 from .evidence_models import canonical_fingerprint
 from .release_gate_models import ReleaseGateValidationError, validate_release_gate_aggregate
+from .verification_session import SUPPORTED_SOURCE_PROBE_VERSIONS
 
 
 VERIFICATION_INCOMPLETE = "verification_incomplete"
@@ -60,7 +61,17 @@ def _session_source_fingerprint(session: Mapping[str, Any]) -> str | None:
     if session.get("schemaVersion") == "verification-session-v1":
         if not all(isinstance(session.get(key), str) for key in _SESSION_SOURCE_KEYS):
             return None
-        return canonical_fingerprint({key: session[key] for key in _SESSION_SOURCE_KEYS})
+        source_seal = {key: session[key] for key in _SESSION_SOURCE_KEYS}
+        gates = session.get("gates")
+        source_probe_version = gates.get("sourceProbeVersion") if isinstance(gates, Mapping) else None
+        if isinstance(gates, Mapping) and "sourceProbeVersion" in gates:
+            if (
+                not isinstance(source_probe_version, str)
+                or source_probe_version not in SUPPORTED_SOURCE_PROBE_VERSIONS
+            ):
+                return None
+            source_seal["sourceProbeVersion"] = source_probe_version
+        return canonical_fingerprint(source_seal)
     value = session.get("sourceFingerprint")
     return value if isinstance(value, str) else None
 

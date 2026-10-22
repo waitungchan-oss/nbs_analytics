@@ -130,6 +130,30 @@ def test_snapshot_rejects_symlink_descendant(tmp_path):
         snapshot_preserved_untracked(tmp_path, [ROOTS[0]])
 
 
+@pytest.mark.parametrize("link_parent", [False, True])
+def test_snapshot_rejects_symlinked_project_root_or_parent(tmp_path, link_parent):
+    real_parent = tmp_path / "real-parent"
+    project = real_parent / "project"
+    _write_root(project, ROOTS[0], {"private.txt": b"must not follow project-root links"})
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    supplied_root = linked_parent / "project" if link_parent else tmp_path / "project-link"
+    if not link_parent:
+        supplied_root.symlink_to(project, target_is_directory=True)
+
+    with pytest.raises((OSError, ValueError)):
+        snapshot_preserved_untracked(supplied_root, [ROOTS[0]])
+
+
+def test_snapshot_rejects_parent_traversal_in_project_root(tmp_path):
+    project = tmp_path / "real-parent" / "project"
+    _write_root(project, ROOTS[0], {"private.txt": b"must not normalize parent traversal"})
+    supplied_root = project.parent / "unused" / ".." / project.name
+
+    with pytest.raises((OSError, ValueError)):
+        snapshot_preserved_untracked(supplied_root, [ROOTS[0]])
+
+
 @pytest.mark.parametrize("link_component", ["Summay", ROOTS[0].split("/")[-1]])
 def test_snapshot_rejects_symlink_in_approved_root_path(tmp_path, link_component):
     outside = tmp_path / "outside"
@@ -204,6 +228,37 @@ def test_snapshot_bounds_total_inventory_entries_in_empty_directory_tree(tmp_pat
 
     with pytest.raises(ValueError, match="preserved_untracked_limit_exceeded"):
         snapshot_preserved_untracked(tmp_path, [ROOTS[0]])
+
+
+def test_snapshot_counts_nested_empty_directories_toward_total_entry_cap(tmp_path, monkeypatch):
+    from backend.agents import preserved_untracked_snapshot as snapshot_module
+
+    root = tmp_path / ROOTS[0]
+    nested = root / "nested"
+    for name in ("empty-a", "empty-b", "empty-c"):
+        (nested / name).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(snapshot_module, "MAX_TOTAL_ENTRIES", 4)
+
+    with pytest.raises(ValueError, match="preserved_untracked_limit_exceeded"):
+        snapshot_preserved_untracked(tmp_path, [ROOTS[0]])
+
+
+def test_directory_entry_budget_is_reserved_during_single_directory_enumeration(tmp_path, monkeypatch):
+    from backend.agents import preserved_untracked_snapshot as snapshot_module
+
+    directory = tmp_path / "oversized"
+    directory.mkdir()
+    for index in range(8):
+        (directory / f"entry-{index}.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(snapshot_module, "MAX_TOTAL_ENTRIES", 3)
+    budget = snapshot_module._Budget()
+    directory_fd = os.open(directory, os.O_RDONLY | snapshot_module._OPEN_DIRECTORY)
+    try:
+        with pytest.raises(ValueError, match="preserved_untracked_limit_exceeded"):
+            snapshot_module._list_directory_names(directory_fd, budget)
+        assert budget.total_entries == snapshot_module.MAX_TOTAL_ENTRIES
+    finally:
+        os.close(directory_fd)
 
 
 @pytest.mark.parametrize("capability", ["_OPEN_NOFOLLOW", "_OPEN_DIRECTORY"])

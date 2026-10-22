@@ -5,12 +5,13 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
 from backend.agents.evidence_models import canonical_fingerprint
-from backend.agents.repository_scope import repository_git_pathspecs
+from backend.agents.repository_scope import verification_source_git_pathspecs
 from backend.services.cache_generation_service import GENERATION_SCHEMA_VERSION, GENERATION_SIGNATURE_SCOPE
 from backend.services.gmv_refund_models import canonical_payload_sha256
 from backend.services.revenue_generation_service import (
@@ -85,14 +86,18 @@ def _worktree_fingerprint(project_root: Path, git_head: str) -> str:
     try:
         status = subprocess.run(
             [
-                "git", "-C", str(project_root), "status", "--porcelain",
-                "--no-renames", "--", *repository_git_pathspecs(),
+                "git", "-C", str(project_root), "status", "--porcelain=v1",
+                "--untracked-files=all", "--no-renames", "-z", "--",
+                *verification_source_git_pathspecs(),
             ],
-            capture_output=True, text=True, check=True,
+            capture_output=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise VerificationRuntimeProfileBuildError("project root is not a readable Git worktree") from exc
-    return canonical_fingerprint({"head": git_head, "status": status})
+    return canonical_fingerprint({
+        "head": git_head,
+        "statusFingerprint": hashlib.sha256(status).hexdigest(),
+    })
 
 
 def _cache_inventory(project_root: Path) -> dict[str, object]:
@@ -216,16 +221,15 @@ def build_verification_profile(
     profile_dir = Path(output_root) / profile_id
     if profile_dir.exists():
         raise VerificationRuntimeProfileBuildError("profile output already exists")
-    created_profile_dir = False
+    staging_dir = None
     try:
         Path(output_root).mkdir(parents=True, exist_ok=True)
-        profile_dir.mkdir()
-        created_profile_dir = True
-        snapshot = build_read_only_snapshot(source_before.database_path, profile_dir / "snapshot.sqlite")
+        staging_dir = Path(tempfile.mkdtemp(prefix=f".{profile_id}.staging-", dir=output_root))
+        snapshot = build_read_only_snapshot(source_before.database_path, staging_dir / "snapshot.sqlite")
         if snapshot.source_fingerprint != source_before.database_fingerprint:
             raise VerificationRuntimeProfileBuildError("source database changed during snapshot")
-        (profile_dir / "cache").mkdir()
-        (profile_dir / "generation.json").write_text(json.dumps(generation_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        (staging_dir / "cache").mkdir()
+        (staging_dir / "generation.json").write_text(json.dumps(generation_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         source_after = inspect_primary_source(
             project, resolved_source_root, expected_project_id=NBS_PROJECT_ID,
         )
@@ -268,13 +272,33 @@ def build_verification_profile(
             expected_git_head=git_head,
             expected_worktree_fingerprint=unsigned["worktreeFingerprint"],
         )
-        profile_path = profile_dir / "profile.json"
+        profile_path = staging_dir / "profile.json"
+        try:
+            final_source = inspect_primary_source(
+                project, resolved_source_root, expected_project_id=NBS_PROJECT_ID,
+            )
+        except SourceBindingInspectionError as exc:
+            raise VerificationRuntimeProfileBuildError(exc.reason_code) from None
+        if final_source != source_before:
+            raise VerificationRuntimeProfileBuildError("source changed during profile build")
         profile_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        return profile_path
+        try:
+            published_source = inspect_primary_source(
+                project, resolved_source_root, expected_project_id=NBS_PROJECT_ID,
+            )
+        except SourceBindingInspectionError as exc:
+            raise VerificationRuntimeProfileBuildError(exc.reason_code) from None
+        if published_source != source_before:
+            raise VerificationRuntimeProfileBuildError("source changed during profile build")
+        if profile_dir.exists():
+            raise VerificationRuntimeProfileBuildError("profile output already exists")
+        os.rename(staging_dir, profile_dir)
+        staging_dir = None
+        return profile_dir / "profile.json"
     except Exception as exc:
         import shutil
-        if created_profile_dir:
-            shutil.rmtree(profile_dir, ignore_errors=True)
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         if isinstance(exc, VerificationRuntimeProfileBuildError):
             raise
         raise VerificationRuntimeProfileBuildError(f"profile build failed: {type(exc).__name__}") from None

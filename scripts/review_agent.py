@@ -30,6 +30,7 @@ from backend.agents.review_agent_service import (
     format_review_markdown,
     run_review_batches,
 )
+from backend.agents.repository_scope import verification_source_git_pathspecs
 
 
 def _merge_runner_diagnostics(
@@ -130,7 +131,11 @@ def _verification_freshness_diagnostics(
         return ["Strict review verification brief identity does not match the requested brief."]
     if worktree["argv"] != [
         "sh", "-c",
-        "git status --porcelain=v1 --untracked-files=all --no-renames -z -- . ':(exclude,icase,glob)**/Summay/**' ':(exclude)docs/superpowers' ':(exclude).superpowers' | shasum -a 256",
+        "git status --porcelain=v1 --untracked-files=all --no-renames -z -- "
+        + " ".join(shlex.quote(path) for path in verification_source_git_pathspecs(
+            ":(exclude)docs/superpowers", ":(exclude).superpowers",
+        ))
+        + " | shasum -a 256",
     ]:
         return ["Strict review worktree fingerprint command is not the approved command."]
     expected_head = bundle.repository.get("headSha") or current_head_sha

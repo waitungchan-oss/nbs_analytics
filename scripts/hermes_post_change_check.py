@@ -1104,11 +1104,15 @@ def run_checks(
                 "runtimeDir": str(paths.runtime_dir),
             }
         except Exception as exc:
+            results = (
+                [_blocked_source_binding_result("source_binding:profile_load_failed")]
+                if hermes_profile == "isolated-profile" else []
+            )
             return _with_binding({
                 "overallStatus": "fail",
                 "projectRoot": str(project_root),
                 "verificationProfile": {"status": "blocked_runner_capability", "reason": type(exc).__name__},
-                "results": [],
+                "results": results,
             })
         if hermes_profile == "isolated-profile" and profile.source_binding is None:
             report = {
@@ -1129,6 +1133,7 @@ def run_checks(
     source_binding = getattr(profile, "source_binding", None) if verification_profile else None
     if hermes_profile == "isolated-profile" and verification_profile and source_binding is not None:
         from backend.services.verification_profile_acceptance import (
+            NBS_PROJECT_ID,
             SourceBindingInspectionError,
             inspect_primary_source,
         )
@@ -1136,14 +1141,20 @@ def run_checks(
         binding = source_binding
         blocked_reasons: list[str] = []
         source_status = "blocked"
+        project_id_matches = profile.project_id == NBS_PROJECT_ID
+        if not project_id_matches:
+            blocked_reasons.append("source_binding:project_id_mismatch")
+        source_role_matches = getattr(binding, "source_role", None) == "primary-checkout"
+        if not source_role_matches:
+            blocked_reasons.append("source_binding:source_role_mismatch")
         if source_root is None:
             blocked_reasons.append("source_binding:source_root_required")
-        else:
+        elif source_role_matches and project_id_matches:
             try:
                 inspection = inspect_primary_source(
                     project_root,
                     Path(source_root),
-                    expected_project_id=profile.project_id,
+                    expected_project_id=NBS_PROJECT_ID,
                 )
             except SourceBindingInspectionError as exc:
                 blocked_reasons.append(exc.reason_code)

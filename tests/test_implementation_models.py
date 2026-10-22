@@ -9,6 +9,7 @@ from backend.agents.evidence_models import (
     load_json_config,
 )
 from backend.agents.implementation_models import (
+    CarryForwardFile,
     ImplementationRunReport,
     ImplementationTaskContract,
     ValidationResult,
@@ -63,11 +64,37 @@ def test_contract_round_trips_hash_pinned_carry_forward_files_without_changing_w
     assert contract.allowed_write_paths == tuple(payload["allowedWritePaths"])
 
 
+@pytest.mark.parametrize("path", ["Summay/private.md", "docs/sUmMaY/private.md"])
+def test_carry_forward_rejects_summary_root_paths(path):
+    with pytest.raises(ValueError, match="carryForwardFiles"):
+        CarryForwardFile(path=path, sha256="c" * 64)
+
+
+@pytest.mark.parametrize("control", ["\n", "\t", "\x1f"])
+def test_carry_forward_contract_rejects_control_characters(control):
+    with pytest.raises(ValueError, match="carryForwardFiles path is invalid"):
+        CarryForwardFile(path=f"docs/legacy{control}marker.md", sha256="c" * 64)
+
+
+def test_contract_direct_construction_rejects_over_limit_carry_forward_inventory():
+    from dataclasses import replace
+
+    contract = ImplementationTaskContract.from_dict(valid_contract_payload())
+    entries = tuple(
+        CarryForwardFile(path=f"docs/legacy/{index}.md", sha256="c" * 64)
+        for index in range(51)
+    )
+
+    with pytest.raises(ValueError, match="carryForwardFiles"):
+        replace(contract, carry_forward_files=entries)
+
+
 @pytest.mark.parametrize(
     "entries",
     [
         [{"path": "../outside.py", "sha256": "c" * 64}],
         [{"path": "/absolute.py", "sha256": "c" * 64}],
+        [{"path": ".", "sha256": "c" * 64}],
         [{"path": "tests/test_legacy.py", "sha256": "bad"}],
         [{"path": "tests/test_legacy.py", "sha256": "c" * 64, "extra": True}],
         [
@@ -84,11 +111,29 @@ def test_contract_rejects_malformed_carry_forward_entries(entries):
         ImplementationTaskContract.from_dict(payload)
 
 
-def test_contract_rejects_carry_forward_path_overlapping_write_allowlist():
+@pytest.mark.parametrize(
+    ("write_path", "carry_forward_path"),
+    [
+        ("tests", "tests/test_legacy.py"),
+        ("Docs/Agents", "docs/agents/legacy.md"),
+    ],
+)
+def test_contract_rejects_carry_forward_path_overlapping_write_allowlist(write_path, carry_forward_path):
     payload = valid_contract_payload()
-    payload["allowedWritePaths"] = ["tests"]
+    payload["allowedWritePaths"] = [write_path]
     payload["carryForwardFiles"] = [
-        {"path": "tests/test_legacy.py", "sha256": "c" * 64},
+        {"path": carry_forward_path, "sha256": "c" * 64},
+    ]
+
+    with pytest.raises(ValueError, match="carryForwardFiles"):
+        ImplementationTaskContract.from_dict(payload)
+
+
+def test_contract_rejects_case_equivalent_duplicate_carry_forward_paths():
+    payload = valid_contract_payload()
+    payload["carryForwardFiles"] = [
+        {"path": "docs/legacy.md", "sha256": "c" * 64},
+        {"path": "Docs/Legacy.md", "sha256": "d" * 64},
     ]
 
     with pytest.raises(ValueError, match="carryForwardFiles"):
@@ -121,6 +166,97 @@ def test_carry_forward_manifest_must_match_the_fingerprinted_approved_plan(tmp_p
         contract, project_root=tmp_path, brief_path="plan.md",
         expected_brief_fingerprint=plan_fingerprint,
     )
+
+
+def test_carry_forward_approval_rejects_symlinked_project_root(tmp_path):
+    from hashlib import sha256
+    import json
+
+    real_root = tmp_path / "real-repository"
+    real_root.mkdir()
+    manifest_files = [{"path": "tests/test_legacy.py", "sha256": "c" * 64}]
+    brief = real_root / "plan.md"
+    brief.write_text(
+        "<!-- review-carry-forward-v1:start -->\n"
+        + json.dumps({"schemaVersion": "review-carry-forward-v1", "files": manifest_files})
+        + "\n<!-- review-carry-forward-v1:end -->\n",
+        encoding="utf-8",
+    )
+    plan_fingerprint = sha256(brief.read_bytes()).hexdigest()
+    payload = valid_contract_payload()
+    payload.update({
+        "planPath": "plan.md",
+        "planFingerprint": plan_fingerprint,
+        "carryForwardFiles": manifest_files,
+    })
+    contract = ImplementationTaskContract.from_dict(payload)
+    linked_root = tmp_path / "linked-repository"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="unavailable or unsafe"):
+        validate_carry_forward_approval(
+            contract,
+            project_root=linked_root,
+            brief_path="plan.md",
+            expected_brief_fingerprint=plan_fingerprint,
+        )
+
+
+def test_carry_forward_approval_rejects_oversized_plan_manifest_before_entry_conversion(tmp_path):
+    from hashlib import sha256
+    import json
+
+    approved = [{"path": "tests/test_legacy.py", "sha256": "c" * 64}]
+    manifest_files = [
+        {"path": f"tests/test_{index}.py", "sha256": "d" * 64}
+        for index in range(51)
+    ]
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "<!-- review-carry-forward-v1:start -->\n"
+        + json.dumps({"schemaVersion": "review-carry-forward-v1", "files": manifest_files})
+        + "\n<!-- review-carry-forward-v1:end -->\n",
+        encoding="utf-8",
+    )
+    plan_fingerprint = sha256(plan.read_bytes()).hexdigest()
+    payload = valid_contract_payload()
+    payload.update({
+        "planPath": "plan.md",
+        "planFingerprint": plan_fingerprint,
+        "carryForwardFiles": approved,
+    })
+    contract = ImplementationTaskContract.from_dict(payload)
+
+    with pytest.raises(ValueError, match="exceeds the bounded entry limit"):
+        validate_carry_forward_approval(
+            contract, project_root=tmp_path, brief_path="plan.md",
+            expected_brief_fingerprint=plan_fingerprint,
+        )
+
+
+def test_carry_forward_approval_rejects_brief_over_byte_budget_before_accumulating(tmp_path, monkeypatch):
+    from hashlib import sha256
+    import backend.agents.implementation_models as implementation_models
+
+    monkeypatch.setattr(implementation_models, "MAX_CARRY_FORWARD_BRIEF_BYTES", 64)
+    plan = tmp_path / "plan.md"
+    plan.write_bytes(b"x" * 65)
+    plan_fingerprint = sha256(plan.read_bytes()).hexdigest()
+    payload = valid_contract_payload()
+    payload.update({
+        "planPath": "plan.md",
+        "planFingerprint": plan_fingerprint,
+        "carryForwardFiles": [{"path": "tests/test_legacy.py", "sha256": "c" * 64}],
+    })
+    contract = ImplementationTaskContract.from_dict(payload)
+
+    with pytest.raises(ValueError, match="exceeds the bounded byte limit"):
+        validate_carry_forward_approval(
+            contract,
+            project_root=tmp_path,
+            brief_path="plan.md",
+            expected_brief_fingerprint=plan_fingerprint,
+        )
 
 
 def test_carry_forward_approval_reads_sealed_brief_through_pinned_directory_fd(tmp_path, monkeypatch):

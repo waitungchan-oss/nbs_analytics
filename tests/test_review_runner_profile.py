@@ -151,7 +151,7 @@ def test_probe_runner_turn_ready_requires_live_probe(tmp_path):
 def test_live_probe_invokes_codex_exec_subcommand(tmp_path, monkeypatch):
     import subprocess
 
-    from backend.agents.review_runner_profile import probe_runner
+    from backend.agents.review_runner_profile import _PROBE_PROMPT, probe_runner
 
     profile = _ready_profile_instance(tmp_path)
     observed = []
@@ -165,6 +165,7 @@ def test_live_probe_invokes_codex_exec_subcommand(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
     receipt = probe_runner(profile)
 
     assert receipt.status == "turn_ready"
@@ -172,12 +173,14 @@ def test_live_probe_invokes_codex_exec_subcommand(tmp_path, monkeypatch):
     assert probe_argv[1:3] == ["exec", "--ephemeral"]
     assert probe_argv[3:5] == ["--color", "never"]
     assert "--json" in probe_argv
+    assert probe_argv[-1] == _PROBE_PROMPT
+    assert probe_argv.index("--json") < probe_argv.index(_PROBE_PROMPT)
 
 
 def test_live_probe_decodes_codex_jsonl_agent_message(tmp_path, monkeypatch):
     import subprocess
 
-    from backend.agents.review_runner_profile import probe_runner
+    from backend.agents.review_runner_profile import _PROBE_PROMPT, probe_runner
 
     profile = _ready_profile_instance(tmp_path)
     profile.cache_path.write_text(
@@ -202,11 +205,177 @@ def test_live_probe_decodes_codex_jsonl_agent_message(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
     receipt = probe_runner(profile)
 
     assert receipt.status == "turn_ready"
     probe_argv = next(argv for argv in observed if "--version" not in argv)
     assert "--json" in probe_argv
+    assert probe_argv[-1] == _PROBE_PROMPT
+    assert probe_argv.index("--json") < probe_argv.index(_PROBE_PROMPT)
+
+
+def test_live_probe_allows_bounded_jsonl_framing_over_8kib(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+    response = json.dumps({"status": "ok", "model": "gpt-5.4"})
+    event_stream = "\n".join([
+        json.dumps({"type": "thread.started", "metadata": "x" * 9000}),
+        json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": response},
+        }),
+    ])
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.142.5\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=event_stream, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "turn_ready"
+
+
+def test_live_probe_blocks_transport_over_hard_limit(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.142.5\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="x" * (64 * 1024 + 1), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "blocked_runner_transport"
+    assert any("64 KiB" in diagnostic for diagnostic in receipt.diagnostics)
+
+
+def test_live_probe_bounds_combined_stdout_and_stderr_transport(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.142.5\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"status":"ok"}', stderr="e" * (64 * 1024))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "blocked_runner_transport"
+    assert any("combined stdout/stderr" in diagnostic for diagnostic in receipt.diagnostics)
+
+
+def test_live_probe_blocks_pipe_like_transport_without_fileno(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+
+    class PipeLike:
+        def close(self):
+            pass
+
+    class ProcessLike:
+        stdout = PipeLike()
+        stderr = PipeLike()
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            pass
+
+        def wait(self, *args, **kwargs):
+            return -9
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout="codex-cli 0.142.5\n", stderr=""
+        ),
+    )
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: ProcessLike())
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "blocked_runner_transport"
+    assert any("output transport is unavailable" in diagnostic for diagnostic in receipt.diagnostics)
+
+
+def test_bounded_probe_terminates_writer_during_output_capture():
+    from backend.agents.review_runner_profile import (
+        _ProbeTransportLimitError,
+        _run_bounded_probe,
+    )
+
+    with pytest.raises(_ProbeTransportLimitError):
+        _run_bounded_probe(["/bin/sh", "-c", "yes x"])
+
+
+def test_live_probe_blocks_final_agent_message_over_8kib(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+    event_stream = json.dumps({
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": json.dumps({
+            "status": "ok", "model": "gpt-5.4", "extra": "x" * 9000,
+        })},
+    })
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.142.5\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=event_stream, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "blocked_runner_transport"
+    assert any("final response exceeds 8 KiB" in diagnostic for diagnostic in receipt.diagnostics)
+
+
+def test_live_probe_blocks_jsonl_stream_without_final_agent_message(tmp_path, monkeypatch):
+    import subprocess
+
+    from backend.agents.review_runner_profile import probe_runner
+
+    profile = _ready_profile_instance(tmp_path)
+
+    def fake_run(argv, **kwargs):
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.142.5\n", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='{"type":"thread.started"}\n', stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
+    receipt = probe_runner(profile)
+
+    assert receipt.status == "blocked_runner_transport"
+    assert any("lacks a final agent_message" in diagnostic for diagnostic in receipt.diagnostics)
 
 
 def test_probe_runner_static_failure_blocks_capability_without_probe(tmp_path):
@@ -237,6 +406,7 @@ def test_live_nonzero_exit_is_transport_blocked(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     receipt = probe_runner(profile)
     assert receipt.status == "blocked_runner_transport"
@@ -256,6 +426,7 @@ def test_live_probe_timeout_is_transport_blocked(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(argv[0], 15)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     receipt = probe_runner(profile)
     assert receipt.status == "blocked_runner_transport"
@@ -275,6 +446,7 @@ def test_live_probe_invalid_json_is_transport_blocked(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, stdout="not json", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     receipt = probe_runner(profile)
     assert receipt.status == "blocked_runner_transport"
@@ -296,6 +468,7 @@ def test_live_probe_model_mismatch_is_transport_blocked(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     receipt = probe_runner(profile)
     assert receipt.status == "blocked_runner_transport"
@@ -323,6 +496,7 @@ def test_live_probe_accepts_profile_bound_codex_display_name_alias(tmp_path, mon
         encoding="utf-8",
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
     receipt = probe_runner(profile)
 
     assert receipt.status == "turn_ready"
@@ -343,6 +517,7 @@ def test_live_probe_accepts_luna_display_name_alias(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "GPT-5.6-Luna"}), stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
     assert probe_runner(profile).status == "turn_ready"
 
 
@@ -360,6 +535,7 @@ def test_live_probe_accepts_exact_cli_model_selection_for_luna(tmp_path, monkeyp
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "gpt-5.6-luna"}), stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
     assert probe_runner(profile).status == "turn_ready"
 
 
@@ -378,6 +554,7 @@ def test_live_probe_accepts_generic_gpt5_display_for_exact_terra_selection(tmp_p
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "gpt-5"}), stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
     assert probe_runner(profile).status == "turn_ready"
 
 
@@ -395,6 +572,7 @@ def test_live_probe_rejects_generic_luna_alias(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"status": "ok", "model": "GPT-5.6"}), stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
     assert probe_runner(profile).status == "blocked_runner_transport"
 
 
@@ -408,9 +586,10 @@ def test_live_probe_output_over_8kib_is_transport_blocked(tmp_path, monkeypatch)
     def fake_run(argv, **kwargs):
         if "--version" in argv:
             return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.142.5\n", stderr="")
-        return subprocess.CompletedProcess(argv, 0, stdout="x" * 9000, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="x" * (64 * 1024 + 1), stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     receipt = probe_runner(profile)
     assert receipt.status == "blocked_runner_transport"
@@ -432,6 +611,7 @@ def test_failed_probe_is_not_retried(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     receipt = probe_runner(profile)
     assert receipt.status == "blocked_runner_transport"
@@ -509,6 +689,7 @@ def test_receipt_reuse_skips_second_live_probe(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     first = probe_runner(profile, receipt_path=receipt_path)
     second = probe_runner(profile, receipt_path=receipt_path)
@@ -538,6 +719,7 @@ def test_receipt_is_stale_when_capability_identity_changes(tmp_path, monkeypatch
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: fake_run(argv, **kwargs))
 
     first = probe_runner(profile, receipt_path=receipt_path)
     profile.cache_path.write_text(

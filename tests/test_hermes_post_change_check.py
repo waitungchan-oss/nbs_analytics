@@ -145,7 +145,7 @@ def test_default_plan_includes_git_runtime_baseline_and_targeted_tests():
     assert labels[:3] == ["git-status", "git-diff-stat", "git-diff-name-only"]
     git_commands = {step.label: step.command for step in plan[:3]}
     assert all(
-        command[-2:] == [".", ":(exclude,icase,glob)**/Summay/**"]
+        command[-3:] == [".", ":(exclude,icase,glob)**/Summay/**", ":(exclude,icase,glob)**/Summay"]
         for command in git_commands.values()
     )
     assert all("--no-renames" in command for command in git_commands.values())
@@ -694,6 +694,164 @@ def test_isolated_hermes_rejects_legacy_profile_without_source_binding(tmp_path,
     assert result["label"] == "source-binding-acceptance"
     assert result["exitCode"] == 1
     assert "source_binding:v2_profile_required" in json.loads(result["stdout"])["blockedReasons"]
+
+
+def test_isolated_hermes_rejects_non_primary_source_role_even_when_fingerprints_match(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.services import verification_profile_acceptance, verification_runtime_paths
+
+    fingerprints = {
+        "repository_fingerprint": "d" * 64,
+        "source_head": "e" * 40,
+        "database_fingerprint": "f" * 64,
+        "generation_fingerprint": "1" * 64,
+        "baseline_registry_fingerprint": "2" * 64,
+    }
+    binding = SimpleNamespace(source_role="linked-worktree", **fingerprints)
+    profile = SimpleNamespace(
+        profile_id="profile-v2",
+        project_id="nbs_analytics",
+        git_head="e" * 40,
+        database=SimpleNamespace(snapshot_fingerprint="b" * 64, source_fingerprint="c" * 64),
+        source_binding=binding,
+    )
+    paths = SimpleNamespace(runtime_dir="runtime")
+    inspection = SimpleNamespace(**fingerprints)
+    monkeypatch.setattr(
+        verification_runtime_paths,
+        "load_verification_runtime_profile",
+        lambda *_args, **_kwargs: (profile, paths),
+    )
+    monkeypatch.setattr(
+        verification_profile_acceptance,
+        "inspect_primary_source",
+        lambda *_args, **_kwargs: inspection,
+    )
+    invoked_steps = []
+    monkeypatch.setattr(
+        post_check,
+        "run_step",
+        lambda step, *, project_root: invoked_steps.append(step.label)
+        or {"label": step.label, "required": step.required, "exitCode": 0, "stdout": "", "stderr": ""},
+    )
+
+    report = post_check.run_checks(
+        include_monitor=False,
+        include_tests=False,
+        include_system_acceptance=False,
+        project_root=tmp_path,
+        verification_profile="profile-v2.json",
+        source_root=tmp_path / "primary",
+        hermes_profile="isolated-profile",
+    )
+
+    assert report["overallStatus"] == "fail"
+    assert invoked_steps == []
+    result = report["results"][0]
+    assert result["label"] == "source-binding-acceptance"
+    assert result["exitCode"] == 1
+    assert "source_binding:source_role_mismatch" in json.loads(result["stdout"])["blockedReasons"]
+
+
+def test_isolated_hermes_rejects_v2_profile_for_another_project_even_when_fingerprint_matches(
+    tmp_path, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from backend.agents.evidence_models import canonical_fingerprint
+    from backend.services.verification_runtime_profile import (
+        VERIFICATION_PROFILE_SCHEMA_V2,
+        VerificationRuntimeProfile,
+    )
+    from backend.services import verification_profile_acceptance, verification_runtime_paths
+
+    source_binding = {
+        "schemaVersion": "verification-source-binding-v1",
+        "sourceRole": "primary-checkout",
+        "repositoryFingerprint": "d" * 64,
+        "sourceHead": "e" * 40,
+        "databaseFingerprint": "f" * 64,
+        "generationFingerprint": "1" * 64,
+        "baselineRegistryFingerprint": "2" * 64,
+    }
+    unsigned = {
+        "schemaVersion": VERIFICATION_PROFILE_SCHEMA_V2,
+        "profileId": "profile-v2",
+        "projectId": "rogue-project",
+        "gitHead": "e" * 40,
+        "worktreeFingerprint": canonical_fingerprint({"head": "e" * 40, "status": ""}),
+        "database": {
+            "snapshotRef": "verification/profile-v2/database.sqlite",
+            "sourceFingerprint": "f" * 64,
+            "snapshotFingerprint": "b" * 64,
+            "readOnly": True,
+        },
+        "baseline": {
+            "registryFingerprint": "2" * 64,
+            "requiredMay2026Total": "HKD 12,057,968",
+        },
+        "runtime": {
+            "runtimeDir": "verification/profile-v2",
+            "generationRef": "verification/profile-v2/generation.json",
+            "generationFingerprint": "1" * 64,
+            "cacheInventory": {"fileCount": 0, "totalBytes": 0, "fingerprint": "3" * 64},
+        },
+        "services": {
+            "profileNamespace": "profile-v2",
+            "ports": {"api": 18601, "streamlit": 18502, "vue": 15173},
+        },
+        "createdAt": "2026-10-20T10:00:00+08:00",
+        "sourceBinding": source_binding,
+    }
+    profile = VerificationRuntimeProfile.from_dict({
+        **unsigned,
+        "profileFingerprint": canonical_fingerprint(unsigned),
+    })
+    paths = SimpleNamespace(runtime_dir="runtime")
+    monkeypatch.setattr(
+        verification_runtime_paths,
+        "load_verification_runtime_profile",
+        lambda *_args, **_kwargs: (profile, paths),
+    )
+    inspected_sources = []
+    matching_inspection = SimpleNamespace(
+        repository_fingerprint=source_binding["repositoryFingerprint"],
+        source_head=source_binding["sourceHead"],
+        database_fingerprint=source_binding["databaseFingerprint"],
+        generation_fingerprint=source_binding["generationFingerprint"],
+        baseline_registry_fingerprint=source_binding["baselineRegistryFingerprint"],
+    )
+    monkeypatch.setattr(
+        verification_profile_acceptance,
+        "inspect_primary_source",
+        lambda *_args, **_kwargs: inspected_sources.append("called") or matching_inspection,
+    )
+    invoked_steps = []
+    monkeypatch.setattr(
+        post_check,
+        "run_step",
+        lambda step, *, project_root: invoked_steps.append(step.label)
+        or {"label": step.label, "required": step.required, "exitCode": 0, "stdout": "", "stderr": ""},
+    )
+
+    report = post_check.run_checks(
+        include_monitor=False,
+        include_tests=False,
+        include_system_acceptance=False,
+        project_root=tmp_path,
+        verification_profile="profile-v2.json",
+        source_root=tmp_path / "primary",
+        hermes_profile="isolated-profile",
+    )
+
+    assert report["overallStatus"] == "fail"
+    assert invoked_steps == []
+    assert inspected_sources == []
+    result = report["results"][0]
+    assert result["label"] == "source-binding-acceptance"
+    assert result["exitCode"] == 1
+    assert "source_binding:project_id_mismatch" in json.loads(result["stdout"])["blockedReasons"]
 
 
 def test_primary_runtime_hermes_keeps_existing_v2_profile_behavior_without_source_root(tmp_path, monkeypatch):

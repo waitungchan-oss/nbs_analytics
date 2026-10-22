@@ -9,13 +9,26 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Mapping
 
 from backend.agents.evidence_models import canonical_fingerprint
-from backend.agents.repository_scope import repository_git_pathspecs
+from backend.agents.repository_scope import (
+    is_excluded_repository_path,
+    repository_git_pathspecs,
+    verification_source_git_pathspecs,
+)
 from backend.agents.safe_repo_file import open_repo_file_nofollow
+from backend.services.cache_generation_service import GENERATION_SCHEMA_VERSION, GENERATION_SIGNATURE_SCOPE
+from backend.services.gmv_refund_models import canonical_payload_sha256
+from backend.services.revenue_generation_service import (
+    CORE_REVENUE_SIGNATURE_SCHEMA,
+    CORE_REVENUE_SOURCE_TABLES,
+    CORE_REVENUE_TOKEN_PREFIX,
+    REVENUE_SCOPE_CONTRACT_VERSION,
+)
+from backend.services.revenue_scope_service import REVENUE_SCOPE_LABEL
 from backend.services.verification_runtime_paths import VerificationRuntimePaths
 from backend.services.verification_runtime_profile import (
     ProfileSourceBinding,
@@ -164,7 +177,7 @@ def _read_generation_nofollow(root: Path, path: Path) -> tuple[dict[str, object]
         return value, after_identity
 
 
-def _repo_identity(root: Path, *, primary: bool) -> tuple[str, str]:
+def _repo_identity(root: Path, *, primary: bool) -> tuple[str, str, str]:
     git_marker = root / ".git"
     if _has_symlink_component(root) or git_marker.is_symlink():
         raise SourceBindingInspectionError("source_binding:primary_checkout_invalid")
@@ -178,6 +191,11 @@ def _repo_identity(root: Path, *, primary: bool) -> tuple[str, str]:
             capture_output=True, text=True, check=True,
         )
         common_dir = Path(result.stdout.strip()).resolve(strict=True)
+        git_dir_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--absolute-git-dir"],
+            capture_output=True, text=True, check=True,
+        )
+        git_dir = Path(git_dir_result.stdout.strip()).resolve(strict=True)
         head_result = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
             capture_output=True, text=True, check=True,
@@ -187,7 +205,32 @@ def _repo_identity(root: Path, *, primary: bool) -> tuple[str, str]:
     head = head_result.stdout.strip()
     if re.fullmatch(r"[0-9a-f]{40}", head) is None:
         raise SourceBindingInspectionError("source_binding:source_head_unavailable")
-    return hashlib.sha256(str(common_dir).encode("utf-8")).hexdigest(), head
+
+    def _metadata_stat(path: Path, *, directory: bool) -> tuple[int, int, int, int, int, int, int]:
+        try:
+            item = path.lstat()
+        except OSError:
+            raise SourceBindingInspectionError("source_binding:repository_identity_mismatch") from None
+        if stat.S_ISLNK(item.st_mode) or (directory and not stat.S_ISDIR(item.st_mode)):
+            raise SourceBindingInspectionError("source_binding:repository_identity_mismatch")
+        if not directory and not stat.S_ISREG(item.st_mode):
+            raise SourceBindingInspectionError("source_binding:repository_identity_mismatch")
+        return (
+            item.st_dev, item.st_ino, item.st_mode, item.st_nlink,
+            item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+        )
+
+    marker_stat = _metadata_stat(git_marker, directory=git_marker.is_dir())
+    git_dir_stat = _metadata_stat(git_dir, directory=True)
+    common_dir_stat = _metadata_stat(common_dir, directory=True)
+    head_stat = _metadata_stat(git_dir / "HEAD", directory=False)
+    metadata_fingerprint = canonical_fingerprint({
+        "gitMarker": marker_stat,
+        "gitDir": git_dir_stat,
+        "gitCommonDir": common_dir_stat,
+        "headFile": head_stat,
+    })
+    return hashlib.sha256(str(common_dir).encode("utf-8")).hexdigest(), head, metadata_fingerprint
 
 
 def inspect_primary_source(
@@ -197,16 +240,21 @@ def inspect_primary_source(
     expected_project_id: str,
 ) -> SourceBindingInspection:
     """Validate one explicit primary checkout and return path-free source identity."""
+    if expected_project_id != NBS_PROJECT_ID:
+        raise SourceBindingInspectionError("source_binding:project_identity_mismatch")
     project = Path(project_root)
     source = Path(source_root)
-    if source.name != expected_project_id:
-        raise SourceBindingInspectionError("source_binding:project_id_mismatch")
-    source_repo, source_head = _repo_identity(source, primary=True)
-    code_repo, code_head = _repo_identity(project, primary=False)
+    try:
+        project_resolved = project.resolve(strict=True)
+        source_resolved = source.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise SourceBindingInspectionError("source_binding:repository_identity_mismatch") from None
+    if project_resolved == source_resolved or not (project / ".git").is_file():
+        raise SourceBindingInspectionError("source_binding:primary_checkout_isolation_required")
+    source_repo, source_head, source_git_metadata = _repo_identity(source, primary=True)
+    code_repo, code_head, code_git_metadata = _repo_identity(project, primary=False)
     if source_repo != code_repo:
         raise SourceBindingInspectionError("source_binding:repository_identity_mismatch")
-    if source_head != code_head:
-        raise SourceBindingInspectionError("source_binding:source_head_project_mismatch")
 
     database = source / "nbs_marketing_data.db"
     generation_path = source / ".nbs_runtime" / "data_generation.json"
@@ -226,14 +274,78 @@ def inspect_primary_source(
         v2_keys = legacy_keys | {"schemaVersion", "signatureScope", "coreRevenueSignature"}
         if set(generation_payload) not in (legacy_keys, v2_keys):
             raise SourceBindingInspectionError("source_binding:generation_invalid")
+        if (
+            not isinstance(generation_payload["generation"], int)
+            or isinstance(generation_payload["generation"], bool)
+            or generation_payload["generation"] < 0
+            or (
+                generation_payload["operationId"] is not None
+                and (
+                    not isinstance(generation_payload["operationId"], str)
+                    or len(generation_payload["operationId"]) > 128
+                )
+            )
+            or not isinstance(generation_payload["status"], str)
+            or not generation_payload["status"]
+            or len(generation_payload["status"]) > 64
+            or not isinstance(generation_payload["updatedAt"], str)
+            or len(generation_payload["updatedAt"]) > 64
+        ):
+            raise SourceBindingInspectionError("source_binding:generation_invalid")
+        if set(generation_payload) == v2_keys:
+            if (
+                generation_payload["schemaVersion"] != GENERATION_SCHEMA_VERSION
+                or generation_payload["signatureScope"] != GENERATION_SIGNATURE_SCOPE
+            ):
+                raise SourceBindingInspectionError("source_binding:generation_invalid")
+            core_signature = generation_payload["coreRevenueSignature"]
+            core_keys = {
+                "schemaVersion", "scopeLabel", "scopeContractVersion", "sourceTables",
+                "rowCounts", "rawTour", "rawOthers", "formalTour", "formalOthers",
+                "sha256", "token",
+            }
+            if not isinstance(core_signature, dict) or set(core_signature) != core_keys:
+                raise SourceBindingInspectionError("source_binding:generation_invalid")
+            if (
+                core_signature["schemaVersion"] != CORE_REVENUE_SIGNATURE_SCHEMA
+                or core_signature["scopeLabel"] != REVENUE_SCOPE_LABEL
+                or core_signature["scopeContractVersion"] != REVENUE_SCOPE_CONTRACT_VERSION
+                or core_signature["sourceTables"] != list(CORE_REVENUE_SOURCE_TABLES)
+            ):
+                raise SourceBindingInspectionError("source_binding:generation_invalid")
+            row_counts = core_signature["rowCounts"]
+            digest_fields = ("rawTour", "rawOthers", "formalTour", "formalOthers")
+            if (
+                not isinstance(row_counts, dict)
+                or set(row_counts) != set(CORE_REVENUE_SOURCE_TABLES)
+                or any(
+                    not isinstance(count, int) or isinstance(count, bool) or count < 0
+                    for count in row_counts.values()
+                )
+                or any(
+                    not isinstance(core_signature[field], str)
+                    or _SHA256.fullmatch(core_signature[field]) is None
+                    for field in digest_fields
+                )
+            ):
+                raise SourceBindingInspectionError("source_binding:generation_invalid")
+            unsigned = {key: core_signature[key] for key in core_keys - {"sha256", "token"}}
+            core_digest = canonical_payload_sha256(unsigned)
+            if (
+                core_signature["sha256"] != core_digest
+                or core_signature["token"] != f"{CORE_REVENUE_TOKEN_PREFIX}:{core_digest}"
+            ):
+                raise SourceBindingInspectionError("source_binding:generation_invalid")
         signature = generation_payload.get("dbSignature")
         if (
             not isinstance(signature, dict)
             or set(signature) != {"sizeBytes", "modifiedNs", "sha256"}
             or not isinstance(signature.get("sizeBytes"), int)
             or isinstance(signature.get("sizeBytes"), bool)
+            or signature.get("sizeBytes", -1) < 0
             or not isinstance(signature.get("modifiedNs"), int)
             or isinstance(signature.get("modifiedNs"), bool)
+            or signature.get("modifiedNs", -1) < 0
             or not isinstance(signature.get("sha256"), str)
             or _SHA256.fullmatch(signature["sha256"]) is None
         ):
@@ -262,11 +374,13 @@ def inspect_primary_source(
             or code_baseline_identity != code_baseline_identity_after
         ):
             raise SourceBindingInspectionError("source_binding:source_changed_during_inspection")
-        source_repo_after, source_head_after = _repo_identity(source, primary=True)
-        code_repo_after, code_head_after = _repo_identity(project, primary=False)
+        source_repo_after, source_head_after, source_git_metadata_after = _repo_identity(source, primary=True)
+        code_repo_after, code_head_after, code_git_metadata_after = _repo_identity(project, primary=False)
         if (
             (source_repo_after, source_head_after) != (source_repo, source_head)
             or (code_repo_after, code_head_after) != (code_repo, code_head)
+            or source_git_metadata_after != source_git_metadata
+            or code_git_metadata_after != code_git_metadata
         ):
             raise SourceBindingInspectionError("source_binding:source_changed_during_inspection")
         file_state = tuple(zip(after, (
@@ -357,12 +471,80 @@ def _git_head(project_root: Path) -> str | None:
     return value if value else None
 
 
+def _safe_source_status_path(raw_path: bytes) -> bool:
+    try:
+        relative = raw_path.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    path = PurePosixPath(relative)
+    return bool(
+        relative
+        and "\\" not in relative
+        and not path.is_absolute()
+        and str(path) == relative
+        and path.parts
+        and all(part not in {"", ".", ".."} for part in path.parts)
+        and not is_excluded_repository_path(relative)
+        and path.parts[0].casefold() != ".nbs_agent_runtime"
+    )
+
+
+def _source_status_is_in_scope(status: bytes) -> bool:
+    if not status:
+        return True
+    if not status.endswith(b"\0"):
+        return False
+    records = status[:-1].split(b"\0")
+    if any(not record for record in records):
+        return False
+    allowed_states = frozenset(b" M TADRCU?!")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4 or record[2:3] != b" ":
+            return False
+        state = record[:2]
+        if any(value not in allowed_states for value in state):
+            return False
+        paths = [record[3:]]
+        if b"R" in state or b"C" in state:
+            if index >= len(records):
+                return False
+            paths.append(records[index])
+            index += 1
+        if any(not _safe_source_status_path(path) for path in paths):
+            return False
+    return True
+
+
 def _worktree_fingerprint(project_root: Path, git_head: str) -> str | None:
     try:
         status = subprocess.run(
             [
-                "git", "-C", str(project_root), "status", "--porcelain",
-                "--no-renames", "--", *repository_git_pathspecs(),
+                "git", "-C", str(project_root), "status", "--porcelain=v1",
+                "--untracked-files=all", "--no-renames", "-z", "--",
+                *verification_source_git_pathspecs(),
+            ],
+            capture_output=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    if not isinstance(status, bytes) or not _source_status_is_in_scope(status):
+        return None
+    return canonical_fingerprint({
+        "head": git_head,
+        "statusFingerprint": hashlib.sha256(status).hexdigest(),
+    })
+
+
+def _legacy_worktree_fingerprint(project_root: Path, git_head: str) -> str | None:
+    """Retain the original V1 fingerprint contract without querying Summary roots."""
+    try:
+        status = subprocess.run(
+            [
+                "git", "-C", str(project_root), "status", "--porcelain", "--",
+                *repository_git_pathspecs(),
             ],
             capture_output=True, text=True, check=True,
         ).stdout
@@ -424,9 +606,12 @@ def accept_verification_profile(
     """
     reasons: list[str] = []
     project = Path(project_root)
-    expected_project = expected_project_id or (
-        NBS_PROJECT_ID if profile.source_binding is not None else project.name
-    )
+    if profile.source_binding is not None:
+        expected_project = NBS_PROJECT_ID
+        if expected_project_id is not None and expected_project_id != NBS_PROJECT_ID:
+            reasons.append("identity_drift:expected_project_id")
+    else:
+        expected_project = expected_project_id or project.name
     if profile.project_id != expected_project:
         reasons.append("identity_drift:projectId")
 
@@ -436,7 +621,11 @@ def accept_verification_profile(
     elif profile.git_head != head:
         reasons.append("identity_drift:gitHead")
     else:
-        worktree = _worktree_fingerprint(project, head)
+        worktree = (
+            _worktree_fingerprint(project, head)
+            if profile.source_binding is not None
+            else _legacy_worktree_fingerprint(project, head)
+        )
         if worktree is None:
             reasons.append("stale_worktree:unavailable")
         elif profile.worktree_fingerprint != worktree:
@@ -451,8 +640,9 @@ def accept_verification_profile(
     source_binding_evidence: Mapping[str, object] | None = None
     if profile.source_binding is not None:
         binding = profile.source_binding
-        source_binding_ok = False
+        source_binding_ok = True
         if source_root is None:
+            source_binding_ok = False
             reasons.append("source_binding:source_root_required")
         else:
             try:
@@ -462,19 +652,24 @@ def accept_verification_profile(
                     expected_project_id=expected_project,
                 )
             except SourceBindingInspectionError as exc:
+                source_binding_ok = False
                 reasons.append(exc.reason_code)
             else:
                 if inspection.repository_fingerprint != binding.repository_fingerprint:
+                    source_binding_ok = False
                     reasons.append("source_binding:repository_fingerprint_mismatch")
                 if inspection.source_head != binding.source_head:
+                    source_binding_ok = False
                     reasons.append("source_binding:source_head_mismatch")
                 if inspection.database_fingerprint != binding.database_fingerprint:
+                    source_binding_ok = False
                     reasons.append("source_binding:database_fingerprint_mismatch")
                 if inspection.generation_fingerprint != binding.generation_fingerprint:
+                    source_binding_ok = False
                     reasons.append("source_binding:generation_fingerprint_mismatch")
                 if inspection.baseline_registry_fingerprint != binding.baseline_registry_fingerprint:
+                    source_binding_ok = False
                     reasons.append("source_binding:baseline_fingerprint_mismatch")
-                source_binding_ok = not any(reason.startswith("source_binding:") for reason in reasons)
         source_binding_evidence = _source_binding_evidence(
             binding,
             status="accepted" if source_binding_ok else "blocked",

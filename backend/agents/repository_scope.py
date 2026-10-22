@@ -4,11 +4,18 @@ from __future__ import annotations
 
 
 SUMMARY_EXCLUDE_PATHSPEC = ":(exclude,icase,glob)**/Summay/**"
+SUMMARY_LEAF_EXCLUDE_PATHSPEC = ":(exclude,icase,glob)**/Summay"
+AGENT_RUNTIME_EXCLUDE_PATHSPEC = ":(exclude).nbs_agent_runtime"
 
 
 def repository_git_pathspecs(*additional_exclusions: str) -> tuple[str, ...]:
     """Return include-all plus exclusions for bounded repository Git commands."""
-    return (".", SUMMARY_EXCLUDE_PATHSPEC, *additional_exclusions)
+    return (".", SUMMARY_EXCLUDE_PATHSPEC, SUMMARY_LEAF_EXCLUDE_PATHSPEC, *additional_exclusions)
+
+
+def verification_source_git_pathspecs(*additional_exclusions: str) -> tuple[str, ...]:
+    """Exclude generated Agent runtime evidence from source worktree fingerprints."""
+    return repository_git_pathspecs(AGENT_RUNTIME_EXCLUDE_PATHSPEC, *additional_exclusions)
 
 
 def is_excluded_repository_path(relative_path: str) -> bool:

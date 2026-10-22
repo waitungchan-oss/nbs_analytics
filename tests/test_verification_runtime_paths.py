@@ -28,31 +28,48 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_profile_resolves_only_to_its_isolated_artifacts(tmp_path: Path) -> None:
-    project = tmp_path / "nbs_analytics"
-    project.mkdir()
-    git_head = _init_repo(project)
-    db = project / "nbs_marketing_data.db"
+def _build_profile_fixture(tmp_path: Path) -> tuple[Path, str, Path]:
+    primary = tmp_path / "primary" / "nbs_analytics"
+    primary.mkdir(parents=True)
+    (primary / ".gitignore").write_text("nbs_marketing_data.db\n.nbs_runtime/\n.nbs_agent_runtime/\n", encoding="utf-8")
+    (primary / "data").mkdir()
+    (primary / "data" / "monthly_revenue_baselines.json").write_text("{}\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(primary), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(primary), "add", ".gitignore", "data/monthly_revenue_baselines.json"], check=True)
+    subprocess.run(
+        ["git", "-C", str(primary), "-c", "user.email=fixture@example.invalid", "-c", "user.name=fixture", "commit", "-m", "fixture", "-q"],
+        check=True,
+    )
+    project = tmp_path / "worktrees" / "nbs_analytics"
+    project.parent.mkdir()
+    subprocess.run(["git", "-C", str(primary), "worktree", "add", "--quiet", "--detach", str(project), "HEAD"], check=True)
+    git_head = subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    db = primary / "nbs_marketing_data.db"
     with sqlite3.connect(db) as conn:
         conn.execute("create table sample (value text)")
-    runtime = project / ".nbs_runtime"
+    runtime = primary / ".nbs_runtime"
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps({
         "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
         "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
     }), encoding="utf-8")
-    (project / "data").mkdir()
-    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
-        project_root=project, source_root=project,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
+        project_root=project,
+        source_root=primary,
+        output_root=project / ".nbs_agent_runtime" / "verification",
+        git_head=git_head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
+    return project, git_head, profile_path
+
+
+def test_profile_resolves_only_to_its_isolated_artifacts(tmp_path: Path) -> None:
+    project, git_head, profile_path = _build_profile_fixture(tmp_path)
     profile, paths = load_verification_runtime_profile(profile_path, project_root=project, expected_git_head=git_head)
     assert paths.db_path.name == "snapshot.sqlite"
     assert paths.generation_path.name == "generation.json"
     assert paths.runtime_dir == profile_path.parent
-    assert paths.db_path != db
+    assert paths.db_path != tmp_path / "primary" / "nbs_analytics" / "nbs_marketing_data.db"
 
 
 def test_profile_path_rejects_missing_artifacts(tmp_path: Path) -> None:
@@ -63,25 +80,7 @@ def test_profile_path_rejects_missing_artifacts(tmp_path: Path) -> None:
 
 
 def test_nested_profile_refs_resolve_without_basename_substitution(tmp_path: Path) -> None:
-    project = tmp_path / "nbs_analytics"
-    project.mkdir()
-    git_head = _init_repo(project)
-    db = project / "nbs_marketing_data.db"
-    with sqlite3.connect(db) as conn:
-        conn.execute("create table sample (value text)")
-    runtime = project / ".nbs_runtime"
-    runtime.mkdir()
-    (runtime / "data_generation.json").write_text(json.dumps({
-        "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
-    }), encoding="utf-8")
-    (project / "data").mkdir()
-    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
-    profile_path = build_verification_profile(
-        project_root=project, source_root=project,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
-        ports={"api": 18601, "streamlit": 18502, "vue": 15173},
-    )
+    project, git_head, profile_path = _build_profile_fixture(tmp_path)
     payload = json.loads(profile_path.read_text(encoding="utf-8"))
     profile_id = payload["profileId"]
     nested = profile_path.parent / "nested"
@@ -100,25 +99,7 @@ def test_nested_profile_refs_resolve_without_basename_substitution(tmp_path: Pat
 
 
 def test_symlinked_verification_root_is_rejected(tmp_path: Path) -> None:
-    project = tmp_path / "nbs_analytics"
-    project.mkdir()
-    git_head = _init_repo(project)
-    db = project / "nbs_marketing_data.db"
-    with sqlite3.connect(db) as conn:
-        conn.execute("create table sample (value text)")
-    runtime = project / ".nbs_runtime"
-    runtime.mkdir()
-    (runtime / "data_generation.json").write_text(json.dumps({
-        "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
-    }), encoding="utf-8")
-    (project / "data").mkdir()
-    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
-    profile_path = build_verification_profile(
-        project_root=project, source_root=project,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
-        ports={"api": 18601, "streamlit": 18502, "vue": 15173},
-    )
+    project, git_head, profile_path = _build_profile_fixture(tmp_path)
     verification_root = project / ".nbs_agent_runtime" / "verification"
     real_root = project / ".nbs_agent_runtime" / "verification-real"
     verification_root.rename(real_root)
@@ -128,25 +109,7 @@ def test_symlinked_verification_root_is_rejected(tmp_path: Path) -> None:
 
 
 def test_nested_artifact_symlink_is_rejected(tmp_path: Path) -> None:
-    project = tmp_path / "nbs_analytics"
-    project.mkdir()
-    git_head = _init_repo(project)
-    db = project / "nbs_marketing_data.db"
-    with sqlite3.connect(db) as conn:
-        conn.execute("create table sample (value text)")
-    runtime = project / ".nbs_runtime"
-    runtime.mkdir()
-    (runtime / "data_generation.json").write_text(json.dumps({
-        "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
-    }), encoding="utf-8")
-    (project / "data").mkdir()
-    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
-    profile_path = build_verification_profile(
-        project_root=project, source_root=project,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
-        ports={"api": 18601, "streamlit": 18502, "vue": 15173},
-    )
+    project, git_head, profile_path = _build_profile_fixture(tmp_path)
     profile_dir = profile_path.parent
     nested = profile_dir / "nested"
     nested.mkdir()
@@ -169,25 +132,7 @@ def test_nested_artifact_symlink_is_rejected(tmp_path: Path) -> None:
 
 
 def test_cache_internal_symlink_is_rejected(tmp_path: Path) -> None:
-    project = tmp_path / "nbs_analytics"
-    project.mkdir()
-    git_head = _init_repo(project)
-    db = project / "nbs_marketing_data.db"
-    with sqlite3.connect(db) as conn:
-        conn.execute("create table sample (value text)")
-    runtime = project / ".nbs_runtime"
-    runtime.mkdir()
-    (runtime / "data_generation.json").write_text(json.dumps({
-        "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
-    }), encoding="utf-8")
-    (project / "data").mkdir()
-    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
-    profile_path = build_verification_profile(
-        project_root=project, source_root=project,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
-        ports={"api": 18601, "streamlit": 18502, "vue": 15173},
-    )
+    project, git_head, profile_path = _build_profile_fixture(tmp_path)
     cache = profile_path.parent / "cache"
     outside = tmp_path / "outside-cache"
     outside.mkdir()
@@ -237,30 +182,7 @@ def test_health_without_profile_keeps_primary_defaults(monkeypatch, tmp_path: Pa
 
 
 def test_runtime_dir_subdir_ref_resolves_under_profile_dir(tmp_path: Path) -> None:
-    import json
-    import sqlite3
-    import subprocess
-    from pathlib import Path
-
-    project = tmp_path / "nbs_analytics"
-    project.mkdir()
-    git_head = _init_repo(project)
-    db = project / "nbs_marketing_data.db"
-    with sqlite3.connect(db) as conn:
-        conn.execute("create table sample (value text)")
-    runtime = project / ".nbs_runtime"
-    runtime.mkdir()
-    (runtime / "data_generation.json").write_text(json.dumps({
-        "generation": 1, "operationId": None, "status": "accepted", "updatedAt": "2026-08-17",
-        "dbSignature": {"sizeBytes": db.stat().st_size, "modifiedNs": db.stat().st_mtime_ns, "sha256": _sha256(db)},
-    }), encoding="utf-8")
-    (project / "data").mkdir()
-    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
-    profile_path = build_verification_profile(
-        project_root=project, source_root=project,
-        output_root=project / ".nbs_agent_runtime" / "verification", git_head=git_head,
-        ports={"api": 18601, "streamlit": 18502, "vue": 15173},
-    )
+    project, git_head, profile_path = _build_profile_fixture(tmp_path)
     payload = json.loads(profile_path.read_text(encoding="utf-8"))
     profile_id = payload["profileId"]
     payload["runtime"]["runtimeDir"] = f"verification/{profile_id}/runtime"

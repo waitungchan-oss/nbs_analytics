@@ -56,29 +56,52 @@ def _build_ready_profile(
     legacy_profile: bool = True,
     project_name: str = "nbs_analytics",
 ) -> tuple[Path, str, Path]:
-    project = tmp_path / "nbs_analytics"
-    project.mkdir()
-    head = _git_repo(project)
-    source_db = project / "nbs_marketing_data.db"
+    primary = tmp_path / "primary" / "nbs_analytics"
+    primary.mkdir(parents=True)
+    (primary / ".gitignore").write_text("nbs_marketing_data.db\n.nbs_runtime/\n.nbs_agent_runtime/\n", encoding="utf-8")
+    (primary / "data").mkdir()
+    (primary / "data" / "monthly_revenue_baselines.json").write_text("{}\n", encoding="utf-8")
+    _git_repo(primary)
+    subprocess.run(["git", "-C", str(primary), "add", ".gitignore", "data/monthly_revenue_baselines.json"], check=True)
+    subprocess.run(
+        ["git", "-C", str(primary), "-c", "user.email=agent@example.com", "-c", "user.name=agent", "commit", "-m", "fixture baseline", "-q"],
+        check=True,
+    )
+    project = tmp_path / "worktrees" / "nbs_analytics"
+    project.parent.mkdir()
+    subprocess.run(["git", "-C", str(primary), "worktree", "add", "--quiet", "--detach", str(project), "HEAD"], check=True)
+    head = subprocess.run(["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    source_db = primary / "nbs_marketing_data.db"
     _db(source_db)
-    runtime = project / ".nbs_runtime"
+    runtime = primary / ".nbs_runtime"
     runtime.mkdir()
     (runtime / "data_generation.json").write_text(json.dumps(_generation_payload(source_db)), encoding="utf-8")
-    (project / "data").mkdir()
-    (project / "data" / "monthly_revenue_baselines.json").write_text("{}", encoding="utf-8")
     profile_path = build_verification_profile(
         project_root=project,
-        source_root=project,
+        source_root=primary,
         output_root=project / ".nbs_agent_runtime" / "verification",
         git_head=head,
         ports={"api": 18601, "streamlit": 18502, "vue": 15173},
     )
+    shutil.copyfile(source_db, project / "nbs_marketing_data.db")
     if not legacy_profile:
         return project, head, profile_path
     payload = json.loads(profile_path.read_text(encoding="utf-8"))
     payload["schemaVersion"] = VERIFICATION_PROFILE_SCHEMA
     payload.pop("sourceBinding", None)
     payload["projectId"] = project_name
+    from backend.agents.repository_scope import repository_git_pathspecs
+
+    legacy_status = subprocess.run(
+        [
+            "git", "-C", str(project), "status", "--porcelain", "--",
+            *repository_git_pathspecs(),
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    payload["worktreeFingerprint"] = canonical_fingerprint(
+        {"head": head, "status": legacy_status}
+    )
     payload["profileFingerprint"] = canonical_fingerprint(
         {key: value for key, value in payload.items() if key != "profileFingerprint"}
     )
@@ -109,8 +132,54 @@ def test_acceptance_worktree_fingerprint_ignores_summary_only_changes(tmp_path: 
     assert _worktree_fingerprint(project, head) != second
 
 
+def test_acceptance_worktree_fingerprint_uses_nul_delimited_all_untracked_status(tmp_path: Path) -> None:
+    project = tmp_path / "nbs_analytics"
+    project.mkdir()
+    head = _git_repo(project)
+    (project / "odd\nname.py").write_text("VALUE = 1\n", encoding="utf-8")
+    status = subprocess.run(
+        [
+            "git", "-C", str(project), "status", "--porcelain=v1",
+            "--untracked-files=all", "--no-renames", "-z", "--", ".",
+            ":(exclude,icase,glob)**/Summay/**",
+            ":(exclude,icase,glob)**/Summay",
+            ":(exclude).nbs_agent_runtime",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    expected = canonical_fingerprint({
+        "head": head,
+        "statusFingerprint": hashlib.sha256(status).hexdigest(),
+    })
+
+    assert _worktree_fingerprint(project, head) == expected
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        b" M Summay/private.py\0",
+        b"?? docs/summay/private.md\0",
+        b" M .nbs_agent_runtime/session.json\0",
+        b" M ../outside.py\0",
+        b" M /outside.py\0",
+        b" M ordinary.py",
+        b"bad\0",
+    ],
+)
+def test_acceptance_worktree_fingerprint_rejects_excluded_or_malformed_status(tmp_path, monkeypatch, status):
+    from types import SimpleNamespace
+    from backend.services import verification_profile_acceptance as acceptance
+
+    monkeypatch.setattr(acceptance.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=status))
+
+    assert _worktree_fingerprint(tmp_path, "a" * 40) is None
+
+
 def test_v2_acceptance_passes_from_differently_named_linked_worktree(tmp_path: Path) -> None:
-    primary, head, primary_profile = _build_ready_profile(tmp_path, legacy_profile=False)
+    project, head, primary_profile = _build_ready_profile(tmp_path, legacy_profile=False)
+    primary = tmp_path / "primary" / "nbs_analytics"
     profile_payload = json.loads(primary_profile.read_text(encoding="utf-8"))
     linked_worktree = tmp_path / "renamed-linked-worktree"
     subprocess.run(
@@ -119,7 +188,6 @@ def test_v2_acceptance_passes_from_differently_named_linked_worktree(tmp_path: P
     )
     shutil.copy2(primary / "nbs_marketing_data.db", linked_worktree / "nbs_marketing_data.db")
     shutil.copytree(primary / ".nbs_runtime", linked_worktree / ".nbs_runtime")
-    shutil.copytree(primary / "data", linked_worktree / "data")
     linked_profile_dir = (
         linked_worktree / ".nbs_agent_runtime" / "verification" / primary_profile.parent.name
     )
@@ -166,6 +234,35 @@ def test_acceptance_ready_when_all_bindings_match(tmp_path: Path) -> None:
     assert result.project_id == "legacy-v1-project"
     assert result.git_head == head
     assert result.runtime_dir == f"verification/{profile.profile_id}"
+
+
+def test_v1_profile_keeps_legacy_worktree_fingerprint_compatibility(tmp_path: Path) -> None:
+    from backend.agents.repository_scope import repository_git_pathspecs
+
+    project, head, profile_path = _build_ready_profile(tmp_path)
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    legacy_status = subprocess.run(
+        [
+            "git", "-C", str(project), "status", "--porcelain", "--",
+            *repository_git_pathspecs(),
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    payload["worktreeFingerprint"] = canonical_fingerprint(
+        {"head": head, "status": legacy_status}
+    )
+    payload["profileFingerprint"] = canonical_fingerprint(
+        {key: value for key, value in payload.items() if key != "profileFingerprint"}
+    )
+    profile_path.write_text(json.dumps(payload), encoding="utf-8")
+    profile, paths = _load(project, profile_path, head)
+
+    result = accept_verification_profile(
+        profile, paths, project_root=project, expected_git_head=head,
+        service_identity=ServiceIdentityEvidence(True),
+    )
+
+    assert result.ready is True
 
 
 def test_acceptance_auto_detects_git_head_and_worktree(tmp_path: Path) -> None:
@@ -277,7 +374,9 @@ def test_acceptance_blocked_on_runtime_path_mismatch(tmp_path: Path) -> None:
         "profileId": "profile-x",
         "projectId": "project",
         "gitHead": "a" * 40,
-        "worktreeFingerprint": canonical_fingerprint({"head": "a" * 40, "status": ""}),
+        "worktreeFingerprint": canonical_fingerprint({
+            "head": "a" * 40, "statusFingerprint": hashlib.sha256(b"").hexdigest(),
+        }),
         "database": {
             "snapshotRef": "verification/profile-x/database.sqlite",
             "sourceFingerprint": "b" * 64,
@@ -318,7 +417,9 @@ def test_acceptance_blocked_when_artifact_outside_runtime_dir(tmp_path: Path) ->
         "profileId": "profile-x",
         "projectId": "project",
         "gitHead": "a" * 40,
-        "worktreeFingerprint": canonical_fingerprint({"head": "a" * 40, "status": ""}),
+        "worktreeFingerprint": canonical_fingerprint({
+            "head": "a" * 40, "statusFingerprint": hashlib.sha256(b"").hexdigest(),
+        }),
         "database": {
             "snapshotRef": "verification/profile-x/database.sqlite",
             "sourceFingerprint": "b" * 64,

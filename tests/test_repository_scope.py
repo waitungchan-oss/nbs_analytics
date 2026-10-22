@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from backend.agents.repository_scope import (
+    SUMMARY_LEAF_EXCLUDE_PATHSPEC,
     SUMMARY_EXCLUDE_PATHSPEC,
     is_excluded_repository_path,
     repository_git_pathspecs,
@@ -31,6 +32,7 @@ def test_git_pathspec_excludes_root_and_nested_case_variants(tmp_path: Path):
     fixtures = {
         "Summay/root.md": "tracked root summary\n",
         "docs/Summay/nested.md": "tracked nested summary\n",
+        "docs/section/Summay": "tracked deeper leaf summary\n",
         "docs/summay/lower.md": "tracked lower summary\n",
         "src/allowed.py": "tracked allowed file\n",
     }
@@ -43,6 +45,7 @@ def test_git_pathspec_excludes_root_and_nested_case_variants(tmp_path: Path):
 
     (tmp_path / "Summay/root.md").write_text("changed root summary\n", encoding="utf-8")
     (tmp_path / "docs/Summay/nested.md").write_text("changed nested summary\n", encoding="utf-8")
+    (tmp_path / "docs/section/Summay").write_text("changed deeper leaf summary\n", encoding="utf-8")
     (tmp_path / "docs/summay/lower.md").write_text("changed lower summary\n", encoding="utf-8")
     (tmp_path / "Summay/untracked.md").write_text("untracked summary\n", encoding="utf-8")
     (tmp_path / "src/allowed.py").write_text("changed allowed file\n", encoding="utf-8")
@@ -65,3 +68,25 @@ def test_git_pathspec_excludes_root_and_nested_case_variants(tmp_path: Path):
     assert "summay" not in status + diff + untracked
     assert "Summay/untracked.md" not in untracked
     assert SUMMARY_EXCLUDE_PATHSPEC in pathspec
+    assert SUMMARY_LEAF_EXCLUDE_PATHSPEC in pathspec
+
+
+def test_git_pathspec_excludes_files_named_summay_without_children(tmp_path: Path):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "tests@example.com")
+    _git(tmp_path, "config", "user.name", "Acceptance Tests")
+    for relative in ("Summay", "docs/Summay", "docs/section/Summay"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("tracked summary leaf\n", encoding="utf-8")
+    _git(tmp_path, "add", "--all")
+    _git(tmp_path, "commit", "-qm", "summary leaf fixtures")
+
+    for relative in ("Summay", "docs/Summay", "docs/section/Summay"):
+        (tmp_path / relative).write_text("changed summary leaf\n", encoding="utf-8")
+    pathspec = repository_git_pathspecs()
+    status = _git(tmp_path, "status", "--porcelain=v1", "--", *pathspec)
+    diff = _git(tmp_path, "diff", "HEAD", "--", *pathspec)
+
+    assert not status
+    assert not diff

@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from backend.agents.evidence_models import canonical_fingerprint, load_json_config
 from backend.agents.memory_hub_integration_models import MemoryHubIntegrationEvidence
+from backend.agents.repository_scope import is_excluded_repository_path
 from backend.agents.safe_repo_file import open_repo_file_nofollow
 
 
@@ -24,6 +26,33 @@ _OPTIONAL_CONTRACT_KEYS = {
 _TASK_TYPES = {"behavior", "refactor", "test", "documentation", "configuration"}
 _CONTRACT_SCHEMA = "implementation-task-v1"
 _REPORT_SCHEMA = "implementation-run-report-v1"
+MAX_CARRY_FORWARD_FILES = 50
+MAX_CARRY_FORWARD_BRIEF_BYTES = 4 * 1024 * 1024
+
+
+class _CarryForwardBriefTooLarge(ValueError):
+    pass
+
+
+def repo_relative_path_key(path: str) -> tuple[str, ...]:
+    parsed = PurePosixPath(path) if isinstance(path, str) else None
+    if (
+        parsed is None or not path or "\\" in path or "\x00" in path
+        or parsed.is_absolute() or str(parsed) != path
+        or not parsed.parts
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+    ):
+        raise ValueError("repo-relative path is invalid")
+    return tuple(part.casefold() for part in parsed.parts)
+
+
+def repo_relative_paths_overlap(left: str, right: str) -> bool:
+    left_parts = repo_relative_path_key(left)
+    right_parts = repo_relative_path_key(right)
+    return (
+        left_parts[:len(right_parts)] == right_parts
+        or right_parts[:len(left_parts)] == left_parts
+    )
 
 
 def _require_string(payload: dict[str, Any], key: str, *, non_empty: bool = True) -> str:
@@ -57,7 +86,10 @@ class CarryForwardFile:
         if (
             parsed is None or not self.path or "\\" in self.path or "\x00" in self.path
             or parsed.is_absolute() or str(parsed) != self.path
+            or not parsed.parts
             or any(part in {"", ".", ".."} for part in parsed.parts)
+            or any(unicodedata.category(char) == "Cc" for char in self.path)
+            or is_excluded_repository_path(self.path)
         ):
             raise ValueError("carryForwardFiles path is invalid")
         if (
@@ -84,17 +116,15 @@ def _require_carry_forward_files(payload: dict[str, Any]) -> tuple[CarryForwardF
     if not isinstance(raw, list):
         raise ValueError("carryForwardFiles must be a list")
     entries = tuple(CarryForwardFile.from_dict(item) for item in raw)
-    if len(entries) > 50:
+    if len(entries) > MAX_CARRY_FORWARD_FILES:
         raise ValueError("carryForwardFiles exceeds the bounded entry limit")
-    paths = [item.path for item in entries]
+    paths = [repo_relative_path_key(item.path) for item in entries]
     if len(paths) != len(set(paths)):
         raise ValueError("carryForwardFiles contains duplicate paths")
     write_paths = payload.get("allowedWritePaths", [])
     for entry in entries:
-        entry_parts = PurePosixPath(entry.path).parts
         for write_path in write_paths:
-            write_parts = PurePosixPath(write_path).parts
-            if entry_parts[:len(write_parts)] == write_parts or write_parts[:len(entry_parts)] == entry_parts:
+            if repo_relative_paths_overlap(entry.path, write_path):
                 raise ValueError("carryForwardFiles must not overlap allowedWritePaths")
     return entries
 
@@ -157,14 +187,14 @@ class ImplementationTaskContract:
             raise ValueError("expectedMemoryEvidenceFingerprint is invalid")
         if not self.memory_context_allowed and self.expected_memory_evidence_fingerprint is not None:
             raise ValueError("expectedMemoryEvidenceFingerprint requires memoryContextAllowed")
-        paths = [item.path for item in self.carry_forward_files]
+        if len(self.carry_forward_files) > MAX_CARRY_FORWARD_FILES:
+            raise ValueError("carryForwardFiles exceeds the bounded entry limit")
+        paths = [repo_relative_path_key(item.path) for item in self.carry_forward_files]
         if len(paths) != len(set(paths)):
             raise ValueError("carryForwardFiles contains duplicate paths")
         for entry in self.carry_forward_files:
-            entry_parts = PurePosixPath(entry.path).parts
             for write_path in self.allowed_write_paths:
-                write_parts = PurePosixPath(write_path).parts
-                if entry_parts[:len(write_parts)] == write_parts or write_parts[:len(entry_parts)] == entry_parts:
+                if repo_relative_paths_overlap(entry.path, write_path):
                     raise ValueError("carryForwardFiles must not overlap allowedWritePaths")
         for key, value in (
             ("maxChangedFiles", self.max_changed_files),
@@ -353,7 +383,7 @@ def validate_carry_forward_approval(
         return
     if contract.plan_path != brief_path:
         raise ValueError("carry-forward approval is not bound to the sealed brief path")
-    root = Path(project_root).resolve()
+    root = Path(project_root)
     relative = PurePosixPath(contract.plan_path)
     if (
         relative.is_absolute()
@@ -366,13 +396,22 @@ def validate_carry_forward_approval(
     try:
         with open_repo_file_nofollow(root, contract.plan_path) as descriptor:
             before = os.fstat(descriptor)
-            chunks = []
+            contents = bytearray()
+            digest = hashlib.sha256()
             size = 0
             while True:
-                chunk = os.read(descriptor, 1024 * 1024)
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, MAX_CARRY_FORWARD_BRIEF_BYTES - size + 1),
+                )
                 if not chunk:
                     break
-                chunks.append(chunk)
+                if size + len(chunk) > MAX_CARRY_FORWARD_BRIEF_BYTES:
+                    raise _CarryForwardBriefTooLarge(
+                        "carry-forward approval brief exceeds the bounded byte limit"
+                    )
+                contents.extend(chunk)
+                digest.update(chunk)
                 size += len(chunk)
             after = os.fstat(descriptor)
             identity_before = (
@@ -385,10 +424,12 @@ def validate_carry_forward_approval(
             )
             if identity_before != identity_after or size != before.st_size:
                 raise ValueError("carry-forward approval brief changed while being read")
-            raw = b"".join(chunks)
+            raw = bytes(contents)
+            actual_fingerprint = digest.hexdigest()
+    except _CarryForwardBriefTooLarge:
+        raise
     except (OSError, ValueError) as exc:
         raise ValueError("carry-forward approval brief is unavailable or unsafe") from exc
-    actual_fingerprint = hashlib.sha256(raw).hexdigest()
     if (
         actual_fingerprint != contract.plan_fingerprint
         or actual_fingerprint != expected_brief_fingerprint
@@ -413,6 +454,8 @@ def validate_carry_forward_approval(
         raise ValueError("carry-forward approval manifest schema is invalid")
     if manifest["schemaVersion"] != "review-carry-forward-v1" or not isinstance(manifest["files"], list):
         raise ValueError("carry-forward approval manifest schema is invalid")
+    if len(manifest["files"]) > MAX_CARRY_FORWARD_FILES:
+        raise ValueError("carry-forward approval manifest exceeds the bounded entry limit")
     approved = tuple(CarryForwardFile.from_dict(item) for item in manifest["files"])
     if tuple(item.to_dict() for item in approved) != tuple(
         item.to_dict() for item in contract.carry_forward_files

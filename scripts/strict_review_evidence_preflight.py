@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_STATUS_MAX_BYTES = 16 * 1024 * 1024
+SOURCE_STATUS_MAX_STDERR_BYTES = 64 * 1024
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -20,7 +22,8 @@ from backend.agents.strict_review_evidence_service import (
 )
 from backend.agents.validation_runner import ValidationRunner
 from backend.agents.evidence_models import canonical_fingerprint
-from backend.agents.repository_scope import repository_git_pathspecs
+from backend.agents.repository_scope import verification_source_git_pathspecs
+from backend.agents.verification_chain import run_bounded_subprocess
 
 
 def _emit(payload: dict) -> None:
@@ -28,15 +31,21 @@ def _emit(payload: dict) -> None:
 
 
 def _source_fingerprint(project_root: Path) -> str:
-    import subprocess
-    completed = subprocess.run(
+    completed = run_bounded_subprocess(
         [
-            "git", "status", "--short", "--untracked-files=all", "--no-renames",
-            "--", *repository_git_pathspecs(),
+            "git", "status", "--porcelain=v1", "--untracked-files=all",
+            "--no-renames", "-z", "--", *verification_source_git_pathspecs(),
         ],
-        cwd=project_root, capture_output=True, text=True, check=False,
+        cwd=project_root,
+        timeout_seconds=60,
+        max_output_bytes=SOURCE_STATUS_MAX_BYTES + SOURCE_STATUS_MAX_STDERR_BYTES,
+        error_message="git status source fingerprint exceeded its bounded output budget",
+        check=False,
     )
-    return hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest()
+    stdout = completed.stdout
+    if completed.returncode != 0:
+        raise ValueError("git status source fingerprint probe failed")
+    return hashlib.sha256(stdout).hexdigest()
 
 
 def _output_dir(project_root: Path, raw: str, session: str) -> Path:
