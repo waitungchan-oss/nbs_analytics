@@ -1,7 +1,23 @@
 import json
+import sys
 from hashlib import sha256
+from types import ModuleType
 
 from scripts import hermes_post_change_check as post_check
+
+
+def _stub_source_acceptance(monkeypatch, inspect_primary_source):
+    module_name = "backend.services.verification_profile_acceptance"
+    module = ModuleType(module_name)
+    module.NBS_PROJECT_ID = "nbs_analytics"
+
+    class SourceBindingInspectionError(ValueError):
+        def __init__(self, reason_code):
+            self.reason_code = reason_code
+
+    module.SourceBindingInspectionError = SourceBindingInspectionError
+    module.inspect_primary_source = inspect_primary_source
+    monkeypatch.setitem(sys.modules, module_name, module)
 
 
 def _write_v2_documentation_artifacts(root, *, run_id="run-1", target_id="handoff.current-conclusion"):
@@ -699,7 +715,7 @@ def test_isolated_hermes_rejects_legacy_profile_without_source_binding(tmp_path,
 def test_isolated_hermes_rejects_non_primary_source_role_even_when_fingerprints_match(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from backend.services import verification_profile_acceptance, verification_runtime_paths
+    from backend.services import verification_runtime_paths
 
     fingerprints = {
         "repository_fingerprint": "d" * 64,
@@ -723,11 +739,7 @@ def test_isolated_hermes_rejects_non_primary_source_role_even_when_fingerprints_
         "load_verification_runtime_profile",
         lambda *_args, **_kwargs: (profile, paths),
     )
-    monkeypatch.setattr(
-        verification_profile_acceptance,
-        "inspect_primary_source",
-        lambda *_args, **_kwargs: inspection,
-    )
+    _stub_source_acceptance(monkeypatch, lambda *_args, **_kwargs: inspection)
     invoked_steps = []
     monkeypatch.setattr(
         post_check,
@@ -764,7 +776,7 @@ def test_isolated_hermes_rejects_v2_profile_for_another_project_even_when_finger
         VERIFICATION_PROFILE_SCHEMA_V2,
         VerificationRuntimeProfile,
     )
-    from backend.services import verification_profile_acceptance, verification_runtime_paths
+    from backend.services import verification_runtime_paths
 
     source_binding = {
         "schemaVersion": "verification-source-binding-v1",
@@ -822,9 +834,8 @@ def test_isolated_hermes_rejects_v2_profile_for_another_project_even_when_finger
         generation_fingerprint=source_binding["generationFingerprint"],
         baseline_registry_fingerprint=source_binding["baselineRegistryFingerprint"],
     )
-    monkeypatch.setattr(
-        verification_profile_acceptance,
-        "inspect_primary_source",
+    _stub_source_acceptance(
+        monkeypatch,
         lambda *_args, **_kwargs: inspected_sources.append("called") or matching_inspection,
     )
     invoked_steps = []
