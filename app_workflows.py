@@ -143,9 +143,21 @@ AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
 EXPORT_CACHE_VERSION = 'export-lazy-v4'
 EXPORT_FAST_PATH_MODE = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", "shadow").strip().lower()
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v2'
+BETA_EXPORT_VARIANT = "beta_market_ecommerce_peer_sales_points_v5"
+BETA_EXPORT_WORKBOOK_KEYS = (
+    "ex_beta",
+    "ex_no_writeoff_beta",
+    "ex_no_writeoff_refund_transfer_beta",
+)
 AI_CACHE_DIR = Path(os.environ.get("NBS_ANALYTICS_CACHE_DIR", str(Path(__file__).resolve().parent / ".nbs_runtime_cache")))
 EXPORT_FAST_CACHE_DIR = AI_CACHE_DIR / "export_fast"
 PERSISTENT_REPAIR_STATE_PATH = Path(__file__).resolve().parent / '.nbs_runtime' / 'persistent_repair_state.json'
+
+
+def _beta_export_cache_is_current(cache: dict) -> bool:
+    return cache.get("beta_export_variant") == BETA_EXPORT_VARIANT and all(
+        cache.get(key) for key in BETA_EXPORT_WORKBOOK_KEYS
+    )
 
 
 def resolve_export_mode() -> str:
@@ -1138,6 +1150,7 @@ def _compute_beta_export_workbooks(
             excluded_receipt_types,
             excluded_payment_methods=excluded_payment_methods,
             beta_sales_point=sales_points,
+            include_branch_salesperson_sheet=True,
         )
 
     buffers = {
@@ -1151,7 +1164,7 @@ def _compute_beta_export_workbooks(
     source_payload += pd.util.hash_pandas_object(beta_others, index=True).values.tobytes()
     source_fingerprint = hashlib.sha256(source_payload).hexdigest()
     rules_fingerprint = _file_content_hash(CONFIG_FILE)
-    variant = "beta_market_ecommerce_peer_sales_points_v4"
+    variant = BETA_EXPORT_VARIANT
     return {
         **{
             key: _buffer_to_bytes(value[0] if isinstance(value, tuple) else value)
