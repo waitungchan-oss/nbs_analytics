@@ -943,7 +943,7 @@ def build_dashboard_data(
             ["文本", col_type, "日期", "月份", "旅行團", "郵輪", "票務"]
         ].fillna(0)
 
-    def build_branch_salesperson_summary(df_t, df_o):
+    def build_branch_salesperson_summary(df_t, df_o, *, tour_people_source=None):
         columns = ["文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"]
         branch_text_lookup = {str(text)[2:]: str(text) for text in branch_list}
         if not branch_text_lookup:
@@ -1022,9 +1022,13 @@ def build_dashboard_data(
         s_tour = grouped_amounts(t_not_c, "旅行團")
         s_cruise = grouped_amounts(t_c, "郵輪")
         s_tkt = grouped_amounts(df_o, "票務")
-        s_tour_people = grouped_tour_people(df_t)
+        s_tour_people = grouped_tour_people(
+            tour_people_source if tour_people_source is not None else df_t
+        )
         s_ticket_qty = grouped_ticket_quantity(df_o)
         keys = [COL_BRANCH, COL_SALESPERSON, "統一日期"]
+        for grouped in (s_tour, s_cruise, s_tkt, s_tour_people, s_ticket_qty):
+            grouped["統一日期"] = grouped["統一日期"].astype("string").fillna("")
         res = (
             s_tour.merge(s_cruise, on=keys, how="outer")
             .merge(s_tkt, on=keys, how="outer")
@@ -1064,10 +1068,16 @@ def build_dashboard_data(
         COL_BRANCH,
         True,
     )
+    beta_tour_people_source = None
+    if beta_enabled and COL_ORDER_ID in df_tour_matched.columns:
+        beta_tour_people_source = df_tour_matched.sort_values(
+            by=COL_TRANS_TIME, na_position="last"
+        ).drop_duplicates(subset=[COL_ORDER_ID], keep="first")
     result_s1_salesperson = (
         build_branch_salesperson_summary(
             formal_branch_tour,
             formal_branch_others,
+            tour_people_source=beta_tour_people_source,
         )
         if include_branch_salesperson_sheet
         else pd.DataFrame(columns=["文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"])

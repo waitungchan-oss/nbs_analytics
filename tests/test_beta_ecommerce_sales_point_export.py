@@ -439,10 +439,167 @@ def test_beta_export_has_distinct_variant_identity_and_artifacts():
 
     payload = app_workflows._compute_beta_export_workbooks(tour_frame(), others_frame())
 
-    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v4"
+    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v5"
     assert payload["sales_point_filter"] == list(BETA_SALES_POINTS)
     assert {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} <= set(payload)
     assert all(payload[key] for key in ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"))
+
+
+def test_beta_workbooks_add_branch_salesperson_sheet_with_scope_reconciliation():
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    import app_workflows
+
+    tours = pd.DataFrame(
+        [
+            _row("BT001", "銅鑼灣分社", "Alice"),
+            _row("BT002", "銅鑼灣分社", "Ben", department="郵輪部"),
+            _row("BT999", "銅鑼灣分社", "Alice"),
+        ]
+    )
+    tours.loc[tours["來源單據號"].eq("BT999"), "收款類型"] = "掛賬核銷"
+    others = pd.DataFrame(
+        [
+            _row("BO001", "銅鑼灣分社", "Alice"),
+            _row("BO002", "銅鑼灣分社", "Ben"),
+            _row("BO999", "銅鑼灣分社", "Ben"),
+        ]
+    )
+    others["來源報表標籤"] = "門券all"
+    others.loc[others["來源單據號"].eq("BO999"), "收款方式"] = "TT 退款轉團款"
+
+    payload = app_workflows._compute_beta_export_workbooks(
+        tours,
+        others,
+        rules=(
+            {"1A": "銅鑼灣分社", "225": "專職銷售組"},
+            ["銅鑼灣分社"],
+            ["郵輪部"],
+            ["Alice", "Ben"],
+            [],
+        ),
+    )
+    expected_metrics = {
+        "ex_beta": ((200, 100, 300), 6, 6),
+        "ex_no_writeoff_beta": ((100, 100, 300), 4, 6),
+        "ex_no_writeoff_refund_transfer_beta": ((100, 100, 200), 4, 4),
+    }
+    expected_headers = (
+        "文本",
+        "單選",
+        "銷售員",
+        "日期",
+        "月份",
+        "旅行團",
+        "郵輪",
+        "票務",
+        "旅行團交易人數",
+        "票務交易數量",
+    )
+
+    for key, (
+        expected_amounts,
+        expected_tour_people,
+        expected_ticket_quantity,
+    ) in expected_metrics.items():
+        workbook = load_workbook(BytesIO(payload[key]), data_only=True, read_only=True)
+        assert "分社經營統計_含銷售員" in workbook.sheetnames
+        assert "分社經營統計" in workbook.sheetnames
+        assert f"{BETA_LABEL}_經營統計" in workbook.sheetnames
+
+        detailed_rows = list(
+            workbook["分社經營統計_含銷售員"].iter_rows(values_only=True)
+        )
+        branch_rows = list(workbook["分社經營統計"].iter_rows(values_only=True))
+        tour_people_rows = list(
+            workbook["分社每天旅行團交易人數"].iter_rows(values_only=True)
+        )
+        ticket_quantity_rows = list(
+            workbook["分社每天票務交易數量"].iter_rows(values_only=True)
+        )
+        assert detailed_rows[0] == expected_headers
+
+        def sum_columns(rows, index):
+            return sum(float(row[index] or 0) for row in rows[1:])
+
+        assert workbook.sheetnames.index("分社經營統計_含銷售員") == (
+            workbook.sheetnames.index("分社經營統計") + 1
+        )
+        detailed_amounts = tuple(
+            sum_columns(detailed_rows, index) for index in (5, 6, 7)
+        )
+        branch_amounts = tuple(
+            sum_columns(branch_rows, index) for index in (4, 5, 6)
+        )
+        assert detailed_amounts == expected_amounts
+        assert detailed_amounts == branch_amounts
+        assert sum_columns(detailed_rows, 8) == expected_tour_people
+        assert (
+            sum_columns(tour_people_rows, 3) + sum_columns(tour_people_rows, 4)
+            == expected_tour_people
+        )
+        assert sum_columns(detailed_rows, 9) == expected_ticket_quantity
+        assert sum_columns(ticket_quantity_rows, 4) == expected_ticket_quantity
+        assert {row[2] for row in detailed_rows[1:]} == {"Alice", "Ben"}
+        workbook.close()
+
+
+def test_beta_branch_salesperson_tour_people_uses_global_order_deduplication():
+    import pipeline
+
+    first = _row("DUP001", E_COMMERCE, "Alice")
+    first["交易時間"] = "2026-05-01 09:00:00"
+    first["數量"] = 2
+    second = _row("DUP001", "銅鑼灣分社", "Ben")
+    second["交易時間"] = "2026-05-01 10:00:00"
+    second["數量"] = 5
+    retained_branch_row = _row("DUP002", "銅鑼灣分社", "Alice")
+    retained_branch_row["交易時間"] = "2026-05-01 09:00:00"
+    retained_branch_row["數量"] = 2
+    later_beta_row = _row("DUP002", E_COMMERCE, "Ben")
+    later_beta_row["交易時間"] = "2026-05-01 10:00:00"
+    later_beta_row["數量"] = 5
+
+    _, _, facts = pipeline.build_dashboard_data_excluding_receipt_types(
+        pd.DataFrame([first, second, retained_branch_row, later_beta_row]),
+        empty_frame(),
+        {"1A": "銅鑼灣分社", "I6": E_COMMERCE},
+        ["銅鑼灣分社"],
+        [],
+        [],
+        [],
+        make_workbook=False,
+        include_branch_salesperson_sheet=True,
+        return_facts=True,
+        beta_sales_point=BETA_SALES_POINTS,
+    )
+
+    detail = facts["分社經營統計_含銷售員"]
+    official_daily = facts["分社每天旅行團交易人數"]
+    assert detail["旅行團交易人數"].sum() == 2
+    assert official_daily["交易人數"].sum() + official_daily["郵輪交易人數"].sum() == 2
+    assert detail.loc[detail["銷售員"].eq("Ben"), "旅行團交易人數"].sum() == 0
+    assert detail.loc[
+        detail["銷售員"].eq("Alice") & detail["文本"].str.endswith("銅鑼灣分社"),
+        "旅行團交易人數",
+    ].sum() == 2
+
+
+def test_beta_export_cache_requires_current_variant_and_all_three_workbooks():
+    import app_workflows
+
+    keys = ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta")
+    current_payload = {key: b"workbook" for key in keys}
+    current_payload["beta_export_variant"] = app_workflows.BETA_EXPORT_VARIANT
+    stale_payload = dict(current_payload, beta_export_variant="beta_market_ecommerce_peer_sales_points_v4")
+    incomplete_payload = dict(current_payload)
+    incomplete_payload.pop("ex_no_writeoff_beta")
+
+    assert app_workflows._beta_export_cache_is_current(current_payload)
+    assert not app_workflows._beta_export_cache_is_current(stale_payload)
+    assert not app_workflows._beta_export_cache_is_current(incomplete_payload)
 
 
 def test_beta_cache_identity_differs_from_formal_identity():

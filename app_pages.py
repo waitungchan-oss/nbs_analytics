@@ -23,6 +23,7 @@ from app_workflows import (
     COL_QTY,
     COL_SALESPERSON,
     BETA_COMPARISON_SALES_POINT_LABEL,
+    BETA_EXPORT_WORKBOOK_KEYS,
     CONFIG_FILE,
     HAS_AI_LIBS,
     HAS_MATPLOTLIB,
@@ -52,6 +53,7 @@ from app_workflows import (
     _combined_max_date,
     _compute_ai_cleaning_suggestions,
     _compute_beta_export_workbooks,
+    _beta_export_cache_is_current,
     _compute_causal_driver_analytics,
     _compute_data_quality_scorecard,
     _compute_feature_store_lead_signals,
@@ -2399,11 +2401,11 @@ def _render_ai_and_exports(cache: dict) -> None:
             else:
                 st.info("目前沒有清洗異常日誌可下載。")
 
-        beta_keys = ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta")
-        beta_loaded = all(cache.get(key) for key in beta_keys)
+        beta_keys = BETA_EXPORT_WORKBOOK_KEYS
+        beta_loaded = _beta_export_cache_is_current(cache)
         st.markdown("#### Beta comparison export")
         st.caption(
-            f"只將 workbook 內原專職表格替換為合併銷售點群組「{BETA_COMPARISON_SALES_POINT_LABEL}」資料；另以 Beta-only exception 放行 1950506 + 四個合併銷售點；正式 Dashboard、Forecast 與正式下載不變。"
+            f"原專職表格替換為合併銷售點群組「{BETA_COMPARISON_SALES_POINT_LABEL}」資料，並新增「分社經營統計_含銷售員」；Beta-only exception 與原範圍不變。正式 Dashboard、Forecast 與正式下載不變。"
         )
         if not beta_loaded and st.button("準備 Beta 市場電商及同業比較匯出", key="PREPARE_BETA_ECOMMERCE_EXPORT"):
             with st.spinner(f"正在生成 Beta {BETA_COMPARISON_SALES_POINT_LABEL}比較匯出..."):
