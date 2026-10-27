@@ -145,7 +145,8 @@ def test_official_export_branch_salesperson_sheet_matches_existing_branch_sheets
     )
     assert _sum_rows(branch_rows, [4, 5, 6]) == 250.0
     assert _sum_rows(salesperson_rows, [5, 6, 7]) == 250.0
-    assert _sum_rows(tour_people_rows, [3, 4]) == 3.0
-    assert _sum_rows(salesperson_rows, [8]) == 3.0
+    assert _sum_rows(tour_people_rows, [3]) == 2.0
+    assert _sum_rows(tour_people_rows, [4]) == 1.0
+    assert _sum_rows(salesperson_rows, [8]) == 2.0
     assert _sum_rows(ticket_quantity_rows, [4]) == 7.0
     assert _sum_rows(salesperson_rows, [9]) == 7.0

@@ -263,10 +263,12 @@ def test_export_workbook_adds_branch_summary_with_salesperson_and_matches_branch
 
     branch_tour_rows = list(workbook["分社每天旅行團交易人數"].iter_rows(values_only=True))
     branch_ticket_rows = list(workbook["分社每天票務交易數量"].iter_rows(values_only=True))
-    branch_tour_people = sum(float(row[3] or 0) + float(row[4] or 0) for row in branch_tour_rows[1:])
+    branch_tour_people = sum(float(row[3] or 0) for row in branch_tour_rows[1:])
+    branch_cruise_people = sum(float(row[4] or 0) for row in branch_tour_rows[1:])
     branch_ticket_qty = sum(float(row[4] or 0) for row in branch_ticket_rows[1:])
     salesperson_tour_people = sum(float(row[8] or 0) for row in salesperson_rows[1:])
     salesperson_ticket_qty = sum(float(row[9] or 0) for row in salesperson_rows[1:])
 
-    assert salesperson_tour_people == branch_tour_people == 2.0
+    assert salesperson_tour_people == branch_tour_people == 1.0
+    assert branch_cruise_people == 1.0
     assert salesperson_ticket_qty == branch_ticket_qty == 2.0

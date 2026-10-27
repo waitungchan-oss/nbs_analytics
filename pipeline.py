@@ -978,6 +978,9 @@ def build_dashboard_data(
             work = _prepared_branch_frame(df_sub)
             if work.empty:
                 return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "旅行團交易人數"])
+            work = work[~work[COL_DEPT].isin(cruise_depts)]
+            if work.empty:
+                return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "旅行團交易人數"])
             work = (
                 work.sort_values(by=COL_TRANS_TIME, na_position="last").drop_duplicates(subset=[COL_ORDER_ID], keep="first")
                 if COL_ORDER_ID in work.columns
