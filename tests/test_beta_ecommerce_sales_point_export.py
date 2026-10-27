@@ -482,9 +482,9 @@ def test_beta_workbooks_add_branch_salesperson_sheet_with_scope_reconciliation()
         ),
     )
     expected_metrics = {
-        "ex_beta": ((200, 100, 300), 6, 6),
-        "ex_no_writeoff_beta": ((100, 100, 300), 4, 6),
-        "ex_no_writeoff_refund_transfer_beta": ((100, 100, 200), 4, 4),
+        "ex_beta": ((200, 100, 300), 4, 2, 6),
+        "ex_no_writeoff_beta": ((100, 100, 300), 2, 2, 6),
+        "ex_no_writeoff_refund_transfer_beta": ((100, 100, 200), 2, 2, 4),
     }
     expected_headers = (
         "文本",
@@ -502,6 +502,7 @@ def test_beta_workbooks_add_branch_salesperson_sheet_with_scope_reconciliation()
     for key, (
         expected_amounts,
         expected_tour_people,
+        expected_cruise_people,
         expected_ticket_quantity,
     ) in expected_metrics.items():
         workbook = load_workbook(BytesIO(payload[key]), data_only=True, read_only=True)
@@ -536,10 +537,8 @@ def test_beta_workbooks_add_branch_salesperson_sheet_with_scope_reconciliation()
         assert detailed_amounts == expected_amounts
         assert detailed_amounts == branch_amounts
         assert sum_columns(detailed_rows, 8) == expected_tour_people
-        assert (
-            sum_columns(tour_people_rows, 3) + sum_columns(tour_people_rows, 4)
-            == expected_tour_people
-        )
+        assert sum_columns(tour_people_rows, 3) == expected_tour_people
+        assert sum_columns(tour_people_rows, 4) == expected_cruise_people
         assert sum_columns(detailed_rows, 9) == expected_ticket_quantity
         assert sum_columns(ticket_quantity_rows, 4) == expected_ticket_quantity
         assert {row[2] for row in detailed_rows[1:]} == {"Alice", "Ben"}
