@@ -72,12 +72,16 @@ def service(tmp_path: Path):
     brief = tmp_path / ".nbs_agent_runtime" / "reports" / "verified-backfill-task2-brief.md"
     brief.parent.mkdir(parents=True)
     brief.write_text("# Task 2\n", encoding="utf-8")
-    return VerifiedBackfillService(
+    service = VerifiedBackfillService(
         tmp_path,
         store=WorkflowStore(tmp_path),
         runner=runner,
         review_provider=lambda identity, gates: passing_review(),
     )
+    service._current_source_binding = lambda identity: {
+        "commitSha": identity["sourceCommit"], "sourceFingerprint": "f" * 64,
+    }
+    return service
 
 
 def test_create_blocks_dirty_main_before_writing_run(service):
@@ -292,6 +296,80 @@ def test_create_writes_bounded_standard_artifacts_and_hashes(service):
     assert service.runner.calls
     assert all(isinstance(argv, tuple) for argv in service.runner.calls)
     assert all(";" not in " ".join(argv) and "|" not in " ".join(argv) for argv in service.runner.calls)
+
+
+def test_completed_run_gate_artifacts_share_verified_source_binding(service):
+    source_fingerprint = "f" * 64
+    service._current_source_binding = lambda identity: {
+        "commitSha": identity["sourceCommit"],
+        "sourceFingerprint": source_fingerprint,
+    }
+
+    result = service.create(source_commit=COMMIT, reason="documentation backfill")
+
+    run_dir = service.store.runs_root / result["runId"]
+    gates = [service.store._read_json(run_dir / name) for name in (
+        "review.json", "full-verification.json", "hermes.json",
+    )]
+    assert all(gate["commitSha"] == COMMIT for gate in gates)
+    assert all(gate["sourceFingerprint"] == source_fingerprint for gate in gates)
+
+
+def test_source_binding_reuses_only_a_current_complete_verification_session(tmp_path, monkeypatch):
+    from backend.agents import verified_backfill_service
+    from backend.agents.verification_session import VerificationSession
+
+    session = VerificationSession.create(
+        project_id="nbs_analytics", base_sha="b" * 40, head_sha=COMMIT,
+        brief_path="docs/briefs/release.md", brief_fingerprint="1" * 64,
+        worktree_fingerprint="2" * 64, diff_fingerprint="3" * 64,
+        contract_fingerprint="4" * 64, policy_fingerprint="5" * 64,
+        status="complete",
+    )
+    session_path = tmp_path / ".nbs_agent_runtime/verification_sessions/session-a/session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(json.dumps(session.to_dict()), encoding="utf-8")
+    monkeypatch.setattr(verified_backfill_service, "git_source_probe", lambda *args, **kwargs: {
+        "head_sha": session.head_sha,
+        "brief_fingerprint": session.brief_fingerprint,
+        "worktree_fingerprint": session.worktree_fingerprint,
+        "diff_fingerprint": session.diff_fingerprint,
+        "contract_fingerprint": session.contract_fingerprint,
+        "policy_fingerprint": session.policy_fingerprint,
+        "source_probe_version": session.gates["sourceProbeVersion"],
+    })
+
+    binding = VerifiedBackfillService(tmp_path)._current_source_binding({"sourceCommit": COMMIT})
+
+    assert binding == {"commitSha": COMMIT, "sourceFingerprint": session.source_fingerprint}
+
+
+def test_source_binding_rejects_a_sealed_verification_session(tmp_path, monkeypatch):
+    from backend.agents import verified_backfill_service
+    from backend.agents.verification_session import VerificationSession
+
+    session = VerificationSession.create(
+        project_id="nbs_analytics", base_sha="b" * 40, head_sha=COMMIT,
+        brief_path="docs/briefs/release.md", brief_fingerprint="1" * 64,
+        worktree_fingerprint="2" * 64, diff_fingerprint="3" * 64,
+        contract_fingerprint="4" * 64, policy_fingerprint="5" * 64,
+        status="sealed",
+    )
+    session_path = tmp_path / ".nbs_agent_runtime/verification_sessions/session-a/session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(json.dumps(session.to_dict()), encoding="utf-8")
+    monkeypatch.setattr(verified_backfill_service, "git_source_probe", lambda *args, **kwargs: {
+        "head_sha": session.head_sha,
+        "brief_fingerprint": session.brief_fingerprint,
+        "worktree_fingerprint": session.worktree_fingerprint,
+        "diff_fingerprint": session.diff_fingerprint,
+        "contract_fingerprint": session.contract_fingerprint,
+        "policy_fingerprint": session.policy_fingerprint,
+        "source_probe_version": session.gates["sourceProbeVersion"],
+    })
+
+    with pytest.raises(verified_backfill_service._Blocked, match="source_session_unavailable"):
+        VerifiedBackfillService(tmp_path)._current_source_binding({"sourceCommit": COMMIT})
 
 
 def test_subprocess_runner_uses_service_project_root(monkeypatch, tmp_path):
