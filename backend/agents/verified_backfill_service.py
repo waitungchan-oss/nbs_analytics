@@ -279,7 +279,11 @@ class VerifiedBackfillService:
                 session = VerificationSession.from_dict(json.loads(session_path.read_text(encoding="utf-8")))
             except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
                 continue
-            if session.status != "complete" or session.head_sha != identity["sourceCommit"]:
+            if (
+                session.status != "complete"
+                or session.project_id != "nbs_analytics"
+                or session.head_sha != identity["sourceCommit"]
+            ):
                 continue
             try:
                 current = git_source_probe(

@@ -372,6 +372,34 @@ def test_source_binding_rejects_a_sealed_verification_session(tmp_path, monkeypa
         VerifiedBackfillService(tmp_path)._current_source_binding({"sourceCommit": COMMIT})
 
 
+def test_source_binding_rejects_a_session_from_another_project(tmp_path, monkeypatch):
+    from backend.agents import verified_backfill_service
+    from backend.agents.verification_session import VerificationSession
+
+    session = VerificationSession.create(
+        project_id="another_project", base_sha="b" * 40, head_sha=COMMIT,
+        brief_path="docs/briefs/release.md", brief_fingerprint="1" * 64,
+        worktree_fingerprint="2" * 64, diff_fingerprint="3" * 64,
+        contract_fingerprint="4" * 64, policy_fingerprint="5" * 64,
+        status="complete",
+    )
+    session_path = tmp_path / ".nbs_agent_runtime/verification_sessions/session-a/session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(json.dumps(session.to_dict()), encoding="utf-8")
+    monkeypatch.setattr(verified_backfill_service, "git_source_probe", lambda *args, **kwargs: {
+        "head_sha": session.head_sha,
+        "brief_fingerprint": session.brief_fingerprint,
+        "worktree_fingerprint": session.worktree_fingerprint,
+        "diff_fingerprint": session.diff_fingerprint,
+        "contract_fingerprint": session.contract_fingerprint,
+        "policy_fingerprint": session.policy_fingerprint,
+        "source_probe_version": session.gates["sourceProbeVersion"],
+    })
+
+    with pytest.raises(verified_backfill_service._Blocked, match="source_session_unavailable"):
+        VerifiedBackfillService(tmp_path)._current_source_binding({"sourceCommit": COMMIT})
+
+
 def test_subprocess_runner_uses_service_project_root(monkeypatch, tmp_path):
     captured = {}
 
