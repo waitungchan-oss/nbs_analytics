@@ -13,7 +13,11 @@ from typing import Any
 from .workflow_models import canonical_sha256
 from .workflow_store import WorkflowStore
 from .memory_hub_integration_models import MemoryHubIntegrationEvidence
-from .documentation_models import DocumentationEvidenceV2, DocumentationSchemaError
+from .documentation_models import (
+    MAX_DOCUMENTATION_TASK_BRIEF_BYTES,
+    DocumentationEvidenceV2,
+    DocumentationSchemaError,
+)
 from .documentation_policy import load_documentation_target
 
 
@@ -141,6 +145,10 @@ class DocumentationEvidenceCollector:
         if len(distinct_sources) != 1:
             raise DocumentationEvidenceError("gate source fingerprint mismatch")
 
+        brief_path, task_brief, brief_sha256 = _read_verified_task_brief(
+            self.project_root, manifest,
+        )
+
         try:
             _, target_text, section, _, _ = _read_target_section(self.project_root, target)
         except (OSError, UnicodeError, ValueError, PermissionError) as exc:
@@ -156,6 +164,7 @@ class DocumentationEvidenceCollector:
             raise DocumentationEvidenceError("selected target differs from the accepted source commit")
 
         source_records = []
+        source_records.append({"path": brief_path, "sha256": brief_sha256})
         for path, payload in (
             ("manifest.json", manifest), ("status.json", status),
             ("approval.json", approval),
@@ -180,6 +189,9 @@ class DocumentationEvidenceCollector:
             "commitSha": manifest["gitHead"],
             "sourceFingerprint": next(iter(distinct_sources)),
             "selectedTargetId": target.target_id,
+            "taskBrief": task_brief,
+            "taskBriefPath": brief_path,
+            "taskBriefSha256": brief_sha256,
             "sources": source_records,
             "gateResults": list(gate_results),
             "guardrails": {
@@ -390,6 +402,45 @@ def _manifest_brief_source(manifest: dict[str, Any]) -> dict[str, str] | None:
     ):
         return None
     return {"path": posix.as_posix(), "sha256": digest}
+
+
+def _read_verified_task_brief(
+    project_root: Path, manifest: dict[str, Any],
+) -> tuple[str, str, str]:
+    source = _manifest_brief_source(manifest)
+    if source is None:
+        raise DocumentationEvidenceError("approved task brief path or fingerprint is invalid")
+    root = project_root.resolve()
+    relative_path = PurePosixPath(source["path"])
+    candidate = root.joinpath(*relative_path.parts)
+    current = root
+    for part in relative_path.parts:
+        current = current / part
+        if current.is_symlink():
+            raise DocumentationEvidenceError("approved task brief is unsafe")
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise DocumentationEvidenceError("approved task brief is unsafe or missing") from exc
+    if not resolved.is_file():
+        raise DocumentationEvidenceError("approved task brief is unsafe or missing")
+    try:
+        content = resolved.read_bytes()
+    except OSError as exc:
+        raise DocumentationEvidenceError("approved task brief is unavailable") from exc
+    if len(content) > MAX_DOCUMENTATION_TASK_BRIEF_BYTES:
+        raise DocumentationEvidenceError("approved task brief exceeds the evidence size limit")
+    digest = sha256(content).hexdigest()
+    if digest != source["sha256"]:
+        raise DocumentationEvidenceError("approved task brief fingerprint mismatch")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DocumentationEvidenceError("approved task brief is not valid UTF-8") from exc
+    if not text.strip():
+        raise DocumentationEvidenceError("approved task brief is empty")
+    return source["path"], text, digest
 
 
 def _collect_commands(artifacts: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], ...]:

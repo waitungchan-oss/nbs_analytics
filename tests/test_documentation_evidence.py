@@ -14,6 +14,11 @@ from backend.agents.documentation_evidence import (
     _collect_paths,
 )
 from backend.agents.memory_hub_integration_models import build_memory_hub_integration_evidence
+from backend.agents.documentation_models import (
+    MAX_DOCUMENTATION_TASK_BRIEF_BYTES,
+    DocumentationEvidenceV2,
+    DocumentationSchemaError,
+)
 from backend.agents.workflow_models import (
     APPROVAL_SCHEMA,
     MANIFEST_SCHEMA,
@@ -21,13 +26,14 @@ from backend.agents.workflow_models import (
     WorkflowApproval,
     WorkflowManifest,
     WorkflowStatus,
+    canonical_sha256,
 )
 from backend.agents.workflow_store import WorkflowStore
 
 
-def _manifest(run_id: str, commit_sha: str) -> WorkflowManifest:
+def _manifest(run_id: str, commit_sha: str, brief_sha256: str) -> WorkflowManifest:
     return WorkflowManifest(
-        MANIFEST_SCHEMA, run_id, "docs/briefs/task.md", "a" * 64,
+        MANIFEST_SCHEMA, run_id, "docs/briefs/task.md", brief_sha256,
         "codex/task-2", commit_sha, (), "2026-07-18T10:00:00+00:00", "c" * 64,
     )
 
@@ -54,9 +60,13 @@ def completed_run_fixture(tmp_path: Path):
     subprocess.run(["git", "add", "NBS_ANALYTICS_HANDOFF.md"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "--quiet", "-m", "accepted target source"], cwd=tmp_path, check=True)
     commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    brief = tmp_path / "docs" / "briefs" / "task.md"
+    brief.parent.mkdir(parents=True)
+    brief.write_text("# Approved task\n\nUpdate the fixed handoff section with verified release status.\n", encoding="utf-8")
+    brief_sha256 = sha256(brief.read_bytes()).hexdigest()
     store = WorkflowStore(tmp_path)
     run_id = "run-task-2"
-    store.create_run(_manifest(run_id, commit_sha), _status(run_id, "completed"))
+    store.create_run(_manifest(run_id, commit_sha, brief_sha256), _status(run_id, "completed"))
     store.write_approval(run_id, WorkflowApproval(
         APPROVAL_SCHEMA, run_id, "contract.json", "d" * 64, commit_sha,
         "2026-07-18T10:00:30+00:00", "approved",
@@ -181,7 +191,9 @@ def test_collector_exposes_manifest_brief_as_safe_source(completed_run_fixture):
         completed_run_fixture.project_root, store=completed_run_fixture.store,
     ).collect(completed_run_fixture.run_id).to_dict()
 
-    assert {item["path"]: item["sha256"] for item in evidence["sources"]}["docs/briefs/task.md"] == "a" * 64
+    assert {item["path"]: item["sha256"] for item in evidence["sources"]}["docs/briefs/task.md"] == sha256(
+        (completed_run_fixture.project_root / "docs" / "briefs" / "task.md").read_bytes()
+    ).hexdigest()
 
 
 def test_collector_emits_target_bound_v2_evidence_and_section_sha(completed_run_fixture):
@@ -195,10 +207,64 @@ def test_collector_emits_target_bound_v2_evidence_and_section_sha(completed_run_
     assert payload["selectedTargetId"] == "handoff.current-conclusion"
     assert payload["commitSha"] == completed_run_fixture.commit_sha
     assert payload["sourceFingerprint"] == "f" * 64
+    assert payload["taskBrief"] == "# Approved task\n\nUpdate the fixed handoff section with verified release status.\n"
+    assert payload["taskBriefSha256"] == completed_run_fixture.store.load_manifest(
+        completed_run_fixture.run_id
+    ).brief_sha256
     assert payload["expectedSectionSha256"] == sha256(section.encode("utf-8")).hexdigest()
     assert {item["gate"] for item in payload["gateResults"]} == {
         "review", "full-verification", "hermes",
     }
+    assert {item["path"]: item["sha256"] for item in payload["sources"]}["docs/briefs/task.md"] == payload["taskBriefSha256"]
+
+
+def test_collector_v2_blocks_if_task_brief_changed_after_approval(completed_run_fixture):
+    brief = completed_run_fixture.project_root / "docs" / "briefs" / "task.md"
+    brief.write_text("# Replaced task\n", encoding="utf-8")
+
+    with pytest.raises(DocumentationEvidenceError, match="brief fingerprint"):
+        DocumentationEvidenceCollector(
+            completed_run_fixture.project_root, store=completed_run_fixture.store,
+        ).collect_target(completed_run_fixture.run_id, "handoff.current-conclusion")
+
+
+def test_collector_v2_rejects_symlinked_task_brief(completed_run_fixture, tmp_path):
+    brief = completed_run_fixture.project_root / "docs" / "briefs" / "task.md"
+    brief.unlink()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Approved task\n", encoding="utf-8")
+    brief.symlink_to(outside)
+
+    with pytest.raises(DocumentationEvidenceError, match="brief is unsafe"):
+        DocumentationEvidenceCollector(
+            completed_run_fixture.project_root, store=completed_run_fixture.store,
+        ).collect_target(completed_run_fixture.run_id, "handoff.current-conclusion")
+
+
+def test_v2_evidence_rejects_task_brief_hash_mismatch_and_oversize(completed_run_fixture):
+    payload = DocumentationEvidenceCollector(
+        completed_run_fixture.project_root, store=completed_run_fixture.store,
+    ).collect_target(completed_run_fixture.run_id, "handoff.current-conclusion").to_dict()
+    payload["taskBrief"] += "tampered"
+    payload.pop("evidenceFingerprint")
+    payload["evidenceFingerprint"] = canonical_sha256(payload)
+    with pytest.raises(DocumentationSchemaError, match="taskBriefSha256"):
+        DocumentationEvidenceV2.from_dict(payload)
+
+    oversized = DocumentationEvidenceCollector(
+        completed_run_fixture.project_root, store=completed_run_fixture.store,
+    ).collect_target(completed_run_fixture.run_id, "handoff.current-conclusion").to_dict()
+    oversized["taskBrief"] = "x" * (MAX_DOCUMENTATION_TASK_BRIEF_BYTES + 1)
+    oversized["taskBriefSha256"] = sha256(oversized["taskBrief"].encode()).hexdigest()
+    oversized["sources"] = [
+        {"path": item["path"], "sha256": oversized["taskBriefSha256"]}
+        if item["path"] == oversized["taskBriefPath"] else item
+        for item in oversized["sources"]
+    ]
+    oversized.pop("evidenceFingerprint")
+    oversized["evidenceFingerprint"] = canonical_sha256(oversized)
+    with pytest.raises(DocumentationSchemaError, match="bounded evidence size"):
+        DocumentationEvidenceV2.from_dict(oversized)
 
 
 def test_collector_v2_blocks_stale_source_and_missing_gate(completed_run_fixture):

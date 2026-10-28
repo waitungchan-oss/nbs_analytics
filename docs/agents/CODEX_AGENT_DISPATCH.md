@@ -86,7 +86,10 @@ Acceptance contract 與 performance baseline lineage 是 metadata/diagnostic-onl
       "applicationSchema": "documentation-application-v2",
       "targetIds": ["handoff.current-conclusion", "handoff.verification-snapshot", "runbook.pipeline-rollout-gate", "runbook.shard-boundary", "runbook.parallel-rollout-boundary"],
       "approvalArgument": "--approve-target-id",
-      "arbitraryPaths": false
+      "arbitraryPaths": false,
+      "taskBrief": "manifest-bound-content-and-sha256",
+      "maxTaskBriefBytes": 16384,
+      "requiresCanonicalDraftFingerprint": true
     },
     "requiresApprovedRunner": true,
     "missingRunnerStatus": "blocked_missing_runner",

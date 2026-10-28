@@ -132,7 +132,17 @@ def _v2_evidence(tmp_path: Path) -> DocumentationEvidenceV2:
         "commitSha": "b" * 40,
         "sourceFingerprint": "c" * 64,
         "selectedTargetId": "handoff.current-conclusion",
-        "sources": [{"path": "NBS_ANALYTICS_HANDOFF.md", "sha256": "d" * 64}],
+        "taskBrief": "Align the approved handoff section with verified release status.",
+        "taskBriefPath": "docs/briefs/task.md",
+        "taskBriefSha256": sha256(
+            b"Align the approved handoff section with verified release status."
+        ).hexdigest(),
+        "sources": [
+            {"path": "NBS_ANALYTICS_HANDOFF.md", "sha256": "d" * 64},
+            {"path": "docs/briefs/task.md", "sha256": sha256(
+                b"Align the approved handoff section with verified release status."
+            ).hexdigest()},
+        ],
         "gateResults": [
             {"gate": name, "status": "pass", "sourceFingerprint": "c" * 64,
              "evidenceFingerprint": chr(54 + index) * 64}
@@ -162,6 +172,23 @@ def test_runner_receives_only_evidence_json(evidence, service):
     assert payload["schemaVersion"] == DOCUMENTATION_EVIDENCE_SCHEMA
     assert "prompt" not in payload
     assert "absoluteVaultPath" not in payload
+
+
+def test_v2_draft_blocks_legacy_evidence_without_task_brief(tmp_path, service):
+    payload = _v2_evidence(tmp_path).to_dict()
+    payload.pop("taskBrief")
+    payload.pop("taskBriefPath")
+    payload.pop("taskBriefSha256")
+    payload.pop("evidenceFingerprint")
+    evidence = DocumentationEvidenceV2.from_dict({
+        **payload, "evidenceFingerprint": canonical_sha256(payload),
+    })
+    fake_runner = FakeRunner()
+
+    with pytest.raises(DocumentationValidationError, match="approved task brief"):
+        service(fake_runner).draft_target(evidence, agent_command="codex")
+
+    assert fake_runner.calls == 0
 
 
 def test_service_accepts_actual_evidence_payload_fingerprint_contract(evidence, service):
@@ -351,6 +378,10 @@ def test_service_v2_blocks_input_over_budget_before_runner(tmp_path):
         {"path": f"docs/evidence/source-{index}.md", "sha256": "d" * 64}
         for index in range(600)
     ]
+    payload["sources"].append({
+        "path": evidence.task_brief_path,
+        "sha256": evidence.task_brief_sha256,
+    })
     payload["evidenceFingerprint"] = canonical_sha256(payload)
     large_evidence = DocumentationEvidenceV2.from_dict(payload)
     runner = FakeV2Runner()

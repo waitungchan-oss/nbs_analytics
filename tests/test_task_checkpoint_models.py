@@ -63,6 +63,30 @@ def test_valid_checkpoint_evidence_round_trips_with_exact_schema() -> None:
     assert evidence.evidence_fingerprint == evidence.recompute_fingerprint()
 
 
+def test_raw_approved_task_id_round_trips_without_rewriting_identity() -> None:
+    evidence = TaskCheckpointEvidence.build(
+        task_id="implementation-runner-flag-parsing",
+        task_contract_fingerprint=SHA,
+        parent_head=PARENT,
+        allowed_files=("scripts/implementation_agent.py",),
+        changed_files=("scripts/implementation_agent.py",),
+        diff_fingerprint="c" * 64,
+        review_fingerprint="d" * 64,
+        focused_verification={
+            "status": "pass",
+            "commandIds": ["checkpoint-model-tests"],
+            "evidenceFingerprint": "e" * 64,
+        },
+        git_diff_check="pass",
+        generated_at="2026-09-01T00:00:00Z",
+    )
+
+    payload = evidence.to_dict()
+
+    assert payload["taskId"] == "implementation-runner-flag-parsing"
+    assert TaskCheckpointEvidence.from_dict(payload).to_dict() == payload
+
+
 def test_checkpoint_evidence_is_immutable_and_rejects_stale_parent() -> None:
     evidence = valid_evidence()
 
@@ -103,6 +127,23 @@ def test_commit_metadata_has_pending_final_acceptance_and_trailers() -> None:
         "NBS-Focused-Verification": "pass",
         "NBS-Final-Acceptance": "pending",
     }
+
+
+def test_raw_task_id_keeps_identity_and_gets_canonical_checkpoint_subject() -> None:
+    metadata = TaskCheckpointCommitMetadata(
+        task_id="implementation-runner-flag-parsing",
+        task_contract_fingerprint=SHA,
+        scope="keep runner argv",
+        allowed_files=("scripts/implementation_agent.py",),
+        parent_head=PARENT,
+        diff_fingerprint="c" * 64,
+        review_fingerprint="d" * 64,
+        focused_verification_status="pass",
+    )
+
+    assert metadata.subject() == "checkpoint(task-implementation-runner-flag-parsing): keep runner argv"
+    assert "Task-ID: implementation-runner-flag-parsing" in metadata.body()
+    assert metadata.trailers()["NBS-Task-ID"] == "implementation-runner-flag-parsing"
 
 
 def test_commit_metadata_rejects_empty_or_sensitive_scope() -> None:

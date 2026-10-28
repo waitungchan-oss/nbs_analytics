@@ -20,6 +20,7 @@ DOCUMENTATION_PROPOSAL_V2_SCHEMA = "documentation-proposal-v2"
 DOCUMENTATION_APPLICATION_V2_SCHEMA = "documentation-application-v2"
 DOCUMENTATION_TARGET_V2_SCHEMA = "documentation-target-v2"
 DOCUMENTATION_TARGET_POLICY_V2_SCHEMA = "documentation-target-policy-v2"
+MAX_DOCUMENTATION_TASK_BRIEF_BYTES = 16 * 1024
 
 TARGET_KINDS = frozenset({"brief_backfill", "system_map", "adr"})
 OPERATIONS = frozenset({"update_managed_block", "replace_section", "create_file"})
@@ -541,6 +542,9 @@ class DocumentationEvidenceV2:
     guardrails: dict[str, str]
     expected_section_sha256: str
     evidence_fingerprint: str
+    task_brief: str | None = None
+    task_brief_path: str | None = None
+    task_brief_sha256: str | None = None
 
     @property
     def canonical_fingerprint(self) -> str:
@@ -553,7 +557,10 @@ class DocumentationEvidenceV2:
             "sourceFingerprint", "selectedTargetId", "sources", "gateResults",
             "guardrails", "expectedSectionSha256", "evidenceFingerprint",
         }
-        _v2_keys(payload, fields, DOCUMENTATION_EVIDENCE_V2_SCHEMA)
+        brief_fields = {"taskBrief", "taskBriefPath", "taskBriefSha256"}
+        _v2_keys(payload, fields | (brief_fields & set(payload)), DOCUMENTATION_EVIDENCE_V2_SCHEMA)
+        if frozenset(payload) not in {frozenset(fields), frozenset(fields | brief_fields)}:
+            raise DocumentationSchemaError("task brief fields must be provided together")
         target_id = _string(payload["selectedTargetId"], "selectedTargetId")
         _target_dict(target_id)
         if not isinstance(payload["sources"], list) or not payload["sources"]:
@@ -584,6 +591,22 @@ class DocumentationEvidenceV2:
         _keys(guardrails, {"revenueScope", "mayBaseline"})
         if guardrails != {"revenueScope": _REVENUE_SCOPE, "mayBaseline": _MAY_BASELINE}:
             raise DocumentationSchemaError("guardrails do not match protected governance")
+        task_brief = None
+        task_brief_path = None
+        task_brief_sha256 = None
+        if brief_fields <= set(payload):
+            task_brief = _string(payload["taskBrief"], "taskBrief")
+            if len(task_brief.encode("utf-8")) > MAX_DOCUMENTATION_TASK_BRIEF_BYTES:
+                raise DocumentationSchemaError("taskBrief exceeds the bounded evidence size")
+            task_brief_path = _repo_relative_path(payload["taskBriefPath"], "taskBriefPath")
+            task_brief_sha256 = _hash(payload["taskBriefSha256"], "taskBriefSha256")
+            if sha256(task_brief.encode("utf-8")).hexdigest() != task_brief_sha256:
+                raise DocumentationSchemaError("taskBriefSha256 does not match taskBrief")
+            if not any(
+                item["path"] == task_brief_path and item["sha256"] == task_brief_sha256
+                for item in sources
+            ):
+                raise DocumentationSchemaError("task brief source is not bound in sources")
         commit_sha = _string(payload["commitSha"], "commitSha")
         if len(commit_sha) not in {40, 64} or any(char not in "0123456789abcdef" for char in commit_sha):
             raise DocumentationSchemaError("commitSha must be a lowercase Git object ID")
@@ -600,13 +623,16 @@ class DocumentationEvidenceV2:
             {key: _string(guardrails[key], key) for key in ("revenueScope", "mayBaseline")},
             _hash(payload["expectedSectionSha256"], "expectedSectionSha256"),
             _hash(payload["evidenceFingerprint"], "evidenceFingerprint"),
+            task_brief,
+            task_brief_path,
+            task_brief_sha256,
         )
         if model.canonical_fingerprint != model.evidence_fingerprint:
             raise DocumentationSchemaError("evidence fingerprint does not match canonical payload")
         return model
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schemaVersion": self.schema_version,
             "taskId": self.task_id,
             "generatedAt": self.generated_at,
@@ -620,6 +646,15 @@ class DocumentationEvidenceV2:
             "expectedSectionSha256": self.expected_section_sha256,
             "evidenceFingerprint": self.evidence_fingerprint,
         }
+        if (
+            self.task_brief is not None
+            and self.task_brief_path is not None
+            and self.task_brief_sha256 is not None
+        ):
+            payload["taskBrief"] = self.task_brief
+            payload["taskBriefPath"] = self.task_brief_path
+            payload["taskBriefSha256"] = self.task_brief_sha256
+        return payload
 
 
 @dataclass(frozen=True)

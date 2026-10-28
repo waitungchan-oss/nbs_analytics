@@ -14,7 +14,7 @@ CHECKPOINT_EVIDENCE_SCHEMA = "task-checkpoint-evidence-v1"
 CHECKPOINT_CLI_SCHEMA = "task-checkpoint-cli-v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
-_TASK_ID = re.compile(r"^task-[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_TASK_ID = re.compile(r"^(?:task-)?[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SENSITIVE = re.compile(r"(?:api[_-]?key|secret|token|password|credential|private[_-]?key)", re.IGNORECASE)
 
@@ -39,6 +39,10 @@ def _task_id(value: object) -> str:
     if not isinstance(value, str) or not _TASK_ID.fullmatch(value):
         raise TaskCheckpointEvidenceError("taskId is invalid")
     return value
+
+
+def _canonical_task_id(value: str) -> str:
+    return value if value.startswith("task-") else f"task-{value}"
 
 
 def _paths(values: object, name: str) -> tuple[str, ...]:
@@ -184,7 +188,7 @@ class TaskCheckpointCommitMetadata:
             raise TaskCheckpointEvidenceError("focused verification must be pass")
 
     def subject(self) -> str:
-        subject = f"checkpoint({self.task_id}): {self.scope}"
+        subject = f"checkpoint({_canonical_task_id(self.task_id)}): {self.scope}"
         if len(subject) > 72:
             raise TaskCheckpointEvidenceError("commit subject exceeds 72 characters")
         return subject

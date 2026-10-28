@@ -24,6 +24,8 @@ from .workflow_models import (
     canonical_sha256,
 )
 from .workflow_store import WorkflowStore
+from .verification_chain import git_source_probe
+from .verification_session import VerificationSession
 
 
 PROJECT_PYTHON = sys.executable
@@ -223,6 +225,7 @@ class VerifiedBackfillService:
             context_fingerprint = hashlib.sha256(context.read_bytes()).hexdigest() if context.is_file() else hashlib.sha256(b"missing-context").hexdigest()
         except (OSError, subprocess.TimeoutExpired):
             raise _Blocked("brief_read_failed")
+        source_binding = self._current_source_binding(identity)
         manifest = WorkflowManifest(
             MANIFEST_SCHEMA, run_id, BRIEF_PATH, hashlib.sha256(brief_bytes).hexdigest(),
             "main", identity["sourceCommit"], (), now, context_fingerprint,
@@ -243,9 +246,10 @@ class VerifiedBackfillService:
             "findingCount": review["findingCount"], "sourceCommit": review["sourceCommit"],
             "sourceBranch": review["sourceBranch"], "diffFingerprint": review["diffFingerprint"],
             "reviewFingerprint": review["reviewFingerprint"],
+            **source_binding,
         }
-        full = {"schemaVersion": "full-verification-v1", "status": "passed", "gateStatuses": {key: value["status"] for key, value in gates.items()}}
-        hermes = {"schemaVersion": "hermes-v1", "overallStatus": "pass"}
+        full = {"schemaVersion": "full-verification-v1", "status": "passed", "gateStatuses": {key: value["status"] for key, value in gates.items()}, **source_binding}
+        hermes = {"schemaVersion": "hermes-v1", "overallStatus": "pass", **source_binding}
         manifest_payload = VerifiedBackfillManifest.from_dict({
             "sourceCommit": identity["sourceCommit"], "sourceBranch": "main", "dirtyFiles": [],
             "gateHashes": {key: canonical_sha256(value) for key, value in gates.items() if key != "baseline"},
@@ -258,6 +262,51 @@ class VerifiedBackfillService:
         }
         self._atomic_create_run(run_id, manifest, status, approval, artifacts)
         return {"status": "completed", "runId": run_id, "reason": self._bounded_reason(reason)}
+
+    def _current_source_binding(self, identity: dict[str, Any]) -> dict[str, str]:
+        """Reuse a complete, still-current verification session for documentation evidence."""
+        sessions_root = self.project_root / ".nbs_agent_runtime" / "verification_sessions"
+        if sessions_root.is_symlink() or not sessions_root.is_dir():
+            raise _Blocked("source_session_unavailable")
+        session_dirs = sorted(sessions_root.iterdir(), key=lambda item: item.name)
+        if len(session_dirs) > 512:
+            raise _Blocked("source_session_limit_exceeded")
+        for session_dir in reversed(session_dirs):
+            session_path = session_dir / "session.json"
+            if session_dir.is_symlink() or not session_dir.is_dir() or session_path.is_symlink() or not session_path.is_file():
+                continue
+            try:
+                session = VerificationSession.from_dict(json.loads(session_path.read_text(encoding="utf-8")))
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if (
+                session.status != "complete"
+                or session.project_id != "nbs_analytics"
+                or session.head_sha != identity["sourceCommit"]
+            ):
+                continue
+            try:
+                current = git_source_probe(
+                    self.project_root,
+                    brief_path=session.brief_path,
+                    base_sha=session.base_sha,
+                    head_ref="WORKTREE",
+                    contract_path="docs/agents/REVIEW_AGENT_CONTRACT.md",
+                    policy_path="agent_config/token_budgets.json",
+                )
+                session.assert_fresh(
+                    head_sha=current["head_sha"],
+                    brief_fingerprint=current["brief_fingerprint"],
+                    worktree_fingerprint=current["worktree_fingerprint"],
+                    diff_fingerprint=current["diff_fingerprint"],
+                    contract_fingerprint=current["contract_fingerprint"],
+                    policy_fingerprint=current["policy_fingerprint"],
+                    source_probe_version=current["source_probe_version"],
+                )
+            except (OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
+                continue
+            return {"commitSha": session.head_sha, "sourceFingerprint": session.source_fingerprint}
+        raise _Blocked("source_session_unavailable")
 
     def _atomic_create_run(
         self, run_id: str, manifest: WorkflowManifest, status: WorkflowStatus,
