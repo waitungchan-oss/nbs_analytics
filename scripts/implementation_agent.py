@@ -43,7 +43,7 @@ _ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?:[^\s'\"<>]+)")
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one approved implementation task")
     parser.add_argument("--contract", required=True)
-    parser.add_argument("--agent-command", nargs="+")
+    parser.add_argument("--agent-command", nargs=argparse.REMAINDER)
     parser.add_argument("--collect-only", action="store_true")
     return parser
 

@@ -72,6 +72,19 @@ def test_validator_accepts_only_allowlisted_staged_change(tmp_path: Path) -> Non
     assert result.evidence.parent_head == parent
 
 
+def test_validator_accepts_raw_approved_task_id_and_preserves_it(tmp_path: Path) -> None:
+    repo = initialized_repo(tmp_path)
+    parent, diff = staged_change(repo)
+    task = contract()
+    task["taskId"] = "implementation-runner-flag-parsing"
+
+    result = validate_checkpoint(repo, task, verification(repo, parent, diff), expected_parent_head=parent)
+
+    assert result.status == "ready"
+    assert result.evidence is not None
+    assert result.evidence.task_id == "implementation-runner-flag-parsing"
+
+
 @pytest.mark.parametrize("mutation", ["parent_drift", "unrelated_dirty", "allowlist_violation", "failed_review", "stale_verification"])
 def test_validator_blocks_unsafe_checkpoint_mutation(tmp_path: Path, mutation: str) -> None:
     repo = initialized_repo(tmp_path)

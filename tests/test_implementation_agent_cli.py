@@ -199,3 +199,28 @@ def test_cli_fails_closed_before_runner_on_non_darwin(
     assert exit_code == 2
     assert json.loads(captured.out)["status"] == "blocked_invalid_contract"
     assert "unsupported on this platform" in captured.err
+
+
+def test_cli_preserves_runner_flags_after_agent_command(monkeypatch, contract_path: Path, capsys):
+    import scripts.implementation_agent as cli
+
+    captured_runner_argv = []
+    monkeypatch.setattr(
+        cli, "_load_agent_runner",
+        lambda argv, _contract: captured_runner_argv.extend(argv) or (lambda _request: {}),
+    )
+    monkeypatch.setattr(cli.ImplementationAgentService, "execute", lambda self, contract, runner: {
+        "schemaVersion": "implementation-run-report-v1",
+        "status": "validation_failed",
+    })
+
+    exit_code = cli.main([
+        "--contract", str(contract_path), "--agent-command", "codex", "exec",
+        "--json", "--sandbox", "workspace-write", "-m", "gpt-5.6-luna",
+    ])
+
+    assert exit_code == 3
+    assert captured_runner_argv == [
+        "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "gpt-5.6-luna",
+    ]
+    assert json.loads(capsys.readouterr().out)["status"] == "validation_failed"
