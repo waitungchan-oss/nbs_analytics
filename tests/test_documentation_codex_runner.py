@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 from backend.agents.documentation_codex_runner import (
@@ -71,7 +72,17 @@ def _v2_evidence(**updates):
         "commitSha": "b" * 40,
         "sourceFingerprint": "c" * 64,
         "selectedTargetId": "handoff.current-conclusion",
-        "sources": [{"path": "NBS_ANALYTICS_HANDOFF.md", "sha256": "d" * 64}],
+        "taskBrief": "Update the fixed handoff conclusion with verified release status.",
+        "taskBriefPath": "docs/briefs/task.md",
+        "taskBriefSha256": sha256(
+            b"Update the fixed handoff conclusion with verified release status."
+        ).hexdigest(),
+        "sources": [
+            {"path": "NBS_ANALYTICS_HANDOFF.md", "sha256": "d" * 64},
+            {"path": "docs/briefs/task.md", "sha256": sha256(
+                b"Update the fixed handoff conclusion with verified release status."
+            ).hexdigest()},
+        ],
         "gateResults": [
             {"gate": name, "status": "pass", "sourceFingerprint": "c" * 64,
              "evidenceFingerprint": chr(54 + index) * 64}
@@ -141,6 +152,8 @@ def test_runner_v2_accepts_only_matching_target_id_and_schema():
 
     assert result.exit_code == 0
     assert fake.argv[-1] == CODEX_DOCUMENTATION_V2_INSTRUCTION
+    assert "taskBrief" in CODEX_DOCUMENTATION_V2_INSTRUCTION
+    assert "draftFingerprint" in CODEX_DOCUMENTATION_V2_INSTRUCTION
 
     mismatch = CodexDocumentationRunner(FakeSubprocess(
         FakeProcess(stdout=_v2_draft(evidence, target_id="runbook.shard-boundary").encode()),

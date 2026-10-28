@@ -158,6 +158,8 @@ class DocumentationAgentService:
             target = load_documentation_target(evidence.selected_target_id)
         except DocumentationSchemaError as exc:
             raise DocumentationValidationError("invalid or non-catalogued v2 evidence") from exc
+        if evidence.task_brief is None or evidence.task_brief_sha256 is None:
+            raise DocumentationValidationError("v2 evidence is missing the approved task brief")
         required_gates = {"review", "full-verification", "hermes"}
         if (
             {item["gate"] for item in evidence.gate_results} != required_gates

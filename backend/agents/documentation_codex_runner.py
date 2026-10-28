@@ -32,7 +32,12 @@ CODEX_DOCUMENTATION_V2_INSTRUCTION = (
     "status, proposals, and draftFingerprint. Emit exactly one proposals entry containing only targetId "
     "and content; targetId must exactly equal selectedTargetId from the evidence. Content is replacement "
     "text for that one fixed section and must not contain a heading, path, approval, or another target. "
-    "Preserve the evidenceFingerprint and calculate the canonical draftFingerprint. Do not use tools, "
+    "Use taskBrief as the task scope and source of requested changes. Make only claims supported by the "
+    "taskBrief, gateResults, sourceFingerprint, commitSha, and guardrails; gateResults do not contain test "
+    "counts or UI/release aggregate status. Preserve the evidenceFingerprint. Set status to ready when the "
+    "taskBrief and evidence are sufficient; use blocked only when they are insufficient, and still return "
+    "a complete valid draft. Calculate draftFingerprint as SHA-256 over UTF-8 canonical JSON of the draft "
+    "without draftFingerprint, using sorted keys, ensure_ascii=false, and separators(',', ':'). Do not use tools, "
     "access files, network, Git, SQLite, or a vault. Do not emit markdown fences or commentary."
 )
 _STDERR_TAIL_BYTES = 4 * 1024
