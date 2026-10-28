@@ -168,6 +168,36 @@ def test_runner_v2_accepts_only_matching_target_id_and_schema():
     assert wrong_schema.exit_code == -2
 
 
+def test_runner_v2_computes_missing_draft_fingerprint_after_validation():
+    evidence = _v2_evidence()
+    draft = json.loads(_v2_draft(evidence))
+    draft["draftFingerprint"] = None
+    fake = FakeSubprocess(FakeProcess(
+        stdout=json.dumps(draft, ensure_ascii=False).encode(),
+    ))
+
+    result = CodexDocumentationRunner(fake).run(
+        ("codex",), input_text=json.dumps(evidence), timeout_seconds=120,
+        max_output_bytes=65536,
+    )
+
+    normalized = json.loads(result.stdout)
+    fingerprint_payload = {key: value for key, value in normalized.items()
+                           if key != "draftFingerprint"}
+    assert result.exit_code == 0
+    assert normalized["draftFingerprint"] == canonical_sha256(fingerprint_payload)
+
+    invalid = json.loads(_v2_draft(evidence, target_id="runbook.shard-boundary"))
+    invalid["draftFingerprint"] = None
+    rejected = CodexDocumentationRunner(FakeSubprocess(FakeProcess(
+        stdout=json.dumps(invalid, ensure_ascii=False).encode(),
+    ))).run(
+        ("codex",), input_text=json.dumps(evidence), timeout_seconds=120,
+        max_output_bytes=65536,
+    )
+    assert rejected.exit_code == -2
+
+
 def test_runner_uses_explicit_local_auth_home_without_serializing_it(tmp_path, monkeypatch):
     auth_home = tmp_path / "codex-auth"
     monkeypatch.setenv("NBS_DOCUMENTATION_CODEX_HOME", str(auth_home))

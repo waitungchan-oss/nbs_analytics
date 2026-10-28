@@ -12,6 +12,7 @@ from .documentation_models import (
     DocumentationDraft, DocumentationDraftV2, DocumentationEvidenceV2,
     DocumentationSchemaError,
 )
+from .workflow_models import canonical_sha256
 
 
 CODEX_DOCUMENTATION_INSTRUCTION = (
@@ -107,10 +108,17 @@ class CodexDocumentationRunner:
         raw_output = stdout.decode("utf-8", errors="replace")
         output = raw_output
         output = self._extract_agent_message(output)
-        if len(output.encode("utf-8")) > max_output_bytes or not self._valid_draft(output, evidence):
+        if len(output.encode("utf-8")) > max_output_bytes:
             return DocumentationRunnerResult(
                 -2, self._bounded_text(output, max_output_bytes), stderr.decode("utf-8", errors="replace"), self._duration(started),
             )
+        normalized_output = self._normalize_draft(output, evidence)
+        if normalized_output is None or len(normalized_output.encode("utf-8")) > max_output_bytes:
+            return DocumentationRunnerResult(
+                -2, self._bounded_text(normalized_output or output, max_output_bytes),
+                stderr.decode("utf-8", errors="replace"), self._duration(started),
+            )
+        output = normalized_output
         # A valid, fingerprint-bound draft is the contract boundary; CLI warnings
         # must not discard an otherwise safe structured result.
         return DocumentationRunnerResult(
@@ -149,6 +157,48 @@ class CodexDocumentationRunner:
         except (TypeError, json.JSONDecodeError, DocumentationSchemaError):
             return False
         return draft.evidence_fingerprint == evidence["evidenceFingerprint"]
+
+    @classmethod
+    def _normalize_draft(cls, output: str, evidence: dict[str, Any]) -> str | None:
+        if evidence.get("schemaVersion") != "documentation-evidence-v2":
+            return output if cls._valid_draft(output, evidence) else None
+        try:
+            payload = json.loads(output)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("draftFingerprint") is not None:
+            return output if cls._valid_draft(output, evidence) else None
+
+        expected_keys = {
+            "schemaVersion", "evidenceFingerprint", "status", "proposals", "draftFingerprint",
+        }
+        proposals = payload.get("proposals")
+        if (
+            set(payload) != expected_keys
+            or payload.get("schemaVersion") != "documentation-draft-v2"
+            or payload.get("evidenceFingerprint") != evidence.get("evidenceFingerprint")
+            or not isinstance(proposals, list)
+            or len(proposals) != 1
+            or not isinstance(proposals[0], dict)
+            or set(proposals[0]) != {"targetId", "content"}
+            or proposals[0].get("targetId") != evidence.get("selectedTargetId")
+        ):
+            return None
+
+        fingerprint_payload = {key: value for key, value in payload.items()
+                               if key != "draftFingerprint"}
+        normalized = dict(payload)
+        normalized["draftFingerprint"] = canonical_sha256(fingerprint_payload)
+        try:
+            draft = DocumentationDraftV2.from_dict(normalized)
+        except (TypeError, DocumentationSchemaError):
+            return None
+        if (
+            draft.evidence_fingerprint != evidence["evidenceFingerprint"]
+            or draft.proposals[0]["targetId"] != evidence["selectedTargetId"]
+        ):
+            return None
+        return json.dumps(normalized, ensure_ascii=False)
 
     @staticmethod
     def _extract_agent_message(output: str) -> str:
