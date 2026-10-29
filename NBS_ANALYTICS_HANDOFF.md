@@ -16,23 +16,15 @@ Git 狀態：本地 `main` 與 `origin/main` 對齊；本輪 documentation commi
 
 ## 1. 本輪交接結論
 
-NBS Analytics 現在不只是 session-only 分析工具，而是一套以 Streamlit、FastAPI、SQLite、版本化報表 cache 與受控 Agent verification chain 組成的本地企業營運駕駛艙。
+NBS Analytics 是以 Streamlit、FastAPI、SQLite、版本化報表 cache 與受控 Agent verification chain 組成的本地企業營運駕駛艙。正式營收口徑為「不含掛賬核銷與TT退款轉團款」；2026-05 frozen baseline 為 HKD 12,057,968。
 
-下一個對話可以直接在以下專案繼續：
+截至 2026-10-29，`handoff.current-conclusion` 與 `handoff.verification-snapshot` 對應的兩節已依使用者批准的一次性 inline 文檔例外，手動套用至主 checkout。正式 Documentation v2 的 preview／application artifact 尚未重建；原單 target apply 會在修改第一節後使同檔第二份 preview 過期，atomic multi-target apply 的回歸測試已提交，實作仍待完成。此前聲稱「只差一步」不準確。
 
-```text
-/Users/chanwaitung2025/Downloads/nbs_analytics
-```
+Node sandbox bootstrap 已在獨立 worktree 提交為 `5afeded`，並取得 fresh Strict Review PASS；receipt-boundary 的正式 run `run-95153db834304fe7a0705124797f79c2` 因 sandbox 無法讀取 `@openai/codex-darwin-arm64` 原生套件而失敗，未修改任務目標檔。若要恢復正式 v2 流程，仍需重新產生並核對其 preview artifact。
 
-不要修改：
+本次手動回填只確認上述兩節的文字已更新；不構成 Documentation v2 正式 application，也不代表 release aggregate PASS。若要恢復受控 runner 流程，仍需處理 sandbox 原生套件讀取與後續驗證。
 
-```text
-/Users/chanwaitung2025/Downloads/dashboard-project
-```
-
-`dashboard-project` 是另一個展示型旅遊 dashboard；本文件只交接 `nbs_analytics`。
-
-本輪只更新 handoff/spec/plan 文件，不修改程式碼、SQLite、正式業務資料、baseline、業務規則或 runtime。
+專案主 checkout：`/Users/chanwaitung2025/Downloads/nbs_analytics`。`dashboard-project` 是另一個專案，不屬於本輪範圍。
 
 ---
 
@@ -233,21 +225,11 @@ Strict Review、full pytest、Hermes 與 UI acceptance 是四個獨立 gate；�
 
 ### 5.3 最近驗證快照
 
-- 本次 runner identity implementation commit：`64717c62e0e13e777563d9e3c14a95eedda34f8c`。
-- Runner identity、Local CLI、capability/cache、verification chain 與 Hermes adapter affected pack：`196 passed`。
-- merged `main` full pytest：`2558 passed in 110.91s`；使用受控 elevated environment，因 Codex sandbox 無法執行 macOS `sandbox-exec`。
-- 本次變更的 Strict Review：尚未重跑；不沿用歷史 `review_passed` 作為 current PASS。
-- 本次 Hermes post-change：尚未形成 PASS；fresh isolated worktree 曾因 services 未啟動及 SQLite 實際讀值 `HKD 0` 而 fail/block。
-- 本次 UI acceptance：`not required / not run`，因本次未修改 UI。
-
-上述結果是歷史 evidence，不等於下一輪修改後的驗證結果。任何新實作都必須建立 fresh source-bound evidence，不能沿用舊 PASS 宣稱完成。
-
-相關規格與計畫：
-
-- `docs/superpowers/specs/2026-08-31-strict-review-evidence-preflight-design.md`
-- `docs/superpowers/plans/2026-08-31-strict-review-evidence-preflight.md`
-- `docs/superpowers/specs/2026-08-28-strict-review-verification-chain-design.md`
-- `docs/superpowers/plans/2026-08-28-strict-review-verification-chain.md`
+- 2026-10-29 Node sandbox bootstrap：`tests/test_agent_runtime.py` 為 `58 passed`，真實 macOS sandbox 執行 Node shebang 成功；Strict Review session `0d941876-f695-4cc3-bf37-b581790a6351` 為 `review_passed`。checkpoint commit：`5afeded`，`Final-Acceptance: pending`。
+- Receipt-boundary run `run-95153db834304fe7a0705124797f79c2`：RED 驗證如預期失敗；Implementation 階段因缺少 `@openai/codex-darwin-arm64` 的 sandbox 讀取權限而 `runtime_error`；`changedFiles=[]`。
+- 最近一次 full pytest（Node bootstrap 提交前）為 `3607 passed, 1 skipped, 2 failed`；失敗分別對應尚未實作的 atomic apply 和 receipt-boundary runner 行為。這份歷史結果不能作為目前 source 的 release PASS。
+- 兩個 handoff target 對應的章節已依一次性 inline 例外手動更新；正式 v2 preview／application artifact 尚未產生。先前主 checkout 的 `documentation-preview.json` 屬 v1 brief／system map 流程，不適用於這兩節。
+- Hermes、UI acceptance 與 release aggregate 尚未對目前 source 形成 fresh PASS。
 
 ---
 
