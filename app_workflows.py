@@ -144,6 +144,7 @@ EXPORT_CACHE_VERSION = 'export-lazy-v4'
 EXPORT_FAST_PATH_MODE = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", "shadow").strip().lower()
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v2'
 BETA_EXPORT_VARIANT = "beta_market_ecommerce_peer_sales_points_v5"
+BETA_EXPORT_CACHE_VERSION = "beta-export-persistent-v1"
 BETA_EXPORT_WORKBOOK_KEYS = (
     "ex_beta",
     "ex_no_writeoff_beta",
@@ -1058,6 +1059,66 @@ def _load_export_runtime_cache(cache_key: str) -> dict | None:
 
 def _save_export_runtime_cache(cache_key: str, data: dict) -> bool:
     return _save_pickle_cache(_export_cache_path(cache_key), EXPORT_CACHE_VERSION, data)
+
+
+def _beta_export_runtime_cache_key(cache: dict) -> str | None:
+    formal_key = cache.get("export_cache_key")
+    if not formal_key:
+        return None
+    digest = hashlib.sha256()
+    for key in ("raw_t", "raw_o", "beta_exception_tour", "beta_exception_others"):
+        frame = cache.get(key)
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame()
+        digest.update(key.encode("utf-8"))
+        digest.update(repr(tuple(frame.columns)).encode("utf-8"))
+        digest.update(pd.util.hash_pandas_object(frame, index=True).values.tobytes())
+    identity = f"{BETA_EXPORT_CACHE_VERSION}|{BETA_EXPORT_VARIANT}|{OFFICIAL_EXPORT_SCHEMA_CONTRACT}|{formal_key}|{digest.hexdigest()}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+
+
+def _beta_export_runtime_cache_path(cache_key: str) -> Path:
+    return AI_CACHE_DIR / f"beta_export_{cache_key}.pkl"
+
+
+def _load_beta_export_workbooks(cache: dict) -> bool:
+    cache_key = _beta_export_runtime_cache_key(cache)
+    if not cache_key:
+        return False
+    payload = _load_pickle_cache(_beta_export_runtime_cache_path(cache_key), BETA_EXPORT_CACHE_VERSION)
+    if not isinstance(payload, dict) or payload.get("cache_key") != cache_key or not _beta_export_cache_is_current(payload):
+        return False
+    cache.update(payload)
+    st.session_state["PROCESSED_DATA_CACHE"] = cache
+    return True
+
+
+def _ensure_beta_export_workbooks(cache: dict) -> bool:
+    if _beta_export_cache_is_current(cache):
+        return True
+    if _load_beta_export_workbooks(cache):
+        return True
+    cache_key = _beta_export_runtime_cache_key(cache)
+    if not cache_key:
+        return False
+    path = _beta_export_runtime_cache_path(cache_key)
+    computed = _compute_beta_export_workbooks(
+        cache.get("raw_t", pd.DataFrame()),
+        cache.get("raw_o", pd.DataFrame()),
+        beta_exception_tour=cache.get("beta_exception_tour", pd.DataFrame()),
+        beta_exception_others=cache.get("beta_exception_others", pd.DataFrame()),
+    )
+    payload = {key: computed.get(key) for key in BETA_EXPORT_WORKBOOK_KEYS}
+    payload["beta_export_variant"] = computed.get("export_variant")
+    payload["beta_sales_point_filter"] = computed.get("sales_point_filter")
+    payload["cache_key"] = cache_key
+    if not _beta_export_cache_is_current(payload):
+        return False
+    if not _save_pickle_cache(path, BETA_EXPORT_CACHE_VERSION, payload):
+        return False
+    cache.update(payload)
+    st.session_state["PROCESSED_DATA_CACHE"] = cache
+    return True
 
 def _buffer_to_bytes(buffer: io.BytesIO | None) -> bytes | None:
     if buffer is None:
