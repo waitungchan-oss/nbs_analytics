@@ -52,8 +52,9 @@ from app_workflows import (
     _clean_editor_list,
     _combined_max_date,
     _compute_ai_cleaning_suggestions,
-    _compute_beta_export_workbooks,
     _beta_export_cache_is_current,
+    _load_beta_export_workbooks,
+    _ensure_beta_export_workbooks,
     _compute_causal_driver_analytics,
     _compute_data_quality_scorecard,
     _compute_feature_store_lead_signals,
@@ -2401,25 +2402,20 @@ def _render_ai_and_exports(cache: dict) -> None:
             else:
                 st.info("目前沒有清洗異常日誌可下載。")
 
-        beta_keys = BETA_EXPORT_WORKBOOK_KEYS
         beta_loaded = _beta_export_cache_is_current(cache)
+        if not beta_loaded:
+            beta_loaded = _load_beta_export_workbooks(cache)
         st.markdown("#### Beta comparison export")
         st.caption(
             f"原專職表格替換為合併銷售點群組「{BETA_COMPARISON_SALES_POINT_LABEL}」資料，並新增「分社經營統計_含銷售員」；Beta-only exception 與原範圍不變。正式 Dashboard、Forecast 與正式下載不變。"
         )
         if not beta_loaded and st.button("準備 Beta 市場電商及同業比較匯出", key="PREPARE_BETA_ECOMMERCE_EXPORT"):
             with st.spinner(f"正在生成 Beta {BETA_COMPARISON_SALES_POINT_LABEL}比較匯出..."):
-                beta_payload = _compute_beta_export_workbooks(
-                    cache.get("raw_t", pd.DataFrame()),
-                    cache.get("raw_o", pd.DataFrame()),
-                    beta_exception_tour=cache.get("beta_exception_tour", pd.DataFrame()),
-                    beta_exception_others=cache.get("beta_exception_others", pd.DataFrame()),
-                )
-            cache.update({key: beta_payload.get(key) for key in beta_keys})
-            cache["beta_export_variant"] = beta_payload.get("export_variant")
-            cache["beta_sales_point_filter"] = beta_payload.get("sales_point_filter")
-            st.session_state["PROCESSED_DATA_CACHE"] = cache
-            st.rerun()
+                beta_loaded = _ensure_beta_export_workbooks(cache)
+            if beta_loaded:
+                st.rerun()
+            else:
+                st.error("Beta 匯出準備失敗，請檢查目前資料與快取目錄。")
         if beta_loaded:
             st.download_button(
                 "下載 Beta 市場電商及同業比較匯出（正式口徑）",

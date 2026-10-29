@@ -601,6 +601,67 @@ def test_beta_export_cache_requires_current_variant_and_all_three_workbooks():
     assert not app_workflows._beta_export_cache_is_current(incomplete_payload)
 
 
+def test_beta_export_persistent_cache_survives_refresh_and_invalidates_on_inputs(tmp_path, monkeypatch):
+    import app_workflows
+
+    monkeypatch.setattr(app_workflows, "AI_CACHE_DIR", tmp_path)
+    calls = []
+
+    def fake_compute(*args, **kwargs):
+        calls.append(1)
+        return {
+            **{key: f"workbook-{len(calls)}".encode() for key in app_workflows.BETA_EXPORT_WORKBOOK_KEYS},
+            "export_variant": app_workflows.BETA_EXPORT_VARIANT,
+            "sales_point_filter": [],
+        }
+
+    monkeypatch.setattr(app_workflows, "_compute_beta_export_workbooks", fake_compute)
+
+    def fresh_cache(formal_key="formal-1", exception_amount=10):
+        return {
+            "export_cache_key": formal_key,
+            "raw_t": pd.DataFrame({"單號": ["1"], "金額": [100]}),
+            "raw_o": pd.DataFrame(),
+            "beta_exception_tour": pd.DataFrame({"單號": ["2"], "金額": [exception_amount]}),
+            "beta_exception_others": pd.DataFrame(),
+        }
+
+    first = fresh_cache()
+    assert app_workflows._ensure_beta_export_workbooks(first)
+    assert len(calls) == 1
+    refreshed = fresh_cache()
+    assert app_workflows._load_beta_export_workbooks(refreshed)
+    assert refreshed["ex_no_writeoff_refund_transfer_beta"] == b"workbook-1"
+    assert len(calls) == 1
+
+    assert not app_workflows._load_beta_export_workbooks(fresh_cache(exception_amount=20))
+    assert not app_workflows._load_beta_export_workbooks(fresh_cache(formal_key="formal-2"))
+    changed_source = fresh_cache()
+    changed_source["raw_t"].loc[0, "金額"] = 101
+    assert not app_workflows._load_beta_export_workbooks(changed_source)
+
+    monkeypatch.setattr(app_workflows, "BETA_EXPORT_VARIANT", "beta-next-version")
+    assert not app_workflows._load_beta_export_workbooks(fresh_cache())
+
+
+def test_beta_export_persistent_cache_reports_disk_write_failure(tmp_path, monkeypatch):
+    import app_workflows
+
+    monkeypatch.setattr(app_workflows, "AI_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(app_workflows, "_save_pickle_cache", lambda *args: False)
+    monkeypatch.setattr(
+        app_workflows,
+        "_compute_beta_export_workbooks",
+        lambda *args, **kwargs: {
+            **{key: b"workbook" for key in app_workflows.BETA_EXPORT_WORKBOOK_KEYS},
+            "export_variant": app_workflows.BETA_EXPORT_VARIANT,
+        },
+    )
+    cache = {"export_cache_key": "formal", "raw_t": pd.DataFrame(), "raw_o": pd.DataFrame()}
+    assert not app_workflows._ensure_beta_export_workbooks(cache)
+    assert not app_workflows._beta_export_cache_is_current(cache)
+
+
 def test_beta_cache_identity_differs_from_formal_identity():
     import app_workflows
 
