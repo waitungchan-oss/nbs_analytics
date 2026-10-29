@@ -1,9 +1,21 @@
 # NBS Analytics 專案全面分析與評估報告
 
-> 評估日期：2026-08-18
+> 原始評估日期：2026-08-18
+> 現況補記日期：2026-10-29
 > 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`
 > 評估範圍：系統架構、程式碼品質、資料治理、agent 治理機制、測試與驗證現況、安全風險
 > 評估方式：靜態盤點 + 四個維度的程式碼深讀 + 實際執行驗證（py_compile / pytest / 業務日曆 / SQLite / Hermes）
+
+> **閱讀方式：**本文主體是 2026-08-18 的歷史評估，不應把其中的行數、測試結果、漏洞狀態或建議直接視為目前事實。2026-10-29 的補記只更新可從當前 Git 與既有唯讀 snapshot 證實的部分；本次沒有重新審計 API 安全、資料庫、完整測試套件或本機 Hermes。
+
+## 現況補記（2026-10-29）
+
+- 本次乾淨 main source snapshot 為 `4f287ec76a552826214d558e7954fa28c9036648`；文件所在工作目錄則是 `codex/beta-export-dedup@53441a0`，且有未提交檔案。不能把工作目錄狀態等同 main 或部署狀態。
+- PR #79 已合併；其 CI 記錄中的 Full pytest、Hermes、UI acceptance、Hermes Governance Graph、macOS sandbox 和 release aggregate 為 PASS。這是該 PR 的 CI 證據，不是本次重新執行；不能由 aggregate 推定 Strict Review PASS。
+- 2026-10-29 的唯讀 Agent runtime snapshot 記錄 381 個 canonical workflow status（370 awaiting_authorization、9 completed、2 blocked），並特別註明這不是執行中 process 數。Memory Hub catalog 有 3 個來源，均已過期；本次未查詢 Hub。這些屬本機 runtime metadata，不代表程式碼品質或正式資料狀態。
+- 專案地圖已更新至 2026-10-29，並將 2026-07 的 SQLite 行數／Acceptance Record 和 2026-08 的效能數字保留為歷史值；本次沒有重新讀取正式 SQLite 或執行全套驗收。詳見 [NBS_ANALYTICS_SYSTEM_MAP.md](../NBS_ANALYTICS_SYSTEM_MAP.md) 與 [Agent Memory Map snapshot](https://github.com/waitungchan-oss/nbs_analytics/blob/53441a01676c8555146e349c73f68ef04bcbd1f6/Summay/AGENT_MEMORY_MAP_2026-09-05/REPORT.md)。
+
+**目前判斷：**2026-08 的安全、架構和效能問題清單應視為待重新驗證的 audit findings，而非已確認仍存在或已修復。要發布新的當前風險評估，需對指定 source commit 重跑程式碼檢查、完整 pytest、資料庫檢查與 Hermes，並記錄各項 evidence 的版本與時間。
 
 ---
 
@@ -88,7 +100,7 @@ Brief → Context Agent (collect-only) → Codex 規劃 → 使用者授權
 
 ---
 
-## 4. 量化規模盤點
+## 4. 量化規模盤點（2026-08-18 歷史快照）
 
 | 維度 | 數字 |
 |---|---|
@@ -123,7 +135,9 @@ Brief → Context Agent (collect-only) → Codex 規劃 → 使用者授權
 
 ---
 
-## 6. 問題與風險（依嚴重度）
+## 6. 歷史問題與風險清單（2026-08-18；未按目前 source 重驗）
+
+以下 P0/P1/P2/P3 分類與程式行為均來自原評估。除非另有新 evidence，不應以此節判定風險目前仍存在或已解除。
 
 ### 🔴 P0 — 安全與正確性
 
@@ -157,7 +171,7 @@ Brief → Context Agent (collect-only) → Codex 規劃 → 使用者授權
 - **Governance Graph D1–E4**（24 檔 4,486 行）是 read-only 衍生 read model，**不驅動任何決策**，只供顯示。
 - **測試倒掛**：agent 相關測試 25,618 行 > agent 實作 19,332 行，且集中在 schema/fingerprint 邊界，而非 business rules / baseline。真正承載資料正確性的 `pipeline.py` / `database.py` / `forecasting.py` **直接單元測試稀少**。
 - 多個 service（`governance_telemetry_service`、`restore_drill_service`、`verification_runtime_snapshot`、965 行的 `agent_operations_service`）**不被任何 FastAPI router 使用**，只被 Streamlit/scripts/tests 呼叫，放在 `services/` 造成職責模糊。
-- **文件治理滯後**：文件記錄的驗收數字（329/474/350 passed）已落後於實際測試套件（2000+ tests），`SYSTEM_MAP.md` 記載的資料狀態（6,676/22,571 行、2026-07-13）也已落後於現況（7,390/27,855 行、2026-08-17）。
+- **文件治理滯後（2026-08-18 觀察）**：當時文件中的驗收數字與資料庫行數已出現版本落差；2026-10-29 已補記系統地圖的歷史資料界線，但尚未重新核實目前 SQLite 行數或全套測試數。
 
 **判斷**：呈現典型的「為治理而治理 / yak-shaving」螺旋 —— 為了治理 agent 而不斷建立更複雜的治理工具，而治理工具本身又需要更多治理。核心業務（本質上單人使用的本地 dashboard）並不需要 40 個 agent 模組 + 21 個 worktree + 169 次 agent run 來支撐。
 
@@ -175,7 +189,7 @@ Brief → Context Agent (collect-only) → Codex 規劃 → 使用者授權
 
 ---
 
-## 7. 驗證現況（實測結果）
+## 7. 歷史驗證結果（2026-08-18；不可視為目前 gate）
 
 ### 7.1 健康檢查（全數通過）
 
@@ -201,7 +215,7 @@ Brief → Context Agent (collect-only) → Codex 規劃 → 使用者授權
 
 ---
 
-## 8. 總體評價
+## 8. 原評估總體評價（2026-08-18）
 
 **核心系統是扎實且可信的**：資料清洗、正式口徑、frozen baseline、single-writer、rollback、generation 簽章的治理閉環，在本地財務報表系統中是難得的高紀律工程。AI 預測與診斷分離、read-only 診斷層不污染正式資料，這些設計都是對的。
 
@@ -209,7 +223,7 @@ Brief → Context Agent (collect-only) → Codex 規劃 → 使用者授權
 
 ---
 
-## 9. 建議優先序
+## 9. 原評估建議優先序（2026-08-18；執行前需重新核實）
 
 1. **先堵 P0 安全**：API 加認證（至少 upload/targets PUT）；`verification_profile` 限制在 project_root 內並 whitelist 檔名；`pickle.loads` 改 JSON + signature 驗證或移出可寫目錄；統一 exception handler 不外洩內部型別。
 2. **收斂 agent 治理**：三套記憶機制合併為一套 read-only catalog；凍結 `governance_graph` D2–E4 的繼續擴張；把測試重心移回 business rules / baseline / upload。

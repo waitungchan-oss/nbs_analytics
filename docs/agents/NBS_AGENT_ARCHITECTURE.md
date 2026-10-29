@@ -2,7 +2,7 @@
 
 狀態：active
 版本：v1.1 Evidence Bundle and Implementation Pipeline
-日期：2026-07-15
+最後核對：2026-10-29
 
 ## 1. 文件目的
 
@@ -103,7 +103,7 @@ flowchart TD
 | Codex | 建立/批准 Task contract、分派單一 Task、檢查 report 與 diff、處理 findings、完整驗證、Hermes 與整合 | 把未驗證輸出當成完成證據 |
 | Implementation Agent | 在獨立 worktree 內執行一個已批准 allowlisted Task，提交 final implementation report 與實際 diff | 決定下一 Task、commit、merge、push、正式 SQLite、baseline、rollback、完整驗證或 Hermes |
 | Review Agent | requirement coverage、diff findings、測試缺口、residual risk | 修改檔案、取代 Hermes、正式 baseline 裁決 |
-| Documentation Agent | 只讀 `documentation-evidence-v1`，輸出 `documentation-proposal-v1` | auto-apply、target approval、repo/Obsidian/SQLite/runtime/Git 寫入、主 Codex fallback |
+| Documentation Agent | v1 讀取 `documentation-evidence-v1` 並輸出 proposal；v2 為固定 target 產生 evidence/proposal/preview | auto-apply、target approval、repo/Obsidian/SQLite/runtime/Git 寫入、主 Codex fallback |
 | Hermes | runtime、SQLite integrity、baseline、服務、Git 與系統驗收；只 read-only 檢查 documentation sidecar schema/status/cap | 執行 documentation runner、preview/apply、backup、Git 或 Obsidian 寫入 |
 
 Review Agent 的 `pass` 只代表可以進入完整驗證及 Hermes，不代表正式系統已完成驗收。
@@ -119,6 +119,8 @@ Memory Sidecar 是 provider-neutral、non-authoritative 的 bounded hint sidecar
 功能變更在 Review PASS、full verification PASS 與 Hermes PASS 後，Codex 才可針對同一 completed run 呼叫 `agent_workflow.py document`。v1 流程維持 `documentation-evidence-v1` → `documentation-proposal-v1`，歷史 v1 artifacts 不遷移。v2 為額外 target-bound repo workflow；runner 必須明確批准，缺少 runner 時 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。
 
 v2 只接受五個固定 IDs：`handoff.current-conclusion`、`handoff.verification-snapshot`、`runbook.pipeline-rollout-gate`、`runbook.shard-boundary`、`runbook.parallel-rollout-boundary`。Catalog 決定 repo path/section/operation，CLI 不接受任意路徑；先以 `--target-id <id>` 產生 evidence/proposal/preview，再以同一 `--target-id <id> --approve-target-id <id>` 明確批准 apply。Evidence 綁定 run ID、commit SHA、source fingerprint、gate/source hashes、target section hash，以及從 manifest briefPath 讀取並核對 briefSha256 的 UTF-8 任務 brief（最多 16 KiB）。Runner 以 brief 界定更新範圍，事實必須有 brief 或 gate evidence 支持；gate status 不可推導測試數或 release aggregate。Legacy v2 evidence 可唯讀解析，但缺少已核對 brief 時不可產生 preview。Draft fingerprint 必須符合 canonical JSON SHA-256。Apply 必須重收 evidence 並與 saved preview 比對，stale/missing/malformed 或 approval mismatch 一律 blocked。目標 section 不存在時不可自行建立替代路徑。
+
+v2 CLI 一次只處理一個 target。若多個 target 共用同一 Markdown 檔案，前一個 target apply 會改變該檔案內容；套用下一個 target 前，必須依更新後的 source 重新產生 preview、重新 Review 並再次明確批准。不得把舊 preview 當作同檔多 target 的原子批次，也不得自行宣稱有 multi-target atomic apply。
 
 Documentation Agent 只產生 proposal，永遠不得 auto-apply、批准 targets 或修改 repo、Obsidian、Hermes/terminal state、SQLite、baseline、runtime、Git。Agent Operations 只顯示 sidecar 的 bounded status/counts；Hermes 對 v1 五個既有 artifacts 與 v2 四個 target-scoped artifacts 做 read-only schema/status/fingerprint/lineage/cap/permission inspection，不呼叫 runner、不 preview/apply、不寫 gate。`documentation-hermes-report-v1` 不屬於正式 release gate，不表示 handoff/runbook 已完成回填。正式 release gate 仍只由 Full pytest、Hermes、UI acceptance 的 fresh source-bound evidence 組成。
 

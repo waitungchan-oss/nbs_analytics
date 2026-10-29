@@ -1,5 +1,7 @@
 # NBS Analytics Agent Instructions
 
+最後核對：2026-10-29。一次性 inline exception 只授權其明列的 Task、檔案與目的，不會永久修改本文件的流程、runner 或 allowlist 規則。
+
 正式修改前先讀 `docs/agents/NBS_AGENT_ARCHITECTURE.md` 與 `docs/agents/CODEX_AGENT_DISPATCH.md`。
 
 治理文件：`docs/agents/NBS_AGENT_ARCHITECTURE.md`、`docs/agents/CONTEXT_AGENT_CONTRACT.md`、`docs/agents/REVIEW_AGENT_CONTRACT.md`、`docs/agents/IMPLEMENTATION_AGENT_CONTRACT.md`、`docs/agents/CODEX_AGENT_DISPATCH.md`、`NBS_HERMES_MONITORING.md`。
