@@ -2,7 +2,8 @@
 
 狀態：active
 版本：v1
-日期：2026-08-28
+原始日期：2026-08-28
+最後核對：2026-10-29
 適用：`nbs_analytics` 日常開發與維護的 Codex 使用規範
 
 ---
@@ -13,6 +14,8 @@
 人工授權、frozen baseline）的前提下，降低 Codex 額度消耗。
 
 依據 2026-08-28 用量實測（來源：`~/.codex/sessions` rollout 記錄）：
+
+以下用量、plugin 數量、launchd 設定與 cache 命中率均是 2026-08-28 的歷史觀察；本次未讀取目前 Codex 設定或重算用量，不可當作當前帳戶／主機狀態。50–70% 是原先預期效益，尚非本文件提供的實測結論。
 
 - 3 個月共 **575 個 session**、輸入 token 約 **145.3 億**（96.5% 為 cached）。
 - **21 個長 session（>50 turns）吃掉 95% 的輸入 token**；129 個含 `spawn_agent`
@@ -26,7 +29,7 @@
 不是來自 agent pipeline 本身。本 runbook 的目標是把編排移出 Codex 對話，
 讓每個 agent 步驟成為有預算上限的一次性呼叫。
 
-預期效果：總額度消耗下降 50–70%（與 `NBS_AGENT_ARCHITECTURE.md` 設計目標
+原預期效果：總額度消耗下降 50–70%（與 `NBS_AGENT_ARCHITECTURE.md` 設計目標
 「降低主 Codex 前期探索內容約 50% 至 75%」一致）。
 
 ---
@@ -153,7 +156,7 @@ git log -1 --oneline
 
 ## 7. Plugin 清理
 
-現況：`~/.codex/config.toml` 啟用 18 個 plugins
+歷史觀察（2026-08-28，未重新檢查）：`~/.codex/config.toml` 啟用 18 個 plugins
 （canva、gmail、spreadsheets、presentations、documents、computer-use、browser、
 chrome、hyperframes、remotion 等）。
 

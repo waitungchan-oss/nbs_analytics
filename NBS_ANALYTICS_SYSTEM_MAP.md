@@ -1,11 +1,11 @@
 # NBS Analytics 系統全景地圖導航
 
-更新日期：2026-08-04
+更新日期：2026-10-29
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`  
 正式收入口徑：`不含掛賬核銷與TT退款轉團款`
 
-目前正式版本節點：`main@4683065`；Governance Graph Phase A–E-4 與 Documentation runner hardening 已完成本地合併，尚待後續 remote 整合。
-最新正式資料：Acceptance Record `15`；最新日期 `2026-07-13`
+本次文件核對日期：`2026-10-29`。乾淨 main source snapshot：`4f287ec76a552826214d558e7954fa28c9036648`；本文件所在工作目錄為 `codex/beta-export-dedup@53441a0`，另有未提交修改。兩者不可混稱為同一 source 或正式部署版本。
+本次沒有重新讀取正式 SQLite、執行 pytest 或重跑本機 Hermes；下文標有日期的資料庫及驗收數字均為歷史觀察，不代表目前狀態。
 
 ---
 
@@ -49,9 +49,9 @@ Agent Evidence Pipeline 是 Codex 的 read-only 證據整理與檢查層，用�
 - Bundle、report、cache 與 telemetry 只寫入 `.nbs_agent_runtime/`，不作為正式資料來源。
 - Context/Review Agent 不修改程式、正式 SQLite、baseline、runtime evidence、業務口徑或 Git；它們只提供規劃與 code review 證據。
 - Hermes 不與 Agent 重複：Hermes 保留 runtime、SQLite integrity、baseline、服務與整體 system acceptance，仍是 final acceptance。
-- 最新 Evidence Pipeline 驗證：implementation commits 包含 `4ba657c`；Agent pack（implementation plan 指定 9 檔）`110 passed`，full pytest `329 passed`。
-- Context final estimated tokens：`8,284`，無 overflow；Review final：`29` 個 diff files，denied source paths `0`。
-- system acceptance、Vue verify/build 均 passed；Hermes `overallStatus=pass`；2026-05 baseline 維持 `HKD 12,057,968`。
+- 歷史 Evidence Pipeline 驗證（2026-08）：Agent pack `110 passed`、full pytest `329 passed`、Context estimated tokens `8,284`。這些是當時 run 的結果，不是目前測試總數或最新 gate。
+- 最新可引用的 CI gate 記錄（PR #79，已合併至 `main@4f287ec`）：Full pytest、Hermes、UI acceptance、Hermes Governance Graph、macOS sandbox 與 release aggregate PASS；Strict Review 不由此推定，也沒有在本次文件更新中重跑。
+- 本次唯讀盤點的本機 workflow canonical list 有 381 個狀態（370 awaiting_authorization、9 completed、2 blocked），不是 active process 數；Memory Hub catalog 有 3 個已過期來源，本次未查詢 Hub。詳見 [Agent Memory Map snapshot](Summay/AGENT_MEMORY_MAP_2026-09-05/REPORT.md)。
 
 Agent 流程為：`Brief -> collect-only evidence -> Context/Review -> Codex implementation -> full verification -> Hermes final acceptance`。Agent 通過不代表正式系統已驗收，正式 DB 與 baseline 仍以 Hermes 和既有治理 gate 為準。
 - Documentation flow is an active post-acceptance sidecar: `Hermes PASS -> Codex agent_workflow.py document -> documentation-evidence-v1 -> approved runner -> documentation-proposal-v1 -> explicit target approval / trusted Controller`. No-doc changes skip deterministically; missing runner is `blocked_missing_runner`, with no main Codex LLM fallback.
@@ -59,13 +59,11 @@ Agent 流程為：`Brief -> collect-only evidence -> Context/Review -> Codex imp
 
 ---
 
-### Documentation Backfill: run-3b52b9d763c94b1a87f745909feeaf1f
+### Documentation Backfill：截至 2026-10-29 的狀態
 
-Documentation workflow now reflects updates involving the documentation agent service and documentation Codex runner. The verified flow consumes documentation-evidence-v1, preserves evidence fingerprints, emits documentation proposals for approved required targets, and remains gated by Review, full verification, and Hermes before documentation dispatch. The documented governance boundary remains read-only for documentation sidecar behavior and preserves the fixed revenue scope and May 2026 baseline.
-
-### Documentation Backfill: run-20e4bc6034714a4d969c9b4a17144a95
-
-Documentation dispatch 流程中的 Codex runner 位於 backend/agents/documentation_codex_runner.py，對應測試位於 tests/test_documentation_codex_runner.py。本次變更已通過 Review、完整驗證與 Hermes，未改變正式營收口徑或 2026-05 baseline。
+- Documentation v2 的 repo workflow 只接受五個固定 target，必須先產生 preview，再明確批准 apply；artifact 過期或 lineage 不符時 fail closed。Hermes 對文件 artifact 的檢查是唯讀，不代表已完成回填或正式 release gate PASS。
+- 近期 handoff 回填記錄在 commit `0c935ae`；本次更新的 Agent Memory Map snapshot 在 `53441a0`。兩者是文件變更證據，不是產品程式碼 release。
+- 本次沒有派發 Documentation Agent，也沒有更新 handoff/runbook target；這次變更只更新系統地圖與專案評估。
 
 ## 2. 全景流程圖
 
@@ -214,7 +212,7 @@ nbs_marketing_data.db
 - `others_data`：票務、其它業務、未匹配或非旅行團資料。
 - `temp_ids`：upsert 刪舊時的技術輔助表。
 
-目前正式實例狀態（2026-07-14 驗收）：
+歷史正式實例狀態（2026-07-14 驗收；本次未重查 SQLite）：
 
 - `tour_data`：`6,676` 行。
 - `others_data`：`22,571` 行。
@@ -555,7 +553,7 @@ Baseline drift 排查順序：
 
 ---
 
-## 9. 目前限制與後續方向
+## 9. 已知限制與待重新確認項目
 
 已知限制：
 
@@ -563,7 +561,7 @@ Baseline drift 排查順序：
 - Normal-Day Tight Guardrail 與 Two-Lane Selector 仍是診斷/實驗，不覆蓋正式 forecast。
 - GMV 排除清單目前不持久化，重開 session 需重新上傳。
 - SQLite 仍是本地單機資料庫，未做多人權限與 schema migration 管理。
-- Streamlit rerun / page-load hot path 仍有約 12–15 秒固定等待需要以 profiling 重新定位；這是 P1 效能範圍，不得改動 P0 single-writer 或 baseline contract。
+- 2026-08-04 曾記錄 Streamlit rerun / page-load 約 12–15 秒；尚未在本次重新 profiling，應先量度再決定是否仍是目前瓶頸。不得因此改動 single-writer 或 baseline contract。
 
 P3 後續方向：
 
