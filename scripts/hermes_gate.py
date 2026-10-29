@@ -40,6 +40,19 @@ def _safe_argv(argv: list[str]) -> list[str]:
     return [Path(value).name if Path(value).is_absolute() else value for value in argv]
 
 
+def _bounded_tail(value: str) -> str:
+    if len(value) <= _TAIL:
+        return value
+    start = len(value) - _TAIL
+    tail = value[start:]
+    if value[start - 1] != "\n":
+        line_end = tail.find("\n")
+        if line_end < 0:
+            return "[truncated output line omitted]"
+        tail = tail[line_end + 1:]
+    return tail
+
+
 def run_hermes_gate(
     project_root: Path,
     commit_sha: str,
@@ -98,8 +111,8 @@ def run_hermes_gate(
         "startedAt": started, "finishedAt": _timestamp(), "result": result,
         "metadata": {
             **metadata,
-            "stdoutTail": stdout[-_TAIL:],
-            "stderrTail": stderr[-_TAIL:],
+            "stdoutTail": _bounded_tail(stdout),
+            "stderrTail": _bounded_tail(stderr),
             "telemetry": build_gate_telemetry(
                 duration_seconds=time.perf_counter() - monotonic_started,
                 failure_code=metadata.get("failureCode"),
