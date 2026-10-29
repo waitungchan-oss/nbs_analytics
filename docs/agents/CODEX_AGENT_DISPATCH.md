@@ -2,6 +2,7 @@
 
 版本：v1
 狀態：active
+最後核對：2026-10-29
 
 ## Release Gate Contract
 
@@ -26,6 +27,8 @@ Codex 建立並批准 implementation Task contract 後，只可分派一個 Task
 只有在功能變更已通過 Review、full verification 與 Hermes PASS 後，Codex 才可對同一 completed run 呼叫 `agent_workflow.py document`。純 typo、format-only、generated evidence 或 classifier 判定沒有文件影響的測試變更直接 skip，不調用 LLM。按需文件 backfill 必須指定 completed run ID；未提供 approved Documentation runner 時必須停止為 `blocked_missing_runner`，不得由主 Codex LLM 靜默代寫。
 
 v1 contract 維持 `documentation-evidence-v1` → `documentation-proposal-v1`，不遷移既有 v1 artifacts。附加的 v2 handoff/runbook workflow 只接受五個固定 IDs：`handoff.current-conclusion`、`handoff.verification-snapshot`、`runbook.pipeline-rollout-gate`、`runbook.shard-boundary`、`runbook.parallel-rollout-boundary`。Catalog 派生 repo path/section，CLI 不接受任意檔案路徑；先 `--target-id <id>` 產生 preview，再以同一 `--target-id <id> --approve-target-id <id>` 明確批准 apply。Evidence 綁定 run/commit/source fingerprint、source hashes、gate results 與 target section hash；任何 stale、malformed、missing preview、unknown target、approval mismatch 或 symlink/path permission 問題都 fail closed。
+
+CLI 每次只接受一個 `--target-id`。多個 target 若位於同一檔案，前一個 apply 會改變後續 target 的 source hash；每次 apply 後必須以新 source 重做下一個 target 的 preview、Review 與明確批准。此流程不提供 multi-target atomic apply。
 
 Hermes 對 v1 五個 root artifacts 與 v2 每 target 四個 artifacts 執行 bounded read-only schema/status/fingerprint/lineage/cap/permission inspection，固定不呼叫 Documentation runner、不 preview/apply、不批准 target、不寫 release-gate state。Catalog 或 Hermes report 不代表 handoff/runbook 內容已回填；`documentation-hermes-report-v1` 不屬於正式 release gate。
 

@@ -1,6 +1,6 @@
 # NBS Hermes Monitoring Contract
 
-更新日期：2026-07-15
+更新日期：2026-10-29
 專案路徑：`/Users/chanwaitung2025/Downloads/nbs_analytics`
 契約版本：v1.1 read-only monitoring
 
@@ -66,6 +66,8 @@ Hermes 可以讀取以下來源：
 Hermes 只可 read-only 報告 workflow artifact、cap warning 與 retention state，不得寫入 artifact、執行 `prune` 或取代 Review / full verification gate。每個 stage artifact 的 hard cap 是 5 MiB；單一 run 的 stage artifact 合計超過 25 MiB 時 Store 會記錄 warning event，但不會由 Hermes 自動 compact。retention 僅可由既有 policy 的 best-effort housekeeping 或明確 `prune --apply` 處理合資格的 completed run；最新 30 個 terminal run 與非 completed run 均受保護。
 
 Documentation sidecar 由 Store allowlist 的五個 artifact 組成：`documentation-evidence.json`、`documentation-proposal.json`、`documentation-preview.json`、`documentation-application.json`、`documentation-telemetry.json`。Hermes 只檢查 schema presence、status consistency、bounded counts、artifact cap 與 read-only permissions，並回報 `documentation-hermes-report-v1`；不得呼叫 `agent_workflow.py document`、runner、preview、apply、backup、Git 或 Obsidian write。Documentation PASS 不是 runtime acceptance，也不能批准 targets 或改變 Hermes/terminal state。
+
+Documentation v2 另外使用 target-scoped artifacts：`documentation-evidence-v2.json`、`documentation-proposal-v2.json`、`documentation-preview-v2.json`、`documentation-application-v2.json`，存放於 `.nbs_agent_runtime/runs/<run-id>/documentation/targets/<target-id>/`。Hermes 只對 allowlist 中的五個 target 執行 schema、lineage/fingerprint、size cap 與權限檢查；不呼叫 runner、不產生 preview、不 apply，也不批准 target。v1 root artifacts 與 v2 target artifacts 是不同契約，Hermes 報告不代表 Markdown 已回填或正式 release gate PASS。
 
 Sandbox capability preflight receipt 位於 `.nbs_agent_runtime/sandbox-capability/evidence.json`，schema 為 `sandbox-capability-evidence-v1`。Hermes 只 read-only 驗證 receipt 的 exact schema、fingerprint 與 status，並回報 `sandbox-capability-hermes-report-v1`；`available` 才表示 nested macOS sandbox capability 可用，`blocked_environment`、`not_applicable` 或 `invalid_evidence` 都不是 sandbox gate PASS。Hermes 不會重新執行 probe、改寫 receipt、放寬 sandbox policy，亦不把 capability evidence 當成 Review、full pytest、baseline 或 UI acceptance。
 
