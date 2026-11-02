@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from backend.services.receipt_exclusion_models import ReceiptExclusionIdentity, ReceiptExclusionRule
 from backend.services.upload_lock_service import UploadOperation
@@ -9,6 +10,7 @@ def _operation():
 
 
 def _accepted_execution(tmp_path, **overrides):
+    from backend.services import beta_seller_scope_service, upload_orchestrator_service
     from backend.services.upload_orchestrator_service import execute_upload_operation
 
     prepared = {
@@ -16,6 +18,11 @@ def _accepted_execution(tmp_path, **overrides):
         "others": pd.DataFrame(),
         "anm": pd.DataFrame(),
         "entity_audit": {},
+        "beta_seller_scope": {
+            "tour": pd.DataFrame(),
+            "others": pd.DataFrame(),
+            "coverage": {"complete": True, "status": "complete"},
+        },
     }
     kwargs = {
         "main_file": object(), "live_db_path": tmp_path / "live.db",
@@ -24,13 +31,23 @@ def _accepted_execution(tmp_path, **overrides):
         "load_runner": lambda **kwargs: (prepared["tour"], prepared["others"]),
         "gate_builder": lambda **kwargs: {"status": "matched", "monthlyBaseline": {"allMatched": True}},
         "rollback_handler": lambda *args, **kwargs: {"status": "accepted", "rollbackStatus": "not_required", "postRollbackGate": None},
-        "generation_advancer": lambda **kwargs: {"generation": 1, "operationId": "op-1"},
+        "generation_advancer": lambda **kwargs: {"generation": 1, "operationId": "op-1", "signatureMatched": True},
         "generation_signature_refresher": lambda **kwargs: {"generation": 1, "operationId": "op-1", "signatureMatched": True},
         "history_writer": lambda *args, **kwargs: 1,
         "rules_loader": lambda: {"BRANCH_MAPPING": {}, "EXCLUDE_PREFIXES": [], "SALES_REP_LIST": []},
     }
     kwargs.update(overrides)
-    return execute_upload_operation(_operation(), **kwargs)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("NBS_ANALYTICS_CACHE_DIR", str(tmp_path / "cache"))
+        if upload_orchestrator_service.persist_beta_seller_scope_frames is beta_seller_scope_service.persist_beta_seller_scope_frames:
+            monkeypatch.setattr(
+                upload_orchestrator_service,
+                "persist_beta_seller_scope_frames",
+                lambda tour, others, coverage, **kwargs: {
+                    "status": "saved", "tourRows": len(tour), "othersRows": len(others), "coverage": coverage,
+                },
+            )
+        return execute_upload_operation(_operation(), **kwargs)
 
 
 def test_blocked_preflight_does_not_write_history_or_database(tmp_path):
@@ -69,6 +86,188 @@ def test_accepted_upload_records_history_and_generation(tmp_path):
     assert execution.response["cacheState"] == "invalidated"
     assert contexts[0]["operation_id"] == "op-1"
     assert contexts[0]["latest_data_date"] == "2026-07-01"
+
+
+def test_accepted_upload_keeps_legacy_beta_cache_bytes_unchanged(tmp_path, monkeypatch):
+    from backend.services import beta_only_exception_service
+    from backend.services import upload_orchestrator_service
+    from rules import BETA_ONLY_EXCEPTION_SALES_POINTS
+
+    monkeypatch.setenv("NBS_ANALYTICS_CACHE_DIR", str(tmp_path))
+    legacy_cache_path = tmp_path / "beta_only_exception.pkl"
+    beta_only_exception_service.persist_beta_only_exception_frames(
+        pd.DataFrame([{
+            "來源單據號": "1950506001", "收款單號": "LEGACY-1",
+            "銷售點": BETA_ONLY_EXCEPTION_SALES_POINTS[0], "收款原幣金額": 100,
+        }]),
+        pd.DataFrame(),
+        cache_path=legacy_cache_path,
+    )
+    legacy_cache_before = legacy_cache_path.read_bytes()
+
+    beta_tour = pd.DataFrame([{"收款單號": "R-1", "銷售員": "002785 朱淑宜"}])
+    beta_others = pd.DataFrame([{"收款單號": "R-2", "銷售員": "011185 洪淑芬"}])
+    coverage = {
+        "complete": True,
+        "status": "complete",
+        "requiredDateIntervals": [{"start": "2025-01-01", "end": "2026-07-01"}],
+    }
+    prepared = {
+        "tour": pd.DataFrame([{"來源單據號": "A", "統一日期": "2026-07-01"}]),
+        "others": pd.DataFrame(),
+        "anm": pd.DataFrame(),
+        "entity_audit": {},
+        "beta_exception_tour": pd.DataFrame([{
+            "來源單據號": "1950506002", "收款單號": "LEGACY-2",
+            "銷售點": BETA_ONLY_EXCEPTION_SALES_POINTS[0], "收款原幣金額": 200,
+        }]),
+        "beta_exception_others": pd.DataFrame(),
+        "beta_seller_scope": {"tour": beta_tour, "others": beta_others, "coverage": coverage},
+    }
+    captured = []
+    monkeypatch.setattr(
+        upload_orchestrator_service,
+        "persist_beta_seller_scope_frames",
+        lambda tour, others, passed_coverage, **kwargs: captured.append((tour, others, passed_coverage, kwargs)) or {
+            "status": "saved", "tourRows": 1, "othersRows": 1,
+            "coverage": passed_coverage,
+        },
+    )
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: {"status": "matched", "prepared": prepared},
+    )
+
+    assert len(captured) == 1
+    assert captured[0][0].equals(beta_tour)
+    assert captured[0][1].equals(beta_others)
+    assert captured[0][2] is coverage
+    assert captured[0][3]["data_generation"] == 1
+    assert legacy_cache_path.read_bytes() == legacy_cache_before
+    legacy_tour, legacy_others = beta_only_exception_service.load_beta_only_exception_frames(
+        cache_path=legacy_cache_path
+    )
+    assert list(legacy_tour["收款單號"]) == ["LEGACY-1"]
+    assert legacy_others.empty
+    assert execution.response["betaExceptionCache"]["status"] == "not_run"
+    assert execution.response["betaSellerScopeCache"]["status"] == "saved"
+    assert execution.response["betaSellerScopeCache"]["coverage"]["complete"] is True
+
+
+@pytest.mark.parametrize("final_status", ["rejected_rolled_back", "rollback_failed"])
+def test_unaccepted_upload_never_persists_or_reports_beta_seller_scope_ready(
+    tmp_path, monkeypatch, final_status
+):
+    from backend.services import upload_orchestrator_service
+
+    calls = []
+    monkeypatch.setattr(
+        upload_orchestrator_service,
+        "persist_beta_seller_scope_frames",
+        lambda *args, **kwargs: calls.append("persist"),
+    )
+    prepared = {
+        "tour": pd.DataFrame([{"來源單據號": "A", "統一日期": "2026-07-01"}]),
+        "others": pd.DataFrame(),
+        "beta_seller_scope": {
+            "tour": pd.DataFrame([{"收款單號": "R-1", "銷售員": "002785 朱淑宜"}]),
+            "others": pd.DataFrame(),
+            "coverage": {"complete": True, "status": "complete"},
+        },
+    }
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: {"status": "matched", "prepared": prepared},
+        rollback_handler=lambda *args, **kwargs: {"status": final_status, "rollbackStatus": final_status},
+    )
+
+    assert calls == []
+    assert execution.response["betaSellerScopeCache"]["status"] == "not_run"
+    assert execution.response["betaSellerScopeCache"]["coverage"]["complete"] is False
+
+
+def test_missing_beta_seller_scope_payload_is_not_ready(tmp_path, monkeypatch):
+    from backend.services import upload_orchestrator_service
+
+    prepared = {
+        "tour": pd.DataFrame([{"來源單據號": "A", "統一日期": "2026-07-01"}]),
+        "others": pd.DataFrame(),
+        "anm": pd.DataFrame(),
+        "entity_audit": {},
+    }
+    calls = []
+    monkeypatch.setattr(
+        upload_orchestrator_service,
+        "persist_beta_seller_scope_frames",
+        lambda *args, **kwargs: calls.append("persist"),
+    )
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: {"status": "matched", "prepared": prepared},
+    )
+
+    assert calls == []
+    assert execution.response["status"] == "degraded"
+    assert execution.response["writeCommitted"] is True
+    assert execution.response["betaSellerScopeCache"]["status"] == "missing_payload"
+    assert execution.response["betaSellerScopeCache"]["coverage"]["complete"] is False
+
+
+def test_incomplete_beta_seller_scope_coverage_degrades_upload_without_rollback(tmp_path, monkeypatch):
+    from backend.services import upload_orchestrator_service
+
+    prepared = {
+        "tour": pd.DataFrame([{"來源單據號": "A", "統一日期": "2026-07-01"}]),
+        "others": pd.DataFrame(),
+        "beta_seller_scope": {
+            "tour": pd.DataFrame([{"收款單號": "R-1", "銷售員": "002785 朱淑宜"}]),
+            "others": pd.DataFrame(),
+            "coverage": {"complete": False, "status": "partial"},
+        },
+    }
+    monkeypatch.setattr(
+        upload_orchestrator_service,
+        "persist_beta_seller_scope_frames",
+        lambda *args, **kwargs: {
+            "status": "saved", "tourRows": 1, "othersRows": 0,
+            "coverage": None,
+        },
+    )
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: {"status": "matched", "prepared": prepared},
+    )
+
+    assert execution.response["status"] == "degraded"
+    assert execution.response["writeCommitted"] is True
+    assert execution.response["betaSellerScopeCache"]["coverage"] is None
+
+
+def test_beta_seller_scope_persist_error_degrades_upload_and_never_reports_ready(tmp_path, monkeypatch):
+    from backend.services import upload_orchestrator_service
+
+    prepared = {
+        "tour": pd.DataFrame([{"來源單據號": "A", "統一日期": "2026-07-01"}]),
+        "others": pd.DataFrame(),
+        "beta_seller_scope": {
+            "tour": pd.DataFrame([{"收款單號": "R-1", "銷售員": "002785 朱淑宜"}]),
+            "others": pd.DataFrame(),
+            "coverage": {"complete": True, "status": "complete"},
+        },
+    }
+    monkeypatch.setattr(
+        upload_orchestrator_service,
+        "persist_beta_seller_scope_frames",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+    execution = _accepted_execution(
+        tmp_path,
+        preflight_runner=lambda *args, **kwargs: {"status": "matched", "prepared": prepared},
+    )
+
+    assert execution.response["status"] == "degraded"
+    assert execution.response["betaSellerScopeCache"]["status"] == "error"
+    assert execution.response["betaSellerScopeCache"]["coverage"]["complete"] is False
 
 
 def test_generation_signature_refreshes_after_history_write(tmp_path):

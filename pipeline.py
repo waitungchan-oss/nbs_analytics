@@ -595,6 +595,61 @@ def _beta_salesperson_category(value) -> str:
     return "客戶服務部"
 
 
+BETA_COMPARISON_SALESPEOPLE_TO_CATEGORY = {
+    "002785 朱淑宜": "客戶服務部",
+    "004499 胡闹香": "客戶服務部",
+    "006105 刘冠寰": "客戶服務部",
+    "007939 陈秀珠": "客戶服務部",
+    "009282 石颖": "客戶服務部",
+    "NL9 麦浩贤": "客戶服務部",
+    "011185 洪淑芬": "商務同業組",
+    "debby 卢淑贞": "商務同業組",
+    "ctsit 杨慧如": "商務同業組",
+    "004014 杨慧如": "商務同業組",
+}
+_BETA_COMPARISON_SALESPEOPLE_CASEFOLD = {
+    name.casefold(): name for name in BETA_COMPARISON_SALESPEOPLE_TO_CATEGORY
+}
+
+
+def _canonical_beta_salesperson(value, sales_rep_list: Iterable[str] = ()) -> str | None:
+    normalized = _normalize_beta_salesperson(value)
+    if normalized == "未指定":
+        return None
+    # Beta eligibility is separate from the global specialist roster.
+    # New Beta sellers must be explicitly added to the approved Beta rule map.
+    return _BETA_COMPARISON_SALESPEOPLE_CASEFOLD.get(normalized.casefold())
+
+
+def _select_beta_salesperson_frames(
+    tour: pd.DataFrame,
+    others: pd.DataFrame,
+    sales_rep_list: Iterable[str] = (),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Select approved seller identities, independent of sales point and order prefix."""
+    selected = []
+    for frame in (tour, others):
+        work = normalize_runtime_columns(frame.copy(deep=True))
+        if COL_SALESPERSON not in work.columns:
+            work[COL_SALESPERSON] = ""
+        canonical = work[COL_SALESPERSON].map(
+            lambda value: _canonical_beta_salesperson(value, sales_rep_list)
+        )
+        work = work.loc[canonical.notna()].copy()
+        work[COL_SALESPERSON] = canonical.loc[canonical.notna()]
+        selected.append(work)
+    return selected[0], selected[1]
+
+
+def _deduplicate_tour_orders_in_time_order(frame: pd.DataFrame) -> pd.DataFrame:
+    work = frame.copy(deep=True)
+    if COL_ORDER_ID not in work.columns:
+        return work
+    if COL_TRANS_TIME in work.columns:
+        work = work.sort_values(by=COL_TRANS_TIME, na_position="last", kind="stable")
+    return work.drop_duplicates(subset=[COL_ORDER_ID], keep="first")
+
+
 def _select_sales_point_frames(
     tour: pd.DataFrame,
     others: pd.DataFrame,
@@ -731,6 +786,7 @@ def process_raw_files(
     sales_rep_list: list[str],
     return_entity_audit: bool = False,
     branch_reassignment_overrides: list[dict] | None = None,
+    beta_capture_mode: bool = False,
 ):
     df1, _ = _read_excel_source(main_file)
     secondary_dfs = []
@@ -753,10 +809,16 @@ def process_raw_files(
     col1_name = resolve_key_column(df1, KEY_COL_1, fallback_index=2)
     main_clean_samples = _id_cleaning_samples(df1, col1_name, "財務主表")
     df1[col1_name] = clean_invoice_number(df1[col1_name])
-    df1_filtered = df1[
-        df1[col1_name].str.startswith(tuple(branch_mapping.keys()))
-        & ~df1[col1_name].str.startswith(tuple(exclude_prefixes))
-    ].copy()
+    if beta_capture_mode:
+        df1_filtered = df1.copy()
+        if COL_SALESPERSON not in df1_filtered.columns:
+            df1_filtered[COL_SALESPERSON] = ""
+        df1_filtered.rename(columns={COL_SALESPERSON: "__beta_main_salesperson"}, inplace=True)
+    else:
+        df1_filtered = df1[
+            df1[col1_name].str.startswith(tuple(branch_mapping.keys()))
+            & ~df1[col1_name].str.startswith(tuple(exclude_prefixes))
+        ].copy()
 
     def get_branch(no):
         for k in sorted(branch_mapping.keys(), key=len, reverse=True):
@@ -774,7 +836,13 @@ def process_raw_files(
     df2[col2_name] = clean_invoice_number(df2[col2_name])
     df2_cleaned_for_audit = df2.copy()
     df2 = df2.drop_duplicates(subset=[col2_name])
-    cols_to_ext = [col2_name] + [c for c in COLS_TO_FETCH if c in df2.columns and c != col2_name]
+    cols_to_ext = [col2_name] + [
+        c
+        for c in COLS_TO_FETCH
+        if c in df2.columns
+        and c != col2_name
+        and not (beta_capture_mode and c == COL_SALESPERSON)
+    ]
     if "資料來源" in df2.columns:
         cols_to_ext.append("資料來源")
     df2_subset = df2[cols_to_ext].copy().rename(columns={"銷售點": "副表_銷售點"})
@@ -788,6 +856,8 @@ def process_raw_files(
         indicator=True,
     )
     final_df = _coalesce_columns(final_df)
+    if beta_capture_mode:
+        final_df[COL_SALESPERSON] = final_df.pop("__beta_main_salesperson").fillna("")
     if col2_name in final_df.columns and "來源單據號" != col2_name:
         final_df.drop(columns=[col2_name], inplace=True)
 
@@ -807,18 +877,20 @@ def process_raw_files(
     df_others_matched = normalize_runtime_columns(df_others_matched)
 
     anomaly_log: list[dict] = []
-    for df_t in [df_tour_matched, df_others_matched]:
-        if COL_SALESPERSON in df_t.columns:
-            df_t[COL_SALESPERSON] = df_t[COL_SALESPERSON].apply(
-                lambda x: apply_fuzzy(x, sales_rep_list, COL_SALESPERSON, anomaly_log)
-            )
+    if not beta_capture_mode:
+        for df_t in [df_tour_matched, df_others_matched]:
+            if COL_SALESPERSON in df_t.columns:
+                df_t[COL_SALESPERSON] = df_t[COL_SALESPERSON].apply(
+                    lambda x: apply_fuzzy(x, sales_rep_list, COL_SALESPERSON, anomaly_log)
+                )
     df_tour_matched = apply_subtable_branch_override(df_tour_matched, anomaly_log)
     df_others_matched = apply_subtable_branch_override(df_others_matched, anomaly_log)
     overrides = BRANCH_REASSIGNMENT_OVERRIDES if branch_reassignment_overrides is None else branch_reassignment_overrides
     df_tour_matched = apply_branch_reassignment_overrides(df_tour_matched, overrides, anomaly_log)
     df_others_matched = apply_branch_reassignment_overrides(df_others_matched, overrides, anomaly_log)
-    df_tour_matched = apply_operator_sales_rep_override(df_tour_matched, sales_rep_list, anomaly_log)
-    df_others_matched = apply_operator_sales_rep_override(df_others_matched, sales_rep_list, anomaly_log)
+    if not beta_capture_mode:
+        df_tour_matched = apply_operator_sales_rep_override(df_tour_matched, sales_rep_list, anomaly_log)
+        df_others_matched = apply_operator_sales_rep_override(df_others_matched, sales_rep_list, anomaly_log)
     df_anomaly_log = (
         pd.DataFrame(anomaly_log)
         if anomaly_log
@@ -850,7 +922,13 @@ def build_dashboard_data(
     _already_normalized: bool = False,
     *,
     beta_sales_point: str | Iterable[str] | None = None,
+    beta_salesperson_scope: bool = False,
+    beta_seller_scope_verified: bool = False,
 ):
+    if beta_salesperson_scope and beta_sales_point:
+        raise ValueError("beta_salesperson_scope and beta_sales_point cannot be combined")
+    if beta_salesperson_scope and not beta_seller_scope_verified:
+        raise ValueError("beta_salesperson_scope requires verified seller-scope coverage")
     if not _already_normalized:
         df_tour_matched = normalize_runtime_columns(df_tour_matched)
         df_others_matched = normalize_runtime_columns(df_others_matched)
@@ -879,8 +957,23 @@ def build_dashboard_data(
             if str(value).strip()
         }
     )
-    beta_enabled = bool(beta_sales_points)
-    if beta_enabled:
+    beta_enabled = bool(beta_sales_points) or beta_salesperson_scope
+    if beta_salesperson_scope:
+        specialist_tour, specialist_others = _select_beta_salesperson_frames(
+            df_tour_matched,
+            df_others_matched,
+            sales_rep_list,
+        )
+        specialist_salespeople = sorted(
+            {
+                str(value)
+                for frame in (specialist_tour, specialist_others)
+                for value in frame.get(COL_SALESPERSON, pd.Series(dtype=object)).tolist()
+            }
+        )
+        specialist_branch = BETA_COMPARISON_SALES_POINT_LABEL
+        specialist_sheet_prefix = f"{BETA_COMPARISON_SALES_POINT_LABEL}_"
+    elif beta_sales_points:
         specialist_tour, specialist_others = _select_sales_point_frames(
             df_tour_matched,
             df_others_matched,
@@ -901,13 +994,21 @@ def build_dashboard_data(
         specialist_salespeople = list(sales_rep_list)
         specialist_branch = TARGET_DEPT_FOR_REP
         specialist_sheet_prefix = ""
-    specialist_branch_values = beta_sales_points if beta_enabled else {specialist_branch}
+    specialist_branch_values = (
+        set()
+        if beta_salesperson_scope
+        else beta_sales_points if beta_sales_points else {specialist_branch}
+    )
 
     def normalize_beta_salespeople(frame: pd.DataFrame) -> pd.DataFrame:
         if not beta_enabled or frame.empty:
             return frame
         result = frame.copy(deep=True)
-        beta_mask = result[COL_BRANCH].astype(str).str.strip().isin(beta_sales_points)
+        beta_mask = (
+            pd.Series(False, index=result.index)
+            if beta_salesperson_scope
+            else result[COL_BRANCH].astype(str).str.strip().isin(beta_sales_points)
+        )
         salesperson = result[COL_SALESPERSON].astype(object)
         salesperson.loc[beta_mask] = salesperson.loc[beta_mask].map(_normalize_beta_salesperson)
         result[COL_SALESPERSON] = salesperson
@@ -981,11 +1082,7 @@ def build_dashboard_data(
             work = work[~work[COL_DEPT].isin(cruise_depts)]
             if work.empty:
                 return pd.DataFrame(columns=[COL_BRANCH, COL_SALESPERSON, "統一日期", "旅行團交易人數"])
-            work = (
-                work.sort_values(by=COL_TRANS_TIME, na_position="last").drop_duplicates(subset=[COL_ORDER_ID], keep="first")
-                if COL_ORDER_ID in work.columns
-                else work.copy()
-            )
+            work = _deduplicate_tour_orders_in_time_order(work)
             work["統計日期"] = (
                 _format_date_with_fallback(work[COL_TRANS_TIME], work["統一日期"])
                 if COL_TRANS_TIME in work.columns
@@ -1073,9 +1170,7 @@ def build_dashboard_data(
     )
     beta_tour_people_source = None
     if beta_enabled and COL_ORDER_ID in df_tour_matched.columns:
-        beta_tour_people_source = df_tour_matched.sort_values(
-            by=COL_TRANS_TIME, na_position="last"
-        ).drop_duplicates(subset=[COL_ORDER_ID], keep="first")
+        beta_tour_people_source = _deduplicate_tour_orders_in_time_order(df_tour_matched)
     result_s1_salesperson = (
         build_branch_salesperson_summary(
             formal_branch_tour,
@@ -1093,11 +1188,7 @@ def build_dashboard_data(
         False,
     )
 
-    df_tour_dedup = (
-        df_tour_matched.sort_values(by=COL_TRANS_TIME, na_position="last").drop_duplicates(subset=[COL_ORDER_ID], keep="first")
-        if COL_ORDER_ID in df_tour_matched.columns
-        else df_tour_matched.copy()
-    )
+    df_tour_dedup = _deduplicate_tour_orders_in_time_order(df_tour_matched)
     df_tour_dedup = normalize_beta_salespeople(df_tour_dedup)
     df_tour_dedup["日期"] = (
         _format_date_with_fallback(df_tour_dedup[COL_TRANS_TIME], df_tour_dedup["統一日期"])
@@ -1127,10 +1218,61 @@ def build_dashboard_data(
         return s[s["交易人數"] > 0].sort_values(sort_cols)[columns]
 
     result_s3 = gen_t_stats(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)])
-    result_s4 = gen_t_stats(
-        df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)],
-        include_salesperson=beta_enabled,
-    )
+    if beta_salesperson_scope:
+        specialist_tour_dedup = _deduplicate_tour_orders_in_time_order(specialist_tour)
+        specialist_tour_dedup["日期"] = (
+            _format_date_with_fallback(specialist_tour_dedup[COL_TRANS_TIME], specialist_tour_dedup["統一日期"])
+            if COL_TRANS_TIME in specialist_tour_dedup.columns
+            else specialist_tour_dedup["統一日期"]
+        )
+        specialist_tour_dedup["文本"] = specialist_tour_dedup.apply(
+            lambda row: map_dest_category(row, cruise_depts), axis=1
+        )
+        specialist_tour_dedup["天數_num"] = pd.to_numeric(
+            specialist_tour_dedup[COL_DAYS], errors="coerce"
+        ).fillna(0)
+        specialist_tour_dedup["交易人數"] = pd.to_numeric(
+            specialist_tour_dedup[COL_QTY], errors="coerce"
+        ).fillna(0)
+        specialist_tour_dedup["月份"] = pd.to_datetime(
+            specialist_tour_dedup["日期"], errors="coerce"
+        ).dt.strftime("%Y-%m")
+        specialist_ticket = specialist_others.copy()
+        specialist_ticket["日期"] = (
+            _format_date_with_fallback(specialist_ticket[COL_TRANS_TIME], specialist_ticket["統一日期"])
+            if COL_TRANS_TIME in specialist_ticket.columns
+            else specialist_ticket["統一日期"]
+        )
+        specialist_ticket["月份"] = pd.to_datetime(specialist_ticket["日期"], errors="coerce").dt.strftime("%Y-%m")
+        specialist_ticket["交易數量"] = pd.to_numeric(specialist_ticket[COL_QTY], errors="coerce").fillna(0)
+        specialist_ticket["文本"] = specialist_ticket.apply(map_ticket_category, axis=1)
+        specialist_ticket = specialist_ticket[specialist_ticket["文本"].notnull()]
+        specialist_tour_count_daily = specialist_tour_dedup.copy()
+        specialist_tour_count_daily["日期"] = specialist_tour_count_daily["統一日期"]
+        specialist_tour_count_daily["月份"] = pd.to_datetime(
+            specialist_tour_count_daily["日期"], errors="coerce"
+        ).dt.strftime("%Y-%m")
+        specialist_tour_amount = specialist_tour.copy()
+        specialist_tour_amount["日期"] = specialist_tour_amount["統一日期"]
+        specialist_tour_amount["文本"] = specialist_tour_amount.apply(
+            lambda row: map_dest_category(row, cruise_depts), axis=1
+        )
+        specialist_tour_amount["月份"] = pd.to_datetime(
+            specialist_tour_amount["日期"], errors="coerce"
+        ).dt.strftime("%Y-%m")
+        specialist_tour_amount[COL_MONEY] = pd.to_numeric(
+            specialist_tour_amount[COL_MONEY], errors="coerce"
+        ).fillna(0)
+        result_s4 = gen_t_stats(specialist_tour_dedup, include_salesperson=True)
+    else:
+        specialist_tour_dedup = None
+        specialist_ticket = None
+        specialist_tour_count_daily = None
+        specialist_tour_amount = None
+        result_s4 = gen_t_stats(
+            df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)],
+            include_salesperson=beta_enabled,
+        )
 
     df_ticket = df_others_matched.copy()
     df_ticket = normalize_beta_salespeople(df_ticket)
@@ -1162,9 +1304,13 @@ def build_dashboard_data(
         return s[s["交易數量"] > 0].sort_values(sort_cols)[columns]
 
     result_s5 = gen_tk_stats(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)])
-    result_s6 = gen_tk_stats(
-        df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)],
-        include_salesperson=beta_enabled,
+    result_s6 = (
+        gen_tk_stats(specialist_ticket, include_salesperson=True)
+        if beta_salesperson_scope
+        else gen_tk_stats(
+            df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)],
+            include_salesperson=beta_enabled,
+        )
     )
     result_s7 = gen_tk_stats(df_ticket)
 
@@ -1189,7 +1335,9 @@ def build_dashboard_data(
 
     result_s8 = gen_d_tour(df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH, "交易人數")
     result_s9 = gen_d_tour(
-        df_tour_dedup[df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)],
+        specialist_tour_dedup if beta_salesperson_scope else df_tour_dedup[
+            df_tour_dedup[COL_BRANCH].isin(specialist_branch_values)
+        ],
         COL_SALESPERSON,
         "旅行團交易人數",
         include_salesperson=beta_enabled,
@@ -1214,7 +1362,9 @@ def build_dashboard_data(
 
     result_s10 = gen_d_tkt(df_ticket[df_ticket[COL_BRANCH].isin(target_branches_s3)], COL_BRANCH)
     result_s11 = gen_d_tkt(
-        df_ticket[df_ticket[COL_BRANCH].isin(specialist_branch_values)],
+        specialist_ticket if beta_salesperson_scope else df_ticket[
+            df_ticket[COL_BRANCH].isin(specialist_branch_values)
+        ],
         COL_SALESPERSON,
         include_salesperson=beta_enabled,
     )
@@ -1317,7 +1467,7 @@ def build_dashboard_data(
         "分社",
     )
     result_s16 = gen_route_type_daily(
-        df_tour_count_daily[
+        specialist_tour_count_daily if beta_salesperson_scope else df_tour_count_daily[
             (df_tour_count_daily[COL_BRANCH].isin(specialist_branch_values))
             & (
                 df_tour_count_daily[COL_SALESPERSON].isin(specialist_salespeople)
@@ -1325,7 +1475,7 @@ def build_dashboard_data(
                 else df_tour_count_daily[COL_SALESPERSON].notna()
             )
         ],
-        df_tour_amount[
+        specialist_tour_amount if beta_salesperson_scope else df_tour_amount[
             (df_tour_amount[COL_BRANCH].isin(specialist_branch_values))
             & (
                 df_tour_amount[COL_SALESPERSON].isin(specialist_salespeople)
@@ -1514,6 +1664,8 @@ def build_dashboard_data_excluding_receipt_types(
     return_facts: bool = False,
     *,
     beta_sales_point: str | Iterable[str] | None = None,
+    beta_salesperson_scope: bool = False,
+    beta_seller_scope_verified: bool = False,
 ):
     excluded_types = {str(v).strip() for v in excluded_receipt_types if str(v).strip()}
     excluded_methods = {str(v).strip() for v in (excluded_payment_methods or []) if str(v).strip()}
@@ -1529,6 +1681,8 @@ def build_dashboard_data_excluding_receipt_types(
             include_branch_salesperson_sheet=include_branch_salesperson_sheet,
             return_facts=return_facts,
             beta_sales_point=beta_sales_point,
+            beta_salesperson_scope=beta_salesperson_scope,
+            beta_seller_scope_verified=beta_seller_scope_verified,
         )
 
     def collect_excluded_ids(df: pd.DataFrame) -> set[str]:
@@ -1560,4 +1714,6 @@ def build_dashboard_data_excluding_receipt_types(
         include_branch_salesperson_sheet=include_branch_salesperson_sheet,
         return_facts=return_facts,
         beta_sales_point=beta_sales_point,
+        beta_salesperson_scope=beta_salesperson_scope,
+        beta_seller_scope_verified=beta_seller_scope_verified,
     )

@@ -32,9 +32,9 @@ from backend.services.dashboard_analytics_service import build_analytics_from_fa
 from backend.services.dashboard_facts_service import build_dashboard_facts  # noqa: E402
 from backend.services.stability_history_service import record_stability_history  # noqa: E402
 from backend.services.upload_preflight_service import run_upload_preflight  # noqa: E402
-from backend.services.beta_only_exception_service import (  # noqa: E402
-    clear_beta_only_exception_cache,
-    load_beta_only_exception_frames,
+from backend.services.beta_seller_scope_service import (  # noqa: E402
+    BETA_SELLER_SCOPE_CACHE_VERSION,
+    load_beta_seller_scope_frames,
 )
 from backend.services.upload_rollback_service import handle_core_drift_rollback  # noqa: E402
 from backend.services.cache_generation_service import (  # noqa: E402
@@ -74,12 +74,7 @@ CONFIG_FILE = config_module.CONFIG_FILE
 DB_FILE = config_module.DB_FILE
 SESSION_RULE_KEYS = config_module.SESSION_RULE_KEYS
 TARGET_DEPT_FOR_REP = config_module.TARGET_DEPT_FOR_REP
-BETA_COMPARISON_SALES_POINTS = tuple(config_module.BETA_COMPARISON_SALES_POINTS)
 BETA_COMPARISON_SALES_POINT_LABEL = config_module.BETA_COMPARISON_SALES_POINT_LABEL
-BETA_ONLY_EXCEPTION_PREFIXES = tuple(config_module.BETA_ONLY_EXCEPTION_PREFIXES)
-BETA_ONLY_EXCEPTION_SALES_POINTS = tuple(config_module.BETA_ONLY_EXCEPTION_SALES_POINTS)
-# Backward-compatible alias for callers that need the original I6 sales point.
-E_COMMERCE_SALES_POINT = BETA_COMPARISON_SALES_POINTS[0]
 init_session_state_config = config_module.init_session_state_config
 save_business_rules = config_module.save_business_rules
 
@@ -126,6 +121,16 @@ if st.session_state.get('EXPORT_RULE_VERSION') != 6:
     st.session_state['PROCESSED_DATA_CACHE'] = None
     st.session_state['DB_LOADED_FLAG'] = False
     st.session_state['EXPORT_RULE_VERSION'] = 6
+if st.session_state.get('BETA_COMPARISON_RULE_VERSION') != 2:
+    processed_cache = st.session_state.get('PROCESSED_DATA_CACHE')
+    if isinstance(processed_cache, dict):
+        for beta_key in (
+            "ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta",
+            "beta_export_variant", "beta_export_variant_key", "beta_export_warning",
+            "beta_export_seller_scope_ready",
+        ):
+            processed_cache.pop(beta_key, None)
+    st.session_state['BETA_COMPARISON_RULE_VERSION'] = 2
 if st.session_state.get('REVENUE_SCOPE_RULE_VERSION') != 1:
     st.session_state['PROCESSED_DATA_CACHE'] = None
     st.session_state['DB_LOADED_FLAG'] = False
@@ -143,8 +148,8 @@ AI_CACHE_VERSION = 'daily-macro-normal-tight-v1'
 EXPORT_CACHE_VERSION = 'export-lazy-v4'
 EXPORT_FAST_PATH_MODE = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", "shadow").strip().lower()
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v2'
-BETA_EXPORT_VARIANT = "beta_market_ecommerce_peer_sales_points_v5"
-BETA_EXPORT_CACHE_VERSION = "beta-export-persistent-v1"
+BETA_EXPORT_VARIANT = "beta_market_ecommerce_peer_salesperson_v1"
+BETA_EXPORT_CACHE_VERSION = "beta-export-persistent-v2"
 BETA_EXPORT_WORKBOOK_KEYS = (
     "ex_beta",
     "ex_no_writeoff_beta",
@@ -156,7 +161,9 @@ PERSISTENT_REPAIR_STATE_PATH = Path(__file__).resolve().parent / '.nbs_runtime' 
 
 
 def _beta_export_cache_is_current(cache: dict) -> bool:
-    return cache.get("beta_export_variant") == BETA_EXPORT_VARIANT and all(
+    return cache.get("beta_export_variant") == BETA_EXPORT_VARIANT and cache.get(
+        "beta_export_seller_scope_ready"
+    ) is True and all(
         cache.get(key) for key in BETA_EXPORT_WORKBOOK_KEYS
     )
 
@@ -1066,14 +1073,24 @@ def _beta_export_runtime_cache_key(cache: dict) -> str | None:
     if not formal_key:
         return None
     digest = hashlib.sha256()
-    for key in ("raw_t", "raw_o", "beta_exception_tour", "beta_exception_others"):
+    for key in (
+        "raw_t", "raw_o",
+        "beta_seller_scope_tour", "beta_seller_scope_others",
+    ):
         frame = cache.get(key)
         if not isinstance(frame, pd.DataFrame):
             frame = pd.DataFrame()
         digest.update(key.encode("utf-8"))
         digest.update(repr(tuple(frame.columns)).encode("utf-8"))
         digest.update(pd.util.hash_pandas_object(frame, index=True).values.tobytes())
-    identity = f"{BETA_EXPORT_CACHE_VERSION}|{BETA_EXPORT_VARIANT}|{OFFICIAL_EXPORT_SCHEMA_CONTRACT}|{formal_key}|{digest.hexdigest()}"
+    coverage = cache.get("beta_seller_scope_coverage")
+    coverage_payload = json.dumps(coverage or {}, ensure_ascii=False, sort_keys=True, default=str)
+    digest.update(coverage_payload.encode("utf-8"))
+    identity = (
+        f"{BETA_EXPORT_CACHE_VERSION}|{BETA_EXPORT_VARIANT}|{BETA_SELLER_SCOPE_CACHE_VERSION}|"
+        f"{OFFICIAL_EXPORT_SCHEMA_CONTRACT}|generation={cache.get('current_data_generation')}|"
+        f"{formal_key}|{digest.hexdigest()}"
+    )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
 
 
@@ -1105,14 +1122,23 @@ def _ensure_beta_export_workbooks(cache: dict) -> bool:
     computed = _compute_beta_export_workbooks(
         cache.get("raw_t", pd.DataFrame()),
         cache.get("raw_o", pd.DataFrame()),
-        beta_exception_tour=cache.get("beta_exception_tour", pd.DataFrame()),
-        beta_exception_others=cache.get("beta_exception_others", pd.DataFrame()),
+        beta_seller_scope={
+            "tour": cache.get("beta_seller_scope_tour", pd.DataFrame()),
+            "others": cache.get("beta_seller_scope_others", pd.DataFrame()),
+            "coverage": cache.get("beta_seller_scope_coverage", {}),
+        },
+        current_data_generation=cache.get("current_data_generation"),
     )
     payload = {key: computed.get(key) for key in BETA_EXPORT_WORKBOOK_KEYS}
     payload["beta_export_variant"] = computed.get("export_variant")
     payload["beta_sales_point_filter"] = computed.get("sales_point_filter")
+    payload["beta_export_warning"] = computed.get("warning")
+    payload["beta_export_seller_scope_ready"] = computed.get("seller_scope_ready") is True
     payload["cache_key"] = cache_key
     if not _beta_export_cache_is_current(payload):
+        cache["beta_export_warning"] = computed.get("warning") or "Beta 新口徑尚未完成驗證，暫停提供下載。"
+        cache["beta_export_seller_scope_ready"] = False
+        st.session_state["PROCESSED_DATA_CACHE"] = cache
         return False
     if not _save_pickle_cache(path, BETA_EXPORT_CACHE_VERSION, payload):
         return False
@@ -1180,72 +1206,169 @@ def _compute_beta_export_workbooks(
     db_others: pd.DataFrame,
     *,
     rules: tuple[dict, list[str], list[str], list[str], list[str]] | None = None,
-    beta_exception_tour: pd.DataFrame | None = None,
-    beta_exception_others: pd.DataFrame | None = None,
+    beta_seller_scope: dict | None = None,
+    current_data_generation: int | None = None,
 ) -> dict:
     branch_mapping, target_branches, cruise_depts, sales_reps, _ = rules or _current_rules()
-    sales_points = BETA_COMPARISON_SALES_POINTS
-    beta_tour = pd.concat(
-        [db_tour, beta_exception_tour]
-        if isinstance(beta_exception_tour, pd.DataFrame) and not beta_exception_tour.empty
-        else [db_tour],
-        ignore_index=True,
-        sort=False,
-    )
-    beta_others = pd.concat(
-        [db_others, beta_exception_others]
-        if isinstance(beta_exception_others, pd.DataFrame) and not beta_exception_others.empty
-        else [db_others],
-        ignore_index=True,
-        sort=False,
-    )
-
-    def build_beta(excluded_receipt_types, excluded_payment_methods=None):
+    def build_beta(tour, others, excluded_receipt_types, excluded_payment_methods=None, *, seller_scope=False):
         return build_dashboard_data_excluding_receipt_types(
-            beta_tour,
-            beta_others,
+            tour,
+            others,
             branch_mapping,
             target_branches,
             cruise_depts,
             sales_reps,
             excluded_receipt_types,
             excluded_payment_methods=excluded_payment_methods,
-            beta_sales_point=sales_points,
             include_branch_salesperson_sheet=True,
+            beta_salesperson_scope=seller_scope,
+            beta_seller_scope_verified=seller_scope,
         )
 
-    buffers = {
-        "ex_beta": build_beta([]),
-        "ex_no_writeoff_beta": build_beta(["掛賬核銷"]),
-        "ex_no_writeoff_refund_transfer_beta": build_beta(
-            ["掛賬核銷"], excluded_payment_methods=["TT 退款轉團款"]
-        ),
-    }
-    source_payload = pd.util.hash_pandas_object(beta_tour, index=True).values.tobytes()
-    source_payload += pd.util.hash_pandas_object(beta_others, index=True).values.tobytes()
-    source_fingerprint = hashlib.sha256(source_payload).hexdigest()
-    rules_fingerprint = _file_content_hash(CONFIG_FILE)
-    variant = BETA_EXPORT_VARIANT
-    return {
-        **{
+    def build_variants(tour, others, *, seller_scope=False):
+        return {
+            "ex_beta": build_beta(tour, others, [], seller_scope=seller_scope),
+            "ex_no_writeoff_beta": build_beta(
+                tour, others, ["掛賬核銷"], seller_scope=seller_scope
+            ),
+            "ex_no_writeoff_refund_transfer_beta": build_beta(
+                tour,
+                others,
+                ["掛賬核銷"],
+                excluded_payment_methods=["TT 退款轉團款"],
+                seller_scope=seller_scope,
+            ),
+        }
+
+    def as_bytes(buffers):
+        return {
             key: _buffer_to_bytes(value[0] if isinstance(value, tuple) else value)
             for key, value in buffers.items()
+        }
+
+    def blocked_payload(warning: str) -> dict:
+        return {
+            "export_variant": BETA_EXPORT_VARIANT,
+            "status": "blocked",
+            "seller_scope_ready": False,
+            "warning": warning,
+        }
+
+    coverage = beta_seller_scope.get("coverage") if isinstance(beta_seller_scope, dict) else None
+    seller_tour = beta_seller_scope.get("tour") if isinstance(beta_seller_scope, dict) else None
+    seller_others = beta_seller_scope.get("others") if isinstance(beta_seller_scope, dict) else None
+    fingerprints = list(coverage.get("sourceFingerprints") or []) if isinstance(coverage, dict) else []
+    latest_fingerprint = str(coverage.get("sourceFingerprint") or "") if isinstance(coverage, dict) else ""
+    valid_fingerprints = bool(fingerprints) and all(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value.lower())
+        for value in fingerprints
+    ) and latest_fingerprint in fingerprints
+    try:
+        generation_matches = (
+            current_data_generation is not None
+            and coverage.get("dataGeneration") is not None
+            and int(coverage["dataGeneration"]) == int(current_data_generation)
+        ) if isinstance(coverage, dict) else False
+    except (TypeError, ValueError):
+        generation_matches = False
+    verification = coverage.get("verification") if isinstance(coverage, dict) else {}
+    verification = verification if isinstance(verification, dict) else {}
+    preflight_verified = (
+        verification.get("preflightStatus") == "matched"
+        and verification.get("driftStatus") in {"no_drift", "matched"}
+        and verification.get("entityMatchStatus") == "matched"
+        and verification.get("sourceRolesStatus") == "complete"
+        and verification.get("sourceRoleMappingStatus") == "verified"
+        and verification.get("liveDbUnchanged") is True
+    )
+    seller_scope_current = (
+        isinstance(seller_tour, pd.DataFrame)
+        and isinstance(seller_others, pd.DataFrame)
+        and isinstance(coverage, dict)
+        and coverage.get("version") == BETA_SELLER_SCOPE_CACHE_VERSION
+        and bool(coverage.get("complete"))
+        and coverage.get("betaExportReady") is True
+        and coverage.get("sourceRoleMappingVerified") is True
+        and bool(coverage.get("requiredDateIntervals"))
+        and not coverage.get("missingDateIntervals")
+        and not coverage.get("missingSourceRoles")
+        and valid_fingerprints
+        and bool(coverage.get("rowsFingerprintMatched"))
+        and preflight_verified
+        and generation_matches
+    )
+    if not seller_scope_current:
+        missing_roles = list(coverage.get("missingSourceRoles") or []) if isinstance(coverage, dict) else []
+        role_labels = {
+            "main": "財務主表", "tour": "旅行團", "transport": "交通",
+            "ticket": "門券", "package": "套票", "hotel": "酒店",
+        }
+        missing_label = "、".join(role_labels.get(role, str(role)) for role in missing_roles)
+        warning = (
+            "Beta 銷售員口徑尚未完成來源覆蓋驗證；為避免套用舊銷售點／單號前綴規則，暫停提供下載。"
+            "請完整上傳並重建財務主表及旅行團、交通、門券、套票、酒店五類副表。"
+            + (f"尚缺來源：{missing_label}。" if missing_label else "")
+        )
+        if isinstance(coverage, dict) and coverage.get("complete") and not generation_matches:
+            warning = "Beta seller-scope generation 與目前資料不一致；為避免舊規則輸出，已暫停下載，請完整上傳並重建。"
+        elif isinstance(coverage, dict) and coverage.get("sourceRoleMappingVerified") is False:
+            issues = "、".join(str(value) for value in coverage.get("sourceRoleMappingIssues") or [])
+            warning = "Beta 來源檔無法無歧義對應至主表及五類副表，已暫停下載。請更正檔名／來源分類後重新上傳。"
+            if issues:
+                warning += f"未通過項目：{issues}。"
+        elif isinstance(coverage, dict) and coverage.get("complete") and (
+            not valid_fingerprints or not coverage.get("rowsFingerprintMatched")
+        ):
+            warning = "Beta seller-scope 來源 fingerprint 缺失或不一致；為避免舊規則輸出，已暫停下載，請重新完整上傳並重建。"
+        return blocked_payload(warning)
+
+    try:
+        seller_bytes = as_bytes(build_variants(seller_tour, seller_others, seller_scope=True))
+    except Exception as exc:
+        return blocked_payload(
+            f"Beta 銷售員口徑 workbook 重建失敗，已暫停下載。"
+            f"（{type(exc).__name__}: {str(exc)[:160]}）"
+        )
+    if not all(seller_bytes.values()):
+        return blocked_payload("Beta 銷售員口徑 workbook 重建不完整，已暫停下載。")
+
+    beta_categories = pipeline_module.BETA_COMPARISON_SALESPEOPLE_TO_CATEGORY
+    beta_rules_payload = json.dumps(beta_categories, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    beta_rules_fingerprint = hashlib.sha256(beta_rules_payload.encode("utf-8")).hexdigest()
+    source_fingerprint = (
+        fingerprints[0]
+        if len(fingerprints) == 1
+        else hashlib.sha256("|".join(sorted(fingerprints)).encode("utf-8")).hexdigest()
+    )
+    seller_rules_fingerprint = hashlib.sha256(
+        f"{_file_content_hash(CONFIG_FILE)}|{BETA_SELLER_SCOPE_CACHE_VERSION}|{beta_rules_fingerprint}".encode("utf-8")
+    ).hexdigest()
+    variant_key_material = json.dumps(
+        {
+            "variant": BETA_EXPORT_VARIANT,
+            "cacheVersion": BETA_SELLER_SCOPE_CACHE_VERSION,
+            "betaRulesFingerprint": beta_rules_fingerprint,
+            "sourceFingerprint": source_fingerprint,
+            "dataGeneration": int(coverage["dataGeneration"]),
         },
-        "export_variant": variant,
-        "sales_point_filter": list(sales_points),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        **seller_bytes,
+        "export_variant": BETA_EXPORT_VARIANT,
         "source_fingerprint": source_fingerprint,
-        "rules_fingerprint": rules_fingerprint,
-        "export_variant_key": _build_export_variant_key(source_fingerprint, rules_fingerprint, variant),
-        "beta_export_schema": f"{OFFICIAL_EXPORT_SCHEMA_CONTRACT}:{variant}",
-        "beta_exception_rule": {
-            "prefixes": list(BETA_ONLY_EXCEPTION_PREFIXES),
-            "sales_points": list(BETA_ONLY_EXCEPTION_SALES_POINTS),
-            "official_scope_unchanged": True,
-        },
-        "beta_exception_rows": {
-            "tour": int(len(beta_exception_tour)) if isinstance(beta_exception_tour, pd.DataFrame) else 0,
-            "others": int(len(beta_exception_others)) if isinstance(beta_exception_others, pd.DataFrame) else 0,
-        },
+        "rules_fingerprint": seller_rules_fingerprint,
+        "export_variant_key": _build_export_variant_key(
+            source_fingerprint, seller_rules_fingerprint, variant_key_material
+        ),
+        "export_variant_key_material": variant_key_material,
+        "beta_export_schema": f"{OFFICIAL_EXPORT_SCHEMA_CONTRACT}:{BETA_EXPORT_VARIANT}",
+        "seller_scope_ready": True,
+        "warning": None,
     }
 
 
@@ -2115,7 +2238,14 @@ def _load_and_compute_cache(include_ai: bool = True) -> None:
 
     db_tour = facts["rawTour"]
     db_others = facts["rawOthers"]
-    beta_exception_tour, beta_exception_others = load_beta_only_exception_frames()
+    expected_beta_generation = (
+        int(generation.get("generation", 0))
+        if generation.get("signatureMatched") is True
+        else None
+    )
+    beta_seller_tour, beta_seller_others, beta_seller_coverage = load_beta_seller_scope_frames(
+        expected_data_generation=expected_beta_generation
+    )
     if db_tour.empty and db_others.empty:
         st.session_state["PROCESSED_DATA_CACHE"] = None
         st.session_state["DB_LOADED_FLAG"] = True
@@ -2153,8 +2283,14 @@ def _load_and_compute_cache(include_ai: bool = True) -> None:
         "o": analysis_others,
         "raw_t": normalize_runtime_columns(db_tour),
         "raw_o": normalize_runtime_columns(db_others),
-        "beta_exception_tour": normalize_runtime_columns(beta_exception_tour),
-        "beta_exception_others": normalize_runtime_columns(beta_exception_others),
+        "beta_seller_scope_tour": normalize_runtime_columns(beta_seller_tour),
+        "beta_seller_scope_others": normalize_runtime_columns(beta_seller_others),
+        "beta_seller_scope_coverage": beta_seller_coverage,
+        "current_data_generation": (
+            int(generation.get("generation", 0))
+            if generation.get("signatureMatched") is True
+            else None
+        ),
         "s1": s1,
         "s2": s2,
         "ptrk": ai_payload.get("ptrk"),

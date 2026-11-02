@@ -31,6 +31,14 @@ def test_upload_preflight_never_changes_module_global_db_target(tmp_path, monkey
         }
 
     monkeypatch.setattr(upload_preflight_service, "process_raw_files", fake_process_raw_files)
+    monkeypatch.setattr(
+        upload_preflight_service,
+        "build_beta_only_exception_frames",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy Beta exception frames must not be generated")
+        ),
+        raising=False,
+    )
     monkeypatch.setattr(upload_preflight_service, "build_phase2c_stability_gate", fake_gate)
     monkeypatch.setattr(
         upload_preflight_service,
@@ -248,3 +256,148 @@ def test_upload_preflight_uses_temp_database_and_preserves_live_db(tmp_path, mon
     assert "Preflight stability gate" in timing_labels
     assert "Drift diagnosis" in timing_labels
     assert "Preflight total" in timing_labels
+
+
+def _coverage_row(order_id, receipt_date, salesperson="002785 朱淑宜"):
+    return {
+        "來源單據號": order_id,
+        "收款單號": f"R-{order_id}",
+        "收款時間": f"{receipt_date} 10:00:00",
+        "統一日期": receipt_date,
+        "銷售點": "任意銷售點",
+        "銷售員": salesperson,
+        "收款原幣金額": 100,
+        "交易時間": f"{receipt_date} 10:00:00",
+        "行程天數": 3,
+        "數量": 1,
+        "團名稱": "測試團",
+        "來源報表標籤": "旅行團",
+    }
+
+
+@pytest.mark.parametrize(
+    "source_dates,target_dates,unmatched_rows,gate_status,expected_complete,expected_missing,source_complete",
+    [
+        (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 0, "matched", True, [], True),
+        (
+            ["2026-05-01"],
+            ["2026-01-01", "2026-01-03", "2026-05-01"],
+            0,
+            "matched",
+            False,
+            [{"start": "2026-01-01", "end": "2026-01-01"}, {"start": "2026-01-03", "end": "2026-01-03"}],
+            True,
+        ),
+        (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 1, "matched", False, [], True),
+        (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 0, "drift", False, [], True),
+        (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 0, "matched", False,
+         [{"start": "2026-01-01", "end": "2026-01-01"}, {"start": "2026-01-03", "end": "2026-01-03"}], False),
+    ],
+)
+def test_preflight_prepares_beta_seller_scope_with_date_gaps_and_match_status(
+    tmp_path,
+    monkeypatch,
+    source_dates,
+    target_dates,
+    unmatched_rows,
+    gate_status,
+    expected_complete,
+    expected_missing,
+    source_complete,
+):
+    from backend.services import upload_preflight_service
+
+    live_path = tmp_path / "live.db"
+    live_path.touch()
+    target_rows = pd.DataFrame(
+        [_coverage_row(f"TARGET-{index}", date) for index, date in enumerate(target_dates)]
+    )
+    seller_rows = pd.DataFrame(
+        [_coverage_row(f"SOURCE-{index}", date) for index, date in enumerate(source_dates)]
+    )
+    entity_summary = pd.DataFrame(
+        [
+            {"指標": "主表未匹配行數", "數值": unmatched_rows},
+            {"指標": "副表未落主表單號數", "數值": 0},
+        ]
+    )
+    calls = []
+    database_reads = [
+        (target_rows.iloc[:2].copy(), pd.DataFrame()),
+        (target_rows.copy(), pd.DataFrame()),
+    ]
+
+    def fake_process_raw_files(*args, **kwargs):
+        calls.append(kwargs)
+        rows = seller_rows if kwargs.get("beta_capture_mode") else target_rows.iloc[:1]
+        return rows.copy(), pd.DataFrame(), pd.DataFrame(), {"summary": entity_summary}
+
+    monkeypatch.setattr(upload_preflight_service, "process_raw_files", fake_process_raw_files)
+    monkeypatch.setattr(database, "snapshot_sqlite_database", lambda *args, **kwargs: None)
+    monkeypatch.setattr(database, "load_all_data_from_db", lambda **kwargs: database_reads.pop(0))
+    monkeypatch.setattr(upload_preflight_service, "_table_row_count", lambda *args, **kwargs: 7)
+    upsert_targets = []
+
+    def fake_upsert(*args, db_path=None, **kwargs):
+        upsert_targets.append(Path(db_path))
+        return {
+            "tour_data": {"filtered_excluded_rows": 0, "write_rows": 1},
+            "others_data": {"filtered_excluded_rows": 0, "write_rows": 0},
+        }
+
+    monkeypatch.setattr(database, "upsert_to_db", fake_upsert)
+    monkeypatch.setattr(
+        upload_preflight_service,
+        "build_phase2c_stability_gate",
+        lambda **kwargs: {"status": gate_status, "driftChecks": []},
+    )
+    monkeypatch.setattr(
+        upload_preflight_service,
+        "build_upload_drift_diagnosis",
+        lambda *args, **kwargs: {"status": "no_drift"},
+    )
+
+    other_sources = []
+    if source_complete:
+        for role, name in (
+            ("transport", "交通副表.xlsx"),
+            ("ticket", "門券副表.xlsx"),
+            ("package", "套票副表.xlsx"),
+            ("hotel", "酒店副表.xlsx"),
+        ):
+            source = BytesIO(name.encode("utf-8"))
+            source.name = name
+            source.beta_source_role = role
+            other_sources.append(source)
+    source_names = ["main.xlsx", "旅行團副表.xlsx", *(source.name for source in other_sources)]
+    report = upload_preflight_service.run_upload_preflight(
+        BytesIO(b"main-source"),
+        "旅行團副表.xlsx",
+        other_sources,
+        {},
+        ["1950506"],
+        [],
+        source_files=source_names,
+        live_db_path=live_path,
+        registry_loader=lambda **kwargs: {"revision": "test", "rules": []},
+    )
+
+    prepared = report["prepared"]["beta_seller_scope"]
+    coverage = prepared["coverage"]
+    assert isinstance(prepared["tour"], pd.DataFrame)
+    assert len(coverage["sourceFingerprint"]) == 64
+    assert coverage["complete"] is expected_complete
+    assert coverage["status"] == ("complete" if expected_complete else "partial")
+    assert coverage["betaExportReady"] is expected_complete
+    assert coverage["dateIntervals"] == (
+        [{"start": date, "end": date} for date in source_dates] if source_complete else []
+    )
+    assert coverage["missingDateIntervals"] == expected_missing
+    assert coverage["missingSourceRoles"] == ([] if source_complete else ["hotel", "package", "ticket", "transport"])
+    assert coverage["verification"]["sourceRolesStatus"] == ("complete" if source_complete else "incomplete")
+    assert coverage["verification"]["entityMatchStatus"] == (
+        "matched" if source_complete and unmatched_rows == 0 else "unmatched_or_unverified"
+    )
+    assert any(call.get("beta_capture_mode") is True for call in calls) is source_complete
+    assert report["liveDbUnchanged"] is True
+    assert upsert_targets and all(path != live_path for path in upsert_targets)
