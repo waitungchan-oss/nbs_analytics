@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import pickle
 from datetime import date, timedelta
@@ -16,6 +17,48 @@ BETA_SELLER_SCOPE_CACHE_VERSION = "beta-seller-scope-v2"
 BETA_REQUIRED_SOURCE_ROLES = ("main", "tour", "transport", "ticket", "package", "hotel")
 _CACHE_FILENAME = "beta_seller_scope_v2.pkl"
 _UNSET = object()
+
+
+def _entity_audit_reconciled(coverage: dict) -> bool:
+    """Verify the main-row and secondary-ID audit without requiring zero orphans."""
+    required = (
+        "主表有效來源單據號數", "副表有效交易號碼數", "成功匹配唯一單號數",
+        "成功匹配主表行數", "主表未匹配行數", "副表未落主表單號數",
+    )
+    values = {}
+    for row in coverage.get("entityAuditSummary") or []:
+        if not isinstance(row, dict) or row.get("指標") not in required:
+            continue
+        name = row["指標"]
+        if name in values:
+            return False
+        try:
+            number = float(row.get("數值"))
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(number) or number < 0 or not number.is_integer():
+            return False
+        values[name] = int(number)
+    if set(values) != set(required):
+        return False
+    try:
+        raw_input_rows = float(coverage.get("audit", {}).get("inputRows"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if not math.isfinite(raw_input_rows) or raw_input_rows < 0 or not raw_input_rows.is_integer():
+        return False
+    input_rows = int(raw_input_rows)
+    main_unique, secondary_unique, matched_unique, matched_rows, main_unmatched, secondary_only = (
+        values[name] for name in required
+    )
+    return (
+        matched_unique <= main_unique
+        and matched_unique <= secondary_unique
+        and matched_unique <= matched_rows
+        and main_unique - matched_unique <= main_unmatched
+        and matched_rows + main_unmatched == input_rows
+        and secondary_unique - matched_unique == secondary_only
+    )
 
 
 def _default_cache_path() -> Path:
@@ -449,6 +492,22 @@ def _load_beta_seller_scope_frames(
                 coverage["complete"] = False
                 coverage["status"] = "stale_generation"
                 return pd.DataFrame(), pd.DataFrame(), coverage
+        if (
+            not include_incomplete
+            and expected_data_generation is not _UNSET
+            and not coverage.get("complete")
+            and isinstance(coverage.get("verification"), dict)
+            and coverage["verification"].get("entityMatchStatus") == "unmatched_or_unverified"
+            and _entity_audit_reconciled(coverage)
+        ):
+            revised = dict(coverage)
+            revised["verification"] = {
+                **coverage["verification"], "entityMatchStatus": "matched",
+                "betaExportReady": True,
+            }
+            promoted = _merge_coverage({}, revised)
+            if promoted.get("complete"):
+                coverage = promoted
         if not include_incomplete and not coverage.get("complete"):
             return pd.DataFrame(), pd.DataFrame(), coverage
         return tour, others, coverage

@@ -524,12 +524,61 @@ def test_entity_mismatch_keeps_cached_scope_incomplete(tmp_path):
     )
 
     _, _, coverage = beta_seller_scope_service.load_beta_seller_scope_frames(
-        cache_path=cache_path
+        cache_path=cache_path, expected_data_generation=9
     )
 
     assert coverage["verification"]["entityMatchStatus"] == "unmatched_or_unverified"
     assert coverage["complete"] is False
     assert coverage["status"] == "partial"
+
+
+def test_legacy_zero_orphan_gate_cache_is_revalidated_read_only_for_matching_generation(tmp_path):
+    from backend.services import beta_seller_scope_service
+
+    cache_path = tmp_path / "beta_seller_scope_v2.pkl"
+    frame = _seller_rows(
+        [("ORDER-1", "RECEIPT-1", "2026-05-01 10:00:00", "任意銷售點", "002785 朱淑宜", 100)]
+    )
+    interval = [{"start": "2026-05-01", "end": "2026-05-01"}]
+    beta_seller_scope_service.persist_beta_seller_scope_frames(
+        frame, pd.DataFrame(),
+        {
+            "sourceFingerprint": "d" * 64,
+            "sourceRoles": list(beta_seller_scope_service.BETA_REQUIRED_SOURCE_ROLES),
+            "sourceRoleMappingVerified": True,
+            "missingSourceRoles": [],
+            "dateIntervals": interval,
+            "requiredDateIntervals": interval,
+            "audit": {"inputRows": 2},
+            "entityAuditSummary": [
+                {"指標": name, "數值": count} for name, count in {
+                    "主表有效來源單據號數": 2,
+                    "副表有效交易號碼數": 2,
+                    "成功匹配唯一單號數": 1,
+                    "成功匹配主表行數": 1,
+                    "主表未匹配行數": 1,
+                    "副表未落主表單號數": 1,
+                }.items()
+            ],
+            "verification": {
+                "preflightStatus": "matched", "driftStatus": "no_drift",
+                "entityMatchStatus": "unmatched_or_unverified", "liveDbUnchanged": True,
+            },
+        },
+        cache_path=cache_path, data_generation=9,
+    )
+    before = cache_path.read_bytes()
+    loaded, _, coverage = beta_seller_scope_service.load_beta_seller_scope_frames(
+        cache_path=cache_path, expected_data_generation=9
+    )
+    assert len(loaded) == 1
+    assert coverage["complete"] is True
+    assert coverage["verification"]["entityMatchStatus"] == "matched"
+    assert cache_path.read_bytes() == before
+    stale, _, stale_coverage = beta_seller_scope_service.load_beta_seller_scope_frames(
+        cache_path=cache_path, expected_data_generation=10
+    )
+    assert stale.empty and stale_coverage["status"] == "stale_generation"
 
 
 def test_clear_beta_seller_scope_cache_removes_rows_and_coverage(tmp_path):

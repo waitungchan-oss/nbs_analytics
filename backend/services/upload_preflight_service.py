@@ -16,6 +16,7 @@ from backend.services.receipt_exclusion_proposal_service import build_receipt_ex
 from backend.services.receipt_exclusion_registry_service import load_active_registry_snapshot
 from backend.services.beta_seller_scope_service import (
     _date_intervals,
+    _entity_audit_reconciled,
     _uncovered_date_intervals,
     build_beta_seller_scope_frames,
 )
@@ -250,17 +251,8 @@ def run_upload_preflight(
         required_intervals,
         beta_seller_coverage.get("dateIntervals"),
     )
-    entity_summary = {
-        str(row.get("指標")): pd.to_numeric(row.get("數值"), errors="coerce")
-        for row in beta_seller_coverage.get("entityAuditSummary", [])
-        if isinstance(row, dict)
-    }
-    main_unmatched = entity_summary.get("主表未匹配行數")
-    subtable_only = entity_summary.get("副表未落主表單號數")
-    entity_match_verified = pd.notna(main_unmatched) and pd.notna(subtable_only)
     entity_match_status = (
-        "matched" if entity_match_verified and int(main_unmatched) == 0 and int(subtable_only) == 0
-        else "unmatched_or_unverified"
+        "matched" if _entity_audit_reconciled(beta_seller_coverage) else "unmatched_or_unverified"
     )
     drift_ready = drift_diagnosis.get("status") in {"no_drift", "matched"}
     missing_source_roles = list(beta_seller_coverage.get("missingSourceRoles") or [])
