@@ -14,7 +14,11 @@ from backend.services.receipt_exclusion_matcher import match_receipt_exclusions
 from backend.services.receipt_exclusion_models import ReceiptExclusionRule, canonical_json_hash
 from backend.services.receipt_exclusion_proposal_service import build_receipt_exclusion_proposal
 from backend.services.receipt_exclusion_registry_service import load_active_registry_snapshot
-from backend.services.beta_only_exception_service import build_beta_only_exception_frames
+from backend.services.beta_seller_scope_service import (
+    _date_intervals,
+    _uncovered_date_intervals,
+    build_beta_seller_scope_frames,
+)
 from pipeline import process_raw_files, read_excel_source
 
 # Backward-compatible dependency hook used by profiling and tests.
@@ -180,7 +184,7 @@ def run_upload_preflight(
         )
         _record_stage(stage_timings, "清洗與 Entity Resolution", stage_started)
         stage_started = time.perf_counter()
-        beta_exception_tour, beta_exception_others = build_beta_only_exception_frames(
+        beta_seller_tour, beta_seller_others, beta_seller_coverage = build_beta_seller_scope_frames(
             main_input,
             tour_file,
             other_files or [],
@@ -189,7 +193,7 @@ def run_upload_preflight(
             sales_reps,
             process_runner=process_raw_files,
         )
-        _record_stage(stage_timings, "Beta-only exception frame", stage_started)
+        _record_stage(stage_timings, "Beta seller-scope capture", stage_started)
         stage_started = time.perf_counter()
         upsert_summary = database.upsert_to_db(new_t_df, new_o_df, db_path=temp_db_path)
         _record_stage(stage_timings, "臨時 SQLite upsert", stage_started)
@@ -239,6 +243,61 @@ def run_upload_preflight(
         _record_stage(stage_timings, "確認正式 DB 未變更", stage_started)
 
     stage_started = time.perf_counter()
+    required_intervals = _date_intervals(
+        [live_tour_before, live_others_before, temp_tour_after, temp_others_after]
+    )
+    missing_intervals = _uncovered_date_intervals(
+        required_intervals,
+        beta_seller_coverage.get("dateIntervals"),
+    )
+    entity_summary = {
+        str(row.get("指標")): pd.to_numeric(row.get("數值"), errors="coerce")
+        for row in beta_seller_coverage.get("entityAuditSummary", [])
+        if isinstance(row, dict)
+    }
+    main_unmatched = entity_summary.get("主表未匹配行數")
+    subtable_only = entity_summary.get("副表未落主表單號數")
+    entity_match_verified = pd.notna(main_unmatched) and pd.notna(subtable_only)
+    entity_match_status = (
+        "matched" if entity_match_verified and int(main_unmatched) == 0 and int(subtable_only) == 0
+        else "unmatched_or_unverified"
+    )
+    drift_ready = drift_diagnosis.get("status") in {"no_drift", "matched"}
+    missing_source_roles = list(beta_seller_coverage.get("missingSourceRoles") or [])
+    source_role_mapping_verified = beta_seller_coverage.get("sourceRoleMappingVerified") is True
+    coverage_complete = (
+        bool(required_intervals)
+        and not missing_intervals
+        and not missing_source_roles
+        and source_role_mapping_verified
+        and stability_gate.get("status") == "matched"
+        and drift_ready
+        and entity_match_status == "matched"
+        and live_before == live_after
+    )
+    beta_seller_coverage.update(
+        {
+            "requiredDateIntervals": required_intervals,
+            "missingDateIntervals": missing_intervals,
+            "complete": bool(coverage_complete),
+            "status": "complete" if coverage_complete else "partial",
+            "betaExportReady": bool(coverage_complete),
+            "verification": {
+                "preflightStatus": str(stability_gate.get("status") or "drift"),
+                "driftStatus": str(drift_diagnosis.get("status") or "unknown"),
+                "entityMatchStatus": entity_match_status,
+                "sourceRolesStatus": (
+                    "complete" if source_role_mapping_verified and not missing_source_roles else "incomplete"
+                ),
+                "sourceRoleMappingStatus": "verified" if source_role_mapping_verified else "unverified",
+                "betaExportReady": bool(coverage_complete),
+                "liveDbUnchanged": live_before == live_after,
+            },
+        }
+    )
+    _record_stage(stage_timings, "Beta seller-scope coverage gate", stage_started)
+
+    stage_started = time.perf_counter()
     total_filtered = sum(int(upsert_summary.get(key, {}).get("filtered_excluded_rows", 0)) for key in ("tour_data", "others_data"))
     total_write_rows = sum(int(upsert_summary.get(key, {}).get("write_rows", 0)) for key in ("tour_data", "others_data"))
     batch_summary = [
@@ -274,8 +333,11 @@ def run_upload_preflight(
         "prepared": {
             "tour": new_t_df,
             "others": new_o_df,
-            "beta_exception_tour": beta_exception_tour,
-            "beta_exception_others": beta_exception_others,
+            "beta_seller_scope": {
+                "tour": beta_seller_tour,
+                "others": beta_seller_others,
+                "coverage": beta_seller_coverage,
+            },
             "anm": anm_df,
             "entity_audit": entity_audit,
             "receipt_exclusion_evidence": receipt_exclusion_evidence,

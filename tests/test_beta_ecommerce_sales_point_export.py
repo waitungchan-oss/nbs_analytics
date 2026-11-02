@@ -265,6 +265,20 @@ def test_beta_empty_sales_point_keeps_schema_without_legacy_fallback():
         assert list(facts[sheet_name].columns) == columns
 
 
+def test_beta_seller_scope_empty_sources_keep_ticket_sheet_schema():
+    import pipeline
+
+    _, _, facts = pipeline.build_dashboard_data(
+        empty_frame(), empty_frame(), branch_mapping(), [], [], [],
+        make_workbook=False, return_facts=True,
+        beta_salesperson_scope=True, beta_seller_scope_verified=True,
+    )
+
+    sheet = facts[f"{BETA_LABEL}_票務總計"]
+    assert sheet.empty
+    assert list(sheet.columns) == ["銷售員", "所屬種類", "文本", "日期", "月份", "交易數量"]
+
+
 def test_beta_market_summary_classifies_named_salespeople_and_defaults_others():
     import pipeline
 
@@ -439,110 +453,209 @@ def test_beta_export_has_distinct_variant_identity_and_artifacts():
 
     payload = app_workflows._compute_beta_export_workbooks(tour_frame(), others_frame())
 
-    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v5"
-    assert payload["sales_point_filter"] == list(BETA_SALES_POINTS)
-    assert {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} <= set(payload)
-    assert all(payload[key] for key in ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"))
+    assert payload["export_variant"] == app_workflows.BETA_EXPORT_VARIANT
+    assert payload["status"] == "blocked"
+    assert payload["seller_scope_ready"] is False
+    assert payload["warning"]
+    assert not {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} & set(payload)
 
 
-def test_beta_workbooks_add_branch_salesperson_sheet_with_scope_reconciliation():
+def test_beta_export_does_not_fall_back_to_branch_or_salespoint_scope():
+    import app_workflows
+
+    tours = pd.DataFrame([_row("BT001", "銅鑼灣分社", "Alice")])
+    others = pd.DataFrame([_row("BO001", "市場及商務部-電子商務組", "Ben")])
+
+    payload = app_workflows._compute_beta_export_workbooks(tours, others)
+
+    assert payload["status"] == "blocked"
+    assert payload["seller_scope_ready"] is False
+    assert "舊銷售點／單號前綴" in payload["warning"]
+    assert not {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} & set(payload)
+
+
+def test_beta_export_blocks_unmatched_or_unverified_entity_scope():
+    import app_workflows
+
+    fingerprint = "a" * 64
+    coverage = {
+        "version": app_workflows.BETA_SELLER_SCOPE_CACHE_VERSION,
+        "sourceFingerprint": fingerprint,
+        "sourceFingerprints": [fingerprint],
+        "dataGeneration": 8,
+        "complete": True,
+        "betaExportReady": True,
+        "sourceRoleMappingVerified": True,
+        "requiredDateIntervals": [{"start": "2026-05-01", "end": "2026-05-01"}],
+        "missingDateIntervals": [],
+        "missingSourceRoles": [],
+        "rowsFingerprintMatched": True,
+        "verification": {
+            "preflightStatus": "matched",
+            "driftStatus": "no_drift",
+            "entityMatchStatus": "unmatched_or_unverified",
+            "sourceRolesStatus": "complete",
+                "sourceRoleMappingStatus": "verified",
+            "liveDbUnchanged": True,
+        },
+    }
+
+    payload = app_workflows._compute_beta_export_workbooks(
+        pd.DataFrame([_row("BT001", "任意銷售點", "002785 朱淑宜")]),
+        pd.DataFrame(),
+        beta_seller_scope={
+            "tour": pd.DataFrame([_row("BT001", "任意銷售點", "002785 朱淑宜")]),
+            "others": pd.DataFrame(),
+            "coverage": coverage,
+        },
+        current_data_generation=8,
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["seller_scope_ready"] is False
+    assert not set(app_workflows.BETA_EXPORT_WORKBOOK_KEYS) & set(payload)
+
+
+def test_beta_export_builds_all_three_verified_v5_workbooks_with_reconciled_values():
     from io import BytesIO
 
     from openpyxl import load_workbook
 
     import app_workflows
 
-    tours = pd.DataFrame(
-        [
-            _row("BT001", "銅鑼灣分社", "Alice"),
-            _row("BT002", "銅鑼灣分社", "Ben", department="郵輪部"),
-            _row("BT999", "銅鑼灣分社", "Alice"),
-        ]
-    )
-    tours.loc[tours["來源單據號"].eq("BT999"), "收款類型"] = "掛賬核銷"
-    others = pd.DataFrame(
-        [
-            _row("BO001", "銅鑼灣分社", "Alice"),
-            _row("BO002", "銅鑼灣分社", "Ben"),
-            _row("BO999", "銅鑼灣分社", "Ben"),
-        ]
-    )
-    others["來源報表標籤"] = "門券all"
-    others.loc[others["來源單據號"].eq("BO999"), "收款方式"] = "TT 退款轉團款"
+    fingerprint = "b" * 64
+    coverage = {
+        "version": app_workflows.BETA_SELLER_SCOPE_CACHE_VERSION,
+        "sourceFingerprint": fingerprint,
+        "sourceFingerprints": [fingerprint],
+        "dataGeneration": 8,
+        "complete": True,
+        "betaExportReady": True,
+        "sourceRoleMappingVerified": True,
+        "requiredDateIntervals": [{"start": "2026-05-01", "end": "2026-05-01"}],
+        "missingDateIntervals": [],
+        "missingSourceRoles": [],
+        "rowsFingerprintMatched": True,
+        "verification": {
+            "preflightStatus": "matched",
+            "driftStatus": "no_drift",
+            "entityMatchStatus": "matched",
+            "sourceRolesStatus": "complete",
+                "sourceRoleMappingStatus": "verified",
+            "liveDbUnchanged": True,
+        },
+    }
+    tour = pd.DataFrame([
+        _row("BT001", "銅鑼灣分社", "002785 朱淑宜"),
+        _row("BT002", "銅鑼灣分社", "011185 洪淑芬", department="郵輪部"),
+        _row("BT999", "銅鑼灣分社", "004499 胡闹香"),
+    ])
+    tour.loc[tour["來源單據號"].eq("BT999"), "收款類型"] = "掛賬核銷"
+    others = pd.DataFrame([
+        {**_row("TK001", "旺角分社", "002785 朱淑宜"), "來源報表標籤": "門券all"},
+        {**_row("TK002", "旺角分社", "NL9 麦浩贤"), "來源報表標籤": "門券all"},
+        {**_row("TK999", "旺角分社", "004014 杨慧如"), "來源報表標籤": "門券all"},
+    ])
+    others.loc[others["來源單據號"].eq("TK999"), "收款方式"] = "TT 退款轉團款"
 
     payload = app_workflows._compute_beta_export_workbooks(
-        tours,
+        tour,
         others,
+        beta_seller_scope={"tour": tour, "others": others, "coverage": coverage},
+        current_data_generation=8,
         rules=(
-            {"1A": "銅鑼灣分社", "225": "專職銷售組"},
-            ["銅鑼灣分社"],
+            {"1A": "銅鑼灣分社", "2B": "旺角分社"},
+            ["銅鑼灣分社", "旺角分社"],
             ["郵輪部"],
-            ["Alice", "Ben"],
+            [],
             [],
         ),
     )
+
     expected_metrics = {
         "ex_beta": ((200, 100, 300), 4, 2, 6),
         "ex_no_writeoff_beta": ((100, 100, 300), 2, 2, 6),
         "ex_no_writeoff_refund_transfer_beta": ((100, 100, 200), 2, 2, 4),
     }
     expected_headers = (
-        "文本",
-        "單選",
-        "銷售員",
-        "日期",
-        "月份",
-        "旅行團",
-        "郵輪",
-        "票務",
-        "旅行團交易人數",
-        "票務交易數量",
+        "文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務",
+        "旅行團交易人數", "票務交易數量",
     )
-
-    for key, (
-        expected_amounts,
-        expected_tour_people,
-        expected_cruise_people,
-        expected_ticket_quantity,
-    ) in expected_metrics.items():
-        workbook = load_workbook(BytesIO(payload[key]), data_only=True, read_only=True)
+    expected_salespeople = {
+        "ex_beta": {
+            "002785 朱淑宜", "011185 洪淑芬", "004499 胡闹香", "NL9 麦浩贤", "004014 杨慧如",
+        },
+        "ex_no_writeoff_beta": {
+            "002785 朱淑宜", "011185 洪淑芬", "NL9 麦浩贤", "004014 杨慧如",
+        },
+        "ex_no_writeoff_refund_transfer_beta": {
+            "002785 朱淑宜", "011185 洪淑芬", "NL9 麦浩贤",
+        },
+    }
+    assert payload["seller_scope_ready"] is True
+    assert set(app_workflows.BETA_EXPORT_WORKBOOK_KEYS) <= set(payload)
+    assert all(payload[key] for key in app_workflows.BETA_EXPORT_WORKBOOK_KEYS)
+    expected_sheet_order = None
+    beta_sheet_headers = {
+        f"{BETA_LABEL}_經營統計": ["文本", "種類", "日期", "月份", "旅行團", "郵輪", "票務"],
+        f"{BETA_LABEL}_旅行團統計": ["銷售員", "所屬種類", "文本", "天數", "日期", "月份", "交易人數"],
+        f"{BETA_LABEL}_票務總計": ["銷售員", "所屬種類", "文本", "日期", "月份", "交易數量"],
+        f"{BETA_LABEL}_每天旅行團交易人數": ["銷售員", "所屬種類", "日期", "月份", "旅行團交易人數", "郵輪交易人數"],
+        f"{BETA_LABEL}_每天票務交易數量": ["銷售員", "所屬種類", "種類", "日期", "月份", "交易數量"],
+        f"{BETA_LABEL}_線路種類每天統計": ["銷售員", "所屬種類", "線路種類", "日子", "月份", "交易人數", "交易金額"],
+    }
+    for key in app_workflows.BETA_EXPORT_WORKBOOK_KEYS:
+        workbook = load_workbook(BytesIO(payload[key]), read_only=True, data_only=True)
+        assert len(workbook.sheetnames) == 19
+        if expected_sheet_order is None:
+            expected_sheet_order = workbook.sheetnames
+        assert workbook.sheetnames == expected_sheet_order
         assert "分社經營統計_含銷售員" in workbook.sheetnames
-        assert "分社經營統計" in workbook.sheetnames
         assert f"{BETA_LABEL}_經營統計" in workbook.sheetnames
+        assert f"{BETA_LABEL}_旅行團統計" in workbook.sheetnames
+        assert f"{BETA_LABEL}_票務總計" in workbook.sheetnames
+        for sheet_name, headers in beta_sheet_headers.items():
+            actual_headers = [
+                cell.value for cell in next(workbook[sheet_name].iter_rows(min_row=1, max_row=1))
+            ]
+            assert actual_headers == headers, sheet_name
+        branch_detail = list(workbook["分社經營統計_含銷售員"].iter_rows(values_only=True))
+        branch_summary = list(workbook["分社經營統計"].iter_rows(values_only=True))
+        tour_daily = list(workbook["分社每天旅行團交易人數"].iter_rows(values_only=True))
+        ticket_daily = list(workbook["分社每天票務交易數量"].iter_rows(values_only=True))
+        assert branch_detail[0] == expected_headers
 
-        detailed_rows = list(
-            workbook["分社經營統計_含銷售員"].iter_rows(values_only=True)
-        )
-        branch_rows = list(workbook["分社經營統計"].iter_rows(values_only=True))
-        tour_people_rows = list(
-            workbook["分社每天旅行團交易人數"].iter_rows(values_only=True)
-        )
-        ticket_quantity_rows = list(
-            workbook["分社每天票務交易數量"].iter_rows(values_only=True)
-        )
-        assert detailed_rows[0] == expected_headers
-
-        def sum_columns(rows, index):
+        def total(rows, index):
             return sum(float(row[index] or 0) for row in rows[1:])
 
-        assert workbook.sheetnames.index("分社經營統計_含銷售員") == (
-            workbook.sheetnames.index("分社經營統計") + 1
-        )
-        detailed_amounts = tuple(
-            sum_columns(detailed_rows, index) for index in (5, 6, 7)
-        )
-        branch_amounts = tuple(
-            sum_columns(branch_rows, index) for index in (4, 5, 6)
-        )
-        assert detailed_amounts == expected_amounts
-        assert detailed_amounts == branch_amounts
-        assert sum_columns(detailed_rows, 8) == expected_tour_people
-        assert sum_columns(tour_people_rows, 3) == expected_tour_people
-        assert sum_columns(tour_people_rows, 4) == expected_cruise_people
-        assert sum_columns(detailed_rows, 9) == expected_ticket_quantity
-        assert sum_columns(ticket_quantity_rows, 4) == expected_ticket_quantity
-        assert {row[2] for row in detailed_rows[1:]} == {"Alice", "Ben"}
+        expected_amounts, tour_people, cruise_people, ticket_quantity = expected_metrics[key]
+        detail_amounts = tuple(total(branch_detail, index) for index in (5, 6, 7))
+        summary_amounts = tuple(total(branch_summary, index) for index in (4, 5, 6))
+        assert detail_amounts == expected_amounts
+        assert detail_amounts == summary_amounts
+        assert total(branch_detail, 8) == tour_people
+        assert total(tour_daily, 3) == tour_people
+        assert total(tour_daily, 4) == cruise_people
+        assert total(branch_detail, 9) == ticket_quantity
+        assert total(ticket_daily, 4) == ticket_quantity
+        assert {row[2] for row in branch_detail[1:]} == expected_salespeople[key]
         workbook.close()
+
+
+def test_beta_seller_scope_pipeline_rejects_unverified_direct_build():
+    import pipeline
+
+    with pytest.raises(ValueError, match="requires verified seller-scope coverage"):
+        pipeline.build_dashboard_data(
+            tour_frame(),
+            empty_frame(),
+            {},
+            [],
+            [],
+            [],
+            make_workbook=False,
+            beta_salesperson_scope=True,
+        )
 
 
 def test_beta_branch_salesperson_tour_people_uses_global_order_deduplication():
@@ -592,6 +705,7 @@ def test_beta_export_cache_requires_current_variant_and_all_three_workbooks():
     keys = ("ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta")
     current_payload = {key: b"workbook" for key in keys}
     current_payload["beta_export_variant"] = app_workflows.BETA_EXPORT_VARIANT
+    current_payload["beta_export_seller_scope_ready"] = True
     stale_payload = dict(current_payload, beta_export_variant="beta_market_ecommerce_peer_sales_points_v4")
     incomplete_payload = dict(current_payload)
     incomplete_payload.pop("ex_no_writeoff_beta")
@@ -612,18 +726,20 @@ def test_beta_export_persistent_cache_survives_refresh_and_invalidates_on_inputs
         return {
             **{key: f"workbook-{len(calls)}".encode() for key in app_workflows.BETA_EXPORT_WORKBOOK_KEYS},
             "export_variant": app_workflows.BETA_EXPORT_VARIANT,
-            "sales_point_filter": [],
+            "seller_scope_ready": True,
         }
 
     monkeypatch.setattr(app_workflows, "_compute_beta_export_workbooks", fake_compute)
 
-    def fresh_cache(formal_key="formal-1", exception_amount=10):
+    def fresh_cache(formal_key="formal-1", seller_amount=10, generation=3):
         return {
             "export_cache_key": formal_key,
+            "current_data_generation": generation,
             "raw_t": pd.DataFrame({"單號": ["1"], "金額": [100]}),
             "raw_o": pd.DataFrame(),
-            "beta_exception_tour": pd.DataFrame({"單號": ["2"], "金額": [exception_amount]}),
-            "beta_exception_others": pd.DataFrame(),
+            "beta_seller_scope_tour": pd.DataFrame({"單號": ["2"], "金額": [seller_amount]}),
+            "beta_seller_scope_others": pd.DataFrame(),
+            "beta_seller_scope_coverage": {"dataGeneration": generation},
         }
 
     first = fresh_cache()
@@ -634,7 +750,7 @@ def test_beta_export_persistent_cache_survives_refresh_and_invalidates_on_inputs
     assert refreshed["ex_no_writeoff_refund_transfer_beta"] == b"workbook-1"
     assert len(calls) == 1
 
-    assert not app_workflows._load_beta_export_workbooks(fresh_cache(exception_amount=20))
+    assert not app_workflows._load_beta_export_workbooks(fresh_cache(seller_amount=20))
     assert not app_workflows._load_beta_export_workbooks(fresh_cache(formal_key="formal-2"))
     changed_source = fresh_cache()
     changed_source["raw_t"].loc[0, "金額"] = 101
@@ -655,6 +771,7 @@ def test_beta_export_persistent_cache_reports_disk_write_failure(tmp_path, monke
         lambda *args, **kwargs: {
             **{key: b"workbook" for key in app_workflows.BETA_EXPORT_WORKBOOK_KEYS},
             "export_variant": app_workflows.BETA_EXPORT_VARIANT,
+            "seller_scope_ready": True,
         },
     )
     cache = {"export_cache_key": "formal", "raw_t": pd.DataFrame(), "raw_o": pd.DataFrame()}
@@ -676,3 +793,192 @@ def test_export_ui_exposes_beta_ecommerce_comparison_without_replacing_official_
     assert "Beta comparison export" in source
     assert BETA_LABEL in source
     assert "ex_no_writeoff_refund_transfer" in source
+
+
+def test_beta_seller_scope_uses_beta_specific_approved_list_and_restores_v5_dimensions():
+    import pipeline
+
+    tour = pd.DataFrame(
+        [
+            _row("SELLER-PEER", "任意銷售點", "011185 洪淑芬"),
+            _row("SELLER-CS", "另一任意銷售點", "002785 朱淑宜"),
+            _row("SELLER-EXTRA", "未知銷售點", "新合資格銷售員"),
+            _row("SELLER-OUTSIDER", "電子商務舊銷售點", "未核准銷售員"),
+        ]
+    )
+    others = pd.DataFrame(
+        [
+            {**_row("TICKET-EXTRA", "另一新銷售點", "新合資格銷售員"), "來源報表標籤": "門券"},
+            {**_row("TICKET-OUTSIDER", E_COMMERCE, "未核准銷售員"), "來源報表標籤": "門券"},
+        ]
+    )
+
+    _, _, facts = pipeline.build_dashboard_data(
+        tour,
+        others,
+        branch_mapping(),
+        [],
+        [],
+        ["002785 朱淑宜", "新合資格銷售員"],
+        make_workbook=False,
+        return_facts=True,
+        beta_salesperson_scope=True,
+        beta_seller_scope_verified=True,
+    )
+
+    summary = facts[f"{BETA_LABEL}_經營統計"]
+    assert set(summary["文本"]) == {"011185 洪淑芬", "002785 朱淑宜"}
+    assert dict(zip(summary["文本"], summary["種類"])) == {
+        "011185 洪淑芬": "商務同業組",
+        "002785 朱淑宜": "客戶服務部",
+    }
+    assert "新合資格銷售員" not in set(facts[f"{BETA_LABEL}_旅行團統計"]["銷售員"])
+    assert "未核准銷售員" not in set(facts[f"{BETA_LABEL}_旅行團統計"]["銷售員"])
+    assert {"銷售員", "所屬種類"} <= set(facts[f"{BETA_LABEL}_旅行團統計"].columns)
+
+
+def test_beta_seller_scope_deduplicates_in_input_order_without_transaction_time():
+    import pipeline
+
+    first = _row("DUPLICATE-ORDER", "任意銷售點", "002785 朱淑宜")
+    second = _row("DUPLICATE-ORDER", "任意銷售點", "011185 洪淑芬")
+    tour = pd.DataFrame([first, second]).drop(columns=["交易時間"])
+
+    _, _, facts = pipeline.build_dashboard_data(
+        tour,
+        empty_frame().drop(columns=["交易時間"]),
+        branch_mapping(),
+        [],
+        [],
+        [],
+        make_workbook=False,
+        return_facts=True,
+        _already_normalized=True,
+        beta_salesperson_scope=True,
+        beta_seller_scope_verified=True,
+    )
+
+    daily = facts[f"{BETA_LABEL}_每天旅行團交易人數"]
+    assert set(daily["銷售員"]) == {"002785 朱淑宜"}
+
+
+def test_beta_seller_scope_retains_v5_branch_salesperson_sheet_without_branch_drift():
+    import pipeline
+
+    tour = pd.DataFrame(
+        [
+            _row("BRANCH-TOUR", "銅鑼灣分社", "普通分社銷售員"),
+            _row("BETA-TOUR", "任意銷售點", "002785 朱淑宜"),
+        ]
+    )
+    others = pd.DataFrame(
+        [{**_row("BRANCH-TICKET", "銅鑼灣分社", "普通分社銷售員"), "來源報表標籤": "門券"}]
+    )
+
+    _, _, legacy = pipeline.build_dashboard_data(
+        tour, others, {"33": "銅鑼灣分社"}, [], [], [], make_workbook=False, return_facts=True
+    )
+    _, _, seller_scope = pipeline.build_dashboard_data(
+        tour,
+        others,
+        {"33": "銅鑼灣分社"},
+        [],
+        [],
+        ["002785 朱淑宜"],
+        make_workbook=False,
+        return_facts=True,
+        include_branch_salesperson_sheet=True,
+        beta_salesperson_scope=True,
+        beta_seller_scope_verified=True,
+    )
+
+    assert "分社經營統計_含銷售員" in seller_scope
+    pd.testing.assert_frame_equal(legacy["分社經營統計"], seller_scope["分社經營統計"])
+
+
+def test_beta_seller_scope_workbook_headers_match_v5():
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    import pipeline
+
+    tour = pd.DataFrame(
+        [
+            _row("BRANCH-TOUR", "銅鑼灣分社", "普通分社銷售員"),
+            _row("BETA-TOUR", "任意銷售點", "002785 朱淑宜"),
+        ]
+    )
+    others = pd.DataFrame(
+        [
+            {**_row("BRANCH-TICKET", "銅鑼灣分社", "普通分社銷售員"), "來源報表標籤": "門券"},
+            {**_row("BETA-TICKET", "另一任意銷售點", "新合資格銷售員"), "來源報表標籤": "門券"},
+        ]
+    )
+    buffer, _, _ = pipeline.build_dashboard_data(
+        tour,
+        others,
+        {"33": "銅鑼灣分社"},
+        [],
+        [],
+        ["002785 朱淑宜", "新合資格銷售員", "普通分社銷售員"],
+        make_workbook=True,
+        include_branch_salesperson_sheet=True,
+        beta_salesperson_scope=True,
+        beta_seller_scope_verified=True,
+    )
+    workbook = load_workbook(BytesIO(buffer.getvalue()), read_only=True, data_only=True)
+    expected = {
+        "分社經營統計_含銷售員": ["文本", "單選", "銷售員", "日期", "月份", "旅行團", "郵輪", "票務", "旅行團交易人數", "票務交易數量"],
+        "市場電商及同業_經營統計": ["文本", "種類", "日期", "月份", "旅行團", "郵輪", "票務"],
+        "市場電商及同業_旅行團統計": ["銷售員", "所屬種類", "文本", "天數", "日期", "月份", "交易人數"],
+        "市場電商及同業_票務總計": ["銷售員", "所屬種類", "文本", "日期", "月份", "交易數量"],
+        "市場電商及同業_每天旅行團交易人數": ["銷售員", "所屬種類", "日期", "月份", "旅行團交易人數", "郵輪交易人數"],
+        "市場電商及同業_每天票務交易數量": ["銷售員", "所屬種類", "種類", "日期", "月份", "交易數量"],
+        "市場電商及同業_線路種類每天統計": ["銷售員", "所屬種類", "線路種類", "日子", "月份", "交易人數", "交易金額"],
+    }
+
+    assert set(expected) <= set(workbook.sheetnames)
+    for sheet_name, headers in expected.items():
+        actual = [cell.value for cell in next(workbook[sheet_name].iter_rows(min_row=1, max_row=1))]
+        assert actual == headers, sheet_name
+
+
+def test_beta_capture_keeps_nonbranch_prefix_rows_and_uses_main_seller_identity():
+    import pipeline
+
+    main = pd.DataFrame(
+        [
+            {"來源單據號": "ZZ-001", "收款時間": "2026-05-01", "收款原幣金額": 100, "銷售員": "002785 朱淑宜"},
+            {"來源單據號": "XX-002", "收款時間": "2026-05-02", "收款原幣金額": 200, "銷售員": "新合資格銷售員"},
+            {"來源單據號": "YY-003", "收款時間": "2026-05-03", "收款原幣金額": 300, "銷售員": "不在名冊"},
+        ]
+    )
+    tours = pd.DataFrame(
+        [
+            {"交易號碼": "ZZ-001", "銷售員": "錯誤副表銷售員", "交易時間": "2026-05-01", "團負責人部門": "旅行團部", "行程天數": 3, "數量": 1, "團名稱": "測試"},
+            {"交易號碼": "XX-002", "銷售員": "錯誤副表銷售員", "交易時間": "2026-05-02", "團負責人部門": "旅行團部", "行程天數": 3, "數量": 1, "團名稱": "測試"},
+            {"交易號碼": "YY-003", "銷售員": "錯誤副表銷售員", "交易時間": "2026-05-03", "團負責人部門": "旅行團部", "行程天數": 3, "數量": 1, "團名稱": "測試"},
+        ]
+    )
+
+    tour, _, _ = pipeline.process_raw_files(
+        main,
+        ("tour.xlsx", tours),
+        [],
+        {"195": E_COMMERCE},
+        ["ZZ"],
+        ["新合資格銷售員"],
+        beta_capture_mode=True,
+    )
+    selected, _ = pipeline._select_beta_salesperson_frames(
+        tour, empty_frame(), ["新合資格銷售員"]
+    )
+
+    assert set(tour["來源單據號"]) == {"ZZ-001", "XX-002", "YY-003"}
+    assert dict(zip(tour["來源單據號"], tour["銷售員"])) == {
+        "ZZ-001": "002785 朱淑宜",
+        "XX-002": "新合資格銷售員",
+        "YY-003": "不在名冊",
+    }
+    assert set(selected["來源單據號"]) == {"ZZ-001"}

@@ -96,7 +96,6 @@ from app_workflows import (
     build_monthly_baseline_governance,
     build_phase2c_stability_gate,
     clear_database,
-    clear_beta_only_exception_cache,
     draw_forecast_chart,
     draw_month_end_macro_chart,
     draw_seven_day_macro_chart,
@@ -115,6 +114,8 @@ from app_workflows import (
     save_business_rules,
     upsert_to_db,
 )
+from backend.services.beta_only_exception_service import clear_beta_only_exception_cache
+from backend.services.beta_seller_scope_service import clear_beta_seller_scope_cache
 from backend.services.upload_lock_service import UploadBusyError, acquire_upload_lease
 from backend.services.gmv_refund_repository import GmvRefundRepository
 from backend.services.upload_lock_service import DEFAULT_COORDINATION_DB
@@ -826,6 +827,7 @@ def _render_config_tab() -> None:
     if st.button("🗑️ 清空所有歷史資料庫 (危險操作)", disabled=not confirm):
         clear_database()
         clear_beta_only_exception_cache()
+        clear_beta_seller_scope_cache()
         st.session_state["PROCESSED_DATA_CACHE"] = None
         st.session_state["DB_LOADED_FLAG"] = False
         st.success("資料庫已完全清空，請重新上傳基礎數據。")
@@ -853,10 +855,25 @@ def _render_receipt_exclusion_governance_panel() -> None:
 
     render_receipt_exclusion_governance(snapshot, preview_revoke=preview, confirm_revoke=confirm)
 
-def _streamlit_named_bytes(upload) -> io.BytesIO:
+def _streamlit_named_bytes(upload, *, beta_source_role: str | None = None) -> io.BytesIO:
     payload = io.BytesIO(upload.getvalue())
     payload.name = getattr(upload, "name", "upload.xlsx")
+    if beta_source_role is not None:
+        payload.beta_source_role = beta_source_role
     return payload
+
+
+def _beta_secondary_uploads(transport_upload, ticket_upload, package_upload, hotel_upload):
+    return [
+        (role, upload)
+        for role, upload in (
+            ("transport", transport_upload),
+            ("ticket", ticket_upload),
+            ("package", package_upload),
+            ("hotel", hotel_upload),
+        )
+        if upload is not None
+    ]
 
 
 def _render_upload_area(has_db_data: bool) -> None:
@@ -866,7 +883,10 @@ def _render_upload_area(has_db_data: bool) -> None:
         with left:
             main_up = st.file_uploader("營收主表 (必填)", type=["xlsx", "xls"])
             tour_up = st.file_uploader("旅行團副表 (選填)", type=["xlsx", "xls"])
-            oth_up = st.file_uploader("其他業務副表 (多選)", type=["xlsx", "xls"], accept_multiple_files=True)
+            transport_up = st.file_uploader("交通副表", type=["xlsx", "xls"])
+            ticket_up = st.file_uploader("門券副表", type=["xlsx", "xls"])
+            package_up = st.file_uploader("套票副表", type=["xlsx", "xls"])
+            hotel_up = st.file_uploader("酒店副表", type=["xlsx", "xls"])
         with right:
             if HAS_AI_LIBS:
                 _ = st.success("✅ AI 預測環境就緒")
@@ -874,15 +894,21 @@ def _render_upload_area(has_db_data: bool) -> None:
                 _ = st.warning("⚠️ 缺 matplotlib/statsmodels，AI 預測會降級或跳過")
             upload_requested = st.button("🔥 上傳並合併至資料庫", type="primary", width="stretch")
         proposal = ((st.session_state.get("LAST_UPLOAD_AUDIT") or {}).get("preflight_report") or {}).get("receiptExclusionProposal") or {}
+        beta_other_uploads = _beta_secondary_uploads(
+            transport_up, ticket_up, package_up, hotel_up
+        )
         if main_up and proposal.get("status") == "confirmation_required":
             def confirm_exclusion(payload: dict) -> dict:
-                source_files = [item.name for item in [main_up, tour_up, *(oth_up or [])] if item is not None]
+                source_files = [item.name for item in [main_up, tour_up, *(item for _, item in beta_other_uploads)] if item is not None]
                 with acquire_upload_lease(entry_point="streamlit", source_files=source_files) as lease:
                     execution = execute_upload_operation(
                         lease.operation,
                         main_file=_streamlit_named_bytes(main_up),
                         tour_file=_streamlit_named_bytes(tour_up) if tour_up else None,
-                        other_files=[_streamlit_named_bytes(item) for item in (oth_up or [])],
+                        other_files=[
+                            _streamlit_named_bytes(item, beta_source_role=role)
+                            for role, item in beta_other_uploads
+                        ],
                         live_db_path=database_module.DB_FILE,
                         receipt_exclusion_confirmation=payload,
                         accepted_cache_rebuilder=lambda: _load_and_compute_cache(include_ai=False),
@@ -905,20 +931,26 @@ def _render_upload_area(has_db_data: bool) -> None:
             st.error("需上傳主表。")
             return
 
-        source_files = [item.name for item in [main_up, tour_up, *(oth_up or [])] if item is not None]
+        source_files = [item.name for item in [main_up, tour_up, *(item for _, item in beta_other_uploads)] if item is not None]
         try:
             with acquire_upload_lease(entry_point="streamlit", source_files=source_files) as lease:
                 with st.status("讀取與清洗檔案...", expanded=True) as upload_status:
                     main_frame = _uploaded_excel_frame(_streamlit_named_bytes(main_up))
                     tour_frame = _uploaded_excel_frame(_streamlit_named_bytes(tour_up)) if tour_up else None
                     other_frames = [
-                        (item.name, _uploaded_excel_frame(_streamlit_named_bytes(item)))
-                        for item in (oth_up or [])
+                        (
+                            role,
+                            item.name,
+                            _uploaded_excel_frame(
+                                _streamlit_named_bytes(item, beta_source_role=role)
+                            ),
+                        )
+                        for role, item in beta_other_uploads
                     ]
                     secondary = []
                     if tour_frame is not None:
                         secondary.append(("旅行團副表", tour_up.name, tour_frame))
-                    secondary.extend(("其他業務副表", name, frame) for name, frame in other_frames)
+                    secondary.extend((f"{role}副表", name, frame) for role, name, frame in other_frames)
                     date_diag = _upload_date_source_diagnostics_from_frames(main_up.name, main_frame, secondary)
                     if date_diag.get("date_mismatch_warning"):
                         st.session_state["LAST_UPLOAD_AUDIT"] = {
@@ -933,7 +965,10 @@ def _render_upload_area(has_db_data: bool) -> None:
                         lease.operation,
                         main_file=_streamlit_named_bytes(main_up),
                         tour_file=_streamlit_named_bytes(tour_up) if tour_up else None,
-                        other_files=[_streamlit_named_bytes(item) for item in (oth_up or [])],
+                        other_files=[
+                            _streamlit_named_bytes(item, beta_source_role=role)
+                            for role, item in beta_other_uploads
+                        ],
                         live_db_path=database_module.DB_FILE,
                         accepted_cache_rebuilder=lambda: _load_and_compute_cache(include_ai=False),
                     )
@@ -2407,15 +2442,18 @@ def _render_ai_and_exports(cache: dict) -> None:
             beta_loaded = _load_beta_export_workbooks(cache)
         st.markdown("#### Beta comparison export")
         st.caption(
-            f"原專職表格替換為合併銷售點群組「{BETA_COMPARISON_SALES_POINT_LABEL}」資料，並新增「分社經營統計_含銷售員」；Beta-only exception 與原範圍不變。正式 Dashboard、Forecast 與正式下載不變。"
+            "Beta 的市場電商及同業來源按核准銷售員名冊納入，不依舊銷售點或單號前綴分流；"
+            "(5) 報表全部 19 張工作表及原欄位保留。財務主表、旅行團、交通、門券、套票、酒店六類來源未完成覆蓋驗證前，Beta 下載會暫停；分社正式篩選不變。"
         )
+        if cache.get("beta_export_warning"):
+            st.warning(cache["beta_export_warning"])
         if not beta_loaded and st.button("準備 Beta 市場電商及同業比較匯出", key="PREPARE_BETA_ECOMMERCE_EXPORT"):
             with st.spinner(f"正在生成 Beta {BETA_COMPARISON_SALES_POINT_LABEL}比較匯出..."):
                 beta_loaded = _ensure_beta_export_workbooks(cache)
             if beta_loaded:
                 st.rerun()
             else:
-                st.error("Beta 匯出準備失敗，請檢查目前資料與快取目錄。")
+                st.error(cache.get("beta_export_warning") or "Beta 匯出準備失敗，請檢查目前資料與快取目錄。")
         if beta_loaded:
             st.download_button(
                 "下載 Beta 市場電商及同業比較匯出（正式口徑）",

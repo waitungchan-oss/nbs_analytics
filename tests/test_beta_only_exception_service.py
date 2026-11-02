@@ -174,19 +174,17 @@ def test_persist_beta_only_exception_frames_does_not_cache_non_exception_rows(tm
     assert list(payload["others"]["來源單據號"]) == ["1950506002"]
 
 
-def test_beta_export_can_include_beta_only_exception_without_changing_formal_inputs():
+def test_beta_export_blocks_instead_of_falling_back_to_beta_only_exception():
     import app_workflows
 
     formal_tour = _frame("T001", "銅鑼灣分社")
     formal_others = _frame("O001", "營銷運營中心-同業銷售部")
-    exception_others = _frame("1950506001", "市場及商務部-電子商務組")
 
     payload = app_workflows._compute_beta_export_workbooks(
         formal_tour,
         formal_others,
-        beta_exception_others=exception_others,
     )
 
-    assert payload["export_variant"] == "beta_market_ecommerce_peer_sales_points_v5"
-    assert payload["beta_exception_rows"] == {"tour": 0, "others": 1}
-    assert payload["ex_no_writeoff_refund_transfer_beta"]
+    assert payload["export_variant"] == app_workflows.BETA_EXPORT_VARIANT
+    assert payload["status"] == "blocked"
+    assert "ex_no_writeoff_refund_transfer_beta" not in payload
