@@ -288,7 +288,7 @@ def _coverage_row(order_id, receipt_date, salesperson="002785 朱淑宜"):
             [{"start": "2026-01-01", "end": "2026-01-01"}, {"start": "2026-01-03", "end": "2026-01-03"}],
             True,
         ),
-        (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 1, "matched", False, [], True),
+        (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 1, "matched", True, [], True),
         (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 0, "drift", False, [], True),
         (["2026-01-01", "2026-01-03"], ["2026-01-01", "2026-01-03"], 0, "matched", False,
          [{"start": "2026-01-01", "end": "2026-01-01"}, {"start": "2026-01-03", "end": "2026-01-03"}], False),
@@ -317,8 +317,12 @@ def test_preflight_prepares_beta_seller_scope_with_date_gaps_and_match_status(
     )
     entity_summary = pd.DataFrame(
         [
+            {"指標": "主表有效來源單據號數", "數值": len(source_dates)},
+            {"指標": "副表有效交易號碼數", "數值": len(source_dates) - unmatched_rows + 1},
+            {"指標": "成功匹配唯一單號數", "數值": len(source_dates) - unmatched_rows},
+            {"指標": "成功匹配主表行數", "數值": len(source_dates) - unmatched_rows},
             {"指標": "主表未匹配行數", "數值": unmatched_rows},
-            {"指標": "副表未落主表單號數", "數值": 0},
+            {"指標": "副表未落主表單號數", "數值": 1},
         ]
     )
     calls = []
@@ -396,8 +400,33 @@ def test_preflight_prepares_beta_seller_scope_with_date_gaps_and_match_status(
     assert coverage["missingSourceRoles"] == ([] if source_complete else ["hotel", "package", "ticket", "transport"])
     assert coverage["verification"]["sourceRolesStatus"] == ("complete" if source_complete else "incomplete")
     assert coverage["verification"]["entityMatchStatus"] == (
-        "matched" if source_complete and unmatched_rows == 0 else "unmatched_or_unverified"
+        "matched" if source_complete else "unmatched_or_unverified"
     )
     assert any(call.get("beta_capture_mode") is True for call in calls) is source_complete
     assert report["liveDbUnchanged"] is True
     assert upsert_targets and all(path != live_path for path in upsert_targets)
+
+
+@pytest.mark.parametrize("broken_metric,broken_value", [
+    ("成功匹配主表行數", 3),
+    ("副表未落主表單號數", 0),
+    ("主表未匹配行數", -1),
+    ("成功匹配唯一單號數", None),
+])
+def test_beta_entity_audit_rejects_inconsistent_or_missing_counts(broken_metric, broken_value):
+    from backend.services.beta_seller_scope_service import _entity_audit_reconciled
+
+    metrics = {
+        "主表有效來源單據號數": 2,
+        "副表有效交易號碼數": 2,
+        "成功匹配唯一單號數": 1,
+        "成功匹配主表行數": 1,
+        "主表未匹配行數": 1,
+        "副表未落主表單號數": 1,
+    }
+    metrics[broken_metric] = broken_value
+    coverage = {
+        "audit": {"inputRows": 2},
+        "entityAuditSummary": [{"指標": name, "數值": count} for name, count in metrics.items()],
+    }
+    assert _entity_audit_reconciled(coverage) is False
