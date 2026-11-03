@@ -34,6 +34,8 @@ from backend.services.stability_history_service import record_stability_history 
 from backend.services.upload_preflight_service import run_upload_preflight  # noqa: E402
 from backend.services.beta_seller_scope_service import (  # noqa: E402
     BETA_SELLER_SCOPE_CACHE_VERSION,
+    beta_closed_month_policy_fingerprint,
+    filter_beta_seller_scope_rows,
     load_beta_seller_scope_frames,
 )
 from backend.services.upload_rollback_service import handle_core_drift_rollback  # noqa: E402
@@ -149,7 +151,7 @@ EXPORT_CACHE_VERSION = 'export-lazy-v4'
 EXPORT_FAST_PATH_MODE = os.environ.get("NBS_EXPORT_FAST_PATH_MODE", "shadow").strip().lower()
 OFFICIAL_EXPORT_SCHEMA_CONTRACT = 'official-branch-salesperson-v2'
 BETA_EXPORT_VARIANT = "beta_market_ecommerce_peer_salesperson_v1"
-BETA_EXPORT_CACHE_VERSION = "beta-export-persistent-v2"
+BETA_EXPORT_CACHE_VERSION = "beta-export-persistent-v3"
 BETA_EXPORT_WORKBOOK_KEYS = (
     "ex_beta",
     "ex_no_writeoff_beta",
@@ -1088,6 +1090,7 @@ def _beta_export_runtime_cache_key(cache: dict) -> str | None:
     digest.update(coverage_payload.encode("utf-8"))
     identity = (
         f"{BETA_EXPORT_CACHE_VERSION}|{BETA_EXPORT_VARIANT}|{BETA_SELLER_SCOPE_CACHE_VERSION}|"
+        f"closedMonthPolicy={beta_closed_month_policy_fingerprint()}|"
         f"{OFFICIAL_EXPORT_SCHEMA_CONTRACT}|generation={cache.get('current_data_generation')}|"
         f"{formal_key}|{digest.hexdigest()}"
     )
@@ -1211,6 +1214,24 @@ def _compute_beta_export_workbooks(
 ) -> dict:
     branch_mapping, target_branches, cruise_depts, sales_reps, _ = rules or _current_rules()
     def build_beta(tour, others, excluded_receipt_types, excluded_payment_methods=None, *, seller_scope=False):
+        if seller_scope:
+            beta_tour, beta_others = filter_beta_seller_scope_rows(
+                tour,
+                others,
+                excluded_receipt_types,
+                excluded_payment_methods or [],
+            )
+            return pipeline_module.build_dashboard_data(
+                beta_tour,
+                beta_others,
+                branch_mapping,
+                target_branches,
+                cruise_depts,
+                sales_reps,
+                include_branch_salesperson_sheet=True,
+                beta_salesperson_scope=True,
+                beta_seller_scope_verified=True,
+            )
         return build_dashboard_data_excluding_receipt_types(
             tour,
             others,

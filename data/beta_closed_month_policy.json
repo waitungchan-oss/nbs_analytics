@@ -1,0 +1,436 @@
+{
+  "schemaVersion": "beta-closed-month-policy-v1",
+  "revision": "2026-10-frozen-receipts-v1",
+  "scope": "beta_market_ecommerce_peer_export_only",
+  "frozenMonth": "2026-10",
+  "currency": "HKD",
+  "frozenBaseline": {
+    "amountHkd": 3239226,
+    "preservedReceipts": [
+      {
+        "receiptNo": "SK2610004589",
+        "amountHkd": 3000,
+        "reason": "Preserve the original October receipt; a separate November write-off with the same source order is excluded row-wise only."
+      }
+    ],
+    "sourceFile": "Beta_市場電商及同業_不含掛賬核銷與TT退款轉團款 (7).xlsx",
+    "sourceSha256": "acc3d3b8945a84818754aa3b9b4ca2c686f94e20e6f907b0a437c6e27d3fc635"
+  },
+  "adjustmentRegister": {
+    "sourceFile": "財務收款總數-0101-1102.xlsx",
+    "sourceSha256": "c4316395fdcf09f9340da83d6608a05d40288d44be57fc4602de5b6b2e84db6f",
+    "expectedReceiptCount": 29,
+    "expectedAdjustmentAmountHkd": 75662,
+    "reason": "Exclude the listed October valid-receipt rows to reproduce the approved frozen Beta (7) baseline. Exclusion is keyed by receipt number, not source order number.",
+    "entries": [
+      {
+        "receiptNo": "SK2610000085",
+        "sourceOrderNo": "19505060044996924152726",
+        "salesperson": "004499 胡闹香",
+        "paymentDate": "2026-10-01",
+        "amountHkd": 12396.0,
+        "receiptType": "旅費",
+        "paymentMethod": "CR 信用咭",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2609008568"
+        ],
+        "sourceRowSha256": "159cd69d36a5081309f9049b375a96a96b9f7f92122725927ff2ce0168a98262"
+      },
+      {
+        "receiptNo": "SK2610000230",
+        "sourceOrderNo": "1950506debby6A02085041",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-02",
+        "amountHkd": 4302.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004221"
+        ],
+        "sourceRowSha256": "d4f4248fd214e59942dcbd83c35d387d72af34b1e07eccef6ed61c3bbaea3e16"
+      },
+      {
+        "receiptNo": "SK2610000440",
+        "sourceOrderNo": "1950506debby6A02155503",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-02",
+        "amountHkd": 3837.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004222"
+        ],
+        "sourceRowSha256": "97657045930122fa375f90be7ecbe9854781de1ae0c2c8482d2b210a14b28e5e"
+      },
+      {
+        "receiptNo": "SK2610000904",
+        "sourceOrderNo": "19505060111856A05112027",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-05",
+        "amountHkd": 300.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004968"
+        ],
+        "sourceRowSha256": "0a4cc73bd54c2174d07fbc542a56983ebf5ecc48349649fec6cd982131611ef9"
+      },
+      {
+        "receiptNo": "SK2610000935",
+        "sourceOrderNo": "19505060111856A05150330",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-05",
+        "amountHkd": 289.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004969"
+        ],
+        "sourceRowSha256": "1aea1f8351a6efb948db263dcd0d2a1d48f90c0f323123c5538303416ec3f84b"
+      },
+      {
+        "receiptNo": "SK2610001152",
+        "sourceOrderNo": "19505060027856A07095234",
+        "salesperson": "002785 朱淑宜",
+        "paymentDate": "2026-10-07",
+        "amountHkd": 10.0,
+        "receiptType": "旅費",
+        "paymentMethod": "BDR 銀行入數紙",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610001151"
+        ],
+        "sourceRowSha256": "d4207ba77e68fdf8033a9a850fe26b7ae32dffc856aaf058665d1ab75b0b01af"
+      },
+      {
+        "receiptNo": "SK2610002471",
+        "sourceOrderNo": "1950506debby6A15095826",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-15",
+        "amountHkd": 2040.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004224"
+        ],
+        "sourceRowSha256": "47f300f65121acf6a45e3116fbdf082167ea6ba38a7ba1ed0905c9f2fa693a01"
+      },
+      {
+        "receiptNo": "SK2610002480",
+        "sourceOrderNo": "1950506debby6A15103310",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-15",
+        "amountHkd": 510.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004225"
+        ],
+        "sourceRowSha256": "d9f69afbf77e9fcb56b1e6f1351c77cba6ad6bb57c72b57cd7dcc3527055496a"
+      },
+      {
+        "receiptNo": "SK2610002605",
+        "sourceOrderNo": "19505060027856210181738",
+        "salesperson": "002785 朱淑宜",
+        "paymentDate": "2026-10-15",
+        "amountHkd": 60.0,
+        "receiptType": "旅費",
+        "paymentMethod": "CF 社內轉賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2604002752"
+        ],
+        "sourceRowSha256": "a457c3d3bb36274a79ee9b1c8bdda628035384b6bbc1c14d1c2a0b80114b0f7c"
+      },
+      {
+        "receiptNo": "SK2610003114",
+        "sourceOrderNo": "19505060111856A20103403",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-20",
+        "amountHkd": 2800.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610003499"
+        ],
+        "sourceRowSha256": "4897cf1df3d3d53019250c3fe7780f42b0980e3fcacacc33ce800c4054bbcaca"
+      },
+      {
+        "receiptNo": "SK2610003240",
+        "sourceOrderNo": "1950506debby6A20192626",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-20",
+        "amountHkd": 7098.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004226"
+        ],
+        "sourceRowSha256": "ca1af5ac155fb36a1a14ee98f66c0bb3d1a7a69051f62762d5b44e11e2ea7fbb"
+      },
+      {
+        "receiptNo": "SK2610003258",
+        "sourceOrderNo": "1950506debby6A21102525",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-21",
+        "amountHkd": 2040.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004227"
+        ],
+        "sourceRowSha256": "2a5cfc7a2aeeea582acaee33d8596b1a85e5f38b976c48e243a3150e77fa6f96"
+      },
+      {
+        "receiptNo": "SK2610003282",
+        "sourceOrderNo": "19505060111856A21103844",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-21",
+        "amountHkd": 4000.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610003500"
+        ],
+        "sourceRowSha256": "d286475ffc7b8e0dfa9bc08169b08449132c82d0b06306ad19eb45c4356093e0"
+      },
+      {
+        "receiptNo": "SK2610003314",
+        "sourceOrderNo": "19505060111856A21135553",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-21",
+        "amountHkd": 1280.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610003501"
+        ],
+        "sourceRowSha256": "66130af9abac16954731b5d62a6c5d238eca37d7944e3d1cb678c094d84016b4"
+      },
+      {
+        "receiptNo": "SK2610003358",
+        "sourceOrderNo": "19505060111856A21161815",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-21",
+        "amountHkd": 550.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004662",
+          "SK2610004663"
+        ],
+        "sourceRowSha256": "f778f1ba6dfd4f4a5967482e7570ff622ae9dd86b3003f514673c85972dc7098"
+      },
+      {
+        "receiptNo": "SK2610003472",
+        "sourceOrderNo": "19505060111856A22131719",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-22",
+        "amountHkd": 1600.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004545"
+        ],
+        "sourceRowSha256": "1133588cdf3891b38225f629bf960b32d41bd1ec03a4809d09d74fa5b511fa3a"
+      },
+      {
+        "receiptNo": "SK2610003516",
+        "sourceOrderNo": "19505060111856A22153157",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-22",
+        "amountHkd": 2800.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004546"
+        ],
+        "sourceRowSha256": "3112418f6485873164694e9a723f725f9a96f018b4783dceefa9637be42e7d46"
+      },
+      {
+        "receiptNo": "SK2610003525",
+        "sourceOrderNo": "19505060111856A22160307",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-22",
+        "amountHkd": 2200.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004547"
+        ],
+        "sourceRowSha256": "6d8c52595c8fec5b160cdb328b18c0e41eab04f31d94b27675babee75397161d"
+      },
+      {
+        "receiptNo": "SK2610003726",
+        "sourceOrderNo": "19505060111856A21161815",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-23",
+        "amountHkd": 30.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004662",
+          "SK2610004663"
+        ],
+        "sourceRowSha256": "eaf4028114bc55f7575a56e458768c8bfecc153a8f30c6c3452a99239a824b4f"
+      },
+      {
+        "receiptNo": "SK2610004520",
+        "sourceOrderNo": "19505060111856A28132052",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 2600.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004548"
+        ],
+        "sourceRowSha256": "a90f050549b381c62dd91f0666f160396ecbd1f38095f3d3b2161f150fc0d338"
+      },
+      {
+        "receiptNo": "SK2610004553",
+        "sourceOrderNo": "19505060111856A28145820",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 2000.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004565"
+        ],
+        "sourceRowSha256": "dbb41f08c23af37fdefe714526b61a9ff289219dab5c7bbbe9029a26ca9ee130"
+      },
+      {
+        "receiptNo": "SK2610004555",
+        "sourceOrderNo": "19505060111856A28150236",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 2200.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004566"
+        ],
+        "sourceRowSha256": "00b145f40b94e5750a5ad26cf65c71ba7e4fc9e318ab2db932519fca3cf01ba8"
+      },
+      {
+        "receiptNo": "SK2610004559",
+        "sourceOrderNo": "19505060111856A28150917",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 3000.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004567"
+        ],
+        "sourceRowSha256": "8d945665289192d898b46d137e50af448cc00bd9a1642383d29ae47620066313"
+      },
+      {
+        "receiptNo": "SK2610004564",
+        "sourceOrderNo": "19505060111856A28151607",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 1600.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004568"
+        ],
+        "sourceRowSha256": "2b042dca4f2a9fe8d91242a276deb0d66f3ad5304a322018e857ad79ce5ea3b7"
+      },
+      {
+        "receiptNo": "SK2610004571",
+        "sourceOrderNo": "19505060111856A28153349",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 2200.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004579"
+        ],
+        "sourceRowSha256": "a6461ae4f30d97f096bcf54a1a5e1065f08c7d099d64c78bd0e40b054b17eab1"
+      },
+      {
+        "receiptNo": "SK2610004574",
+        "sourceOrderNo": "19505060111856A28153802",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 3000.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004580"
+        ],
+        "sourceRowSha256": "677d1b0459a84533db0ab38ed90d582e39539497d663fa684cbf0e69ae2d5a79"
+      },
+      {
+        "receiptNo": "SK2610004578",
+        "sourceOrderNo": "19505060111856A28154105",
+        "salesperson": "011185 洪淑芬",
+        "paymentDate": "2026-10-28",
+        "amountHkd": 3000.0,
+        "receiptType": "旅費",
+        "paymentMethod": "AC 掛賬",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2610004581"
+        ],
+        "sourceRowSha256": "8f44817663521f748c68b6603b03fec44a9a244a9bb8dfabbf34fc43fae27bcb"
+      },
+      {
+        "receiptNo": "SK2610004651",
+        "sourceOrderNo": "1950506debby6424113002",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-29",
+        "amountHkd": 3960.0,
+        "receiptType": "旅費",
+        "paymentMethod": "BDR 銀行入數紙",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2605001807"
+        ],
+        "sourceRowSha256": "72085309dcf328047d5599102df717da93a6db9f6ef334cd7539a62680b094f9"
+      },
+      {
+        "receiptNo": "SK2610004660",
+        "sourceOrderNo": "1950506debby6417172005",
+        "salesperson": "debby 卢淑贞",
+        "paymentDate": "2026-10-29",
+        "amountHkd": 3960.0,
+        "receiptType": "旅費",
+        "paymentMethod": "BDR 銀行入數紙",
+        "reason": "october_frozen_baseline_reconciliation; same source order has separately excluded write-off or TT refund-transfer receipt",
+        "relatedExcludedReceiptNos": [
+          "SK2605001806"
+        ],
+        "sourceRowSha256": "44f237f6ac810368503582a626379a9c24994992531fdecb8c8739ab6e327c8a"
+      }
+    ]
+  }
+}

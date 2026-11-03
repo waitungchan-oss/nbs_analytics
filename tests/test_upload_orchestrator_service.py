@@ -88,6 +88,95 @@ def test_accepted_upload_records_history_and_generation(tmp_path):
     assert contexts[0]["latest_data_date"] == "2026-07-01"
 
 
+def test_closed_month_beta_variance_is_reported_as_warning_without_blocking_upload(tmp_path, monkeypatch):
+    from backend.services import upload_orchestrator_service
+
+    check = {
+        "status": "variance",
+        "months": [
+            {
+                "month": "2026-10",
+                "previousAmount": 2_986_403.0,
+                "currentAmount": 3_239_226.0,
+                "deltaAmount": 252_823.0,
+            }
+        ],
+    }
+    coverage = {
+        "complete": True,
+        "status": "complete",
+        "closedMonthVarianceCheck": check,
+    }
+    monkeypatch.setattr(
+        upload_orchestrator_service,
+        "persist_beta_seller_scope_frames",
+        lambda tour, others, passed_coverage, **kwargs: {
+            "status": "saved",
+            "tourRows": len(tour),
+            "othersRows": len(others),
+            "coverage": coverage,
+        },
+    )
+    contexts = []
+
+    execution = _accepted_execution(
+        tmp_path,
+        history_writer=lambda gate, context, **kwargs: contexts.append(context) or 8,
+    )
+
+    assert execution.response["status"] == "warning"
+    assert execution.response["writeCommitted"] is True
+    assert "2026-10" in execution.response["message"]
+    assert "252,823" in execution.response["message"]
+    assert execution.response["betaSellerScopeCache"]["coverage"]["complete"] is True
+    assert execution.response["cacheBuild"]["betaClosedMonthVarianceCheck"] == check
+    assert contexts[0]["beta_closed_month_variance_check"] == check
+
+
+def test_upload_feedback_explains_frozen_beta_month_reconciliation(tmp_path, monkeypatch):
+    from backend.services import upload_orchestrator_service
+
+    check = {
+        "status": "matched",
+        "months": [
+            {
+                "month": "2026-10",
+                "previousAmount": 3_239_226.0,
+                "currentAmount": 3_239_226.0,
+                "deltaAmount": 0.0,
+                "frozenBaselineAmount": 3_239_226.0,
+                "previousSnapshotAmount": None,
+                "rawCurrentAmount": 3_314_888.0,
+                "adjustmentAmount": -75_662.0,
+                "adjustmentCount": 29,
+                "preservedReceiptAmount": 3_000.0,
+            }
+        ],
+    }
+    coverage = {"complete": True, "status": "complete", "closedMonthVarianceCheck": check}
+    monkeypatch.setattr(
+        upload_orchestrator_service,
+        "persist_beta_seller_scope_frames",
+        lambda tour, others, passed_coverage, **kwargs: {
+            "status": "saved", "tourRows": len(tour), "othersRows": len(others), "coverage": coverage,
+        },
+    )
+    contexts = []
+
+    execution = _accepted_execution(
+        tmp_path,
+        history_writer=lambda gate, context, **kwargs: contexts.append(context) or 9,
+    )
+
+    summary = execution.response["betaClosedMonthVarianceSummary"]
+    assert execution.response["status"] == "success"
+    assert "HKD 3,314,888.00" in summary
+    assert "HKD -75,662.00（29 筆）" in summary
+    assert "HKD 3,239,226.00" in summary
+    assert "保留原收款 HKD 3,000.00" in summary
+    assert contexts[0]["beta_closed_month_variance_summary"] == summary
+
+
 def test_accepted_upload_keeps_legacy_beta_cache_bytes_unchanged(tmp_path, monkeypatch):
     from backend.services import beta_only_exception_service
     from backend.services import upload_orchestrator_service

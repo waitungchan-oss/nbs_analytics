@@ -60,6 +60,44 @@ def _latest_date(*frames: pd.DataFrame) -> str | None:
     return max(candidates).strftime("%Y-%m-%d") if candidates else None
 
 
+def _closed_month_variance_message(check: dict) -> str:
+    rows = check.get("months") if isinstance(check, dict) else []
+    changed = [
+        row for row in rows or []
+        if isinstance(row, dict) and row.get("deltaAmount") is not None
+        and abs(float(row["deltaAmount"])) > 0.01
+    ]
+    if changed:
+        details = "；".join(
+            f"{row['month']}：HKD {float(row['previousAmount']):,.2f} → "
+            f"HKD {float(row['currentAmount']):,.2f}（差額 {float(row['deltaAmount']):+,.2f}）"
+            for row in changed[:3]
+        )
+        return f"資料已寫入；Beta 已結月份差額需核對：{details}。Beta 匯出仍可用。"
+    return "資料已寫入；部分 Beta 已結月份缺少可比較的舊快照，請核對差額基準。Beta 匯出仍可用。"
+
+
+def _closed_month_variance_summary(check: dict) -> str | None:
+    rows = check.get("months") if isinstance(check, dict) else []
+    frozen = next(
+        (
+            row for row in rows or []
+            if isinstance(row, dict) and row.get("frozenBaselineAmount") is not None
+        ),
+        None,
+    )
+    if frozen is None:
+        return None
+    return (
+        f"Beta {frozen['month']} 對帳：原始有效 HKD {float(frozen.get('rawCurrentAmount', 0)):,.2f}；"
+        f"凍結例外 HKD {float(frozen.get('adjustmentAmount', 0)):,.2f}（{int(frozen.get('adjustmentCount', 0))} 筆）；"
+        f"調整後 HKD {float(frozen.get('currentAmount', 0)):,.2f}；"
+        f"凍結基準 HKD {float(frozen.get('frozenBaselineAmount', 0)):,.2f}；"
+        f"差額 HKD {float(frozen.get('deltaAmount') or 0):+,.2f}；"
+        f"保留原收款 HKD {float(frozen.get('preservedReceiptAmount', 0)):,.2f}。"
+    )
+
+
 def _prepared_artifacts(preflight: dict) -> tuple[pd.DataFrame, dict[str, Any]]:
     prepared = preflight.get("prepared") or {}
     anomaly = prepared.get("anm") if isinstance(prepared.get("anm"), pd.DataFrame) else pd.DataFrame()
@@ -227,6 +265,19 @@ def _commit_matched_upload(
             cache_state = "fallback"
             cache_build["fallbackReason"] = cache_error
 
+    beta_coverage = beta_seller_scope_cache.get("coverage")
+    beta_closed_month_check = (
+        beta_coverage.get("closedMonthVarianceCheck")
+        if isinstance(beta_coverage, dict)
+        and isinstance(beta_coverage.get("closedMonthVarianceCheck"), dict)
+        else None
+    )
+    if beta_closed_month_check is not None:
+        cache_build["betaClosedMonthVarianceCheck"] = beta_closed_month_check
+    beta_closed_month_summary = _closed_month_variance_summary(beta_closed_month_check or {})
+    if beta_closed_month_summary:
+        cache_build["betaClosedMonthVarianceSummary"] = beta_closed_month_summary
+
     public_status = "success"
     message = f"上傳批次已寫入；SQLite 最新收款日期：{latest_data_date or '—'}。"
     if final_status == "rejected_rolled_back":
@@ -244,6 +295,8 @@ def _commit_matched_upload(
         or beta_seller_scope_cache["coverage"].get("complete") is not True
     ):
         public_status, message = "degraded", "資料已寫入，但 Beta 來源覆蓋尚未完整；Beta 匯出暫不可用，請補齊來源並重建。"
+    elif beta_closed_month_check and beta_closed_month_check.get("status") in {"variance", "partial_snapshot"}:
+        public_status, message = "warning", _closed_month_variance_message(beta_closed_month_check)
 
     final_gate = rollback.get("postRollbackGate") or gate
     all_timings = list(preflight.get("stageTimings") or []) + timings
@@ -262,6 +315,8 @@ def _commit_matched_upload(
         "cache_build": cache_build,
         "beta_exception_cache": beta_exception_cache,
         "beta_seller_scope_cache": beta_seller_scope_cache,
+        "beta_closed_month_variance_check": beta_closed_month_check,
+        "beta_closed_month_variance_summary": beta_closed_month_summary,
         "receipt_exclusion_revision": receipt_exclusion_revision,
         "receipt_exclusion_rule_ids": receipt_exclusion_rule_ids,
         "receipt_exclusion_match_count": len(receipt_exclusion.get("matchedRules") or []),
@@ -291,6 +346,8 @@ def _commit_matched_upload(
         "cacheBuild": cache_build,
         "betaExceptionCache": beta_exception_cache,
         "betaSellerScopeCache": beta_seller_scope_cache,
+        "betaClosedMonthVarianceCheck": beta_closed_month_check,
+        "betaClosedMonthVarianceSummary": beta_closed_month_summary,
         "receiptExclusion": {
             **(preflight.get("receiptExclusion") or {}),
             "registryRevision": receipt_exclusion_revision,

@@ -232,16 +232,17 @@ def test_cache_merge_drops_stale_verification_for_incomplete_source_roles():
     assert merged["verification"]["sourceRolesStatus"] == "incomplete"
 
 
-def test_v2_cache_upserts_by_receipt_id_preserves_multiple_receipts_per_order_and_legacy_bytes(tmp_path):
+def test_v3_cache_upserts_payment_details_and_preserves_duplicate_receipt_rows(tmp_path):
     from backend.services import beta_seller_scope_service
 
-    cache_path = tmp_path / "beta_seller_scope_v2.pkl"
+    cache_path = tmp_path / "beta_seller_scope_v3.pkl"
     legacy_path = tmp_path / "beta_only_exception.pkl"
     legacy_path.write_bytes(b"legacy-beta-cache-must-not-change")
     legacy_before = legacy_path.read_bytes()
     first = _seller_rows(
         [
             ("ORDER-1", "RECEIPT-1", "2026-05-01 10:00:00", "店A", "002785 朱淑宜", 100),
+            ("ORDER-1", "RECEIPT-1", "2026-05-01 10:00:00", "店A", "002785 朱淑宜", 25),
             ("ORDER-1", "RECEIPT-2", "2026-05-01 11:00:00", "店A", "002785 朱淑宜", 50),
         ]
     )
@@ -292,9 +293,13 @@ def test_v2_cache_upserts_by_receipt_id_preserves_multiple_receipts_per_order_an
         cache_path=cache_path
     )
 
-    assert len(loaded_tour) == 2
-    amounts_by_receipt = dict(zip(loaded_tour["收款單號"], loaded_tour["收款原幣金額"]))
-    assert amounts_by_receipt == {"RECEIPT-1": 250, "RECEIPT-2": 50}
+    assert len(loaded_tour) == 3
+    assert len(loaded_tour.loc[loaded_tour["收款單號"].eq("RECEIPT-1")]) == 2
+    amounts_by_receipt = {
+        receipt: sorted(rows.tolist())
+        for receipt, rows in loaded_tour.groupby("收款單號")["收款原幣金額"]
+    }
+    assert amounts_by_receipt == {"RECEIPT-1": [25, 250], "RECEIPT-2": [50]}
     assert loaded_others.empty
     assert coverage["version"] == beta_seller_scope_service.BETA_SELLER_SCOPE_CACHE_VERSION
     assert coverage["dateIntervals"] == [
@@ -306,6 +311,406 @@ def test_v2_cache_upserts_by_receipt_id_preserves_multiple_receipts_per_order_an
     assert coverage["rowsFingerprintMatched"] is True
     assert coverage["complete"] is True
     assert legacy_path.read_bytes() == legacy_before
+
+
+def test_v3_cache_reports_closed_month_variance_and_keeps_v2_cache_unchanged(tmp_path):
+    from backend.services import beta_seller_scope_service
+
+    cache_path = tmp_path / "beta_seller_scope_v3.pkl"
+    legacy_path = tmp_path / "beta_seller_scope_v2.pkl"
+    legacy_tour = _seller_rows(
+        [("SEP-OLD", "R-OLD", "2026-09-15 10:00:00", "店A", "002785 朱淑宜", 2_986_403)]
+    )
+    legacy_tour["收款本幣金額"] = 2_986_403
+    legacy_payload = {
+        "version": "beta-seller-scope-v2",
+        "tour": legacy_tour,
+        "others": pd.DataFrame(),
+        "coverage": {},
+        "dataGeneration": 9,
+        "rowsFingerprint": beta_seller_scope_service._frames_fingerprint(
+            legacy_tour, pd.DataFrame()
+        ),
+    }
+    with legacy_path.open("wb") as handle:
+        pickle.dump(legacy_payload, handle)
+    legacy_before = legacy_path.read_bytes()
+
+    current = _seller_rows(
+        [
+            ("SEP-NEW", "R-SEP", "2026-09-20 10:00:00", "店A", "002785 朱淑宜", 3_239_226),
+            ("NOV-NEW", "R-NOV", "2026-11-02 10:00:00", "店A", "002785 朱淑宜", 100),
+        ]
+    )
+    current["收款本幣金額"] = current["收款原幣金額"]
+    roles = list(beta_seller_scope_service.BETA_REQUIRED_SOURCE_ROLES)
+    beta_seller_scope_service.persist_beta_seller_scope_frames(
+        current,
+        pd.DataFrame(),
+        {
+            "sourceFingerprint": "c" * 64,
+            "sourceRoles": roles,
+            "sourceRoleMappingVerified": True,
+            "sourceRoleMappingIssues": [],
+            "dateIntervals": [{"start": "2026-09-01", "end": "2026-11-02"}],
+            "requiredDateIntervals": [{"start": "2026-09-01", "end": "2026-11-02"}],
+            "verification": {
+                "preflightStatus": "matched",
+                "driftStatus": "no_drift",
+                "entityMatchStatus": "matched",
+                "sourceRolesStatus": "complete",
+                "sourceRoleMappingStatus": "verified",
+                "liveDbUnchanged": True,
+            },
+        },
+        cache_path=cache_path,
+        data_generation=10,
+    )
+
+    loaded_tour, _, coverage = beta_seller_scope_service.load_beta_seller_scope_frames(
+        cache_path=cache_path, expected_data_generation=10
+    )
+
+    assert len(loaded_tour) == 2
+    check = coverage["closedMonthVarianceCheck"]
+    assert check["status"] == "variance"
+    assert check["months"] == [
+        {
+            "month": "2026-09",
+            "previousAmount": 2_986_403.0,
+            "currentAmount": 3_239_226.0,
+            "deltaAmount": 252_823.0,
+        }
+    ]
+    assert legacy_path.read_bytes() == legacy_before
+
+
+def test_closed_month_uses_source_month_even_when_latest_month_rows_are_excluded():
+    from backend.services import beta_seller_scope_service
+
+    previous = _seller_rows(
+        [("SEP-OLD", "R-OLD", "2026-09-15 10:00:00", "店A", "002785 朱淑宜", 100)]
+    )
+    previous["收款本幣金額"] = 100
+    current = _seller_rows(
+        [("SEP-NEW", "R-NEW", "2026-09-20 10:00:00", "店A", "002785 朱淑宜", 125)]
+    )
+    current["收款本幣金額"] = 125
+    excluded_november = _seller_rows(
+        [("NOV-EXCLUDED", "R-NOV", "2026-11-02 10:00:00", "店A", "002785 朱淑宜", 500)]
+    )
+    excluded_november["收款本幣金額"] = 500
+    excluded_november["收款方式"] = "TT 退款轉團款"
+
+    check = beta_seller_scope_service._closed_month_variance_check(
+        previous,
+        pd.DataFrame(),
+        pd.concat([current, excluded_november], ignore_index=True),
+        pd.DataFrame(),
+        coverage_complete=True,
+        latest_source_month="2026-11",
+    )
+
+    assert check["status"] == "variance"
+    assert check["months"][0]["month"] == "2026-09"
+    assert check["months"][0]["currentAmount"] == 125
+    assert check["months"][0]["deltaAmount"] == 25
+
+
+def test_october_beta_adjustment_is_receipt_level_and_does_not_cascade_to_november():
+    from backend.services import beta_seller_scope_service
+
+    rows = _seller_rows(
+        [
+            (
+                "19505060111856A28154105",
+                "SK2610004578",
+                "2026-10-28 15:42:48",
+                "任意銷售點",
+                "011185 洪淑芬",
+                3000,
+            ),
+            (
+                "19505060111856A28160810",
+                "SK2610004589",
+                "2026-10-28 16:08:10",
+                "任意銷售點",
+                "011185 洪淑芬",
+                3000,
+            ),
+            (
+                "19505060111856A28160810",
+                "SK2611000107",
+                "2026-11-01 10:00:00",
+                "任意銷售點",
+                "011185 洪淑芬",
+                3000,
+            ),
+            (
+                "19505060111856A28160810",
+                "SK2611000108",
+                "2026-11-01 10:05:00",
+                "任意銷售點",
+                "011185 洪淑芬",
+                3000,
+            ),
+            (
+                "NOV-TT",
+                "SK2611000200",
+                "2026-11-02 10:00:00",
+                "任意銷售點",
+                "011185 洪淑芬",
+                500,
+            ),
+        ]
+    )
+    rows["收款本幣金額"] = rows["收款原幣金額"]
+    policy = beta_seller_scope_service._load_beta_closed_month_policy()
+    entry = next(
+        item for item in policy["adjustmentRegister"]["entries"]
+        if item["receiptNo"] == "SK2610004578"
+    )
+    rows["收款類型"] = "旅費"
+    rows["收款方式"] = "現金"
+    rows.loc[rows["收款單號"] == "SK2610004578", "收款類型"] = entry["receiptType"]
+    rows.loc[rows["收款單號"] == "SK2610004578", "收款方式"] = entry["paymentMethod"]
+    rows.loc[rows["收款單號"] == "SK2611000107", "收款類型"] = "掛賬核銷"
+    rows.loc[rows["收款單號"] == "SK2611000200", "收款方式"] = "TT 退款轉團款"
+    original = rows.copy(deep=True)
+
+    filtered, _ = beta_seller_scope_service.filter_beta_seller_scope_rows(
+        rows, pd.DataFrame()
+    )
+
+    assert filtered["收款單號"].tolist() == ["SK2610004589", "SK2611000108"]
+    assert rows.equals(original)
+
+
+def test_october_closed_month_check_reconciles_raw_adjusted_and_frozen_totals():
+    import json
+
+    from backend.services import beta_seller_scope_service
+
+    policy = json.loads(
+        beta_seller_scope_service.BETA_CLOSED_MONTH_POLICY_PATH.read_text(encoding="utf-8")
+    )
+    entries = policy["adjustmentRegister"]["entries"]
+    expected_receipts = {
+        "SK2610000085", "SK2610000230", "SK2610000440", "SK2610000904", "SK2610000935",
+        "SK2610001152", "SK2610002471", "SK2610002480", "SK2610002605", "SK2610003114",
+        "SK2610003240", "SK2610003258", "SK2610003282", "SK2610003314", "SK2610003358",
+        "SK2610003472", "SK2610003516", "SK2610003525", "SK2610003726", "SK2610004520",
+        "SK2610004553", "SK2610004555", "SK2610004559", "SK2610004564", "SK2610004571",
+        "SK2610004574", "SK2610004578", "SK2610004651", "SK2610004660",
+    }
+    assert {entry["receiptNo"] for entry in entries} == expected_receipts
+    assert len({entry["receiptNo"] for entry in entries}) == 29
+    assert sum(entry["amountHkd"] for entry in entries) == 75_662
+    assert all(
+        beta_seller_scope_service._adjustment_source_row_fingerprint(entry)
+        == entry["sourceRowSha256"]
+        for entry in entries
+    )
+    assert [
+        (item["receiptNo"], item["amountHkd"])
+        for item in policy["frozenBaseline"]["preservedReceipts"]
+    ] == [("SK2610004589", 3_000)]
+    adjustment_rows = [
+        (
+            entry["sourceOrderNo"],
+            entry["receiptNo"],
+            f"{entry['paymentDate']} 12:00:00",
+            "任意銷售點",
+            entry["salesperson"],
+            entry["amountHkd"],
+        )
+        for entry in entries
+    ]
+    eligible_total = policy["frozenBaseline"]["amountHkd"] + policy[
+        "adjustmentRegister"
+    ]["expectedAdjustmentAmountHkd"]
+    adjustment_rows.append(
+        (
+            "19505060111856A28160810",
+            "SK2610004589",
+            "2026-10-28 16:08:10",
+            "任意銷售點",
+            "011185 洪淑芬",
+            3000,
+        )
+    )
+    adjustment_rows.append(
+        (
+            "OTHER-OCTOBER-RECEIPTS",
+            "OCT-OTHER",
+            "2026-10-30 10:00:00",
+            "任意銷售點",
+            "011185 洪淑芬",
+            eligible_total - policy["adjustmentRegister"]["expectedAdjustmentAmountHkd"] - 3000,
+        )
+    )
+    current = _seller_rows(adjustment_rows)
+    current["收款本幣金額"] = current["收款原幣金額"]
+    entries_by_receipt = {entry["receiptNo"]: entry for entry in entries}
+    current["收款類型"] = current["收款單號"].map(
+        lambda receipt: entries_by_receipt.get(receipt, {}).get("receiptType", "旅費")
+    )
+    current["收款方式"] = current["收款單號"].map(
+        lambda receipt: entries_by_receipt.get(receipt, {}).get("paymentMethod", "現金")
+    )
+    november = _seller_rows(
+        [("NOV-ORDER", "NOV-RECEIPT", "2026-11-02 10:00:00", "任意銷售點", "011185 洪淑芬", 1)]
+    )
+    november["收款本幣金額"] = 1
+
+    check = beta_seller_scope_service._closed_month_variance_check(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        current,
+        november,
+        coverage_complete=True,
+        latest_source_month="2026-11",
+    )
+
+    assert check["status"] == "matched"
+    assert check["months"] == [
+        {
+            "month": "2026-10",
+            "previousAmount": 3_239_226.0,
+            "currentAmount": 3_239_226.0,
+            "deltaAmount": 0.0,
+            "frozenBaselineAmount": 3_239_226.0,
+            "previousSnapshotAmount": None,
+            "rawCurrentAmount": 3_314_888.0,
+            "adjustmentAmount": -75_662.0,
+            "adjustmentCount": 29,
+            "preservedReceiptAmount": 3_000.0,
+        }
+    ]
+
+
+def test_beta_cache_merge_keeps_same_payment_identity_with_different_amounts():
+    from backend.services import beta_seller_scope_service
+
+    existing = _seller_rows(
+        [("ORDER-1", "", "2026-11-01 10:00:00", "店A", "011185 洪淑芬", 300)]
+    )
+    incoming = existing.copy(deep=True)
+    incoming["收款原幣金額"] = 450
+    incoming["收款本幣金額"] = 450
+    existing["收款本幣金額"] = 300
+
+    merged = beta_seller_scope_service._merge_frames(existing, incoming)
+
+    assert sorted(merged["收款本幣金額"].tolist()) == [300, 450]
+
+
+def test_beta_closed_month_policy_rejects_changed_frozen_reference_and_lineage(tmp_path, monkeypatch):
+    import json
+
+    from backend.services import beta_seller_scope_service
+
+    policy = json.loads(
+        beta_seller_scope_service.BETA_CLOSED_MONTH_POLICY_PATH.read_text(encoding="utf-8")
+    )
+    path = tmp_path / "policy.json"
+    policy["frozenBaseline"]["amountHkd"] += 1
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    monkeypatch.setattr(beta_seller_scope_service, "BETA_CLOSED_MONTH_POLICY_PATH", path)
+
+    with pytest.raises(ValueError, match="frozen references"):
+        beta_seller_scope_service._load_beta_closed_month_policy()
+
+    policy["frozenBaseline"]["amountHkd"] = 3_239_226
+    policy["adjustmentRegister"]["entries"][0]["sourceRowSha256"] = "0" * 64
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    with pytest.raises(ValueError, match="source fingerprint"):
+        beta_seller_scope_service._load_beta_closed_month_policy()
+
+
+def test_incomplete_v3_cache_keeps_v2_as_closed_month_baseline_until_checked(tmp_path):
+    from backend.services import beta_seller_scope_service
+
+    cache_path = tmp_path / "beta_seller_scope_v3.pkl"
+    legacy_path = tmp_path / "beta_seller_scope_v2.pkl"
+    legacy = _seller_rows(
+        [("SEP-OLD", "R-OLD", "2026-09-15 10:00:00", "店A", "002785 朱淑宜", 100)]
+    )
+    legacy["收款本幣金額"] = 100
+    with legacy_path.open("wb") as handle:
+        pickle.dump(
+            {
+                "version": "beta-seller-scope-v2",
+                "tour": legacy,
+                "others": pd.DataFrame(),
+                "rowsFingerprint": beta_seller_scope_service._frames_fingerprint(
+                    legacy, pd.DataFrame()
+                ),
+            },
+            handle,
+        )
+
+    roles = list(beta_seller_scope_service.BETA_REQUIRED_SOURCE_ROLES)
+    october = _seller_rows(
+        [("SEP-NEW", "R-SEP", "2026-09-20 10:00:00", "店A", "002785 朱淑宜", 125)]
+    )
+    october["收款本幣金額"] = 125
+    november_excluded = _seller_rows(
+        [("NOV-EXCLUDED", "R-NOV", "2026-11-02 10:00:00", "店A", "002785 朱淑宜", 500)]
+    )
+    november_excluded["收款本幣金額"] = 500
+    november_excluded["收款方式"] = "TT 退款轉團款"
+
+    def coverage(intervals, required, complete):
+        return {
+            "sourceFingerprint": "a" * 64,
+            "sourceRoles": roles,
+            "sourceRoleMappingVerified": True,
+            "sourceRoleMappingIssues": [],
+            "dateIntervals": intervals,
+            "requiredDateIntervals": required,
+            "verification": {
+                "preflightStatus": "matched",
+                "driftStatus": "no_drift",
+                "entityMatchStatus": "matched",
+                "sourceRolesStatus": "complete",
+                "sourceRoleMappingStatus": "verified",
+                "liveDbUnchanged": True,
+            },
+            "complete": complete,
+        }
+
+    beta_seller_scope_service.persist_beta_seller_scope_frames(
+        october,
+        pd.DataFrame(),
+        coverage(
+            [{"start": "2026-09-01", "end": "2026-09-30"}],
+            [{"start": "2026-09-01", "end": "2026-11-02"}],
+            False,
+        ),
+        cache_path=cache_path,
+    )
+    result = beta_seller_scope_service.persist_beta_seller_scope_frames(
+        november_excluded,
+        pd.DataFrame(),
+        coverage(
+            [{"start": "2026-10-01", "end": "2026-11-02"}],
+            [{"start": "2026-09-01", "end": "2026-11-02"}],
+            True,
+        ),
+        cache_path=cache_path,
+    )
+
+    check = result["coverage"]["closedMonthVarianceCheck"]
+    assert check["status"] == "variance"
+    assert check["months"] == [
+        {
+            "month": "2026-09",
+            "previousAmount": 100.0,
+            "currentAmount": 125.0,
+            "deltaAmount": 25.0,
+        }
+    ]
 
 
 def test_v2_cache_loader_rejects_wrong_version_without_mutating_file(tmp_path):

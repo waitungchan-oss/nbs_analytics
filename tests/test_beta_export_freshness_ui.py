@@ -24,7 +24,7 @@ def _complete_scope():
         "tour": pd.DataFrame([{"收款單號": "R-1", "銷售員": "002785 朱淑宜"}]),
         "others": pd.DataFrame([{"收款單號": "R-2", "銷售員": "011185 洪淑芬"}]),
         "coverage": {
-            "version": "beta-seller-scope-v2",
+            "version": "beta-seller-scope-v3",
             "complete": True,
             "betaExportReady": True,
             "status": "complete",
@@ -173,7 +173,7 @@ def test_complete_current_scope_uses_seller_only_variant_and_fingerprint_identit
     import app_workflows
 
     calls = []
-    monkeypatch.setattr(app_workflows, "build_dashboard_data_excluding_receipt_types", _fake_builder(calls))
+    monkeypatch.setattr(app_workflows.pipeline_module, "build_dashboard_data", _fake_builder(calls))
 
     payload = app_workflows._compute_beta_export_workbooks(
         pd.DataFrame(),
@@ -186,7 +186,7 @@ def test_complete_current_scope_uses_seller_only_variant_and_fingerprint_identit
     assert payload["seller_scope_ready"] is True
     assert payload["warning"] is None
     assert payload["source_fingerprint"] == "a" * 64
-    assert "beta-seller-scope-v2" in payload["export_variant_key_material"]
+    assert "beta-seller-scope-v3" in payload["export_variant_key_material"]
     assert len(calls) == 3
     assert all(call[2].get("beta_salesperson_scope") is True for call in calls)
     assert all("beta_sales_point" not in call[2] for call in calls)
@@ -197,8 +197,8 @@ def test_seller_scope_rebuild_error_blocks_beta_download(monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        app_workflows,
-        "build_dashboard_data_excluding_receipt_types",
+        app_workflows.pipeline_module,
+        "build_dashboard_data",
         _fake_builder(calls, fail_seller_scope=True),
     )
 
