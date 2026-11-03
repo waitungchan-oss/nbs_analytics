@@ -474,6 +474,67 @@ def test_beta_export_does_not_fall_back_to_branch_or_salespoint_scope():
     assert not {"ex_beta", "ex_no_writeoff_beta", "ex_no_writeoff_refund_transfer_beta"} & set(payload)
 
 
+def test_beta_export_exclusions_are_row_level_and_do_not_cascade_across_months(monkeypatch):
+    from io import BytesIO
+
+    import app_workflows
+
+    fingerprint = "d" * 64
+    coverage = {
+        "version": app_workflows.BETA_SELLER_SCOPE_CACHE_VERSION,
+        "sourceFingerprint": fingerprint,
+        "sourceFingerprints": [fingerprint],
+        "dataGeneration": 10,
+        "complete": True,
+        "betaExportReady": True,
+        "sourceRoleMappingVerified": True,
+        "requiredDateIntervals": [{"start": "2026-10-01", "end": "2026-11-02"}],
+        "missingDateIntervals": [],
+        "missingSourceRoles": [],
+        "rowsFingerprintMatched": True,
+        "verification": {
+            "preflightStatus": "matched",
+            "driftStatus": "no_drift",
+            "entityMatchStatus": "matched",
+            "sourceRolesStatus": "complete",
+            "sourceRoleMappingStatus": "verified",
+            "liveDbUnchanged": True,
+        },
+    }
+    tour = pd.DataFrame(
+        [
+            {**_row("SHARED-ORDER", "任意銷售點", "002785 朱淑宜"), "統一日期": "2026-10-20", "收款時間": "2026-10-20 10:00:00"},
+            {**_row("SHARED-ORDER", "任意銷售點", "002785 朱淑宜"), "統一日期": "2026-11-01", "收款時間": "2026-11-01 10:00:00", "收款類型": "掛賬核銷"},
+            {**_row("SHARED-ORDER", "任意銷售點", "002785 朱淑宜"), "統一日期": "2026-11-02", "收款時間": "2026-11-02 10:00:00", "收款方式": "TT 退款轉團款"},
+        ]
+    )
+    captured = []
+
+    def capture_builder(frame, others, *args, **kwargs):
+        captured.append(frame.copy())
+        return BytesIO(b"beta-workbook"), None, None
+
+    monkeypatch.setattr(app_workflows.pipeline_module, "build_dashboard_data", capture_builder)
+    monkeypatch.setattr(
+        app_workflows,
+        "build_dashboard_data_excluding_receipt_types",
+        lambda *args, **kwargs: pytest.fail("seller-scope Beta must use row-level exclusions"),
+    )
+
+    payload = app_workflows._compute_beta_export_workbooks(
+        tour,
+        pd.DataFrame(),
+        beta_seller_scope={"tour": tour, "others": pd.DataFrame(), "coverage": coverage},
+        current_data_generation=10,
+        rules=({}, [], [], [], []),
+    )
+
+    assert payload["seller_scope_ready"] is True
+    assert [len(frame) for frame in captured] == [3, 2, 1]
+    assert captured[1]["統一日期"].tolist() == ["2026-10-20", "2026-11-02"]
+    assert captured[2]["統一日期"].tolist() == ["2026-10-20"]
+
+
 def test_beta_export_blocks_unmatched_or_unverified_entity_scope():
     import app_workflows
 
@@ -785,6 +846,25 @@ def test_beta_cache_identity_differs_from_formal_identity():
     assert app_workflows._build_export_variant_key(
         "source", "rules", "beta_ecommerce_sales_point_v1"
     ) != app_workflows._build_export_variant_key("source", "rules", "official")
+
+
+def test_beta_export_cache_identity_tracks_closed_month_policy_changes(tmp_path, monkeypatch):
+    import app_workflows
+    from backend.services import beta_seller_scope_service
+
+    policy_path = tmp_path / "beta_closed_month_policy.json"
+    policy_path.write_text('{"revision":"one"}', encoding="utf-8")
+    monkeypatch.setattr(beta_seller_scope_service, "BETA_CLOSED_MONTH_POLICY_PATH", policy_path)
+    cache = {
+        "export_cache_key": "formal",
+        "current_data_generation": 3,
+        "beta_seller_scope_coverage": {"complete": True},
+    }
+
+    first_key = app_workflows._beta_export_runtime_cache_key(cache)
+    policy_path.write_text('{"revision":"two"}', encoding="utf-8")
+
+    assert first_key != app_workflows._beta_export_runtime_cache_key(cache)
 
 
 def test_export_ui_exposes_beta_ecommerce_comparison_without_replacing_official_action():

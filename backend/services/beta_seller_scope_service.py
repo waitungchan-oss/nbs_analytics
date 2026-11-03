@@ -5,6 +5,7 @@ import json
 import math
 import os
 import pickle
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -13,10 +14,36 @@ import pandas as pd
 import pipeline
 from pipeline import process_raw_files
 
-BETA_SELLER_SCOPE_CACHE_VERSION = "beta-seller-scope-v2"
+BETA_SELLER_SCOPE_CACHE_VERSION = "beta-seller-scope-v3"
 BETA_REQUIRED_SOURCE_ROLES = ("main", "tour", "transport", "ticket", "package", "hotel")
-_CACHE_FILENAME = "beta_seller_scope_v2.pkl"
+_CACHE_FILENAME = "beta_seller_scope_v3.pkl"
+_LEGACY_CACHE_VERSION = "beta-seller-scope-v2"
+_LEGACY_CACHE_FILENAME = "beta_seller_scope_v2.pkl"
+_PAYMENT_DETAIL_IDENTITY_FIELDS = (
+    "來源單據號", "收款單號", "收款流水號", "收款時間", "統一日期",
+    "收款類型", "收款方式", "原幣幣種", "銷售點", "銷售員",
+    "團代號", "團名稱", "交易時間", "來源報表標籤",
+)
+_BETA_EXCLUDED_RECEIPT_TYPES = ("掛賬核銷",)
+_BETA_EXCLUDED_PAYMENT_METHODS = ("TT 退款轉團款",)
+BETA_CLOSED_MONTH_POLICY_PATH = Path(__file__).resolve().parents[2] / "data" / "beta_closed_month_policy.json"
 _UNSET = object()
+_BETA_FROZEN_MONTH = "2026-10"
+_BETA_FROZEN_AMOUNT_HKD = 3_239_226
+_BETA_PRESERVED_RECEIPT = ("SK2610004589", 3_000)
+_BETA_FROZEN_SOURCE_SHA256 = "acc3d3b8945a84818754aa3b9b4ca2c686f94e20e6f907b0a437c6e27d3fc635"
+_BETA_REGISTER_SOURCE_SHA256 = "c4316395fdcf09f9340da83d6608a05d40288d44be57fc4602de5b6b2e84db6f"
+
+
+def _adjustment_source_row_fingerprint(entry: dict) -> str:
+    fields = (
+        "receiptNo", "sourceOrderNo", "salesperson", "paymentDate", "amountHkd",
+        "receiptType", "paymentMethod", "reason", "relatedExcludedReceiptNos",
+    )
+    payload = {key: entry.get(key) for key in fields}
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _entity_audit_reconciled(coverage: dict) -> bool:
@@ -318,22 +345,51 @@ def build_beta_seller_scope_frames(
     }
 
 
+def _key_value(value) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
 def _row_keys(frame: pd.DataFrame) -> pd.Series:
     if frame.empty:
         return pd.Series(index=frame.index, dtype="string")
-    if "收款單號" in frame.columns:
-        receipt_ids = frame["收款單號"].fillna("").astype(str).str.strip()
-    else:
-        receipt_ids = pd.Series("", index=frame.index, dtype="string")
-    fallback = pd.Series(
-        pd.util.hash_pandas_object(frame, index=False).astype(str).to_numpy(),
-        index=frame.index,
-        dtype="string",
+    identity = pd.DataFrame(index=frame.index)
+    for column in _PAYMENT_DETAIL_IDENTITY_FIELDS:
+        values = frame[column] if column in frame.columns else pd.Series("", index=frame.index)
+        identity[column] = values.map(_key_value)
+    receipt_ids = identity.get("收款單號", pd.Series("", index=frame.index)).ne("")
+    serial_ids = identity.get("收款流水號", pd.Series("", index=frame.index)).ne("")
+    has_receipt_identity = receipt_ids | serial_ids
+    for column in ("收款原幣金額", "收款本幣金額"):
+        values = frame[column] if column in frame.columns else pd.Series("", index=frame.index)
+        identity[column] = values.map(_key_value).where(~has_receipt_identity, "")
+    tokens = identity.apply(
+        lambda row: hashlib.sha256(
+            json.dumps(row.tolist(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        axis=1,
     )
-    keys = fallback.map(lambda value: f"row:{value}")
-    has_receipt = receipt_ids.ne("")
-    keys.loc[has_receipt] = "receipt:" + receipt_ids.loc[has_receipt]
-    return keys
+    no_identity = identity.eq("").all(axis=1)
+    if no_identity.any():
+        fallback = frame.loc[no_identity].apply(
+            lambda row: hashlib.sha256(
+                json.dumps(
+                    [_key_value(value) for value in row.tolist()],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest(),
+            axis=1,
+        )
+        tokens.loc[no_identity] = fallback
+    occurrences = tokens.groupby(tokens, sort=False).cumcount().astype(str)
+    return (tokens + ":" + occurrences).astype("string")
 
 
 def _frames_fingerprint(tour: pd.DataFrame, others: pd.DataFrame) -> str:
@@ -352,14 +408,294 @@ def _merge_frames(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFram
         return incoming.copy().reset_index(drop=True)
     if incoming.empty:
         return existing.copy().reset_index(drop=True)
+    existing_keys = _row_keys(existing).reset_index(drop=True)
+    incoming_keys = _row_keys(incoming).reset_index(drop=True)
     merged = pd.concat([existing, incoming], ignore_index=True, sort=False)
-    keys = _row_keys(merged)
+    keys = pd.concat([existing_keys, incoming_keys], ignore_index=True)
     return (
         merged.assign(_beta_seller_scope_key=keys)
         .drop_duplicates(subset=["_beta_seller_scope_key"], keep="last")
         .drop(columns=["_beta_seller_scope_key"])
         .reset_index(drop=True)
     )
+
+
+def _filter_beta_rowwise_exclusions(
+    frame: pd.DataFrame,
+    excluded_receipt_types,
+    excluded_payment_methods,
+) -> pd.DataFrame:
+    """Apply official Beta exclusions to each payment row without order-ID cascades."""
+    excluded_types = {
+        str(value).strip()
+        for value in excluded_receipt_types
+        if str(value).strip()
+    }
+    excluded_methods = {
+        str(value).strip()
+        for value in excluded_payment_methods
+        if str(value).strip()
+    }
+    if frame.empty:
+        return frame.copy()
+    excluded = pd.Series(False, index=frame.index)
+    if excluded_types and "收款類型" in frame.columns:
+        excluded |= frame["收款類型"].fillna("").astype(str).str.strip().isin(excluded_types)
+    if excluded_methods and "收款方式" in frame.columns:
+        excluded |= frame["收款方式"].fillna("").astype(str).str.strip().isin(excluded_methods)
+    return frame.loc[~excluded].copy()
+
+
+def _load_beta_closed_month_policy() -> dict:
+    try:
+        policy = json.loads(BETA_CLOSED_MONTH_POLICY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Beta closed-month policy unavailable or invalid: {exc}") from exc
+    if not isinstance(policy, dict) or policy.get("schemaVersion") != "beta-closed-month-policy-v1":
+        raise ValueError("Beta closed-month policy schema is invalid")
+    baseline = policy.get("frozenBaseline")
+    register = policy.get("adjustmentRegister")
+    entries = register.get("entries") if isinstance(register, dict) else None
+    if (
+        policy.get("scope") != "beta_market_ecommerce_peer_export_only"
+        or not isinstance(baseline, dict)
+        or not isinstance(register, dict)
+        or not isinstance(entries, list)
+        or not entries
+    ):
+        raise ValueError("Beta closed-month policy is incomplete")
+    if (
+        policy.get("frozenMonth") != _BETA_FROZEN_MONTH
+        or policy.get("currency") != "HKD"
+        or baseline.get("amountHkd") != _BETA_FROZEN_AMOUNT_HKD
+        or baseline.get("sourceSha256") != _BETA_FROZEN_SOURCE_SHA256
+        or baseline.get("sourceFile") != "Beta_市場電商及同業_不含掛賬核銷與TT退款轉團款 (7).xlsx"
+        or register.get("sourceSha256") != _BETA_REGISTER_SOURCE_SHA256
+        or register.get("sourceFile") != "財務收款總數-0101-1102.xlsx"
+    ):
+        raise ValueError("Beta closed-month frozen references do not match the approved October baseline")
+    preserved = baseline.get("preservedReceipts")
+    if (
+        not isinstance(preserved, list)
+        or len(preserved) != 1
+        or preserved[0].get("receiptNo") != _BETA_PRESERVED_RECEIPT[0]
+        or preserved[0].get("amountHkd") != _BETA_PRESERVED_RECEIPT[1]
+    ):
+        raise ValueError("Beta closed-month preserved receipt does not match the approved reference")
+    receipt_ids = []
+    total = 0.0
+    required_fields = (
+        "receiptNo", "sourceOrderNo", "salesperson", "paymentDate", "amountHkd", "reason",
+        "receiptType", "paymentMethod", "relatedExcludedReceiptNos", "sourceRowSha256",
+    )
+    for entry in entries:
+        if not isinstance(entry, dict) or any(
+            key not in entry or not str(entry.get(key) or "").strip() for key in required_fields
+        ):
+            raise ValueError("Beta closed-month adjustment entry is missing required lineage")
+        if (
+            not isinstance(entry["relatedExcludedReceiptNos"], list)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(entry["sourceRowSha256"]))
+            or entry["sourceRowSha256"] != _adjustment_source_row_fingerprint(entry)
+        ):
+            raise ValueError("Beta closed-month adjustment source fingerprint is invalid")
+        receipt_ids.append(str(entry["receiptNo"]).strip())
+        try:
+            total += float(entry["amountHkd"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Beta closed-month adjustment amount is invalid") from exc
+    if len(receipt_ids) != len(set(receipt_ids)):
+        raise ValueError("Beta closed-month adjustment receipt numbers must be unique")
+    if len(entries) != int(register.get("expectedReceiptCount", -1)):
+        raise ValueError("Beta closed-month adjustment receipt count does not match its register")
+    if round(total, 2) != round(float(register.get("expectedAdjustmentAmountHkd", -1)), 2):
+        raise ValueError("Beta closed-month adjustment total does not match its register")
+    return policy
+
+
+def beta_closed_month_policy_fingerprint() -> str:
+    return hashlib.sha256(BETA_CLOSED_MONTH_POLICY_PATH.read_bytes()).hexdigest()
+
+
+def _date_values(frame: pd.DataFrame) -> pd.Series:
+    values = pd.to_datetime(frame.get("統一日期", pd.Series(index=frame.index)), errors="coerce")
+    if "收款時間" in frame.columns:
+        values = values.fillna(pd.to_datetime(frame["收款時間"], errors="coerce"))
+    return values
+
+
+def _apply_beta_closed_month_adjustments(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    policy = _load_beta_closed_month_policy()
+    register = policy["adjustmentRegister"]
+    entries = {str(item["receiptNo"]).strip(): item for item in register["entries"]}
+    if frame.empty or "收款單號" not in frame.columns:
+        return frame.copy(), {"adjustmentAmount": 0.0, "adjustmentCount": 0, "matchedReceiptNos": []}
+
+    result = frame.copy()
+    receipt_ids = result["收款單號"].fillna("").astype(str).str.strip()
+    dates = _date_values(result)
+    frozen_month = str(policy["frozenMonth"])
+    target_rows = receipt_ids.isin(entries) & dates.dt.strftime("%Y-%m").eq(frozen_month)
+    matched = result.loc[target_rows].copy()
+    if matched.empty:
+        return result, {"adjustmentAmount": 0.0, "adjustmentCount": 0, "matchedReceiptNos": []}
+
+    if matched["收款單號"].fillna("").astype(str).str.strip().duplicated().any():
+        raise ValueError("Beta closed-month adjustment receipt is duplicated in seller-scope rows")
+    amounts = pd.to_numeric(matched.get("收款本幣金額"), errors="coerce")
+    if amounts.isna().any():
+        raise ValueError("Beta closed-month adjustment row has no valid HKD amount")
+    for index, row in matched.iterrows():
+        receipt_no = str(row.get("收款單號") or "").strip()
+        entry = entries[receipt_no]
+        row_date = dates.loc[index]
+        expected_date = str(entry["paymentDate"])
+        checks = (
+            str(row.get("來源單據號") or "").strip() == str(entry["sourceOrderNo"]).strip(),
+            str(row.get("銷售員") or "").strip() == str(entry["salesperson"]).strip(),
+            row_date.strftime("%Y-%m-%d") == expected_date,
+            abs(float(amounts.loc[index]) - float(entry["amountHkd"])) <= 0.01,
+            str(row.get("收款類型") or "").strip() == str(entry["receiptType"]).strip(),
+            str(row.get("收款方式") or "").strip() == str(entry["paymentMethod"]).strip(),
+        )
+        if not all(checks):
+            raise ValueError(f"Beta closed-month adjustment source evidence mismatch for {receipt_no}")
+
+    matched_ids = receipt_ids.loc[target_rows]
+    result = result.loc[~target_rows].copy()
+    return result, {
+        "adjustmentAmount": -round(float(amounts.sum()), 2),
+        "adjustmentCount": int(len(matched)),
+        "matchedReceiptNos": sorted(matched_ids.tolist()),
+    }
+
+
+def filter_beta_seller_scope_rows(
+    tour: pd.DataFrame,
+    others: pd.DataFrame,
+    excluded_receipt_types=None,
+    excluded_payment_methods=None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Apply row-wise exclusions and the reversible October receipt register."""
+    excluded_types = _BETA_EXCLUDED_RECEIPT_TYPES if excluded_receipt_types is None else excluded_receipt_types
+    excluded_methods = _BETA_EXCLUDED_PAYMENT_METHODS if excluded_payment_methods is None else excluded_payment_methods
+    rowwise_tour = _filter_beta_rowwise_exclusions(tour, excluded_types, excluded_methods)
+    rowwise_others = _filter_beta_rowwise_exclusions(others, excluded_types, excluded_methods)
+    adjusted_tour, _ = _apply_beta_closed_month_adjustments(rowwise_tour)
+    adjusted_others, _ = _apply_beta_closed_month_adjustments(rowwise_others)
+    return adjusted_tour, adjusted_others
+
+
+def _monthly_beta_amount_breakdown(tour: pd.DataFrame, others: pd.DataFrame) -> dict:
+    frames = [frame for frame in (tour, others) if isinstance(frame, pd.DataFrame) and not frame.empty]
+    if not frames:
+        return {"raw": {}, "adjusted": {}, "adjustments": {}, "latestMonth": None}
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    raw_rows = _filter_beta_rowwise_exclusions(
+        combined, _BETA_EXCLUDED_RECEIPT_TYPES, _BETA_EXCLUDED_PAYMENT_METHODS
+    )
+    adjusted_rows, adjustment_info = _apply_beta_closed_month_adjustments(raw_rows)
+    date_values = _date_values(raw_rows)
+    valid_dates = date_values.dropna()
+    latest_month = valid_dates.max().strftime("%Y-%m") if not valid_dates.empty else None
+    if "收款本幣金額" not in raw_rows.columns:
+        return {"raw": {}, "adjusted": {}, "adjustments": {}, "latestMonth": latest_month}
+    raw_amounts = pd.to_numeric(raw_rows["收款本幣金額"], errors="coerce").fillna(0)
+    adjusted_dates = _date_values(adjusted_rows)
+    adjusted_amounts = pd.to_numeric(adjusted_rows["收款本幣金額"], errors="coerce").fillna(0)
+    raw_monthly = raw_amounts.groupby(date_values.dt.strftime("%Y-%m")).sum()
+    adjusted_monthly = adjusted_amounts.groupby(adjusted_dates.dt.strftime("%Y-%m")).sum()
+    policy = _load_beta_closed_month_policy()
+    frozen_month = policy["frozenMonth"]
+    preserved_receipts = policy["frozenBaseline"].get("preservedReceipts") or []
+    preserved_ids = {str(item.get("receiptNo") or "").strip() for item in preserved_receipts}
+    row_receipts = raw_rows.get("收款單號", pd.Series(index=raw_rows.index)).fillna("").astype(str).str.strip()
+    preserved_amount = raw_amounts.loc[
+        row_receipts.isin(preserved_ids) & date_values.dt.strftime("%Y-%m").eq(frozen_month)
+    ].sum()
+    adjustments = {
+        frozen_month: {
+            **adjustment_info,
+            "preservedReceiptAmount": round(float(preserved_amount), 2),
+        }
+    }
+    return {
+        "raw": {str(month): float(value) for month, value in raw_monthly.items() if month and month != "NaT"},
+        "adjusted": {str(month): float(value) for month, value in adjusted_monthly.items() if month and month != "NaT"},
+        "adjustments": adjustments,
+        "latestMonth": latest_month,
+    }
+
+
+def _monthly_beta_official_amounts(tour: pd.DataFrame, others: pd.DataFrame) -> tuple[dict[str, float], str | None]:
+    breakdown = _monthly_beta_amount_breakdown(tour, others)
+    return breakdown["adjusted"], breakdown["latestMonth"]
+
+
+def _closed_month_variance_check(
+    previous_tour: pd.DataFrame,
+    previous_others: pd.DataFrame,
+    current_tour: pd.DataFrame,
+    current_others: pd.DataFrame,
+    *,
+    coverage_complete: bool,
+    latest_source_month: str | None = None,
+) -> dict:
+    if not coverage_complete:
+        return {"status": "not_checked", "reason": "coverage_incomplete", "months": []}
+    previous_breakdown = _monthly_beta_amount_breakdown(previous_tour, previous_others)
+    current_breakdown = _monthly_beta_amount_breakdown(current_tour, current_others)
+    previous = previous_breakdown["adjusted"]
+    current = current_breakdown["adjusted"]
+    latest_row_month = current_breakdown["latestMonth"]
+    latest_month = latest_source_month or latest_row_month
+    if latest_month is None:
+        return {"status": "not_checked", "reason": "missing_payment_dates", "months": []}
+    closed_months = sorted(month for month in set(previous) | set(current) if month < latest_month)
+    if not closed_months:
+        return {"status": "no_closed_months", "months": []}
+    rows = []
+    has_previous = False
+    has_missing_previous = False
+    has_variance = False
+    for month in closed_months:
+        snapshot_amount = previous.get(month)
+        frozen_baseline = None
+        if month == _load_beta_closed_month_policy()["frozenMonth"]:
+            frozen_baseline = float(_load_beta_closed_month_policy()["frozenBaseline"]["amountHkd"])
+        old_amount = frozen_baseline if frozen_baseline is not None else snapshot_amount
+        new_amount = current.get(month, 0.0)
+        if old_amount is None:
+            has_missing_previous = True
+            delta = None
+        else:
+            has_previous = True
+            delta = round(new_amount - old_amount, 2)
+            has_variance |= abs(delta) > 0.01
+        row = {
+                "month": month,
+                "previousAmount": round(old_amount, 2) if old_amount is not None else None,
+                "currentAmount": round(new_amount, 2),
+                "deltaAmount": delta,
+            }
+        if frozen_baseline is not None:
+            adjustment = current_breakdown["adjustments"].get(month, {})
+            row.update({
+                "frozenBaselineAmount": round(frozen_baseline, 2),
+                "previousSnapshotAmount": round(snapshot_amount, 2) if snapshot_amount is not None else None,
+                "rawCurrentAmount": round(current_breakdown["raw"].get(month, 0.0), 2),
+                "adjustmentAmount": round(float(adjustment.get("adjustmentAmount", 0.0)), 2),
+                "adjustmentCount": int(adjustment.get("adjustmentCount", 0)),
+                "preservedReceiptAmount": round(float(adjustment.get("preservedReceiptAmount", 0.0)), 2),
+            })
+        rows.append(row)
+    status = (
+        "variance" if has_variance else
+        "partial_snapshot" if has_missing_previous and has_previous else
+        "no_previous_snapshot" if not has_previous else
+        "matched"
+    )
+    return {"status": status, "latestSourceMonth": latest_month, "months": rows}
 
 
 def _merge_intervals(*interval_groups) -> list[dict[str, str]]:
@@ -524,6 +860,31 @@ def load_beta_seller_scope_frames(
     )
 
 
+def _load_legacy_v2_beta_seller_scope_frames(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read the prior cache only as a comparison baseline; never migrate its rows."""
+    if path.name == _LEGACY_CACHE_FILENAME:
+        return pd.DataFrame(), pd.DataFrame()
+    legacy_path = path.with_name(_LEGACY_CACHE_FILENAME)
+    if not legacy_path.exists():
+        return pd.DataFrame(), pd.DataFrame()
+    try:
+        with legacy_path.open("rb") as handle:
+            payload = pickle.load(handle)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != _LEGACY_CACHE_VERSION
+            or not isinstance(payload.get("tour"), pd.DataFrame)
+            or not isinstance(payload.get("others"), pd.DataFrame)
+        ):
+            return pd.DataFrame(), pd.DataFrame()
+        tour, others = payload["tour"], payload["others"]
+        if payload.get("rowsFingerprint") != _frames_fingerprint(tour, others):
+            return pd.DataFrame(), pd.DataFrame()
+        return tour, others
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+
+
 def persist_beta_seller_scope_frames(
     tour: pd.DataFrame,
     others: pd.DataFrame,
@@ -546,9 +907,37 @@ def persist_beta_seller_scope_frames(
     existing_tour, existing_others, existing_coverage = _load_beta_seller_scope_frames(
         path, include_incomplete=True
     )
+    previous_check = existing_coverage.get("closedMonthVarianceCheck")
+    previous_check_status = (
+        previous_check.get("status") if isinstance(previous_check, dict) else None
+    )
+    has_completed_closed_month_check = previous_check_status in {
+        "matched", "variance", "partial_snapshot", "no_previous_snapshot"
+    }
+    if path.exists() and has_completed_closed_month_check:
+        previous_tour, previous_others = existing_tour, existing_others
+    else:
+        previous_tour, previous_others = _load_legacy_v2_beta_seller_scope_frames(path)
     merged_tour = _merge_frames(existing_tour, tour)
     merged_others = _merge_frames(existing_others, others)
     merged_coverage = _merge_coverage(existing_coverage, coverage)
+    coverage_end_dates = []
+    for interval in merged_coverage.get("dateIntervals") or []:
+        try:
+            coverage_end_dates.append(date.fromisoformat(str(interval["end"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    latest_source_month = (
+        max(coverage_end_dates).strftime("%Y-%m") if coverage_end_dates else None
+    )
+    merged_coverage["closedMonthVarianceCheck"] = _closed_month_variance_check(
+        previous_tour,
+        previous_others,
+        merged_tour,
+        merged_others,
+        coverage_complete=merged_coverage.get("complete") is True,
+        latest_source_month=latest_source_month,
+    )
     rows_fingerprint = _frames_fingerprint(merged_tour, merged_others)
     merged_coverage["dataGeneration"] = int(data_generation) if data_generation is not None else None
     merged_coverage["rowsFingerprintMatched"] = True
