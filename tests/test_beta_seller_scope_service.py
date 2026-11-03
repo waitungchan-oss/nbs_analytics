@@ -319,9 +319,12 @@ def test_v3_cache_reports_closed_month_variance_and_keeps_v2_cache_unchanged(tmp
     cache_path = tmp_path / "beta_seller_scope_v3.pkl"
     legacy_path = tmp_path / "beta_seller_scope_v2.pkl"
     legacy_tour = _seller_rows(
-        [("SEP-OLD", "R-OLD", "2026-09-15 10:00:00", "店A", "002785 朱淑宜", 2_986_403)]
+        [
+            ("SEP-OLD", "R-OLD", "2026-09-15 10:00:00", "店A", "002785 朱淑宜", 2_986_403),
+            ("LEGACY-ORDER", "SK2610004660", "2026-10-31 10:00:00", "店A", "002785 朱淑宜", 100),
+        ]
     )
-    legacy_tour["收款本幣金額"] = 2_986_403
+    legacy_tour["收款本幣金額"] = [2_986_403, 100]
     legacy_payload = {
         "version": "beta-seller-scope-v2",
         "tour": legacy_tour,
@@ -374,7 +377,7 @@ def test_v3_cache_reports_closed_month_variance_and_keeps_v2_cache_unchanged(tmp
     assert len(loaded_tour) == 2
     check = coverage["closedMonthVarianceCheck"]
     assert check["status"] == "variance"
-    assert check["months"] == [
+    assert check["months"][:1] == [
         {
             "month": "2026-09",
             "previousAmount": 2_986_403.0,
@@ -382,6 +385,8 @@ def test_v3_cache_reports_closed_month_variance_and_keeps_v2_cache_unchanged(tmp
             "deltaAmount": 252_823.0,
         }
     ]
+    assert check["months"][1]["month"] == "2026-10"
+    assert check["months"][1]["previousSnapshotAmount"] == 100
     assert legacy_path.read_bytes() == legacy_before
 
 
@@ -517,7 +522,7 @@ def test_october_closed_month_check_reconciles_raw_adjusted_and_frozen_totals():
     ] == [("SK2610004589", 3_000)]
     adjustment_rows = [
         (
-            entry["sourceOrderNo"],
+            entry["sourceOrderNo"].upper(),
             entry["receiptNo"],
             f"{entry['paymentDate']} 12:00:00",
             "任意銷售點",

@@ -551,7 +551,7 @@ def _apply_beta_closed_month_adjustments(frame: pd.DataFrame) -> tuple[pd.DataFr
         row_date = dates.loc[index]
         expected_date = str(entry["paymentDate"])
         checks = (
-            str(row.get("來源單據號") or "").strip() == str(entry["sourceOrderNo"]).strip(),
+            str(row.get("來源單據號") or "").strip().upper() == str(entry["sourceOrderNo"]).strip().upper(),
             str(row.get("銷售員") or "").strip() == str(entry["salesperson"]).strip(),
             row_date.strftime("%Y-%m-%d") == expected_date,
             abs(float(amounts.loc[index]) - float(entry["amountHkd"])) <= 0.01,
@@ -586,7 +586,9 @@ def filter_beta_seller_scope_rows(
     return adjusted_tour, adjusted_others
 
 
-def _monthly_beta_amount_breakdown(tour: pd.DataFrame, others: pd.DataFrame) -> dict:
+def _monthly_beta_amount_breakdown(
+    tour: pd.DataFrame, others: pd.DataFrame, *, apply_adjustments: bool = True
+) -> dict:
     frames = [frame for frame in (tour, others) if isinstance(frame, pd.DataFrame) and not frame.empty]
     if not frames:
         return {"raw": {}, "adjusted": {}, "adjustments": {}, "latestMonth": None}
@@ -594,7 +596,10 @@ def _monthly_beta_amount_breakdown(tour: pd.DataFrame, others: pd.DataFrame) -> 
     raw_rows = _filter_beta_rowwise_exclusions(
         combined, _BETA_EXCLUDED_RECEIPT_TYPES, _BETA_EXCLUDED_PAYMENT_METHODS
     )
-    adjusted_rows, adjustment_info = _apply_beta_closed_month_adjustments(raw_rows)
+    if apply_adjustments:
+        adjusted_rows, adjustment_info = _apply_beta_closed_month_adjustments(raw_rows)
+    else:
+        adjusted_rows, adjustment_info = raw_rows, {}
     date_values = _date_values(raw_rows)
     valid_dates = date_values.dropna()
     latest_month = valid_dates.max().strftime("%Y-%m") if not valid_dates.empty else None
@@ -640,10 +645,13 @@ def _closed_month_variance_check(
     *,
     coverage_complete: bool,
     latest_source_month: str | None = None,
+    previous_is_legacy: bool = False,
 ) -> dict:
     if not coverage_complete:
         return {"status": "not_checked", "reason": "coverage_incomplete", "months": []}
-    previous_breakdown = _monthly_beta_amount_breakdown(previous_tour, previous_others)
+    previous_breakdown = _monthly_beta_amount_breakdown(
+        previous_tour, previous_others, apply_adjustments=not previous_is_legacy
+    )
     current_breakdown = _monthly_beta_amount_breakdown(current_tour, current_others)
     previous = previous_breakdown["adjusted"]
     current = current_breakdown["adjusted"]
@@ -937,6 +945,7 @@ def persist_beta_seller_scope_frames(
         merged_others,
         coverage_complete=merged_coverage.get("complete") is True,
         latest_source_month=latest_source_month,
+        previous_is_legacy=not (path.exists() and has_completed_closed_month_check),
     )
     rows_fingerprint = _frames_fingerprint(merged_tour, merged_others)
     merged_coverage["dataGeneration"] = int(data_generation) if data_generation is not None else None
