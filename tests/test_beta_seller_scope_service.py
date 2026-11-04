@@ -594,6 +594,24 @@ def test_october_closed_month_check_reconciles_raw_adjusted_and_frozen_totals():
     ]
 
 
+def test_beta_cache_merge_matches_receipt_across_dated_report_names():
+    from backend.services import beta_seller_scope_service
+
+    existing = _seller_rows(
+        [("ORDER-1", "RECEIPT-1", "2026-11-01 10:00:00", "店A", "011185 洪淑芬", 300)]
+    )
+    incoming = existing.copy()
+    existing["來源報表標籤"] = "門券all1102"
+    incoming["來源報表標籤"] = "門券all1103"
+    second_payment = incoming.assign(收款單號="RECEIPT-2")
+    incoming = pd.concat([incoming, second_payment], ignore_index=True)
+
+    merged = beta_seller_scope_service._merge_frames(existing, incoming)
+
+    assert merged["收款單號"].tolist() == ["RECEIPT-1", "RECEIPT-2"]
+    assert merged["來源報表標籤"].tolist() == ["門券all1103"] * 2
+
+
 def test_beta_cache_merge_keeps_same_payment_identity_with_different_amounts():
     from backend.services import beta_seller_scope_service
 

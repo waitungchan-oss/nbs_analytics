@@ -365,6 +365,8 @@ def _row_keys(frame: pd.DataFrame) -> pd.Series:
     receipt_ids = identity.get("收款單號", pd.Series("", index=frame.index)).ne("")
     serial_ids = identity.get("收款流水號", pd.Series("", index=frame.index)).ne("")
     has_receipt_identity = receipt_ids | serial_ids
+    # A dated workbook name can change between uploads of the same receipt.
+    identity["來源報表標籤"] = identity["來源報表標籤"].where(~has_receipt_identity, "")
     for column in ("收款原幣金額", "收款本幣金額"):
         values = frame[column] if column in frame.columns else pd.Series("", index=frame.index)
         identity[column] = values.map(_key_value).where(~has_receipt_identity, "")
